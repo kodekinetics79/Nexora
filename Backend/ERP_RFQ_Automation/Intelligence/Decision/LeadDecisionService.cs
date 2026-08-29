@@ -410,7 +410,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
     private sealed record ItemRow(
         long Id, string? ItemMaterialCode, string? ManufacturerPartNumber,
         string? ProductShortName, string? ProductShortDescription,
-        int? Quantity, decimal? UnitPrice, string? Currency);
+        decimal? Quantity, decimal? UnitPrice, string? Currency);
 
     // Product.QtyOnHand is deliberately NOT projected here: stock for the brief comes from the
     // Inventory rows via AvailableToPromiseByProductAsync, never from the product master.

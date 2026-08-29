@@ -413,7 +413,7 @@ internal sealed record LeadRevisionLineSnapshot(
     string? LineNumber,
     string? Part,
     string? Description,
-    int? Quantity,
+    decimal? Quantity,
     string? UnitOfMeasure)
 {
     public static LeadRevisionLineSnapshot Parse(string json)
@@ -421,7 +421,7 @@ internal sealed record LeadRevisionLineSnapshot(
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         return new(GetString(root, "line"), GetString(root, "part"), GetString(root, "description"),
-            GetInt(root, "Quantity") ?? GetInt(root, "quantity"), GetString(root, "uom"));
+            GetDecimal(root, "Quantity") ?? GetDecimal(root, "quantity"), GetString(root, "uom"));
     }
 
     private static string? GetString(JsonElement root, string name) =>
@@ -429,10 +429,10 @@ internal sealed record LeadRevisionLineSnapshot(
             ? value.GetString()
             : null;
 
-    private static int? GetInt(JsonElement root, string name) =>
+    private static decimal? GetDecimal(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value)
         && value.ValueKind == JsonValueKind.Number
-        && value.TryGetInt32(out var result)
+        && value.TryGetDecimal(out var result)
             ? result
             : null;
 }
@@ -444,12 +444,12 @@ public sealed record CatalogMatchDto(long ProductId, string? ProductName, string
     string? ManufacturerPartNumber, decimal Score, string Reason);
 public sealed record LineSourceFieldDto(string Field, string RawValue, string? SourceAddress);
 public sealed record LineParticipationDto(string Decision, string? ReasonCode, string? Note,
-    long? ProductId, int? Quantity, string? UnitOfMeasure, string? Currency,
+    long? ProductId, decimal? Quantity, string? UnitOfMeasure, string? Currency,
     string CatalogPolicyVersion, string WarningSnapshotJson);
 public sealed record LeadDecisionLineDto(long Id, long RevisionLineId, string? LineItemNo, string? SourceText,
     string? SourceField, string? SourceAddress, IReadOnlyList<LineSourceFieldDto> SourceFields,
     string? ProductName, string? Description, string? ManufacturerName, string? ManufacturerPartNumber,
-    int? Quantity, string? UnitOfMeasure, string? Currency, decimal? NormalizedQuantity, string? NormalizedUom,
+    decimal? Quantity, string? UnitOfMeasure, string? Currency, decimal? NormalizedQuantity, string? NormalizedUom,
     string? CatalogResolution, IReadOnlyList<CatalogMatchDto> CatalogMatches, long? BestMatchProductId,
     decimal CatalogConfidence, bool NeedsAttention, string? AttentionReason, string CatalogPolicyVersion,
     string WarningSnapshotJson, string VerificationStatus,

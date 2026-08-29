@@ -14253,8 +14253,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
-                    b.Property<int?>("Quantity")
-                        .HasColumnType("integer");
+                    b.Property<decimal?>("Quantity")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
 
                     b.Property<DateTime?>("ReceivedDate")
                         .HasColumnType("timestamp without time zone");
@@ -15653,8 +15654,16 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime?>("AcknowledgmentDate")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<string>("AgreementReference")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
                     b.Property<DateTime?>("BidClosingDate")
                         .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("BidClosingDateHijri")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
                     b.Property<string>("BiddingDecision")
                         .HasMaxLength(200)
@@ -15690,12 +15699,24 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("CustomerID");
 
+                    b.Property<string>("CustomerRfqReference")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("DeliveryLocation")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
                     b.Property<string>("DurationAgreement")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
                     b.Property<string>("HeaderRemarks")
                         .HasColumnType("text");
+
+                    b.Property<string>("InquiryType")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
 
                     b.Property<long?>("LeadId")
                         .HasColumnType("bigint")
@@ -15732,6 +15753,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("RecDate")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("RequiredDeliveryDate")
                         .HasColumnType("timestamp without time zone");
 
                     b.Property<string>("Rfqno")
@@ -15858,6 +15882,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)")
                         .HasColumnName("CustomerRFQNo");
 
+                    b.Property<string>("ExtraFields")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("ItemMaterialCode")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
@@ -15932,8 +15959,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("ProductShortName")
                         .HasColumnType("text");
 
-                    b.Property<int?>("Quantity")
-                        .HasColumnType("integer");
+                    b.Property<decimal?>("Quantity")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
 
                     b.Property<DateTime?>("ReceivedDate")
                         .HasColumnType("timestamp without time zone");
@@ -16009,7 +16037,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("CK_RFQItems_Participation_Decision", "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
 
-                            t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
+                            t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR CAST(\"Quantity\" AS NUMERIC) > 0");
 
                             t.HasCheckConstraint("CK_Rfqitems_ProductResolution", "(\"ProductResolvedBy\" IS NULL AND \"ProductResolvedOn\" IS NULL) OR (\"ProductResolvedBy\" IS NOT NULL AND trim(\"ProductResolvedBy\") <> '' AND \"ProductResolvedOn\" IS NOT NULL)");
                         });
@@ -28434,8 +28462,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("ProductId")
                         .HasColumnType("bigint");
 
-                    b.Property<int?>("Quantity")
-                        .HasColumnType("integer");
+                    b.Property<decimal?>("Quantity")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
 
                     b.Property<string>("ReasonCode")
                         .HasMaxLength(64)

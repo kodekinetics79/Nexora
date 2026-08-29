@@ -71,7 +71,7 @@ describe('ModulesTab', () => {
     expect(screen.getByText('1 pending change')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Save module access' })).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText(/Why/), { target: { value: 'no' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Why/ }), { target: { value: 'no' } });
     expect(screen.getByRole('button', { name: 'Save module access' })).toBeDisabled();
   });
 
@@ -80,7 +80,7 @@ describe('ModulesTab', () => {
     renderTab();
 
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Orders' }));
-    fireEvent.change(screen.getByLabelText(/Why/), {
+    fireEvent.change(screen.getByRole('textbox', { name: /^Why/ }), {
       target: { value: 'Customer purchased the orders module on renewal' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save module access' }));

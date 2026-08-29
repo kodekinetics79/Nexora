@@ -81,7 +81,7 @@ public sealed class LeadLineParticipationDecision
     public string? ReasonCode { get; set; }
     public string? ReasonNotes { get; set; }
     public long? ProductId { get; set; }
-    public int? Quantity { get; set; }
+    public decimal? Quantity { get; set; }
     public string? UnitOfMeasure { get; set; }
     public int? UomId { get; set; }
     public string? Currency { get; set; }

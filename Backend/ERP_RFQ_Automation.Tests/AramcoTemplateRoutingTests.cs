@@ -102,10 +102,10 @@ public sealed class AramcoTemplateRoutingTests
     }
 
     [Fact]
-    public void A_fractional_quantity_nulls_that_line_rather_than_truncating_it()
+    public void A_fractional_quantity_is_preserved_exactly()
     {
-        // Quantity is int? downstream. Truncating 2.5 to 2 would under-quote by 20% and look
-        // entirely correct on the screen.
+        // Truncating 2.5 to 2 would under-quote by 20%; routing it to review would also lose
+        // a value the deterministic parser read exactly.
         var text = Preamble + "\n" + string.Join("\n",
             "10", "902017274", "3801", "M", "2.5", "CABLE,ELEC");
 
@@ -113,8 +113,8 @@ public sealed class AramcoTemplateRoutingTests
 
         Assert.NotNull(outcome);
         var line = Assert.Single(outcome!.Result!.Items);
-        Assert.Null(line.Quantity);
-        Assert.Equal(0, line.QuantityConfidence);
+        Assert.Equal(2.5m, line.Quantity);
+        Assert.Equal(1.0d, line.QuantityConfidence);
     }
 
     [Fact]

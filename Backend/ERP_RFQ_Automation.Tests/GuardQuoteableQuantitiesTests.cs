@@ -76,7 +76,7 @@ public sealed class GuardQuoteableQuantitiesTests
     // ───────────────────────────────────────────── the constraints, asserted via the model
 
     [Theory]
-    [InlineData(typeof(Rfqitem), "CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0")]
+    [InlineData(typeof(Rfqitem), "CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR CAST(\"Quantity\" AS NUMERIC) > 0")]
     [InlineData(typeof(QuoteItem), "CK_QuoteItems_Quantity_Positive", "\"Quantity\" > 0")]
     [InlineData(typeof(OrderItem), "CK_OrderItems_Quantity_Positive", "\"Quantity\" > 0")]
     public void Quoteable_line_tables_carry_the_positive_quantity_check_in_the_model(
@@ -128,7 +128,37 @@ public sealed class GuardQuoteableQuantitiesTests
             CreatedBy = "seed", CreatedDate = Jan1
         });
 
+        await using (var schema = db.Database.GetDbConnection().CreateCommand())
+        {
+            schema.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'RFQItems'";
+            var rfqItemsDdl = (string?)await schema.ExecuteScalarAsync();
+            Assert.Contains("CK_RFQItems_Quantity_Positive", rfqItemsDdl, StringComparison.Ordinal);
+        }
+
         await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    [Fact]
+    public async Task Databases_built_from_the_model_accept_the_smallest_supported_fractional_rfq_quantity()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, Bu);
+        db.Rfqs.Add(new Rfq
+        {
+            Id = 9_810, Rfqno = "RFQ-FRACTION-CK", RecDate = Jan1, BusinessUnitId = Bu,
+            CreatedBy = "seed", CreatedDate = Jan1
+        });
+        db.Rfqitems.Add(new Rfqitem
+        {
+            Id = 9_811, Rfqid = 9_810, ProductShortName = "Measured component",
+            Quantity = 0.000001m, CreatedBy = "seed", CreatedDate = Jan1
+        });
+
+        await db.SaveChangesAsync();
+
+        Assert.Equal(0.000001m, await db.Rfqitems.Where(x => x.Id == 9_811)
+            .Select(x => x.Quantity).SingleAsync());
     }
 
     // ───────────────────────────────────────────── helpers

@@ -39,8 +39,8 @@ export const initializeDecisionMap = (workbench: LeadDecisionWorkbenchDTO): Deci
       ...(line.participation?.reasonCode ? { reasonCode: line.participation.reasonCode } : {}),
       ...(line.participation?.note ? { note: line.participation.note } : {}),
       ...(reconciledProductId ? { productId: reconciledProductId } : {}),
-      ...((line.participation?.quantity ?? (Number.isInteger(line.normalizedQuantity) ? line.normalizedQuantity : line.quantity)) != null
-        ? { quantity: line.participation?.quantity ?? (Number.isInteger(line.normalizedQuantity) ? line.normalizedQuantity! : line.quantity!) } : {}),
+      ...((line.participation?.quantity ?? line.normalizedQuantity ?? line.quantity) != null
+        ? { quantity: line.participation?.quantity ?? line.normalizedQuantity ?? line.quantity! } : {}),
       ...((line.participation?.unitOfMeasure ?? line.normalizedUom ?? line.unitOfMeasure)
         ? { unitOfMeasure: line.participation?.unitOfMeasure ?? line.normalizedUom ?? line.unitOfMeasure! } : {}),
       ...((line.participation?.currency ?? line.currency)
@@ -94,7 +94,7 @@ export const bidCommercialValuesReady = (
   const validCurrencyCodes = new Set(currencyOptions.map((option) => option.code.toUpperCase()));
   return Object.entries(decisions).every(([revisionLineId, decision]) => {
     if (decision.decision !== 'Bid') return true;
-    return Boolean(decision.quantity && Number.isInteger(decision.quantity) && decision.quantity > 0
+    return Boolean(decision.quantity && Number.isFinite(decision.quantity) && decision.quantity > 0
       && decision.unitOfMeasure && validUnitCodes.has(decision.unitOfMeasure.toUpperCase())
       && decision.currency && validCurrencyCodes.has(decision.currency.toUpperCase())
       && (!needsAttentionByRevisionLine[Number(revisionLineId)] || (decision.note?.trim().length ?? 0) >= 5));

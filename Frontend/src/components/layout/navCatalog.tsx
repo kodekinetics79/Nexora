@@ -686,6 +686,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         path: '/sales/reps',
         icon: <RepIcon />,
         moduleName: 'Users',
+        managerOnly: true,
         keywords: ['rep', 'people', 'directory', 'salesperson'],
       },
       // NOTE: the old rail carried `/sales/team` TWICE — once as "Sales Manager Control Tower"

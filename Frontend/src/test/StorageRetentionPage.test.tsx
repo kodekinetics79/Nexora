@@ -686,10 +686,21 @@ describe('StorageRetentionPage — clear out what produced nothing', () => {
     expect(screen.getByText(/not the same as "you have nothing to clear"/i)).toBeInTheDocument();
   });
 
-  it('no longer sends anyone at a Data Subject Request process that does not exist', async () => {
+  it('describes governed administrator review without inventing an in-product erasure workflow', async () => {
     renderPage();
     await screen.findByText('256 MB');
     expect(screen.queryByText(/data subject request/i)).not.toBeInTheDocument();
-    expect(screen.getAllByText(/edit or delete the lead that holds them/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/edit or delete the lead that holds them/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/governed privacy process/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/authorised administrator/i).length).toBeGreaterThan(0);
+  });
+
+  it('states the configured retention default without claiming blanket legal compliance', async () => {
+    renderPage();
+    await screen.findByText('256 MB');
+
+    expect(screen.getByText(/90 days is the configured default/i)).toBeInTheDocument();
+    expect(screen.queryByText(/compliance-approved default/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/satisfy UAE and KSA/i)).not.toBeInTheDocument();
   });
 });

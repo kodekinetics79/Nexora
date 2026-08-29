@@ -187,11 +187,12 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         decimal? UnitPrice, double? UnitPriceConfidence,
         // Null means "the document did not state a usable quantity" — the LINE routes to
         // review (the canonical-line store enforces quantity IS NULL OR quantity > 0).
-        // The model path reads this int? through OllamaLlmService.LenientQuantityConverter
-        // (2 / 2.0 / "2" / "2.0" -> 2; a real fraction like 2.5 -> null, NEVER truncated),
-        // and a zero/negative model value is quarantined to null per line — one bad cell
-        // must not fail the other 173 lines of the document.
-        int? Quantity, double? QuantityConfidence,
+        // The model path reads this decimal? through OllamaLlmService.LenientQuantityConverter.
+        // Legal numeric/string spellings preserve their exact value (including fractions up to
+        // the database's decimal(20,6) boundary); a zero/negative or out-of-range model value is
+        // quarantined to null per line — one bad cell must not fail the other 173 lines.
+        [property: JsonConverter(typeof(ERP_RFQ_Automation.Services.OllamaLlmService.LenientQuantityConverter))]
+        decimal? Quantity, double? QuantityConfidence,
         string? StorageLocation, double? StorageLocationConfidence,
         string? ManufacturerName, double? ManufacturerNameConfidence,
         string? ManufacturerPartNumber, double? ManufacturerPartNumberConfidence,

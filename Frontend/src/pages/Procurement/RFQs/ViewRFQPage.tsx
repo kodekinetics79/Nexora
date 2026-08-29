@@ -29,7 +29,6 @@ import {
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
-import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { useSnackbar } from 'notistack';
 import LifecycleActions from '../../../components/common/LifecycleActions';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
@@ -54,6 +53,55 @@ const DataField: React.FC<{ label: string; value: string | number | null; bold?:
   </Box>
 );
 
+const MAX_EXTRA_FIELDS = 6;
+const MAX_EXTRA_FIELD_VALUE_LENGTH = 120;
+
+interface ExtraFieldsPresentation {
+  fields: Array<{ label: string; value: string }>;
+  hiddenCount: number;
+  invalid: boolean;
+}
+
+const extraFieldLabel = (key: string): string => {
+  const spaced = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replaceAll(/[_-]+/g, ' ').trim();
+  return (spaced || 'Customer field').slice(0, 60);
+};
+
+const boundedExtraFieldValue = (value: unknown): string => {
+  if (value === null || value === undefined || value === '') return 'Not stated';
+  if (typeof value === 'object') return 'Structured value retained in the source record';
+  const text = String(value).trim();
+  return text.length > MAX_EXTRA_FIELD_VALUE_LENGTH
+    ? `${text.slice(0, MAX_EXTRA_FIELD_VALUE_LENGTH - 1)}…`
+    : text;
+};
+
+/**
+ * ExtraFields is source JSON, not application markup. Render only a bounded primitive summary;
+ * React escapes the text and nested/unbounded structures remain available in the source record
+ * without flooding the operational table.
+ */
+export const presentRfqExtraFields = (json: string | null | undefined): ExtraFieldsPresentation => {
+  if (!json?.trim()) return { fields: [], hiddenCount: 0, invalid: false };
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      return { fields: [], hiddenCount: 0, invalid: true };
+    }
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    return {
+      fields: entries.slice(0, MAX_EXTRA_FIELDS).map(([key, value]) => ({
+        label: extraFieldLabel(key),
+        value: boundedExtraFieldValue(value),
+      })),
+      hiddenCount: Math.max(0, entries.length - MAX_EXTRA_FIELDS),
+      invalid: false,
+    };
+  } catch {
+    return { fields: [], hiddenCount: 0, invalid: true };
+  }
+};
+
 /**
  * Scenario money.
  *
@@ -76,7 +124,6 @@ const ViewRFQPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
 
-  const [approvalDialogOpen, setApprovalDialogOpen] = React.useState(false);
   const [lineFilter, setLineFilter] = React.useState('all');
   const [evidenceItemId, setEvidenceItemId] = React.useState<number | null>(null);
 
@@ -107,17 +154,6 @@ const ViewRFQPage: React.FC = () => {
     queryFn: () => commercialIntelligenceService.getRfqLineResolutions(Number(id)),
     enabled: !!id && hasPermission('RFQ Management'),
     retry: 1,
-  });
-
-  const approveMutation = useMutation({
-    mutationFn: (payload: { id: number; approvedBy: string; email?: string; subject?: string; body?: string; customerId?: number }) =>
-      rfqService.approve(payload.id, payload.approvedBy, payload.email, payload.subject, payload.body, payload.customerId),
-    onSuccess: () => {
-      enqueueSnackbar('RFQ Approved and Sent successfully!', { variant: 'success' });
-      setApprovalDialogOpen(false);
-      queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] });
-    },
-    onError: () => enqueueSnackbar('Failed to approve RFQ', { variant: 'error' }),
   });
 
   const quoteDraftMutation = useMutation({
@@ -325,13 +361,24 @@ const ViewRFQPage: React.FC = () => {
               // A disabled button wrapped in a Tooltip needs a focusable element between them,
               // otherwise the reason is unreachable by pointer and by keyboard alike.
               <Tooltip title={prepareQuoteReason}>
-                <span>
+                <Box
+                  component="span"
+                  role={canPrepareQuote ? undefined : 'button'}
+                  aria-disabled={canPrepareQuote ? undefined : 'true'}
+                  tabIndex={canPrepareQuote ? -1 : 0}
+                  aria-label={prepareQuoteReason}
+                  sx={{
+                    display: 'inline-flex',
+                    borderRadius: 2,
+                    '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 },
+                  }}
+                >
                   <Button variant="contained" color="success" startIcon={<QuoteDraftIcon />}
                     onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
                     sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
                     Prepare Quote Draft
                   </Button>
-                </span>
+                </Box>
               </Tooltip>
             )}
           </Stack>
@@ -426,6 +473,23 @@ const ViewRFQPage: React.FC = () => {
               )}
             </Paper>
 
+            <Paper component="section" aria-labelledby="customer-request-terms-heading" sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
+              <Typography id="customer-request-terms-heading" component="h2" sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em', mb: 0.5 }}>
+                Customer request terms
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
+                Read-only values preserved from the immutable Lead revision used to create this RFQ.
+              </Typography>
+              <Grid container spacing={2}>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer RFQ reference" value={rfq.customerRfqReference ?? null} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Required delivery date" value={formatDateSafe(rfq.requiredDeliveryDate ?? null)} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Delivery location" value={rfq.deliveryLocation ?? null} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Agreement reference" value={rfq.agreementReference ?? null} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Closing date (Hijri)" value={rfq.bidClosingDateHijri ?? null} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Inquiry type" value={rfq.inquiryType ?? null} /></Grid>
+              </Grid>
+            </Paper>
+
             <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="rfq" recordId={rfq.id} /></Box>
 
             {intelligenceQuery.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => intelligenceQuery.refetch()}>Retry</Button>}>Commercial intelligence could not be reconciled.</Alert>}
@@ -497,7 +561,9 @@ const ViewRFQPage: React.FC = () => {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {visibleItems.map((item, idx) => (
+                  {visibleItems.map((item, idx) => {
+                    const extraFields = presentRfqExtraFields(item.extraFields);
+                    return (
                     <TableRow key={item.id} hover sx={{ '&:last-child td': { border: 0 } }}>
                       {/* The buyer's line number is the identifier they will quote back at you, so
                           a renumbering index is actively wrong — and it shifted every time a tile
@@ -511,6 +577,29 @@ const ViewRFQPage: React.FC = () => {
                         <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
                           {item.productShortDescription || 'No description'}
                         </Typography>
+                        {extraFields.fields.length > 0 ? (
+                          <Box component="details" sx={{ mt: 0.75, maxWidth: 360 }}>
+                            <Typography component="summary" variant="caption" sx={{ cursor: 'pointer', fontWeight: 800 }}>
+                              Customer fields ({extraFields.fields.length + extraFields.hiddenCount})
+                            </Typography>
+                            <Stack spacing={0.25} sx={{ mt: 0.5 }}>
+                              {extraFields.fields.map((field, fieldIndex) => (
+                                <Typography key={`${field.label}-${fieldIndex}`} variant="caption" sx={{ overflowWrap: 'anywhere' }}>
+                                  <Box component="span" sx={{ fontWeight: 800 }}>{field.label}:</Box> {field.value}
+                                </Typography>
+                              ))}
+                              {extraFields.hiddenCount > 0 ? (
+                                <Typography variant="caption" color="text.secondary">
+                                  {extraFields.hiddenCount} additional customer field{extraFields.hiddenCount === 1 ? '' : 's'} retained in the source record.
+                                </Typography>
+                              ) : null}
+                            </Stack>
+                          </Box>
+                        ) : extraFields.invalid ? (
+                          <Typography variant="caption" color="warning.main" sx={{ display: 'block', mt: 0.5 }}>
+                            Customer fields could not be displayed safely.
+                          </Typography>
+                        ) : null}
                       </TableCell>
                       <TableCell>
                         <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>
@@ -583,7 +672,7 @@ const ViewRFQPage: React.FC = () => {
                         })()}
                       </TableCell>
                     </TableRow>
-                  ))}
+                  );})}
                   {/* The body renders `visibleItems`, so this has to test `visibleItems`. Keyed on
                       `rfq.rfqitems` it fired only for an RFQ with no lines at all — the one case
                       where "match this filter" is meaningless — and a filter that genuinely
@@ -685,28 +774,6 @@ const ViewRFQPage: React.FC = () => {
         </Grid>
       </Grid>
 
-      {rfq && (
-        <EmailPromptDialog
-          open={approvalDialogOpen}
-          initialEmail={rfq.customerEmail || rfq.leadEmail}
-          initialSubject={`Quote for RFQ #${rfq.rfqno}`}
-          initialBody={`Dear Customer,\n\nPlease find the quote for your RFQ #${rfq.rfqno} attached.\n\nBest Regards,\n${userData?.userName}`}
-          businessUnitId={userData?.businessUnitId || 0}
-          customerId={rfq.customerId}
-          loading={approveMutation.isPending}
-          onCancel={() => setApprovalDialogOpen(false)}
-          onConfirm={(email, subject, body, customerId) => {
-            approveMutation.mutate({
-              id: rfq.id,
-              approvedBy: userData?.userName || 'System',
-              email,
-              subject,
-              body,
-              customerId
-            });
-          }}
-        />
-      )}
       <Drawer anchor="right" open={Boolean(evidenceItem)} onClose={() => setEvidenceItemId(null)} slotProps={{ paper: { sx: { width: { xs: '100%', sm: 440 }, p: 3 } } }}>
         <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Box><Typography variant="overline">Source evidence</Typography><Typography variant="h6" sx={{ fontWeight: 900 }}>{evidenceItem?.manufacturerPartNumber || evidenceItem?.itemMaterialCode || `Line ${evidenceItem?.lineItemNo || ''}`}</Typography></Box>

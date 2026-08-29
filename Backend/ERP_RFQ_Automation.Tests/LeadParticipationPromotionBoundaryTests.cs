@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
@@ -6,6 +7,8 @@ using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Routing;
 using Microsoft.EntityFrameworkCore;
 
@@ -27,13 +30,225 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("POST promote-to-rfq", routes);
         Assert.Contains("POST rfq-revision-impact/resolve", routes);
 
+        var legacyPromote = typeof(LeadParticipationController).GetMethod(
+            nameof(LeadParticipationController.Promote))!;
+        Assert.NotEmpty(legacyPromote.GetCustomAttributes<RequireManagerRoleAttribute>());
+
+        // The canonical route performs the same manager gate inside the action, after its
+        // tenant-scoped existence check, so a foreign Lead remains non-disclosing.
+        var canonicalPromote = typeof(LeadParticipationController).GetMethod(
+            nameof(LeadParticipationController.PromoteToRfq))!;
+        Assert.Empty(canonicalPromote.GetCustomAttributes<RequireManagerRoleAttribute>());
+
         var resolve = typeof(LeadParticipationController).GetMethod(
             nameof(LeadParticipationController.ResolveRfqRevisionImpact))!;
+        Assert.NotEmpty(resolve.GetCustomAttributes<RequireManagerRoleAttribute>());
         var permissions = resolve.GetCustomAttributes<RequireModulePermissionAttribute>().ToArray();
         Assert.Contains(permissions, permission =>
             permission.ModuleName == "Leads" && permission.Action == PermissionAction.Edit);
         Assert.Contains(permissions, permission =>
             permission.ModuleName == "RFQ Management" && permission.Action == PermissionAction.Edit);
+    }
+
+    [Theory]
+    [InlineData(null, false, false)]
+    [InlineData("", true, false)]
+    [InlineData("4001", false, false)]
+    [InlineData("4001", true, true)]
+    public async Task Participation_commit_authority_fails_closed_below_manager(
+        string? roleId, bool manager, bool expected)
+    {
+        var claims = roleId is null ? Array.Empty<Claim>() : [new Claim("roleId", roleId)];
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+
+        Assert.Equal(expected, await ParticipationDecisionAuthority.CanCommitOrPromoteAsync(
+            principal, 9901, new FixedRoleGate(manager)));
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, true)]
+    public async Task Sales_rep_can_prepare_draft_but_only_manager_can_commit(
+        bool manager, bool commit, bool serviceCalled)
+    {
+        var participation = new RecordingParticipationService();
+        var controller = DecisionController(participation, manager);
+
+        var response = await controller.Decide(77,
+            new ParticipationDecisionRequest(88, 1, null, commit, null, [], null, null), default);
+
+        Assert.Equal(serviceCalled ? 1 : 0, participation.CommitCalls);
+        if (serviceCalled)
+            Assert.IsType<OkObjectResult>(response.Result);
+        else
+            Assert.IsType<ForbidResult>(response.Result);
+    }
+
+    [Fact]
+    public async Task Cross_tenant_promote_to_rfq_is_non_disclosing_before_role_authorization()
+    {
+        var promotion = new RecordingPromotionService();
+        var controller = PromotionController(promotion, canAccessLead: false, manager: false);
+
+        var response = await controller.PromoteToRfq(77,
+            new PromoteToRfqRequest(88, 1, 1, null), default);
+
+        Assert.IsType<NotFoundResult>(response.Result);
+        Assert.Equal(0, promotion.Calls);
+    }
+
+    [Fact]
+    public async Task Same_tenant_promote_to_rfq_forbids_insufficient_role()
+    {
+        var promotion = new RecordingPromotionService();
+        var controller = PromotionController(promotion, canAccessLead: true, manager: false);
+
+        var response = await controller.PromoteToRfq(77,
+            new PromoteToRfqRequest(88, 1, 1, null), default);
+
+        Assert.IsType<ForbidResult>(response.Result);
+        Assert.Equal(0, promotion.Calls);
+    }
+
+    [Theory]
+    [InlineData("DISQUALIFIED", true)]
+    [InlineData("CONVERTED_TO_RFQ", true)]
+    [InlineData("UNDER_REVIEW", false)]
+    public void Full_no_bid_closes_decision_record_until_governed_reopen(string status, bool expected)
+        => Assert.Equal(expected, LeadParticipationService.IsDecisionRecordClosed(status));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("product")]
+    [InlineData(" PRODUCT ")]
+    public void Product_or_unclassified_inquiry_can_enter_product_rfq_gate(string? inquiryType)
+        => LeadInquiryPromotionGate.EnsureProductRfqEligible(new Lead { InquiryType = inquiryType });
+
+    [Theory]
+    [InlineData("service", "SERVICE_BOQ_REQUIRED")]
+    [InlineData(" SERVICE ", "SERVICE_BOQ_REQUIRED")]
+    [InlineData("mixed", "MIXED_INQUIRY_REVIEW_REQUIRED")]
+    public void Service_or_mixed_inquiry_routes_away_from_product_rfq(
+        string inquiryType, string expectedReasonCode)
+    {
+        var error = Assert.Throws<LeadInquiryPromotionRouteException>(() =>
+            LeadInquiryPromotionGate.EnsureProductRfqEligible(new Lead { InquiryType = inquiryType }));
+
+        Assert.Equal(expectedReasonCode, error.ReasonCode);
+        Assert.Contains("blocked", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class FixedRoleGate(bool manager) : IRoleGate
+    {
+        public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
+        public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(manager);
+        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) =>
+            Task.FromResult(manager ? RoleRanks.Manager : RoleRanks.Member);
+        public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) =>
+            Task.FromResult(manager);
+    }
+
+    private static LeadParticipationController DecisionController(
+        ILeadParticipationService participation, bool manager)
+    {
+        var controller = new LeadParticipationController(
+            participation, null!, null!, null!, new AllowAllCommercialAccess(), new FixedRoleGate(manager));
+        var http = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim("businessUnitId", "9901"),
+                new Claim("roleId", "4001"),
+                new Claim(ClaimTypes.Email, "sales@nexora.test")
+            ], "test"))
+        };
+        http.Request.Headers["Idempotency-Key"] = "participation-authority-test";
+        controller.ControllerContext = new ControllerContext { HttpContext = http };
+        return controller;
+    }
+
+    private static LeadParticipationController PromotionController(
+        IRfqPromotionService promotion, bool canAccessLead, bool manager)
+    {
+        var controller = new LeadParticipationController(
+            null!, promotion, null!, null!, new FixedCommercialAccess(canAccessLead), new FixedRoleGate(manager));
+        var http = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim("businessUnitId", "9901"),
+                new Claim("roleId", "4001"),
+                new Claim(ClaimTypes.Email, "sales@nexora.test")
+            ], "test"))
+        };
+        http.Request.Headers["Idempotency-Key"] = "promotion-authority-test";
+        controller.ControllerContext = new ControllerContext { HttpContext = http };
+        return controller;
+    }
+
+    private sealed class RecordingPromotionService : IRfqPromotionService
+    {
+        public int Calls { get; private set; }
+
+        public Task<RfqPromotionResult> PromoteAsync(
+            long businessUnitId, long leadId, PromoteLeadToRfqCommand command,
+            CancellationToken ct = default)
+        {
+            Calls++;
+            throw new InvalidOperationException("The authorization regressions must not call promotion.");
+        }
+    }
+
+    private sealed class RecordingParticipationService : ILeadParticipationService
+    {
+        public int CommitCalls { get; private set; }
+
+        public Task<LeadFitAssessmentResult> RecordFitAssessmentAsync(
+            long businessUnitId, long leadId, RecordLeadFitAssessmentCommand command,
+            CancellationToken ct = default) => throw new NotSupportedException();
+
+        public Task<LeadParticipationResult> CommitDecisionAsync(
+            long businessUnitId, long leadId, CommitLeadParticipationCommand command,
+            CancellationToken ct = default)
+        {
+            CommitCalls++;
+            return Task.FromResult(new LeadParticipationResult(
+                1, leadId, command.ExpectedLeadRevisionId, 2, 1, command.Commit,
+                LeadParticipationOutcome.Pending, null, null, DateTimeOffset.UtcNow, []));
+        }
+
+        public Task<LeadParticipationResult?> GetCurrentDecisionAsync(
+            long businessUnitId, long leadId, CancellationToken ct = default) =>
+            Task.FromResult<LeadParticipationResult?>(null);
+    }
+
+    private sealed class AllowAllCommercialAccess : ICommercialAccessContext
+    {
+        public Task<CommercialActorScope?> ResolveAsync(CancellationToken ct = default) =>
+            Task.FromResult<CommercialActorScope?>(null);
+        public Task<bool> CanAccessLeadAsync(long leadId, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> CanAccessCustomerAsync(long customerId, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> CanAccessRfqAsync(long rfqId, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> CanAccessQuoteAsync(long quoteId, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> CanAccessOrderAsync(long orderId, CancellationToken ct = default) => Task.FromResult(true);
+    }
+
+    private sealed class FixedCommercialAccess(bool canAccessLead) : ICommercialAccessContext
+    {
+        public Task<CommercialActorScope?> ResolveAsync(CancellationToken ct = default) =>
+            Task.FromResult<CommercialActorScope?>(null);
+        public Task<bool> CanAccessLeadAsync(long leadId, CancellationToken ct = default) =>
+            Task.FromResult(canAccessLead);
+        public Task<bool> CanAccessCustomerAsync(long customerId, CancellationToken ct = default) =>
+            Task.FromResult(false);
+        public Task<bool> CanAccessRfqAsync(long rfqId, CancellationToken ct = default) =>
+            Task.FromResult(false);
+        public Task<bool> CanAccessQuoteAsync(long quoteId, CancellationToken ct = default) =>
+            Task.FromResult(false);
+        public Task<bool> CanAccessOrderAsync(long orderId, CancellationToken ct = default) =>
+            Task.FromResult(false);
     }
 
     [Fact]
@@ -355,17 +570,26 @@ public sealed class LeadParticipationPromotionBoundaryTests
     }
 
     [Fact]
-    public void Promotion_requires_current_occurrence_retained_source_evidence_for_each_bid_line()
+    public void Promotion_uses_the_shared_exact_source_or_governed_review_provenance_contract()
     {
-        var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(),
+        var root = FindRepositoryRoot();
+        var promotion = File.ReadAllText(Path.Combine(root,
             "Backend/ERP_RFQ_Automation/CommercialCases/Promotion/RfqPromotionService.cs"));
-        Assert.Contains("x.OccurrenceId == currentOccurrenceId", source, StringComparison.Ordinal);
-        Assert.Contains("currentSourceDocumentIds.Contains(field.ExtractionRun.SourceDocumentId)", source, StringComparison.Ordinal);
-        Assert.Contains("field.ExtractionRun.SourceDocument.PurgeState == EvidencePurgeState.Present", source, StringComparison.Ordinal);
-        Assert.Contains("field.ExtractionRun.SourceDocument.ExtractionJobId == job.Id", source, StringComparison.Ordinal);
-        Assert.Contains("_evidenceStorage.OpenVerifiedReadAsync", source, StringComparison.Ordinal);
-        Assert.True(source.IndexOf("_evidenceStorage.OpenVerifiedReadAsync", StringComparison.Ordinal)
-            < source.IndexOf("_db.Rfqs.Add", StringComparison.Ordinal));
+        var participation = File.ReadAllText(Path.Combine(root,
+            "Backend/ERP_RFQ_Automation/CommercialCases/Participation/LeadParticipationService.cs"));
+        var validator = File.ReadAllText(Path.Combine(root,
+            "Backend/ERP_RFQ_Automation/CommercialCases/Participation/BidSourceProvenanceValidator.cs"));
+        Assert.Contains("BidSourceProvenanceValidator.ValidateAsync", promotion, StringComparison.Ordinal);
+        Assert.Contains("BidSourceProvenanceValidator.ValidateAsync", participation, StringComparison.Ordinal);
+        Assert.Contains("x.OccurrenceId == revision.EstablishedByOccurrenceId", validator, StringComparison.Ordinal);
+        Assert.Contains("documentIds.Contains(field.ExtractionRun.SourceDocumentId)", validator, StringComparison.Ordinal);
+        Assert.Contains("field.ExtractionRun.SourceDocument.PurgeState == EvidencePurgeState.Present", validator, StringComparison.Ordinal);
+        Assert.Contains("field.ExtractionRun.SourceDocument.ExtractionJobId == job.Id", validator, StringComparison.Ordinal);
+        Assert.Contains("ReviewOverrideCoversLine", validator, StringComparison.Ordinal);
+        Assert.Contains("reviewVersion != audit.ToVersion", validator, StringComparison.Ordinal);
+        Assert.Contains("_evidenceStorage.OpenVerifiedReadAsync", promotion, StringComparison.Ordinal);
+        Assert.True(promotion.IndexOf("_evidenceStorage.OpenVerifiedReadAsync", StringComparison.Ordinal)
+            < promotion.IndexOf("_db.Rfqs.Add", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()

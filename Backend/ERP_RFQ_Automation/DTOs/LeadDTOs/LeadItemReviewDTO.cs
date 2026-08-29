@@ -16,8 +16,8 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? UnitOfMeasure { get; set; }
         [System.ComponentModel.DataAnnotations.Range(typeof(decimal), "0", "79228162514264337593543950335")]
         public decimal? UnitPrice { get; set; }
-        [System.ComponentModel.DataAnnotations.Range(1, int.MaxValue)]
-        public int? Quantity { get; set; }
+        [System.ComponentModel.DataAnnotations.Range(typeof(decimal), "0.000001", "99999999999999.999999")]
+        public decimal? Quantity { get; set; }
         public string? ManufacturerName { get; set; }
         public string? ManufacturerPartNumber { get; set; }
         public string? AlternateProductName { get; set; }

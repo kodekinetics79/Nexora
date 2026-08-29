@@ -20,7 +20,7 @@
         /// Null when the source document stated no readable quantity. Never 0-for-unknown: the
         /// review screen must show a gap the reviewer has to fill, not a number to approve.
         /// </summary>
-        public int? Quantity { get; set; }
+        public decimal? Quantity { get; set; }
         public string? StorageLocation { get; set; }
         public string? ManufacturerName { get; set; }
         public string? ManufacturerPartNumber { get; set; }

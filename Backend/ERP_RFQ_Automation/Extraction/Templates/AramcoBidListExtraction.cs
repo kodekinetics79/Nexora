@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Extraction.Quantities;
 using ERP_RFQ_Automation.Services.Interfaces;
 
 namespace ERP_RFQ_Automation.Extraction.Templates;
@@ -71,12 +72,9 @@ public static class AramcoBidListExtraction
 
     private static LeadItemData Map(AramcoBidLine line)
     {
-        // Quantity is int? downstream. Aramco states whole units; a fraction would be a shape
-        // this template does not claim to understand, so it becomes null and routes the LINE to
-        // review rather than being truncated into a different number.
-        int? quantity = decimal.Truncate(line.ReqQty) == line.ReqQty && line.ReqQty <= int.MaxValue
-            ? (int)line.ReqQty
-            : null;
+        // Preserve the buyer's exact demand, including fractional measured quantities. Values
+        // outside numeric(20,6) route the line to review rather than being rounded or overflowing.
+        decimal? quantity = QuantityParser.FitsPersistedQuantity(line.ReqQty) ? line.ReqQty : null;
 
         // The first line is the sheet's own short noun; the remainder is the specification
         // block. Both are kept — the reviewer prices against the specification.

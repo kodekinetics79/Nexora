@@ -118,7 +118,7 @@ public sealed record IntakeExtractedLine(
     string? LineNumber,
     string? ProductName,
     string? Description,
-    int? Quantity,
+    decimal? Quantity,
     string? UnitOfMeasure,
     string? ManufacturerName,
     string? ManufacturerPartNumber,

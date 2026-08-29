@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import ViewRFQPage from './ViewRFQPage';
+import ViewRFQPage, { presentRfqExtraFields } from './ViewRFQPage';
 import type { RfqResponseDTO, RfqitemResponseDTO } from '../../../api/services/rfqService';
 import type { RfqCommercialIntelligence } from '../../../api/services/commercialLearningService';
 import type { SourcingWorkbench } from '../../../api/services/procurementService';
@@ -304,6 +304,57 @@ describe('ViewRFQPage — immutable promotion lineage', () => {
   });
 });
 
+describe('ViewRFQPage — immutable customer request terms', () => {
+  it('shows the customer header terms copied into the formal RFQ', async () => {
+    getRfq.mockResolvedValue(rfq({
+      customerRfqReference: 'CUSTOMER-RFQ-77',
+      requiredDeliveryDate: '2026-09-15T00:00:00Z',
+      deliveryLocation: 'Plant 4 · Receiving Bay B',
+      agreementReference: 'FRAME-2026-09',
+      bidClosingDateHijri: '1448-04-03',
+      inquiryType: 'product',
+    }));
+    render(<ViewRFQPage />, { wrapper });
+
+    expect(await screen.findByRole('heading', { name: 'Customer request terms' })).toBeInTheDocument();
+    expect(screen.getByText('CUSTOMER-RFQ-77')).toBeInTheDocument();
+    expect(screen.getByText('Plant 4 · Receiving Bay B')).toBeInTheDocument();
+    expect(screen.getByText('FRAME-2026-09')).toBeInTheDocument();
+    expect(screen.getByText('1448-04-03')).toBeInTheDocument();
+    expect(screen.getByText('product')).toBeInTheDocument();
+  });
+
+  it('renders only a bounded, escaped line-field summary and retains the remaining count', async () => {
+    const extraFields = JSON.stringify({
+      plant: '<script>unsafe()</script>',
+      incoterm: 'DAP',
+      project_code: 'P-42',
+      costCentre: 'CC-9',
+      drawing: 'A'.repeat(180),
+      nested: { confidential: 'not rendered raw' },
+      seventh: 'retained',
+    });
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1, { extraFields })] }));
+    render(<ViewRFQPage />, { wrapper });
+
+    const summary = await screen.findByText('Customer fields (7)');
+    fireEvent.click(summary);
+    expect(screen.getByText('<script>unsafe()</script>')).toBeInTheDocument();
+    expect(screen.queryByText('unsafe()', { selector: 'script' })).not.toBeInTheDocument();
+    expect(screen.getByText(/Structured value retained in the source record/)).toBeInTheDocument();
+    expect(screen.getByText('1 additional customer field retained in the source record.')).toBeInTheDocument();
+    expect(screen.queryByText('retained', { exact: true })).not.toBeInTheDocument();
+  });
+
+  it('fails closed without rendering malformed JSON', () => {
+    expect(presentRfqExtraFields('{not-json')).toEqual({
+      fields: [],
+      hiddenCount: 0,
+      invalid: true,
+    });
+  });
+});
+
 /**
  * The screen carried three readiness statements. Two were constants: `rfq.readiness` derived
  * from an ItemCount the detail endpoint never populated, and a literal warning chip wired to
@@ -360,6 +411,7 @@ describe('ViewRFQPage — the primary action states why it is unavailable', () =
       'aria-label',
       'Resolve 1 blocked line of the 1 line being quoted before preparing the customer quote.',
     );
+    expect(button.closest('span')).toHaveAttribute('tabindex', '0');
   });
 
   it('lets a rep start a quote whose lines still need sourcing, and says so honestly', async () => {

@@ -17,16 +17,18 @@ public sealed class LeadParticipationController : ControllerBase
     private readonly ILeadDecisionWorkbenchService _workbench;
     private readonly IRfqRevisionImpactResolutionService _rfqImpactResolution;
     private readonly ICommercialAccessContext _commercialAccess;
+    private readonly IRoleGate _roleGate;
 
     public LeadParticipationController(ILeadParticipationService participation, IRfqPromotionService promotion,
         ILeadDecisionWorkbenchService workbench, IRfqRevisionImpactResolutionService rfqImpactResolution,
-        ICommercialAccessContext commercialAccess)
+        ICommercialAccessContext commercialAccess, IRoleGate roleGate)
     {
         _participation = participation;
         _promotion = promotion;
         _workbench = workbench;
         _rfqImpactResolution = rfqImpactResolution;
         _commercialAccess = commercialAccess;
+        _roleGate = roleGate;
     }
 
     [HttpGet("participation")]
@@ -67,6 +69,9 @@ public sealed class LeadParticipationController : ControllerBase
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
         if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
+        if (request.Commit
+            && !await ParticipationDecisionAuthority.CanCommitOrPromoteAsync(User, businessUnitId, _roleGate))
+            return Forbid();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -87,6 +92,7 @@ public sealed class LeadParticipationController : ControllerBase
     [HttpPost("participation/promote")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     [RequireModulePermission("RFQ Management", PermissionAction.Create)]
+    [RequireManagerRole]
     public async Task<ActionResult<RfqPromotionResult>> Promote(
         long leadId, [FromBody] PromoteRfqRequest request, CancellationToken ct)
     {
@@ -103,6 +109,7 @@ public sealed class LeadParticipationController : ControllerBase
         }
         catch (KeyNotFoundException ex) { return NotFound(Problem(404, "Lead not found", ex.Message)); }
         catch (ArgumentException ex) { return BadRequest(Problem(400, "RFQ promotion refused", ex.Message)); }
+        catch (LeadInquiryPromotionRouteException ex) { return Conflict(PromotionRouteProblem(ex)); }
         catch (InvalidOperationException ex) { return Conflict(Problem(409, "RFQ promotion refused", ex.Message)); }
     }
 
@@ -147,6 +154,9 @@ public sealed class LeadParticipationController : ControllerBase
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
         if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
+        if (request.Commit
+            && !await ParticipationDecisionAuthority.CanCommitOrPromoteAsync(User, businessUnitId, _roleGate))
+            return Forbid();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -172,7 +182,13 @@ public sealed class LeadParticipationController : ControllerBase
         long leadId, [FromBody] PromoteToRfqRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        // Resolve tenant-scoped resource visibility before the role gate. Keeping the manager
+        // policy as an action-level authorization attribute returned 403 before this code ran,
+        // disclosing that a foreign-tenant Lead id existed. Same-tenant callers still receive
+        // the truthful 403 below when they lack commercial decision authority.
         if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
+        if (!await ParticipationDecisionAuthority.CanCommitOrPromoteAsync(User, businessUnitId, _roleGate))
+            return Forbid();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -182,12 +198,14 @@ public sealed class LeadParticipationController : ControllerBase
         }
         catch (KeyNotFoundException ex) { return NotFound(Problem(404, "Lead not found", ex.Message)); }
         catch (ArgumentException ex) { return BadRequest(Problem(400, "RFQ promotion refused", ex.Message)); }
+        catch (LeadInquiryPromotionRouteException ex) { return Conflict(PromotionRouteProblem(ex)); }
         catch (InvalidOperationException ex) { return Conflict(Problem(409, "RFQ promotion refused", ex.Message)); }
     }
 
     [HttpPost("rfq-revision-impact/resolve")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
+    [RequireManagerRole]
     public async Task<ActionResult<RfqRevisionImpactResolutionResult>> ResolveRfqRevisionImpact(
         long leadId, [FromBody] ResolveRfqRevisionImpactRequest request, CancellationToken ct)
     {
@@ -230,6 +248,13 @@ public sealed class LeadParticipationController : ControllerBase
         problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
         return problem;
     }
+
+    private ProblemDetails PromotionRouteProblem(LeadInquiryPromotionRouteException error)
+    {
+        var problem = Problem(409, "RFQ promotion routed to governed workflow", error.Message);
+        problem.Extensions["reasonCode"] = error.ReasonCode;
+        return problem;
+    }
 }
 
 public sealed record FitCriterionRequest(string Code, string Decision, string? Note);
@@ -241,7 +266,7 @@ public sealed record ParticipationLineRequest(
     string? ReasonCode,
     string? ReasonNotes,
     long? ProductId,
-    int? Quantity,
+    decimal? Quantity,
     string? UnitOfMeasure,
     string? Currency);
 public sealed record ParticipationDecisionRequest(
@@ -258,7 +283,7 @@ public sealed record PromoteRfqRequest(long ExpectedLeadRevisionId, int Expected
 public sealed record SaveFitAssessmentRequest(long ExpectedLeadRevisionId, int ExpectedDecisionVersion,
     int? ExpectedFitVersion, string OverallDecision, string Rationale, IReadOnlyList<FitCriterionRequest>? Criteria);
 public sealed record SaveParticipationLineRequest(long RevisionLineId, LeadLineParticipationChoice Decision,
-    string? ReasonCode, string? Note, long? ProductId, int? Quantity, string? UnitOfMeasure, string? Currency);
+    string? ReasonCode, string? Note, long? ProductId, decimal? Quantity, string? UnitOfMeasure, string? Currency);
 public sealed record SaveParticipationRequest(long ExpectedLeadRevisionId, int ExpectedDecisionVersion,
     int? ExpectedParticipationVersion, bool Commit, IReadOnlyList<SaveParticipationLineRequest>? Lines,
     string? ReasonCode, string? Notes);

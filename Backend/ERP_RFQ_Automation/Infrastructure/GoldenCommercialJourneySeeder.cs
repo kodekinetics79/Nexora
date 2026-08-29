@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,13 +8,16 @@ using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CustomerResolution;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Sla;
 using Microsoft.EntityFrameworkCore;
 
@@ -43,6 +47,7 @@ public static class GoldenCommercialJourneySeeder
 {
     // Lead.CreatedBy is varchar(20) — this string must stay within it (17 chars).
     private const string Actor = "system:golden-e2e";
+    internal sealed record GoldenEvidenceField(string Name, string? Raw, string? Normalized);
 
     public static async Task EnsureAsync(IServiceProvider services, IConfiguration configuration, IHostEnvironment environment)
     {
@@ -283,6 +288,9 @@ public static class GoldenCommercialJourneySeeder
         IEvidenceObjectStorage evidenceStorage,
         long businessUnitId, long customerId, DateTime now, string reference = "E2E-GOLDEN-A-001")
     {
+        var customerName = await db.Customers.IgnoreQueryFilters()
+            .Where(x => x.Buid == businessUnitId && x.Id == customerId)
+            .Select(x => x.Name).SingleAsync();
         var candidate = new Lead
         {
             Rfqno = reference,
@@ -294,7 +302,12 @@ public static class GoldenCommercialJourneySeeder
             CreatedDate = now,
             BusinessUnitId = businessUnitId,
             NoOfLineItems = 6,
-            HeaderRemarks = "Golden journey: six deterministic lines."
+            HeaderRemarks = "Golden journey: six deterministic lines.",
+            // Exact document organisation evidence lets the real customer resolver establish
+            // the client after canonical reconciliation; never mutate CustomerId behind the
+            // immutable revision's back.
+            CustomerCompanyNameExtracted = customerName,
+            CustomerCompanyEvidence = "Golden retained source header"
         };
 
         // The golden journey starts at QUALIFIED so it can certify the downstream fit,
@@ -346,10 +359,59 @@ public static class GoldenCommercialJourneySeeder
             .Include(l => l.LeadItems)
             .SingleAsync(l => l.Id == result.LeadId);
 
-        // Starting state only, through the domain: a confirmed customer and a qualified lead.
+        // Starting state only, through the domain: a resolved customer and a qualified lead.
         // No acknowledgement, exclusion, RFQ, participation or quote — those are the browser's job.
         if (!lead.CustomerId.HasValue)
-            lead.ResolveCommercialIdentity(customerId, null, "CUSTOMER_CONFIRMED");
+        {
+            var resolution = await new LeadCustomerResolutionService(db)
+                .ResolveAsync(businessUnitId, lead.Id, CancellationToken.None);
+            if (resolution.CustomerId != customerId
+                && !resolution.Candidates.Any(candidate => candidate.CustomerId == customerId))
+                throw new InvalidOperationException(
+                    $"Golden customer resolution neither selected nor proposed fixture customer "
+                    + $"{customerId} for Lead {lead.Id}.");
+
+            // An exact company name without a verified identifier is deliberately only a
+            // suggestion under the production resolver's confidence policy. Complete the same
+            // governed human-link command the workbench uses: it records review audit, advances
+            // concurrency and appends an immutable revision with inherited source lineage.
+            if (!resolution.CustomerId.HasValue)
+            {
+                var linked = await new LeadRepository(db).LinkClientAsync(
+                    lead.Id,
+                    businessUnitId,
+                    new LeadClientLinkRequestDTO
+                    {
+                        CustomerId = customerId,
+                        ExpectedVersion = lead.ReviewVersion,
+                        Reason = "Golden acceptance fixture confirms the suggested customer."
+                    },
+                    Actor);
+                if (linked is null)
+                    throw new InvalidOperationException(
+                        $"Golden governed client link could not reload Lead {lead.Id}.");
+            }
+            db.ChangeTracker.Clear();
+            lead = await db.Leads.IgnoreQueryFilters().Include(x => x.LeadItems)
+                .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == result.LeadId);
+        }
+
+        // Upgrade an already-seeded fixture produced by the former direct CustomerId mutation.
+        // The append operation is the governed repair: it freezes the current projection and
+        // rebinds the occurrence/source-document lineage instead of rewriting history.
+        var frozenCustomerId = await db.Set<LeadRevision>().IgnoreQueryFilters().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == lead.CurrentRevisionId)
+            .Select(x => x.CustomerIdSnapshot).SingleAsync();
+        if (frozenCustomerId != lead.CustomerId)
+        {
+            await identity.AppendHumanRevisionAsync(
+                businessUnitId, lead.Id, Actor,
+                "Repair golden fixture customer identity through governed immutable revisioning.",
+                $"golden-customer-revision:{businessUnitId}:{lead.Id}:{lead.CustomerId}");
+            db.ChangeTracker.Clear();
+            lead = await db.Leads.IgnoreQueryFilters().Include(x => x.LeadItems)
+                .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == result.LeadId);
+        }
         lead.CommercialFactsVerified = true;
         await db.SaveChangesAsync();
 
@@ -532,44 +594,71 @@ public static class GoldenCommercialJourneySeeder
         var lead = await db.Leads.IgnoreQueryFilters().Include(x => x.LeadItems)
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == leadId);
         var leadItemIds = lead.LeadItems.Select(x => x.Id).ToArray();
-        if (await db.Set<FieldEvidence>().IgnoreQueryFilters().AnyAsync(x =>
-                x.BusinessUnitId == businessUnitId
-                && x.ExtractionRun.SourceDocumentId == evidence.DocumentId
-                && x.LineItem != null && x.LineItem.LeadItemId.HasValue
-                && leadItemIds.Contains(x.LineItem.LeadItemId.Value)))
-            return;
 
         var job = await db.Set<ExtractionJob>().IgnoreQueryFilters()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == evidence.ExtractionJobId);
         job.ResultLeadId = leadId;
         job.UpdatedOn = now;
-        var inquiry = CanonicalInquiry.Create(businessUnitId, evidence.CorpusId, 1);
-        inquiry.PopulateHeader(lead.Rfqno, lead.BuyersName, lead.RecDate, lead.BidClosingDate);
-        inquiry.BindLead(leadId);
-        db.Add(inquiry);
-        await db.SaveChangesAsync();
-        var canonicalLines = lead.LeadItems.OrderBy(x => x.LineItemNo).Select((item, index) =>
+        var inquiry = await db.Set<CanonicalInquiry>().IgnoreQueryFilters()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
+                && x.CorpusId == evidence.CorpusId && x.LeadId == leadId);
+        if (inquiry is null)
         {
-            var canonical = CanonicalLineItem.Create(
-                businessUnitId, inquiry.Id, index + 1,
-                item.ProductShortDescription ?? item.ItemMaterialCode ?? "Requested line",
-                item.Quantity > 0 ? item.Quantity : null, item.UnitOfMeasure);
-            canonical.Enrich(null, item.ManufacturerPartNumber, item.Currency, null, null, "{}",
-                CanonicalValidationStatus.Valid);
-            canonical.BindLeadItem(item.Id);
-            return (item, canonical);
-        }).ToArray();
-        db.AddRange(canonicalLines.Select(x => x.canonical));
-        await db.SaveChangesAsync();
-        foreach (var (item, canonical) in canonicalLines)
+            inquiry = CanonicalInquiry.Create(businessUnitId, evidence.CorpusId, 1);
+            inquiry.PopulateHeader(lead.Rfqno, lead.BuyersName, lead.RecDate, lead.BidClosingDate);
+            inquiry.BindLead(leadId);
+            db.Add(inquiry);
+            await db.SaveChangesAsync();
+        }
+
+        var canonicalByLeadItem = await db.Set<CanonicalLineItem>().IgnoreQueryFilters()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.InquiryId == inquiry.Id
+                && x.LeadItemId.HasValue && leadItemIds.Contains(x.LeadItemId.Value))
+            .ToDictionaryAsync(x => x.LeadItemId!.Value);
+        foreach (var (item, index) in lead.LeadItems.OrderBy(x => x.LineItemNo).Select((item, index) => (item, index)))
         {
-            db.Add(FieldEvidence.ForLineItem(
-                businessUnitId, evidence.RegionId, canonical.Id, "requestedLine",
-                item.ProductShortDescription, item.ItemMaterialCode, 1m,
-                "golden-pilot-gate", evidence.RunId,
-                validationStatus: FieldValidationStatus.Valid));
+            if (!canonicalByLeadItem.TryGetValue(item.Id, out var canonical))
+            {
+                canonical = CanonicalLineItem.Create(
+                    businessUnitId, inquiry.Id, index + 1,
+                    item.ProductShortDescription ?? item.ItemMaterialCode ?? "Requested line",
+                    item.Quantity > 0 ? item.Quantity : null, item.UnitOfMeasure);
+                canonical.Enrich(null, item.ManufacturerPartNumber, item.Currency, null, null, "{}",
+                    CanonicalValidationStatus.Valid);
+                canonical.BindLeadItem(item.Id);
+                db.Add(canonical);
+                await db.SaveChangesAsync();
+                canonicalByLeadItem[item.Id] = canonical;
+            }
+
+            // The retained golden text contains part | quantity | UOM on every row. Record each
+            // quote-critical value independently, exactly as the production provenance gate
+            // requires; catalog resolution remains a separate warning and is deliberately not
+            // manufactured for GOLD-NOQT-0005.
+            var fields = GoldenEvidenceFields(item);
+            var existingNames = await db.Set<FieldEvidence>().IgnoreQueryFilters()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.LineItemId == canonical.Id
+                    && x.RunId == evidence.RunId)
+                .Select(x => x.FieldName).ToListAsync();
+            foreach (var field in fields.Where(field => !existingNames.Contains(
+                         field.Name, StringComparer.OrdinalIgnoreCase)))
+                db.Add(FieldEvidence.ForLineItem(
+                    businessUnitId, evidence.RegionId, canonical.Id, field.Name,
+                    field.Raw, field.Normalized, 1m, "golden-pilot-gate", evidence.RunId,
+                    validationStatus: FieldValidationStatus.Valid));
         }
         await db.SaveChangesAsync();
+    }
+
+    internal static IReadOnlyList<GoldenEvidenceField> GoldenEvidenceFields(LeadItem item)
+    {
+        var quantity = item.Quantity?.ToString(CultureInfo.InvariantCulture);
+        return
+        [
+            new("ItemMaterialCode", item.ItemMaterialCode, item.ItemMaterialCode),
+            new("Quantity", quantity, quantity),
+            new("UnitOfMeasure", item.UnitOfMeasure, item.UnitOfMeasure)
+        ];
     }
 
     /// <summary>Stable per-tenant/source batch id — distinct scenarios must not share a corpus.</summary>
@@ -803,15 +892,26 @@ public static class GoldenCommercialJourneySeeder
             .Include(r => r.Items)
             .Where(r => r.BusinessUnitId == businessUnitId && r.LeadId == leadId)
             .ToListAsync();
-        if (revisions.Count != 1) problems.Add($"expected exactly 1 revision, found {revisions.Count}");
-        var revision = revisions.FirstOrDefault();
+        if (revisions.Count == 0) problems.Add("expected at least 1 immutable revision, found none");
+        var revision = revisions.SingleOrDefault(x => x.Id == lead?.CurrentRevisionId);
         if (revision is not null)
         {
-            if (revision.RevisionNumber != 1) problems.Add($"expected revision 1, found {revision.RevisionNumber}");
-            if (lead?.CurrentRevisionId != revision.Id) problems.Add("lead does not point at its only revision");
             if (revision.EstablishedByOccurrenceId <= 0) problems.Add("revision is not linked to a source occurrence");
             if (revision.Items.Count != 6) problems.Add($"expected 6 revision lines, found {revision.Items.Count}");
+            var sourceLinks = await db.Set<LeadOccurrenceDocument>().IgnoreQueryFilters()
+                .CountAsync(x => x.BusinessUnitId == businessUnitId
+                    && x.OccurrenceId == revision.EstablishedByOccurrenceId);
+            var directSource = await db.Set<LeadIngestionOccurrence>().IgnoreQueryFilters()
+                .Where(x => x.BusinessUnitId == businessUnitId
+                    && x.Id == revision.EstablishedByOccurrenceId)
+                .Select(x => x.SourceDocumentId).SingleOrDefaultAsync();
+            problems.AddRange(CurrentRevisionIdentityProblems(
+                lead?.CustomerId, lead?.ContactId,
+                revision.CustomerIdSnapshot, revision.ContactIdSnapshot,
+                sourceLinks > 0 || directSource.HasValue));
         }
+        else if (lead?.CurrentRevisionId.HasValue == true)
+            problems.Add("lead points at a revision outside its immutable revision history");
 
         var lineCount = await db.LeadItems.IgnoreQueryFilters().CountAsync(i => i.LeadId == leadId);
         if (lineCount != 6) problems.Add($"expected 6 lead lines, found {lineCount}");
@@ -846,7 +946,7 @@ public static class GoldenCommercialJourneySeeder
                 + $"wrong scenario: {string.Join("; ", problems)}.");
 
         logger.LogInformation(
-            "Golden starting state verified: 1 lead, revision 1 with 6 lines linked to its occurrence, "
+            "Golden starting state verified: 1 lead, current revision with 6 lines linked to its occurrence, "
             + "customer confirmed, no fit assessment, no participation decision, no RFQ and no Quote.");
     }
 
@@ -858,6 +958,21 @@ public static class GoldenCommercialJourneySeeder
             problems.Add($"expected no fit assessment on the current revision, found {fitAssessments}");
         if (participationDecisions != 0)
             problems.Add($"expected no participation decision on the current revision, found {participationDecisions}");
+        return problems;
+    }
+
+    internal static IReadOnlyList<string> CurrentRevisionIdentityProblems(
+        long? leadCustomerId, long? leadContactId,
+        long? revisionCustomerId, long? revisionContactId,
+        bool hasSourceLineage)
+    {
+        var problems = new List<string>();
+        if (revisionCustomerId != leadCustomerId)
+            problems.Add("current Lead customer identity differs from its frozen current revision");
+        if (revisionContactId != leadContactId)
+            problems.Add("current Lead contact identity differs from its frozen current revision");
+        if (!hasSourceLineage)
+            problems.Add("current revision lost its governed source-document lineage");
         return problems;
     }
 }

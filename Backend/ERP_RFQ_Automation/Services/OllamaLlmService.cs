@@ -7,6 +7,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Extraction.Quantities;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -109,17 +110,9 @@ namespace ERP_RFQ_Automation.Services
                 DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
                 WriteIndented = false,
                 NumberHandling = JsonNumberHandling.AllowReadingFromString,
-                // LeadItemData.Quantity is int?, and the default reader fails the ENTIRE
-                // document when one line item writes "Quantity": 2.0 (or "2.0" as a string)
-                // — one decimal point on one of 174 lines dead-lettered whole documents as
-                // "unparseable output". The lenient converter accepts every integral
-                // spelling (2, 2.0, "2", "2.0") and maps a REAL fraction (2.5) to null so
-                // the line routes to review instead of being silently under-quoted.
-                // Quantity is the only int? on any wire contract this client reads or
-                // writes with these options (Ollama counters are long?, BOQ quantities are
-                // decimal?, num_predict is a non-nullable int), so the registration cannot
-                // leak onto other fields.
-                Converters = { new LenientQuantityConverter() }
+                // LeadItemData.Quantity owns a property-level converter. It preserves exact
+                // decimal(20,6) quantities without applying quantity rules to other decimal
+                // fields such as UnitPrice.
             };
         }
 
@@ -588,8 +581,9 @@ namespace ERP_RFQ_Automation.Services
         /// line carried a non-positive quantity, which dead-lettered 174-line documents for
         /// one bad cell. The diagnostic below records which line positions were quarantined
         /// (positions only — never document content, per the truncation-log rule).
-        /// Fractional quantities (2.5) never reach here: <see cref="LenientQuantityConverter"/>
-        /// already mapped them to null at read time.
+        /// Valid fractional quantities pass through unchanged. Only zero/negative values are
+        /// quarantined here; unsupported precision/range was already mapped to null by the
+        /// property-level <see cref="LenientQuantityConverter"/>.
         /// </summary>
         private LeadExtractionResult QuarantineNonPositiveQuantityLines(LeadExtractionResult result)
         {
@@ -643,7 +637,7 @@ namespace ERP_RFQ_Automation.Services
 2. All confidence scores must be between 0.0 and 1.0
 3. Use null for missing values, never use empty strings
 4. Dates must be in YYYY-MM-DD format or null
-5. Quantities must be positive integers written as bare digits: no decimal point (write 2, never 2.0), no thousands separators (write 12000, never 12,000), no units, no quotes. If a line states no quantity, use null — never invent one
+5. Quantities must be positive JSON numbers with at most 6 decimal places, copied exactly from the document (for example 2 or 2.5). Do not round or truncate. Use no thousands separators, units or quotes. If a line states no quantity, use null — never invent one
 6. Assign confidence based on evidence in the text - aim for accuracy over conservatism where evidence is strong
 7. CUSTOM COLUMNS: if the document contains column headers or labeled per-item values that do NOT map to any field in the schema below (e.g. ""Plant Code"", ""Incoterms"", ""Project"", ""Cost Center""), preserve them per item in ""ExtraFields"" as an object whose keys are the ORIGINAL header text exactly as written and whose values are the cell values as strings. Do NOT invent columns, do NOT duplicate values already mapped to schema fields, and use null (or omit ""ExtraFields"") when there are no unmapped columns. Limit to at most 20 entries per item.
 8. MULTI-INQUIRY DOCUMENTS: if (and ONLY if) the document clearly contains MULTIPLE distinct inquiries/RFQs (e.g. different RFQ numbers, clearly separated sections for different requests), set every item's ""InquiryGroup"" to that item's inquiry identifier (prefer the inquiry's own RFQ number; otherwise a short section label), using the IDENTICAL string for all items of the same inquiry, with an ""InquiryGroupConfidence"" reflecting how certain the separation is. If the document is one single inquiry — the common case — use null (or omit) ""InquiryGroup"" for every item. NEVER invent groups when the separation is not explicit.
@@ -716,7 +710,7 @@ namespace ERP_RFQ_Automation.Services
       ""Currency"": string | null,
       ""UnitOfMeasure"": string | null,
       ""UnitPrice"": number | null,
-      ""Quantity"": integer | null,
+      ""Quantity"": number | null,
       ""StorageLocation"": string | null,
       ""ManufacturerName"": string | null,
       ""ManufacturerPartNumber"": string | null,
@@ -794,40 +788,34 @@ namespace ERP_RFQ_Automation.Services
         );
 
         /// <summary>
-        /// Tolerant reader for the LLM's nullable-int line-item quantity, same family as
+        /// Tolerant reader for the LLM's nullable-decimal line-item quantity, same family as
         /// <see cref="LenientStringDictionaryConverter"/> / <c>LenientBoolConverter</c>: a
         /// slightly-off model output degrades the FIELD instead of failing the whole parse.
-        /// Accepts an integer in any legal disguise — 2, 2.0, 2e0, "2", "2.0" — and reads
-        /// anything that is NOT unambiguously a whole number as null, the pipeline's
-        /// needs-review state. A real fraction (2.5) reads as null on purpose: truncating
-        /// it to 2 is a silent under-quote and rounding it up is an invention; both are
-        /// worse than a reviewer's eyes. Registered on the client's parse options, never
-        /// as a [JsonConverter] attribute, so the DTO contract stays untouched.
+        /// Accepts JSON numbers and invariant numeric strings without grouping separators,
+        /// preserving fractions exactly when they fit numeric(20,6). Unsupported precision,
+        /// overflow and non-numeric shapes become null so one bad field does not reject the
+        /// entire document. Registered on LeadItemData.Quantity only, so price fields are not
+        /// accidentally subjected to quantity limits.
         /// </summary>
-        internal sealed class LenientQuantityConverter : JsonConverter<int?>
+        internal sealed class LenientQuantityConverter : JsonConverter<decimal?>
         {
-            public override int? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            public override decimal? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
             {
                 switch (reader.TokenType)
                 {
                     case JsonTokenType.Number:
-                        if (reader.TryGetInt32(out var whole))
-                            return whole;
-                        // 2.0 / 2e2: an integral value written with a fraction or exponent.
-                        return reader.TryGetDecimal(out var value) ? WholeNumberOrNull(value) : null;
+                        return reader.TryGetDecimal(out var value) ? PersistableOrNull(value) : null;
                     case JsonTokenType.String:
                         var text = reader.GetString()?.Trim();
                         if (string.IsNullOrEmpty(text))
                             return null;
-                        if (int.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsed))
-                            return parsed;
-                        // "2.0" but NOT "12,000": group separators are locale-ambiguous
+                        // Accept invariant decimals/exponents but NOT "12,000": group separators are locale-ambiguous
                         // ("2,5" is 2.5 in much of the world) — misreading one silently
                         // corrupts a quantity, so anything separated goes to review instead.
                         return decimal.TryParse(
-                            text, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                            text, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent,
                             CultureInfo.InvariantCulture, out var fromText)
-                            ? WholeNumberOrNull(fromText)
+                            ? PersistableOrNull(fromText)
                             : null;
                     case JsonTokenType.Null:
                         return null;
@@ -837,13 +825,13 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
-            /// <summary>Whole and within int range reads as that int; anything else is review.</summary>
-            private static int? WholeNumberOrNull(decimal value)
-                => decimal.Truncate(value) == value && value >= int.MinValue && value <= int.MaxValue
-                    ? (int)value
-                    : null;
+            private static decimal? PersistableOrNull(decimal value)
+                => value == 0m || (value < 0m && QuantityParser.FitsPersistedQuantity(-value))
+                    || QuantityParser.FitsPersistedQuantity(value)
+                        ? value
+                        : null;
 
-            public override void Write(Utf8JsonWriter writer, int? value, JsonSerializerOptions options)
+            public override void Write(Utf8JsonWriter writer, decimal? value, JsonSerializerOptions options)
             {
                 if (value is null) writer.WriteNullValue();
                 else writer.WriteNumberValue(value.Value);

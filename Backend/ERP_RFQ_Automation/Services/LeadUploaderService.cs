@@ -181,11 +181,12 @@ namespace ERP_RFQ_Automation.Services
                     // raises RequiresCommercialReview on the parent lead so a human is actually
                     // asked. It stored 0 while the column was NOT NULL, which every downstream
                     // guard rejected but which still read, on a screen, as a demand for nothing.
-                    // Fractional values are treated as unreadable rather than truncated:
-                    // Quantity is an int column, and silently turning 2.5 into 2 is a 20%
-                    // under-quote.
-                    var quantityReading = QuantityParser.Parse(ws.Cells[row, 6].Text, allowFractional: false);
-                    if (quantityReading.RequiresReview)
+                    // Fractional measured quantities are valid. Anything that cannot fit the
+                    // numeric(20,6) contract without rounding is held for review.
+                    var quantityReading = QuantityParser.Parse(ws.Cells[row, 6].Text, allowFractional: true);
+                    if (quantityReading.RequiresReview
+                        || quantityReading.Value is not { } parsedQuantity
+                        || !QuantityParser.FitsPersistedQuantity(parsedQuantity))
                     {
                         quantityNeedsReview.Add(leadKey);
                         _logger.LogWarning(
@@ -196,7 +197,8 @@ namespace ERP_RFQ_Automation.Services
                     var item = new LeadItem
                     {
                         ProductShortName = productName,
-                        Quantity = quantityReading.HasValue ? (int)quantityReading.Value!.Value : null,
+                        Quantity = quantityReading.Value is { } quantity
+                            && QuantityParser.FitsPersistedQuantity(quantity) ? quantity : null,
                         UnitPrice = decimal.TryParse(ws.Cells[row, 7].Text, out var price) ? price : null,
                         Currency = ws.Cells[row, 8].Text?.Trim(),
                         ManufacturerName = ws.Cells[row, 9].Text?.Trim(),

@@ -23,6 +23,12 @@ export interface RfqResponseDTO {
     rfqtype?: string;
     rfqtypeId?: number;
     durationAgreement?: string;
+    customerRfqReference?: string | null;
+    requiredDeliveryDate?: string | null;
+    deliveryLocation?: string | null;
+    agreementReference?: string | null;
+    bidClosingDateHijri?: string | null;
+    inquiryType?: string | null;
     leadId?: number;
     activeLeadRevision: number;
     promotionId?: number | null;
@@ -69,6 +75,7 @@ export interface RfqitemResponseDTO {
     uomId?: number;
     unitPrice?: number;
     quantity: number;
+    extraFields?: string | null;
     storageLocation?: string;
     warehouseId?: number;
     warehouseName?: string;
@@ -120,7 +127,7 @@ export interface RfqFilterParams {
     readiness?: string;
 }
 
-/** Mirrors backend RfqitemCreateRequestDTO. `quantity` is [Required] server-side and must be >= 1. */
+/** Mirrors backend RfqitemCreateRequestDTO. `quantity` is [Required] server-side and must be positive. */
 export interface RfqitemCreatePayload {
     companyRef?: string | null;
     customerAccountPortalId?: string | null;

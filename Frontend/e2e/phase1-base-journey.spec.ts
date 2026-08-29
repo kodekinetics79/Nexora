@@ -3,7 +3,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 import { loginThroughUi } from './support/login';
 import { requireEnv } from './support/environment';
 
-/** Visible-controls certification: no fit, decision, or promotion mutation uses page.request. */
+/** Positive pilot outcomes use visible controls. page.request is used only for explicit negative
+ * authorization and idempotent replay boundary assertions. */
 const env = () => requireEnv('Governed Lead pilot gate',
   'E2E_API_URL', 'E2E_GOLDEN_SALES_EMAIL', 'E2E_GOLDEN_OUTSIDER_EMAIL',
   'E2E_GOLDEN_MANAGER_EMAIL', 'E2E_GOLDEN_DENIED_EMAIL',
@@ -47,7 +48,7 @@ async function selectOption(page: Page, combobox: Locator, name: string | RegExp
   await page.getByRole('option', { name }).first().click();
 }
 
-async function openFreshWorkbench(page: Page, leadId: number) {
+async function openFreshWorkbench(page: Page, leadId: number, expectedParticipationStatus = 'NONE') {
   const bearer = await token(page);
   expect(await rfqCountForLead(page, bearer, leadId)).toBe(0);
   const response = await readApi(page, bearer, `/api/leads/${leadId}/decision-workbench`);
@@ -62,8 +63,8 @@ async function openFreshWorkbench(page: Page, leadId: number) {
     reasonCodes: Array<{ appliesTo: string[] }>;
   };
   expect(fixture.lines).toHaveLength(6);
-  expect(fixture.participationStatus).toBe('NONE');
-  expect(fixture.participationVersion).toBeNull();
+  expect(fixture.participationStatus).toBe(expectedParticipationStatus);
+  if (expectedParticipationStatus === 'NONE') expect(fixture.participationVersion).toBeNull();
   expect(fixture.verificationStatus).toBe('VERIFIED');
   expect(fixture.sourceCoverage).toEqual({ coveredLines: 6, totalLines: 6 });
   expect(fixture.evidence.length).toBeGreaterThan(0);
@@ -143,10 +144,19 @@ async function commitBidScopeAndPromote(page: Page, leadId: number, approved: nu
   await page.getByRole('button', { name: 'Commit participation' }).click();
   const review = page.getByRole('dialog', { name: 'Commit participation scope' });
   await expect(review.getByText(new RegExp(`committing ${approved} line`))).toBeVisible();
+  const commitResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === 'PUT'
+    && response.url().endsWith(`/api/leads/${leadId}/participation`));
   await review.getByRole('button', { name: 'Commit exact scope' }).click();
-  await expect(page.getByText('Participation decision committed.')).toBeVisible();
+  const commitResponse = await commitResponsePromise;
+  expect(commitResponse.ok(), await commitResponse.text()).toBeTruthy();
   await expect(page.getByRole('heading', { name: 'RFQ promotion' })).toBeVisible();
+  const promotionResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === 'POST'
+    && response.url().endsWith(`/api/leads/${leadId}/promote-to-rfq`));
   await page.getByRole('button', { name: `Promote ${approved} lines to RFQ` }).click();
+  const promotionResponse = await promotionResponsePromise;
+  expect(promotionResponse.ok(), await promotionResponse.text()).toBeTruthy();
   await expect(page).toHaveURL(/\/procurement\/rfqs\/view\/\d+$/);
   const rfqId = Number(page.url().split('/').at(-1));
   expect(rfqId).toBeGreaterThan(0);
@@ -169,15 +179,47 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
   test.beforeEach(async ({ page }) => {
     const values = env();
     await loginThroughUi(page, {
-      email: values.E2E_GOLDEN_SALES_EMAIL,
+      email: values.E2E_GOLDEN_MANAGER_EMAIL,
       password: values.E2E_GOLDEN_PASSWORD,
       businessUnitId: values.E2E_GOLDEN_TENANT_A,
     });
   });
 
+  test('sales representative may prepare a draft but cannot commit participation', async ({ page }) => {
+    const values = env();
+    const leadId = Number(values.E2E_GOLDEN_PARTIAL_BID_LEAD_ID);
+    await loginThroughUi(page, {
+      email: values.E2E_GOLDEN_SALES_EMAIL,
+      password: values.E2E_GOLDEN_PASSWORD,
+      businessUnitId: values.E2E_GOLDEN_TENANT_A,
+    });
+    await openFreshWorkbench(page, leadId);
+    await saveFitThroughControls(page);
+    await markAllBidThroughControls(page);
+
+    const draftRequestPromise = page.waitForRequest((request) =>
+      request.method() === 'PUT' && request.url().endsWith(`/api/leads/${leadId}/participation`));
+    const draftResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'PUT'
+      && response.url().endsWith(`/api/leads/${leadId}/participation`));
+    await page.getByRole('button', { name: 'Save draft for manager review' }).click();
+    const draftRequest = await draftRequestPromise;
+    const draftResponse = await draftResponsePromise;
+    expect(draftResponse.ok(), await draftResponse.text()).toBeTruthy();
+    await expect(page.getByText('Stage 3 of 4 · Participation draft')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Commit participation' })).toBeDisabled();
+
+    const draftPayload = draftRequest.postDataJSON() as Record<string, unknown>;
+    const commitAttempt = await page.request.put(draftRequest.url(), {
+      data: { ...draftPayload, commit: true },
+      headers: { Authorization: `Bearer ${await token(page)}` },
+    });
+    expect(commitAttempt.status()).toBe(403);
+  });
+
   test('partial bid promotes only the five approved lines', async ({ page }) => {
     const leadId = Number(env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID);
-    await openFreshWorkbench(page, leadId);
+    await openFreshWorkbench(page, leadId, 'DRAFT');
     await saveFitThroughControls(page);
     await markAllBidThroughControls(page);
     await markPartNoBidThroughControls(page, 'GOLD-NOQT-0005');
@@ -297,8 +339,16 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
 
   test('customer amendment creates a new Lead revision and marks the Quote Draft stale', async ({ page }) => {
     expect(partialQuoteId, 'Quote Draft journey must run first').toBeGreaterThan(0);
-    const batchId = await uploadAndWaitForReconciliation(page, partialAmendment);
     const bearer = await token(page);
+    const beforeResponse = await readApi(
+      page,
+      bearer,
+      `/api/leads/${Number(env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID)}/decision-workbench`,
+    );
+    expect(beforeResponse.ok(), await beforeResponse.text()).toBeTruthy();
+    const before = await beforeResponse.json() as { leadRevisionNumber: number };
+
+    const batchId = await uploadAndWaitForReconciliation(page, partialAmendment);
     const batchResponse = await readApi(page, bearer, `/api/LeadIngestion/batches/${batchId}`);
     expect(batchResponse.ok(), await batchResponse.text()).toBeTruthy();
     const batch = await batchResponse.json() as {
@@ -311,7 +361,7 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     expect(batch.items).toContainEqual(expect.objectContaining({
       classification: 'Revision',
       leadId: Number(env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID),
-      revisionNumber: 2,
+      revisionNumber: before.leadRevisionNumber + 1,
     }));
 
     const quoteResponse = await readApi(page, bearer, `/api/Quote/${partialQuoteId}`);

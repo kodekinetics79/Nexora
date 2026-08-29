@@ -37,6 +37,11 @@ public static class RfqPromotionModelBuilderExtensions
             // that the production migration intentionally preserves. All new application writes
             // are blocked at the database and the sole creator is RfqPromotionService.
             e.ToTable("RFQ");
+            e.Property(x => x.CustomerRfqReference).HasMaxLength(256);
+            e.Property(x => x.DeliveryLocation).HasMaxLength(1000);
+            e.Property(x => x.AgreementReference).HasMaxLength(256);
+            e.Property(x => x.BidClosingDateHijri).HasMaxLength(32);
+            e.Property(x => x.InquiryType).HasMaxLength(16);
             e.HasIndex(x => new { x.BusinessUnitId, x.PromotionId }).IsUnique()
                 .HasFilter("\"PromotionId\" IS NOT NULL");
             e.HasOne<RfqPromotion>().WithOne()
@@ -53,7 +58,14 @@ public static class RfqPromotionModelBuilderExtensions
 
         modelBuilder.Entity<Rfqitem>(e =>
         {
-            e.ToTable("RFQItems");
+            // This is the last RFQItems table mapping applied by OnModelCreating. Repeat the
+            // critical quantity check on the table builder so provider DDL generation cannot
+            // lose it while composing partial model configurations.
+            e.ToTable("RFQItems", table => table.HasCheckConstraint(
+                "CK_RFQItems_Quantity_Positive",
+                "\"Quantity\" IS NULL OR CAST(\"Quantity\" AS NUMERIC) > 0"));
+            e.Property(x => x.Quantity).HasPrecision(20, 6);
+            e.Property(x => x.ExtraFields).HasColumnType("jsonb");
             e.HasIndex(x => new { x.SourceBusinessUnitId, x.SourceLeadItemRevisionId });
             e.HasOne<LeadItemRevision>().WithMany()
                 .HasForeignKey(x => new { x.SourceBusinessUnitId, x.SourceLeadItemRevisionId, x.SourceLeadRevisionId, x.SourceLeadId })

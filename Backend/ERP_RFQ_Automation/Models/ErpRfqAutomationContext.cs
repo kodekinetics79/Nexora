@@ -1192,25 +1192,30 @@ public partial class ErpRfqAutomationContext : DbContext
         {
             entity.HasKey(e => e.Id).HasName("PK__RFQItems__3214EC2712F05C03");
 
-            entity.ToTable("RFQItems");
+            entity.ToTable("RFQItems", table =>
+            {
+                // Wrong-quantity backstop (the "1,000 quoted as 1" defect): rows here are
+                // downstream of extraction review, so a non-positive quantity is always wrong.
+                // Keep the check on the table builder: a later ToTable call used to leave the
+                // design model annotation visible while EnsureCreated omitted it from SQLite DDL.
+                table.HasCheckConstraint(
+                    "CK_RFQItems_Quantity_Positive",
+                    // SQLite stores decimal values as TEXT. A bare `Quantity > 0`
+                    // therefore compares storage classes and lets textual "0.0" pass.
+                    // NUMERIC is portable to PostgreSQL and makes EnsureCreated test
+                    // databases enforce the same positive-decimal invariant as production.
+                    "\"Quantity\" IS NULL OR CAST(\"Quantity\" AS NUMERIC) > 0");
 
-            // Wrong-quantity backstop (the "1,000 quoted as 1" defect): rows here are
-            // downstream of extraction review, so a non-positive quantity is always wrong.
-            // LeadItems, the extraction landing zone, deliberately carries NO such
-            // constraint — there 0 = "never established" plus a review flag.
-            entity.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
-
-            // Line participation (see Rfqitem.Participation.cs). The reason rule is enforced in
-            // the domain AND here, because a decline without a reason is an audit hole that a
-            // future caller writing the column directly would otherwise reopen.
-            entity.HasCheckConstraint(
-                "CK_RFQItems_Participation_Decision",
-                "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
-            entity.HasCheckConstraint(
-                "CK_RFQItems_NoQuote_Requires_Reason",
-                // trim(), not btrim(): this constraint is created by EnsureCreated on the SQLite
-                // unit lane as well as by the migration on PostgreSQL, and btrim is Postgres-only.
-                "\"ParticipationDecision\" <> 'NoQuote' OR (\"NoQuoteReason\" IS NOT NULL AND trim(\"NoQuoteReason\") <> '')");
+                // Line participation (see Rfqitem.Participation.cs). The reason rule is enforced
+                // in the domain AND here because a decline without a reason is an audit hole.
+                table.HasCheckConstraint(
+                    "CK_RFQItems_Participation_Decision",
+                    "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
+                table.HasCheckConstraint(
+                    "CK_RFQItems_NoQuote_Requires_Reason",
+                    // trim(), not btrim(): EnsureCreated also builds the SQLite unit schema.
+                    "\"ParticipationDecision\" <> 'NoQuote' OR (\"NoQuoteReason\" IS NOT NULL AND trim(\"NoQuoteReason\") <> '')");
+            });
             entity.Property(e => e.ParticipationDecision).HasMaxLength(20).HasDefaultValue("Pending");
             entity.Property(e => e.NoQuoteReason).HasMaxLength(500);
             entity.Property(e => e.ParticipationDecidedBy).HasMaxLength(120);
@@ -1252,6 +1257,8 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.SupplierId).HasColumnName("SupplierID");
             entity.Property(e => e.UnitOfMeasure).HasMaxLength(200);
             entity.Property(e => e.UnitPrice).HasColumnType("decimal(18, 6)");
+            entity.Property(e => e.Quantity).HasPrecision(20, 6);
+            entity.Property(e => e.ExtraFields).HasColumnType("jsonb");
             entity.Property(e => e.WarehouseId).HasColumnName("WarehouseID");
 
             entity.HasOne(d => d.CurrencyNavigation).WithMany(p => p.Rfqitems)

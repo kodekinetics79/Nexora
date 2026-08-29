@@ -76,6 +76,18 @@ public readonly record struct QuantityReading(
 /// </summary>
 public static class QuantityParser
 {
+    /// <summary>Largest positive value representable by the persisted numeric(20,6) quantity contract.</summary>
+    public const decimal MaxPersistedQuantity = 99999999999999.999999m;
+
+    /// <summary>
+    /// True when a positive quantity can be stored in numeric(20,6) without rounding or overflow.
+    /// Trailing fractional zeroes are harmless because they do not change the numeric value.
+    /// </summary>
+    public static bool FitsPersistedQuantity(decimal value) =>
+        value > 0m
+        && value <= MaxPersistedQuantity
+        && decimal.Round(value, 6, MidpointRounding.ToEven) == value;
+
     // Leading currency/no-op noise some exporters prefix to numeric cells.
     private static readonly Regex LeadingNoise = new(@"^[\s'`~]+", RegexOptions.Compiled);
 

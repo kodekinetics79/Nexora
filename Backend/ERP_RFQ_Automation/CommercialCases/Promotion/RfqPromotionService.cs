@@ -4,10 +4,10 @@ using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialCases.Participation;
-using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Services.Uom;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.CommercialCases.Promotion;
@@ -73,7 +73,18 @@ public sealed class RfqPromotionService : IRfqPromotionService
                     throw new InvalidOperationException("The lead changed after participation was decided. Refresh and decide the current revision.");
                 if (lead.CurrentRevisionNumber != command.ExpectedDecisionVersion)
                     throw new InvalidOperationException("The Lead decision version changed after participation was decided. Refresh the workbench.");
+                LeadInquiryPromotionGate.EnsureProductRfqEligible(lead);
                 LeadConversionGate.EnsureEligible(lead);
+
+                var immutableRevision = await _db.Set<LeadRevision>().AsNoTracking()
+                    .SingleAsync(x => x.BusinessUnitId == businessUnitId
+                        && x.Id == command.ExpectedLeadRevisionId && x.LeadId == leadId, ct);
+                var hasCompleteCommercialSnapshot = LeadRevisionCommercialSnapshot.TryParse(
+                    immutableRevision.SnapshotJson, out var frozenHeader);
+                if (!hasCompleteCommercialSnapshot)
+                    throw new InvalidOperationException(
+                        "The immutable Lead revision has no complete v2 commercial snapshot. Append a governed revision before promotion.");
+                EnsureFrozenCommercialIdentityMatches(lead, immutableRevision, frozenHeader!);
 
                 var decision = await _db.Set<LeadParticipationDecision>()
                     .Include(x => x.Lines)
@@ -145,6 +156,9 @@ public sealed class RfqPromotionService : IRfqPromotionService
                 var revisionLines = await _db.Set<LeadItemRevision>().AsNoTracking()
                     .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == command.ExpectedLeadRevisionId)
                     .OrderBy(x => x.LineNumber).ToListAsync(ct);
+                if (hasCompleteCommercialSnapshot && frozenHeader!.Items.Count != revisionLines.Count)
+                    throw new InvalidOperationException(
+                        "The immutable Lead revision commercial snapshot does not cover every frozen line. Reconcile a new revision before promotion.");
                 if (decision.Lines.Count != revisionLines.Count
                     || decision.Lines.Select(x => x.LeadItemRevisionId).Except(revisionLines.Select(x => x.Id)).Any())
                     throw new InvalidOperationException("The participation decision does not cover every line of the current revision.");
@@ -159,56 +173,43 @@ public sealed class RfqPromotionService : IRfqPromotionService
                         "An approved revision line has no exact immutable canonical Lead-item lineage. Reconcile the source before promotion.");
                 var approvedLeadItemIds = approvedRevisionLines.Select(x => x.LeadItemId!.Value).Distinct().ToArray();
                 var approvedEvidenceSourceByLeadItemId = await _db.LeadItems.AsNoTracking()
-                    .Where(x => approvedLeadItemIds.Contains(x.Id))
+                    .Where(x => approvedLeadItemIds.Contains(x.Id) && x.LeadId == leadId)
                     .Select(x => new { x.Id, x.EvidenceSourceLeadItemId })
                     .ToDictionaryAsync(x => x.Id, x => x.EvidenceSourceLeadItemId ?? x.Id, ct);
                 if (approvedEvidenceSourceByLeadItemId.Count != approvedLeadItemIds.Length)
                     throw new InvalidOperationException(
                         "An approved revision line does not resolve to its retained canonical Lead item.");
-                var approvedEvidenceSourceIds = approvedEvidenceSourceByLeadItemId.Values.Distinct().ToArray();
-                var currentOccurrenceId = await _db.Set<LeadRevision>().AsNoTracking()
-                    .Where(x => x.BusinessUnitId == businessUnitId && x.Id == command.ExpectedLeadRevisionId
-                        && x.LeadId == leadId)
-                    .Select(x => x.EstablishedByOccurrenceId).SingleAsync(ct);
-                var currentSourceDocumentIds = await _db.Set<LeadOccurrenceDocument>().AsNoTracking()
-                    .Where(x => x.BusinessUnitId == businessUnitId
-                        && x.OccurrenceId == currentOccurrenceId)
-                    .Select(x => x.SourceDocumentId).Distinct().ToListAsync(ct);
-                var directSourceDocumentId = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
-                    .Where(x => x.BusinessUnitId == businessUnitId && x.Id == currentOccurrenceId
-                        && x.LeadId == leadId)
-                    .Select(x => x.SourceDocumentId).SingleAsync(ct);
-                if (directSourceDocumentId.HasValue && !currentSourceDocumentIds.Contains(directSourceDocumentId.Value))
-                    currentSourceDocumentIds.Add(directSourceDocumentId.Value);
-                if (currentSourceDocumentIds.Count == 0)
-                    throw new InvalidOperationException(
-                        "The current revision has no exact retained source-document relation.");
-                var approvedEvidenceObjects = await (from field in _db.Set<FieldEvidence>().AsNoTracking()
-                    join job in _db.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>().AsNoTracking()
-                        on new { field.BusinessUnitId, Id = field.ExtractionRun.ExtractionJobId }
-                        equals new { job.BusinessUnitId, job.Id }
-                    where field.BusinessUnitId == businessUnitId && field.LineItem != null
-                        && field.LineItem.LeadItemId.HasValue
-                        && approvedEvidenceSourceIds.Contains(field.LineItem.LeadItemId.Value)
-                        && currentSourceDocumentIds.Contains(field.ExtractionRun.SourceDocumentId)
-                        && field.ExtractionRun.SourceDocument.SecurityStatus == DocumentSecurityStatus.Cleared
-                        && field.ExtractionRun.SourceDocument.PurgeState == EvidencePurgeState.Present
-                        && field.ExtractionRun.SourceDocument.ExtractionJobId == job.Id
-                        && field.ExtractionRun.SourceDocument.ContentHash == job.ContentHash
-                        && job.StoragePath != null && job.StoragePath != ""
-                    select new
-                    {
-                        LeadItemId = field.LineItem!.LeadItemId!.Value,
-                        SourceDocumentId = field.ExtractionRun.SourceDocumentId,
-                        field.ExtractionRun.SourceDocument.ContentHash,
-                        job.StoragePath
-                    }).Distinct().ToListAsync(ct);
-                var evidencedLeadItemIds = approvedEvidenceObjects.Select(x => x.LeadItemId).Distinct().ToArray();
-                if (approvedEvidenceSourceIds.Any(id => !evidencedLeadItemIds.Contains(id)))
-                    throw new InvalidOperationException(
-                        "Every approved line must have exact persisted source-field evidence before RFQ promotion.");
-                foreach (var evidenceObject in approvedEvidenceObjects
-                             .GroupBy(x => x.SourceDocumentId).Select(x => x.First()))
+                var approvedDecisionByRevisionId = approvedDecisionLines
+                    .ToDictionary(x => x.LeadItemRevisionId);
+                var provenanceRequirements = new List<BidSourceProvenanceValidator.Requirement>(
+                    approvedRevisionLines.Length);
+                foreach (var revisionLine in approvedRevisionLines)
+                {
+                    if (!LeadRevisionLineCommercialSnapshot.TryParse(
+                            revisionLine.SnapshotJson, out var frozenLine))
+                        throw new InvalidOperationException(
+                            $"Immutable revision line {revisionLine.LineNumber} has an incomplete commercial snapshot. Append a governed Lead revision before promotion.");
+                    var approved = approvedDecisionByRevisionId[revisionLine.Id];
+                    var projectionId = revisionLine.LeadItemId!.Value;
+                    provenanceRequirements.Add(new BidSourceProvenanceValidator.Requirement(
+                        revisionLine.Id,
+                        projectionId,
+                        approvedEvidenceSourceByLeadItemId[projectionId],
+                        new[]
+                        {
+                            frozenLine!.ItemMaterialCode,
+                            frozenLine.ManufacturerPartNumber,
+                            frozenLine.ProductShortName,
+                            frozenLine.ProductShortDescription,
+                            frozenLine.ItemText
+                        },
+                        approved.Quantity ?? frozenLine.Quantity,
+                        approved.UnitOfMeasure ?? frozenLine.UnitOfMeasure));
+                }
+                var approvedEvidenceObjects = await BidSourceProvenanceValidator.ValidateAsync(
+                    _db, businessUnitId, lead, command.ExpectedLeadRevisionId,
+                    provenanceRequirements, ct);
+                foreach (var evidenceObject in approvedEvidenceObjects)
                 {
                     await using var verified = await _evidenceStorage.OpenVerifiedReadAsync(
                         evidenceObject.StoragePath, evidenceObject.ContentHash, ct);
@@ -232,17 +233,23 @@ public sealed class RfqPromotionService : IRfqPromotionService
                 var rfq = new Rfq
                 {
                     Rfqno = await NextRfqNumberAsync(businessUnitId, ct),
-                    BuyersName = lead.BuyersName,
-                    RecDate = lead.RecDate,
-                    BidClosingDate = lead.BidClosingDate,
-                    AcknowledgmentDate = lead.AcknowledgmentDate,
-                    SubDate = lead.SubDate,
-                    HeaderRemarks = lead.HeaderRemarks,
-                    OpportunityNo = lead.OpportunityNo,
-                    Rfqtype = lead.Rfqtype,
-                    DurationAgreement = lead.DurationAgreement,
+                    BuyersName = frozenHeader!.BuyersName,
+                    RecDate = frozenHeader.RecDate,
+                    BidClosingDate = frozenHeader.BidClosingDate,
+                    AcknowledgmentDate = frozenHeader.AcknowledgmentDate,
+                    SubDate = frozenHeader.SubmissionDate,
+                    HeaderRemarks = frozenHeader.HeaderRemarks,
+                    OpportunityNo = frozenHeader.OpportunityNo,
+                    Rfqtype = frozenHeader.RfqType,
+                    DurationAgreement = frozenHeader.DurationAgreement,
+                    CustomerRfqReference = frozenHeader.CustomerRfqReference,
+                    RequiredDeliveryDate = frozenHeader.RequiredDeliveryDate,
+                    DeliveryLocation = frozenHeader.DeliveryLocation,
+                    AgreementReference = frozenHeader.AgreementReference,
+                    BidClosingDateHijri = frozenHeader.BidClosingDateHijri,
+                    InquiryType = frozenHeader.InquiryType,
                     LeadId = lead.Id,
-                    CustomerId = lead.CustomerId,
+                    CustomerId = frozenHeader.CustomerId,
                     BusinessUnitId = businessUnitId,
                     RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_db, businessUnitId, "Rfq", "DRAFT", ct),
                     CreatedBy = command.Actor.Trim(),
@@ -251,6 +258,9 @@ public sealed class RfqPromotionService : IRfqPromotionService
                     SourceLeadRevisionId = command.ExpectedLeadRevisionId,
                     ParticipationDecisionId = decision.Id
                 };
+                // The domain mutator below retains all case/customer invariants. A v2 revision
+                // reaches it only after the mutable Lead identity exactly matches the frozen
+                // values above; promotion therefore cannot silently switch customers or cases.
                 rfq.InheritCommercialIdentity(lead);
 
                 var currentLinesById = lead.LeadItems.ToDictionary(x => x.Id);
@@ -264,15 +274,22 @@ public sealed class RfqPromotionService : IRfqPromotionService
                         ? linkedLeadItem
                         : throw new InvalidOperationException(
                             $"Current revision line {revisionLine.LineNumber} has no exact immutable canonical Lead-item lineage. Reconcile the source before promotion.");
-                    // LeadItemRevision.SnapshotJson is an identity fingerprint snapshot: its text
-                    // is deliberately normalized and must never become customer-facing RFQ data.
-                    // Formal values come from the current canonical LeadItem, with only explicit
-                    // human decision corrections allowed to override quote-critical fields.
-                    var quantity = approved.Quantity ?? source.Quantity;
-                    var uom = Clean(approved.UnitOfMeasure) ?? Clean(source.UnitOfMeasure);
-                    var currency = Clean(approved.Currency)?.ToUpperInvariant() ?? Clean(source.Currency)?.ToUpperInvariant();
-                    var part = Clean(source.ManufacturerPartNumber) ?? Clean(source.ItemMaterialCode);
-                    var description = Clean(source.ProductShortDescription) ?? Clean(source.ProductShortName) ?? Clean(source.ItemText);
+                    var hasFrozenLine = LeadRevisionLineCommercialSnapshot.TryParse(
+                        revisionLine.SnapshotJson, out var frozenLine);
+                    if (!hasFrozenLine)
+                        throw new InvalidOperationException(
+                            $"Immutable revision line {revisionLine.LineNumber} has an incomplete commercial snapshot. Append a governed Lead revision before promotion.");
+
+                    // Human participation corrections may override only the three explicitly
+                    // governed quote-critical fields. Every other formal value comes from the
+                    // immutable revision snapshot, never from the mutable current projection.
+                    var quantity = approved.Quantity ?? frozenLine!.Quantity;
+                    var uom = Clean(approved.UnitOfMeasure)
+                        ?? Clean(frozenLine.UnitOfMeasure);
+                    var currency = Clean(approved.Currency)?.ToUpperInvariant()
+                        ?? Clean(frozenLine.Currency)?.ToUpperInvariant();
+                    var part = Clean(frozenLine.ManufacturerPartNumber) ?? Clean(frozenLine.ItemMaterialCode);
+                    var description = Clean(frozenLine.ProductShortDescription) ?? Clean(frozenLine.ProductShortName) ?? Clean(frozenLine.ItemText);
                     if (quantity is null or <= 0)
                         throw new InvalidOperationException($"Approved line {revisionLine.LineNumber} has no positive quantity.");
                     if (string.IsNullOrWhiteSpace(uom))
@@ -284,35 +301,36 @@ public sealed class RfqPromotionService : IRfqPromotionService
 
                     var item = new Rfqitem
                     {
-                        CompanyRef = source.CompanyRef,
-                        CustomerAccountPortalId = source.CustomerAccountPortalId,
-                        CustomerRfqno = source.CustomerRfqno,
-                        ItemMaterialCode = source.ItemMaterialCode ?? part,
-                        LineItemNo = source.LineItemNo ?? revisionLine.LineNumber.ToString(),
+                        CompanyRef = frozenLine.CompanyRef,
+                        CustomerAccountPortalId = frozenLine.CustomerAccountPortalId,
+                        CustomerRfqno = frozenLine.CustomerRfqno,
+                        ItemMaterialCode = frozenLine.ItemMaterialCode ?? part,
+                        LineItemNo = frozenLine.LineItemNo ?? revisionLine.LineNumber.ToString(),
                         ProductId = approved.ProductId,
-                        CommodityProduct = source.CommodityProduct,
-                        ProductShortName = source.ProductShortName ?? description,
-                        ProductShortDescription = source.ProductShortDescription ?? description,
-                        Alternative = source.Alternative,
-                        BuyerName = source.BuyerName,
+                        CommodityProduct = frozenLine.CommodityProduct,
+                        ProductShortName = frozenLine.ProductShortName ?? description,
+                        ProductShortDescription = frozenLine.ProductShortDescription ?? description,
+                        Alternative = frozenLine.Alternative,
+                        BuyerName = frozenLine.BuyerName,
                         Currency = currency,
                         CurrencyId = approved.CurrencyId,
                         UnitOfMeasure = uom,
                         UomId = approved.UomId,
-                        UnitPrice = source.UnitPrice,
+                        UnitPrice = frozenLine.UnitPrice,
                         Quantity = quantity,
-                        StorageLocation = source.StorageLocation,
-                        ManufacturerName = source.ManufacturerName,
-                        ManufacturerPartNumber = source.ManufacturerPartNumber ?? part,
-                        AlternateProductName = source.AlternateProductName,
-                        AlternatePartNumber = source.AlternatePartNumber,
-                        ItemText = source.ItemText,
-                        MaterialPotext = source.MaterialPotext,
-                        LeadTime = source.LeadTime,
-                        ReceivedDate = source.ReceivedDate,
-                        BidClosingDateLine = source.BidClosingDateLine,
-                        RequiredDesiredDate = lead.RequiredDeliveryDate,
-                        Aiconfidence = source.Aiconfidence,
+                        StorageLocation = frozenLine.StorageLocation,
+                        ManufacturerName = frozenLine.ManufacturerName,
+                        ManufacturerPartNumber = frozenLine.ManufacturerPartNumber ?? part,
+                        AlternateProductName = frozenLine.AlternateProductName,
+                        AlternatePartNumber = frozenLine.AlternatePartNumber,
+                        ItemText = frozenLine.ItemText,
+                        MaterialPotext = frozenLine.MaterialPoText,
+                        LeadTime = frozenLine.LeadTime,
+                        ReceivedDate = frozenLine.ReceivedDate,
+                        BidClosingDateLine = frozenLine.BidClosingDateLine,
+                        RequiredDesiredDate = frozenHeader.RequiredDeliveryDate,
+                        Aiconfidence = frozenLine.AiConfidence,
+                        ExtraFields = frozenLine.ExtraFields,
                         CreatedBy = command.Actor.Trim(),
                         CreatedDate = now,
                         SourceBusinessUnitId = businessUnitId,
@@ -429,6 +447,102 @@ public sealed class RfqPromotionService : IRfqPromotionService
             revisionNumber, participationVersion, r.NoOfLineItems ?? r.Rfqitems.Count,
             p.PromotedAtUtc, p.PromotedBy, replayed);
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static void EnsureFrozenCommercialIdentityMatches(
+        Lead lead, LeadRevision revision, LeadRevisionCommercialSnapshot snapshot)
+    {
+        if (snapshot.CommercialCaseId <= 0 || string.IsNullOrWhiteSpace(snapshot.CommercialCaseReference))
+            throw new InvalidOperationException(
+                "The immutable Lead revision has no frozen commercial-case identity. Append a governed Lead revision before promotion.");
+        if (snapshot.CommercialCaseId != lead.CommercialCaseId
+            || !string.Equals(snapshot.CommercialCaseReference, lead.CommercialCaseReference, StringComparison.Ordinal)
+            || snapshot.CustomerId != lead.CustomerId
+            || snapshot.ContactId != lead.ContactId
+            || snapshot.CustomerId != revision.CustomerIdSnapshot
+            || snapshot.ContactId != revision.ContactIdSnapshot)
+            throw new InvalidOperationException(
+                "The Lead commercial identity changed after the immutable revision was established. Append a governed revision and recommit participation before promotion.");
+    }
+
+    /// <summary>
+    /// Revisions written before schema v2 remain readable and promotable only when every value
+    /// they actually froze still matches the current projection. Missing legacy fields are never
+    /// claimed to be frozen; all new revisions use the complete snapshot above.
+    /// </summary>
+    private static void EnsureLegacyHeaderStillMatches(Lead lead, LeadRevision revision)
+    {
+        JsonElement root;
+        try
+        {
+            using var document = JsonDocument.Parse(revision.SnapshotJson);
+            root = document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            throw new InvalidOperationException(
+                "The immutable Lead revision snapshot is unreadable. Append a governed Lead revision before promotion.");
+        }
+        if (root.ValueKind != JsonValueKind.Object
+            || (!root.TryGetProperty("rfq", out _) && !root.TryGetProperty("buyer", out _)
+                && !root.TryGetProperty("closing", out _)))
+            throw new InvalidOperationException(
+                "The immutable Lead revision predates verifiable commercial snapshots. Append a governed Lead revision before promotion.");
+        if (!LegacyStringEquals(root, "rfq", NormalizeLegacy(lead.Rfqno))
+            || !LegacyStringEquals(root, "buyer", NormalizeLegacy(lead.BuyersName))
+            || !LegacyStringEquals(root, "closing", lead.BidClosingDate?.ToUniversalTime().ToString("O")))
+            throw new InvalidOperationException(
+                "The Lead header changed after its immutable legacy revision. Append a governed revision and recommit participation before promotion.");
+    }
+
+    private static void EnsureLegacyLineStillMatches(LeadItemRevision revisionLine, LeadItem source)
+    {
+        JsonElement root;
+        try
+        {
+            using var document = JsonDocument.Parse(revisionLine.SnapshotJson);
+            root = document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            throw new InvalidOperationException(
+                $"Immutable revision line {revisionLine.LineNumber} is unreadable. Append a governed Lead revision before promotion.");
+        }
+        if (root.ValueKind != JsonValueKind.Object
+            || (!root.TryGetProperty("line", out _) && !root.TryGetProperty("part", out _)))
+            throw new InvalidOperationException(
+                $"Immutable revision line {revisionLine.LineNumber} predates verifiable commercial snapshots. Append a governed Lead revision before promotion.");
+
+        var legacyUom = NormalizeLegacy(UomCanonicalizer.CanonicalizeForStorage(source.UnitOfMeasure));
+        var legacyDate = source.BidClosingDateLine?.ToUniversalTime().ToString("O");
+        var quantityMatches = !root.TryGetProperty("Quantity", out var quantity)
+            || quantity.ValueKind == JsonValueKind.Null && source.Quantity is null
+            || quantity.ValueKind == JsonValueKind.Number && source.Quantity == quantity.GetInt32();
+        if (!LegacyStringEquals(root, "line", NormalizeLegacy(source.LineItemNo))
+            || !LegacyStringEquals(root, "part", NormalizeLegacy(source.ManufacturerPartNumber ?? source.ItemMaterialCode))
+            || !LegacyStringEquals(root, "description", NormalizeLegacy(source.ProductShortDescription ?? source.ItemText))
+            || !LegacyStringEquals(root, "uom", legacyUom)
+            || !LegacyStringEquals(root, "date", legacyDate)
+            || !quantityMatches)
+            throw new InvalidOperationException(
+                $"Lead line {revisionLine.LineNumber} changed after its immutable legacy revision. Append a governed revision and recommit participation before promotion.");
+    }
+
+    private static bool LegacyStringEquals(JsonElement root, string property, string? expected)
+    {
+        if (!root.TryGetProperty(property, out var value)) return true;
+        var actual = value.ValueKind == JsonValueKind.Null ? null
+            : value.ValueKind == JsonValueKind.String ? value.GetString()
+            : value.GetRawText();
+        return string.Equals(actual, expected, StringComparison.Ordinal);
+    }
+
+    private static string? NormalizeLegacy(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var normalized = new string(value.Trim().ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+        return normalized.Length == 0 ? null : normalized;
+    }
+
     private static string Hash(object value) => Convert.ToHexString(SHA256.HashData(
         Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)))).ToLowerInvariant();
 

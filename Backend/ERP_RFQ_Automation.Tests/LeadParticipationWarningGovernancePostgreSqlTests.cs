@@ -4,13 +4,17 @@ using System.Text.Json;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
+using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CustomerResolution;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Reporting;
+using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -44,7 +48,11 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         var revisionLine = await context.Set<LeadItemRevision>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == Tenant && x.LeadRevisionId == scenario.RevisionId);
         using (var snapshot = JsonDocument.Parse(revisionLine.SnapshotJson))
+        {
+            Assert.Equal(2, snapshot.RootElement.GetProperty("schemaVersion").GetInt32());
             Assert.Equal("213", snapshot.RootElement.GetProperty("line").GetString());
+            Assert.Equal("2.1.3", snapshot.RootElement.GetProperty("lineItemNo").GetString());
+        }
 
         var workbench = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
             .GetAsync(Tenant, scenario.LeadId);
@@ -77,6 +85,321 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Empty(await context.Set<LeadParticipationDecision>().AsNoTracking()
             .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
         Assert.Empty(await context.Rfqs.AsNoTracking().Where(x => x.LeadId == scenario.LeadId).ToListAsync());
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Generic_line_evidence_cannot_stand_in_for_quantity_and_uom_provenance()
+    {
+        var scenario = await CreateScenarioAsync([
+            Line("00010", 4, "EA", "SAR", "MISSING-CRITICAL-EVIDENCE")
+        ], "missing-critical-evidence", seedCriticalEvidence: false);
+        await using var context = database.ContextFor(Tenant);
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "missing-critical-evidence");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+                Decision(scenario, fit.Id,
+                    [Bid(scenario.LineRevisionIds[0], "The source line was reviewed by the bid desk.")],
+                    "missing-critical-evidence")));
+
+        Assert.Contains("quantity", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("unit of measure", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("governed extraction approval", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Current_governed_extraction_approval_is_an_exact_provenance_override()
+    {
+        var scenario = await CreateScenarioAsync([
+            Line("00010", 4, "EA", "SAR", "REVIEW-OVERRIDE")
+        ], "review-override", seedCriticalEvidence: false);
+        await using var context = database.ContextFor(Tenant);
+        var lead = await context.Leads.Include(x => x.LeadItems)
+            .SingleAsync(x => x.Id == scenario.LeadId);
+        var item = Assert.Single(lead.LeadItems, x => x.IsCurrentRevisionProjection);
+        var reviewedOn = DateTime.UtcNow;
+        var fromVersion = lead.ReviewVersion;
+        lead.ReviewVersion++;
+        lead.ReviewApprovedBy = "tests";
+        lead.ReviewApprovedOn = reviewedOn;
+        context.Add(new LeadReviewAudit
+        {
+            BusinessUnitId = Tenant,
+            LeadId = lead.Id,
+            FromVersion = fromVersion,
+            ToVersion = lead.ReviewVersion,
+            Action = "approve",
+            ReviewedBy = "tests",
+            Reason = "Reviewer verified the requested identity, quantity, and unit against the source.",
+            BeforeJson = JsonSerializer.Serialize(new { reviewVersion = fromVersion }),
+            AfterJson = JsonSerializer.Serialize(new
+            {
+                commercialFactsVerified = true,
+                reviewVersion = lead.ReviewVersion,
+                items = new[]
+                {
+                    new
+                    {
+                        id = item.EvidenceSourceLeadItemId ?? item.Id,
+                        projectionId = item.Id,
+                        itemMaterialCode = item.ItemMaterialCode,
+                        manufacturerPartNumber = item.ManufacturerPartNumber,
+                        productShortName = item.ProductShortName,
+                        productShortDescription = item.ProductShortDescription,
+                        itemText = item.ItemText,
+                        quantity = item.Quantity,
+                        unitOfMeasure = item.UnitOfMeasure
+                    }
+                }
+            }),
+            ReviewedOn = reviewedOn
+        });
+        await context.SaveChangesAsync();
+
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "review-override");
+        var decision = await participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+            Decision(scenario, fit.Id,
+                [Bid(scenario.LineRevisionIds[0], "Current extraction approval covers this source line.")],
+                "review-override"));
+
+        Assert.True(decision.IsCommitted);
+        Assert.Equal(LeadParticipationOutcome.FullBid, decision.Outcome);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Incomplete_or_stale_review_audit_cannot_replace_exact_source_provenance()
+    {
+        var scenario = await CreateScenarioAsync([
+            Line("00010", 4, "EA", "SAR", "INCOMPLETE-REVIEW-OVERRIDE")
+        ], "incomplete-review-override", seedCriticalEvidence: false,
+            linkCurrentRevisionDocument: false);
+        await using var context = database.ContextFor(Tenant);
+        var lead = await context.Leads.Include(x => x.LeadItems)
+            .SingleAsync(x => x.Id == scenario.LeadId);
+        var item = Assert.Single(lead.LeadItems, x => x.IsCurrentRevisionProjection);
+        var reviewedOn = DateTime.UtcNow;
+        var fromVersion = lead.ReviewVersion;
+        lead.ReviewVersion++;
+        lead.ReviewApprovedBy = "tests";
+        lead.ReviewApprovedOn = reviewedOn;
+        context.Add(new LeadReviewAudit
+        {
+            BusinessUnitId = Tenant,
+            LeadId = lead.Id,
+            FromVersion = fromVersion,
+            ToVersion = lead.ReviewVersion,
+            Action = "approve",
+            ReviewedBy = "tests",
+            Reason = "This row deliberately omits the governed after-image version.",
+            BeforeJson = JsonSerializer.Serialize(new { reviewVersion = fromVersion }),
+            AfterJson = JsonSerializer.Serialize(new
+            {
+                commercialFactsVerified = true,
+                items = new[]
+                {
+                    new
+                    {
+                        id = item.EvidenceSourceLeadItemId ?? item.Id,
+                        projectionId = item.Id,
+                        itemMaterialCode = item.ItemMaterialCode,
+                        quantity = item.Quantity,
+                        unitOfMeasure = item.UnitOfMeasure
+                    }
+                }
+            }),
+            ReviewedOn = reviewedOn
+        });
+        await context.SaveChangesAsync();
+
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "incomplete-review-override");
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+                Decision(scenario, fit.Id,
+                    [Bid(scenario.LineRevisionIds[0], "An incomplete audit must fail closed.")],
+                    "incomplete-review-override")));
+
+        Assert.Contains("governed extraction approval", error.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.Set<LeadParticipationDecision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Real_review_approval_documentless_human_revision_commits_and_promotes_from_governed_audit()
+    {
+        var seeded = await CreateScenarioAsync([
+            Line("00010", 4, "EA", "SAR", "REAL-REVIEW-OVERRIDE")
+        ], "real-review-override", linkCurrentRevisionDocument: false);
+
+        await using var context = database.ContextFor(Tenant);
+        var beforeReview = await context.Leads.Include(x => x.LeadItems)
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == seeded.LeadId);
+        beforeReview.CommercialFactsVerified = false;
+        beforeReview.RequiresCommercialReview = true;
+        beforeReview.ReviewApprovedBy = null;
+        beforeReview.ReviewApprovedOn = null;
+        await context.SaveChangesAsync();
+        var currentItem = Assert.Single(beforeReview.LeadItems, x => x.IsCurrentRevisionProjection);
+
+        var reviewed = await new LeadRepository(context).SubmitLeadReviewAsync(
+            seeded.LeadId,
+            Tenant,
+            new LeadReviewSubmitDTO
+            {
+                ExpectedVersion = beforeReview.ReviewVersion,
+                Action = "approve",
+                Reason = "The reviewer verified identity, quantity and unit against the retained customer document.",
+                Items =
+                [
+                    new LeadItemReviewDTO
+                    {
+                        Id = currentItem.Id,
+                        LineItemNo = currentItem.LineItemNo,
+                        ProductShortName = currentItem.ProductShortName,
+                        ProductShortDescription = currentItem.ProductShortDescription,
+                        CommodityProduct = currentItem.CommodityProduct,
+                        ItemMaterialCode = currentItem.ItemMaterialCode,
+                        Currency = currentItem.Currency,
+                        UnitOfMeasure = currentItem.UnitOfMeasure,
+                        UnitPrice = currentItem.UnitPrice,
+                        Quantity = currentItem.Quantity,
+                        ManufacturerName = currentItem.ManufacturerName,
+                        ManufacturerPartNumber = currentItem.ManufacturerPartNumber,
+                        AlternateProductName = currentItem.AlternateProductName,
+                        AlternatePartNumber = currentItem.AlternatePartNumber,
+                        ItemText = currentItem.ItemText,
+                        LeadTime = currentItem.LeadTime
+                    }
+                ]
+            },
+            "tests");
+        Assert.NotNull(reviewed);
+
+        context.ChangeTracker.Clear();
+        var approvedLead = await context.Leads.AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == seeded.LeadId);
+        var humanRevision = await context.Set<LeadRevision>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == approvedLead.CurrentRevisionId);
+        Assert.Equal(LeadProcessingPath.HumanReview, humanRevision.ProcessingPath);
+        Assert.False(await context.Set<LeadOccurrenceDocument>().AsNoTracking().AnyAsync(x =>
+            x.BusinessUnitId == Tenant && x.OccurrenceId == humanRevision.EstablishedByOccurrenceId));
+        var humanRevisionLineIds = await context.Set<LeadItemRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadRevisionId == humanRevision.Id)
+            .OrderBy(x => x.LineNumber).Select(x => x.Id).ToArrayAsync();
+        var scenario = seeded with
+        {
+            RevisionId = humanRevision.Id,
+            RevisionNumber = humanRevision.RevisionNumber,
+            LineRevisionIds = humanRevisionLineIds
+        };
+
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "real-review-override");
+        var decision = await participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+            Decision(scenario, fit.Id,
+                [Bid(scenario.LineRevisionIds[0], "Current governed review covers the exact approved line.")],
+                "real-review-override"));
+        var promoted = await new RfqPromotionService(context, new UnexpectedEvidenceStorage())
+            .PromoteAsync(Tenant, scenario.LeadId,
+                Promotion(scenario, decision, "real-review-override"));
+
+        Assert.True(decision.IsCommitted);
+        Assert.Equal(1, promoted.PromotedLineCount);
+        Assert.Equal(1, await context.Rfqitems.AsNoTracking().CountAsync(x => x.Rfqid == promoted.RfqId));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Deterministic_customer_resolution_rebinds_source_lineage_and_promotes_the_resolved_customer()
+    {
+        var scenario = await CreateResolvedCustomerScenarioAsync(
+            "customer-resolution-lineage", linkSourceBeforeResolution: true);
+        await using var context = database.ContextFor(Tenant);
+        var revisions = await context.Set<LeadRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId)
+            .OrderBy(x => x.RevisionNumber).ToListAsync();
+        var current = revisions[^1];
+        var previousOccurrenceId = revisions[^2].EstablishedByOccurrenceId;
+        Assert.Equal(LeadProcessingPath.HumanReview, current.ProcessingPath);
+        Assert.Equal("customer-resolution", current.CreatedBy);
+
+        var previousDocuments = await context.Set<LeadOccurrenceDocument>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant
+                && x.OccurrenceId == previousOccurrenceId)
+            .Select(x => x.SourceDocumentId).OrderBy(x => x).ToArrayAsync();
+        var currentDocuments = await context.Set<LeadOccurrenceDocument>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant
+                && x.OccurrenceId == current.EstablishedByOccurrenceId)
+            .Select(x => x.SourceDocumentId).OrderBy(x => x).ToArrayAsync();
+        Assert.NotEmpty(previousDocuments);
+        Assert.Equal(previousDocuments, currentDocuments);
+
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "customer-resolution-lineage");
+        var decision = await participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+            Decision(scenario, fit.Id,
+                [Bid(scenario.LineRevisionIds[0], "The retained customer request was verified for bidding.")],
+                "customer-resolution-lineage"));
+        var promoted = await new RfqPromotionService(context,
+                new ExactEvidenceStorage(scenario.StorageUri, scenario.EvidenceHash, scenario.EvidenceBytes))
+            .PromoteAsync(Tenant, scenario.LeadId,
+                Promotion(scenario, decision, "customer-resolution-lineage"));
+
+        var rfq = await context.Rfqs.AsNoTracking().SingleAsync(x => x.Id == promoted.RfqId);
+        Assert.Equal(CustomerId, rfq.CustomerId);
+        Assert.Equal(1, promoted.PromotedLineCount);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_source_link_added_only_to_the_pre_resolution_revision_is_stale_and_fails_closed()
+    {
+        var scenario = await CreateResolvedCustomerScenarioAsync(
+            "customer-resolution-stale-lineage", linkSourceBeforeResolution: false);
+        await using var context = database.ContextFor(Tenant);
+        var revisions = await context.Set<LeadRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId)
+            .OrderBy(x => x.RevisionNumber).ToListAsync();
+        Assert.True(revisions.Count >= 2);
+        var sourceDocumentId = await context.Set<SourceDocument>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.ContentHash == scenario.EvidenceHash)
+            .Select(x => x.Id).SingleAsync();
+        var previousOccurrenceId = revisions[^2].EstablishedByOccurrenceId;
+        var currentOccurrenceId = revisions[^1].EstablishedByOccurrenceId;
+        context.Add(new LeadOccurrenceDocument
+        {
+            BusinessUnitId = Tenant,
+            OccurrenceId = previousOccurrenceId,
+            SourceDocumentId = sourceDocumentId,
+            Role = "Primary",
+            Ordinal = 1,
+            LinkedAtUtc = DateTimeOffset.UtcNow
+        });
+        await context.SaveChangesAsync();
+        Assert.False(await context.Set<LeadOccurrenceDocument>().AsNoTracking().AnyAsync(x =>
+            x.BusinessUnitId == Tenant && x.OccurrenceId == currentOccurrenceId));
+
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "customer-resolution-stale-lineage");
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+                Decision(scenario, fit.Id,
+                    [Bid(scenario.LineRevisionIds[0], "A stale relation must not authorize this bid.")],
+                    "customer-resolution-stale-lineage")));
+
+        Assert.Contains("retained source", error.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.Set<LeadParticipationDecision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+        Assert.Empty(await context.Rfqs.AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
     }
 
     [Fact]
@@ -126,10 +449,10 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Acknowledged_warning_corrections_and_partial_no_bid_are_immutable_and_only_bid_lines_promote()
+    public async Task Acknowledged_warning_and_partial_no_bid_are_immutable_and_only_bid_lines_promote()
     {
         var scenario = await CreateScenarioAsync([
-            Line("00010", 0, null, null, "UNMATCHED-CORRECTED"),
+            Line("00010", 25, "EA", "SAR", "UNMATCHED-BID"),
             Line("00020", 7, "EA", "SAR", "UNMATCHED-EXCLUDED")
         ], "partial-corrections");
         await using var context = database.ContextFor(Tenant);
@@ -279,6 +602,11 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Empty(await context.Rfqs.AsNoTracking()
             .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
 
+        var locked = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            FitAsync(participation, scenario, "full-no-bid-without-reopen"));
+        Assert.Contains("manager", locked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("reopen", locked.Message, StringComparison.OrdinalIgnoreCase);
+
         await Assert.ThrowsAsync<InvalidOperationException>(() => new RfqPromotionService(context,
                 new ExactEvidenceStorage(scenario.StorageUri, scenario.EvidenceHash, scenario.EvidenceBytes))
             .PromoteAsync(Tenant, scenario.LeadId, Promotion(scenario, decision, "full-no-bid")));
@@ -288,7 +616,9 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
     }
 
-    private async Task<Scenario> CreateScenarioAsync(IReadOnlyList<LeadItem> lines, string suffix)
+    private async Task<Scenario> CreateScenarioAsync(
+        IReadOnlyList<LeadItem> lines, string suffix, bool seedCriticalEvidence = true,
+        bool linkCurrentRevisionDocument = true)
     {
         await SeedTenantAsync();
         var batchId = Guid.NewGuid();
@@ -326,6 +656,9 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             lead.ResolveCommercialIdentity(CustomerId, null, "CUSTOMER_CONFIRMED");
             lead.CommercialFactsVerified = true;
             await context.SaveChangesAsync();
+            await new LeadIdentityApplicationService(context).AppendHumanRevisionAsync(
+                Tenant, leadId, "tests", "Test reviewer confirmed the customer identity.",
+                $"warning-customer-revision:{Tenant}:{leadId}:{suffix}");
         }
 
         foreach (var target in new[] { "PENDING_IDENTIFICATION", "ASSIGNED", "UNDER_REVIEW", "QUALIFIED" })
@@ -362,7 +695,7 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
                     false, null, "Service", "tests", amendmentKey), CancellationToken.None);
             Assert.Equal(leadId, reconciled.LeadId);
             Assert.Equal(LeadOccurrenceClassification.Revision, reconciled.Classification);
-            Assert.Equal(2, reconciled.RevisionNumber);
+            Assert.Equal(3, reconciled.RevisionNumber);
             var amendedLead = await amendmentContext.Leads
                 .Include(lead => lead.LeadStatus)
                 .Include(lead => lead.LeadItems)
@@ -377,7 +710,8 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             $"{x.LineItemNo}|{x.ItemMaterialCode}|{x.Quantity}|{x.UnitOfMeasure}|{x.Currency}")));
         var evidenceHash = Convert.ToHexString(SHA256.HashData(evidenceBytes)).ToLowerInvariant();
         var storageUri = $"memory://participation-warning/{suffix}-{leadId}.xlsx";
-        await SeedEvidenceAsync(leadId, suffix, evidenceBytes, evidenceHash);
+        await SeedEvidenceAsync(leadId, suffix, evidenceBytes, evidenceHash, seedCriticalEvidence,
+            linkCurrentRevisionDocument);
 
         await using var read = database.ContextFor(Tenant);
         var current = await read.Leads.AsNoTracking().SingleAsync(x => x.Id == leadId);
@@ -388,7 +722,96 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             lineIds, storageUri, evidenceHash, evidenceBytes);
     }
 
-    private async Task SeedEvidenceAsync(long leadId, string suffix, byte[] bytes, string hash)
+    private async Task<Scenario> CreateResolvedCustomerScenarioAsync(
+        string suffix, bool linkSourceBeforeResolution)
+    {
+        await SeedTenantAsync();
+        var batchId = Guid.NewGuid();
+        var domain = $"{suffix}-{batchId:N}.example";
+        var key = $"participation-warning:{suffix}:{batchId:N}";
+        var candidate = new Lead
+        {
+            Rfqno = $"WARN-{suffix}-{batchId:N}",
+            BuyersName = "Unresolved buyer",
+            CustomerBuyerEmailExtracted = $"buyer@{domain}",
+            RecDate = Now,
+            BidClosingDate = Now.AddDays(14),
+            LeadSource = "ParticipationWarningTests",
+            CreatedBy = "tests",
+            CreatedDate = Now,
+            BusinessUnitId = Tenant,
+            NoOfLineItems = 1
+        };
+        candidate.LeadItems.Add(Line("00010", 4, "EA", "SAR", $"RESOLVED-{batchId:N}"));
+
+        long leadId;
+        await using (var context = database.ContextFor(Tenant))
+        {
+            context.Set<CustomerIdentifier>().Add(new CustomerIdentifier
+            {
+                BusinessUnitId = Tenant,
+                CustomerId = CustomerId,
+                IdentifierType = CustomerIdentifierType.Domain,
+                NormalizedValue = domain,
+                DisplayValue = domain,
+                IsVerified = true,
+                Confidence = 0.99m,
+                Source = "CustomerProfile",
+                EffectiveFrom = Now.AddDays(-1)
+            });
+            await context.SaveChangesAsync();
+            var reconciled = await new LeadIdentityApplicationService(context).ReconcileAsync(candidate,
+                new LeadIntakeDescriptor(
+                    batchId, "ManualUpload", key, key, null, "ParticipationWarningTests", null,
+                    $"RFQ {suffix}", $"{suffix}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 20480,
+                    new string('c', 64), null, null, Now, Now, LeadProcessingPath.Deterministic,
+                    false, null, "Service", "tests", key), CancellationToken.None);
+            leadId = reconciled.LeadId;
+        }
+
+        var evidenceBytes = Encoding.UTF8.GetBytes($"00010|resolved-customer|4|EA|SAR|{suffix}|{batchId:N}");
+        var evidenceHash = Convert.ToHexString(SHA256.HashData(evidenceBytes)).ToLowerInvariant();
+        await SeedEvidenceAsync(leadId, suffix, evidenceBytes, evidenceHash,
+            seedCriticalEvidence: true, linkCurrentRevisionDocument: linkSourceBeforeResolution);
+
+        var retryOptions = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(database.ConnectionString, npgsql => npgsql.EnableRetryOnFailure())
+            .EnableDetailedErrors()
+            .Options;
+        await using (var context = new ErpRfqAutomationContext(retryOptions, new StubTenant(Tenant)))
+        {
+            var outcome = await new LeadCustomerResolutionService(context).ResolveAsync(Tenant, leadId);
+            Assert.Equal(CustomerId, outcome.CustomerId);
+            var lead = await context.Leads.SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == leadId);
+            lead.CommercialFactsVerified = true;
+            await context.SaveChangesAsync();
+        }
+
+        foreach (var target in new[] { "PENDING_IDENTIFICATION", "ASSIGNED", "UNDER_REVIEW", "QUALIFIED" })
+        {
+            await using var context = database.ContextFor(Tenant);
+            var lead = await context.Leads.SingleAsync(x => x.Id == leadId);
+            await new LifecycleApplicationService(context).TransitionLeadAsync(Tenant, leadId,
+                new LifecycleActor("tests", "ParticipationWarningTests"),
+                new LifecycleTransitionCommand(target, lead.LifecycleVersion, null, null,
+                    "Seed", $"{suffix}-{target}", $"lead-{leadId}",
+                    $"warning-{suffix}-{target}:{leadId}"), false, CancellationToken.None);
+        }
+
+        await using var read = database.ContextFor(Tenant);
+        var current = await read.Leads.AsNoTracking().SingleAsync(x => x.Id == leadId);
+        var lineIds = await read.Set<LeadItemRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadRevisionId == current.CurrentRevisionId)
+            .OrderBy(x => x.LineNumber).Select(x => x.Id).ToArrayAsync();
+        return new Scenario(leadId, current.CurrentRevisionId!.Value, current.CurrentRevisionNumber,
+            lineIds, $"memory://participation-warning/{suffix}-{leadId}.xlsx",
+            evidenceHash, evidenceBytes);
+    }
+
+    private async Task SeedEvidenceAsync(
+        long leadId, string suffix, byte[] bytes, string hash, bool seedCriticalEvidence,
+        bool linkCurrentRevisionDocument)
     {
         await using var context = database.ContextFor(Tenant);
         var lead = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == leadId);
@@ -396,13 +819,31 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == lead.CurrentRevisionId);
         var occurrence = await context.Set<LeadIngestionOccurrence>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == revision.EstablishedByOccurrenceId);
-        var corpus = DocumentCorpus.Create(Tenant, occurrence.BatchId, CorpusSourceType.ManualUpload);
-        context.Add(corpus);
-        await context.SaveChangesAsync();
+        // A customer correction appends a documentless human revision in a shared correction
+        // batch. The synthetic source document still belongs to the last actual intake batch;
+        // using the correction batch would collapse otherwise independent test corpora.
+        var evidenceBatchId = occurrence.RecordKind == LeadOccurrenceRecordKind.IdentityBaseline
+            ? await (from priorRevision in context.Set<LeadRevision>().AsNoTracking()
+                     join priorOccurrence in context.Set<LeadIngestionOccurrence>().AsNoTracking()
+                         on priorRevision.EstablishedByOccurrenceId equals priorOccurrence.Id
+                     where priorRevision.BusinessUnitId == Tenant && priorRevision.LeadId == leadId
+                         && priorRevision.RevisionNumber < revision.RevisionNumber
+                         && priorOccurrence.RecordKind != LeadOccurrenceRecordKind.IdentityBaseline
+                     orderby priorRevision.RevisionNumber descending
+                     select priorOccurrence.BatchId).FirstAsync()
+            : occurrence.BatchId;
+        var corpus = await context.Set<DocumentCorpus>().SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == Tenant && x.BatchId == evidenceBatchId);
+        if (corpus is null)
+        {
+            corpus = DocumentCorpus.Create(Tenant, evidenceBatchId, CorpusSourceType.ManualUpload);
+            context.Add(corpus);
+            await context.SaveChangesAsync();
+        }
         var location = $"participation-warning/{suffix}-{leadId}.xlsx";
         var job = new ExtractionJob
         {
-            BatchId = occurrence.BatchId, BusinessUnitId = Tenant,
+            BatchId = evidenceBatchId, BusinessUnitId = Tenant,
             SourceType = ExtractionSourceType.ManualUpload, ContentHash = hash,
             StoragePath = $"memory://{location}", FileName = $"{suffix}.xlsx", FileType = "xlsx",
             Status = ExtractionStatus.Succeeded, Priority = 0, SchedulerTag = 0, Attempts = 1,
@@ -417,7 +858,16 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         document.BindExtractionJob(job.Id);
         context.Add(document);
         await context.SaveChangesAsync();
-        context.Add(new LeadOccurrenceDocument
+        var sourceOccurrence = SourceDocumentOccurrence.Create(
+            Tenant, document.Id, corpus.Id, $"participation-warning:{suffix}:{leadId}", "{}");
+        context.Add(sourceOccurrence);
+        await context.SaveChangesAsync();
+        job.SourceDocumentOccurrenceId = sourceOccurrence.Id;
+        sourceOccurrence.BindExtractionJob(job.Id);
+        sourceOccurrence.MarkProcessing();
+        sourceOccurrence.MarkResolved();
+        if (linkCurrentRevisionDocument)
+            context.Add(new LeadOccurrenceDocument
         {
             BusinessUnitId = Tenant, OccurrenceId = revision.EstablishedByOccurrenceId,
             SourceDocumentId = document.Id, Role = "Primary", Ordinal = 1,
@@ -450,10 +900,19 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         await context.SaveChangesAsync();
         foreach (var (item, canonical) in canonicalLines)
         {
-            var evidence = FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "requestedLine",
+            context.Add(FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "requestedLine",
                 item.ProductShortDescription, item.ItemMaterialCode, 1m,
-                "participation-warning-test", runId, validationStatus: FieldValidationStatus.Valid);
-            context.Add(evidence);
+                "participation-warning-test", runId, validationStatus: FieldValidationStatus.Valid));
+            if (seedCriticalEvidence)
+                context.AddRange(
+                    FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "Quantity",
+                        Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture),
+                        Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture), 1m,
+                        "participation-warning-test", runId, valueKind: FieldValueKind.Number,
+                        validationStatus: FieldValidationStatus.Valid),
+                    FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "UnitOfMeasure",
+                        item.UnitOfMeasure, item.UnitOfMeasure, 1m,
+                        "participation-warning-test", runId, validationStatus: FieldValidationStatus.Valid));
         }
         await context.SaveChangesAsync();
     }
@@ -556,5 +1015,17 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             Assert.Equal(hash, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
             return Task.FromResult<Stream>(new MemoryStream(bytes, writable: false));
         }
+    }
+
+    private sealed class UnexpectedEvidenceStorage : IEvidenceObjectStorage
+    {
+        public bool IsDurable => true;
+        public Task ProbeAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<EvidenceObject> WriteImmutableAsync(long businessUnitId, string zone, string sha256,
+            string extension, ReadOnlyMemory<byte> content, CancellationToken ct = default) =>
+            throw new InvalidOperationException("The human-review audit path must not invent a current physical evidence object.");
+        public Task<Stream> OpenVerifiedReadAsync(string requestedUri, string requestedHash,
+            CancellationToken ct = default) =>
+            throw new InvalidOperationException("The documentless human revision must promote through its governed audit.");
     }
 }

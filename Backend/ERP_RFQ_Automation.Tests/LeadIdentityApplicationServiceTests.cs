@@ -6,11 +6,183 @@ using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Tests;
 
 public sealed class LeadIdentityApplicationServiceTests
 {
+    [Fact]
+    public async Task Immutable_revision_freezes_exact_promotable_header_and_line_values()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(69);
+        Seed.BusinessUnit(context, 69); Seed.EmailConfig(context, 6901, 69); Seed.EmailIngest(context, 6902, 6901, "NeedsReview");
+        await context.SaveChangesAsync();
+        var lead = Candidate(69, 6902, "RFQ/EXACT-69", "buyer@exact.test", 17);
+        lead.BuyersName = "Buyer Name, LLC";
+        lead.AcknowledgmentDate = new DateTime(2026, 8, 1, 12, 30, 0, DateTimeKind.Utc);
+        lead.SubDate = new DateTime(2026, 8, 2, 9, 0, 0, DateTimeKind.Utc);
+        lead.HeaderRemarks = "Keep punctuation: A/B & C.";
+        lead.OpportunityNo = "OPP-69/X";
+        lead.Rfqtype = "Public Tender";
+        lead.DurationAgreement = "24 months + option";
+        lead.RequiredDeliveryDate = new DateTime(2026, 12, 15, 0, 0, 0, DateTimeKind.Utc);
+        var line = lead.LeadItems.Single();
+        line.CompanyRef = "COMP/69";
+        line.CustomerRfqno = "CUST-RFQ/69";
+        line.ProductShortDescription = "1/2\" SS Valve, 300#";
+        line.Currency = "SAR";
+        line.UnitPrice = 1234.56m;
+        line.ManufacturerPartNumber = "AB-123/X";
+        line.ExtraFields = "{\"Drawing No.\":\"D-69/A\"}";
+
+        var created = await new LeadIdentityApplicationService(context).ReconcileAsync(
+            lead, Intake("commercial-snapshot", "commercial-snapshot-hash", Guid.NewGuid(), "buyer@exact.test"));
+
+        var revision = await context.Set<LeadRevision>().AsNoTracking()
+            .SingleAsync(x => x.Id == created.RevisionId);
+        using var header = JsonDocument.Parse(revision.SnapshotJson);
+        Assert.Equal(2, header.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal("RFQ/EXACT-69", header.RootElement.GetProperty("customerRfqReference").GetString());
+        Assert.Equal("Buyer Name, LLC", header.RootElement.GetProperty("buyersName").GetString());
+        Assert.Equal("Keep punctuation: A/B & C.", header.RootElement.GetProperty("headerRemarks").GetString());
+        Assert.Equal("OPP-69/X", header.RootElement.GetProperty("opportunityNo").GetString());
+        Assert.Equal("24 months + option", header.RootElement.GetProperty("durationAgreement").GetString());
+
+        var revisionLine = await context.Set<LeadItemRevision>().AsNoTracking()
+            .SingleAsync(x => x.LeadRevisionId == revision.Id);
+        using var item = JsonDocument.Parse(revisionLine.SnapshotJson);
+        Assert.Equal(2, item.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal("AB-123/X", item.RootElement.GetProperty("manufacturerPartNumber").GetString());
+        Assert.Equal("1/2\" SS Valve, 300#", item.RootElement.GetProperty("productShortDescription").GetString());
+        Assert.Equal(1234.56m, item.RootElement.GetProperty("unitPrice").GetDecimal());
+        Assert.Equal("{\"Drawing No.\":\"D-69/A\"}", item.RootElement.GetProperty("extraFields").GetString());
+        // Historical normalized paths remain present for diff/index readers.
+        Assert.Equal("ab123x", item.RootElement.GetProperty("part").GetString());
+    }
+
+    [Fact]
+    public void Header_only_commercial_amendment_changes_the_identity_fingerprint()
+    {
+        var original = Candidate(68, 6802, "RFQ-68", "buyer@header.test", 5);
+        original.HeaderRemarks = "Original commercial terms";
+        original.DurationAgreement = "12 months";
+        original.RequiredDeliveryDate = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+        var amended = Candidate(68, 6802, "RFQ-68", "buyer@header.test", 5);
+        amended.HeaderRemarks = "Amended commercial terms";
+        amended.DurationAgreement = "24 months";
+        amended.RequiredDeliveryDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        Assert.NotEqual(
+            LeadIdentityApplicationService.Fingerprint(original),
+            LeadIdentityApplicationService.Fingerprint(amended));
+    }
+
+    [Fact]
+    public void Replay_subject_in_generated_email_envelope_note_does_not_change_identity_fingerprint()
+    {
+        var original = Candidate(692, 6922, "RFQ-692", "buyer@header.test", 5);
+        original.EmailIngests = new EmailIngest
+        {
+            MessageId = "original@buyer.test", FromEmail = "buyer@header.test",
+            EmailSubject = "Motor schedule"
+        };
+        original.HeaderRemarks =
+            "Email: From buyer@header.test, Subject: Motor schedule.";
+        var replay = Candidate(692, 6922, "RFQ-692", "buyer@header.test", 5);
+        replay.EmailIngests = new EmailIngest
+        {
+            MessageId = "replay@buyer.test", FromEmail = "buyer@header.test",
+            EmailSubject = "Motor schedule - replay"
+        };
+        replay.HeaderRemarks =
+            "Email: From buyer@header.test, Subject: Motor schedule - replay.";
+
+        Assert.Equal(
+            LeadIdentityApplicationService.Fingerprint(original),
+            LeadIdentityApplicationService.Fingerprint(replay));
+    }
+
+    [Theory]
+    [InlineData(693, "")]
+    [InlineData(694, "[NEEDS REVIEW] Verify extracted schedule. ")]
+    [InlineData(695, "Split from a multi-inquiry document (group 1 of 2). ")]
+    public async Task Replay_subject_envelope_is_not_commercial_identity_even_after_generated_review_notes(
+        long businessUnitId, string generatedNote)
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(businessUnitId);
+        Seed.BusinessUnit(context, businessUnitId);
+        Seed.EmailConfig(context, businessUnitId * 10 + 1, businessUnitId);
+        Seed.EmailIngest(context, businessUnitId * 10 + 2, businessUnitId * 10 + 1, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var first = Candidate(businessUnitId, businessUnitId * 10 + 2, "RFQ-REPLAY", "buyer@acme.test", 5);
+        first.HeaderRemarks = $"{generatedNote}Email: From buyer@acme.test, Subject: Original. Customer remark";
+        var created = await service.ReconcileAsync(first,
+            Intake("subject-original", "hash-original", Guid.NewGuid(), subject: "Original"));
+
+        context.ChangeTracker.Clear();
+        var replay = Candidate(businessUnitId, businessUnitId * 10 + 2, "RFQ-REPLAY", "buyer@acme.test", 5);
+        replay.HeaderRemarks = $"{generatedNote}Email: From buyer@acme.test, Subject: Replay. Customer remark";
+        var result = await service.ReconcileAsync(replay,
+            Intake("subject-replay", "hash-replay", Guid.NewGuid(), subject: "Replay"));
+
+        Assert.Equal(LeadOccurrenceClassification.ExactDuplicate, result.Classification);
+        Assert.Equal(created.LeadId, result.LeadId);
+        Assert.Equal(1, await context.Set<LeadRevision>().CountAsync());
+    }
+
+    [Theory]
+    [InlineData("acknowledgmentDate", 681)]
+    [InlineData("submissionDate", 682)]
+    [InlineData("headerRemarks", 683)]
+    [InlineData("opportunityNo", 684)]
+    [InlineData("rfqType", 685)]
+    [InlineData("durationAgreement", 686)]
+    [InlineData("requiredDeliveryDate", 687)]
+    [InlineData("deliveryLocation", 688)]
+    [InlineData("agreementReference", 689)]
+    [InlineData("bidClosingDateHijri", 690)]
+    [InlineData("inquiryType", 691)]
+    public async Task Every_promotable_header_term_versions_a_same_reference_inquiry(
+        string field, long businessUnitId)
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(businessUnitId);
+        var configurationId = businessUnitId * 10 + 1;
+        var ingestId = businessUnitId * 10 + 2;
+        Seed.BusinessUnit(context, businessUnitId);
+        Seed.EmailConfig(context, configurationId, businessUnitId);
+        Seed.EmailIngest(context, ingestId, configurationId, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(businessUnitId, ingestId, "RFQ-HEADER-TERMS", "buyer@terms.test", 5);
+        SetPromotableHeaderTerm(original, field, amended: false);
+        var created = await service.ReconcileAsync(original,
+            Intake($"{field}-original", $"{field}-a", Guid.NewGuid(), "buyer@terms.test"));
+
+        context.ChangeTracker.Clear();
+        var amendment = Candidate(businessUnitId, ingestId, "RFQ-HEADER-TERMS", "buyer@terms.test", 5);
+        SetPromotableHeaderTerm(amendment, field, amended: true);
+        var revised = await service.ReconcileAsync(amendment,
+            Intake($"{field}-amendment", $"{field}-b", Guid.NewGuid(), "buyer@terms.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revised.Classification);
+        Assert.Equal(created.LeadId, revised.LeadId);
+        Assert.Equal(2, revised.RevisionNumber);
+        Assert.Equal(2, await context.Set<LeadRevision>()
+            .CountAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == created.LeadId));
+        Assert.Contains(await context.Set<LeadRevisionDifference>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId
+                    && x.LeadRevisionId == revised.RevisionId).ToListAsync(),
+            difference => difference.Path == $"$.{field}"
+                && difference.ChangeType == LeadRevisionChangeType.Modified);
+    }
+
     [Fact]
     public async Task Batch_reports_scanner_outage_as_awaiting_without_rejected_kpi()
     {
@@ -1112,8 +1284,32 @@ public sealed class LeadIdentityApplicationServiceTests
         return lead;
     }
 
-    private static LeadIntakeDescriptor Intake(string key, string hash, Guid batch, string? sender = "buyer@acme.test") => new(
-        batch, "ManualUpload", key, null, null, "test", sender, "RFQ", $"{key}.xlsx",
+    private static void SetPromotableHeaderTerm(Lead lead, string field, bool amended)
+    {
+        var text = amended ? "Amended value" : "Original value";
+        var date = amended
+            ? new DateTime(2026, 12, 2, 12, 0, 0, DateTimeKind.Utc)
+            : new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+        switch (field)
+        {
+            case "acknowledgmentDate": lead.AcknowledgmentDate = date; break;
+            case "submissionDate": lead.SubDate = date; break;
+            case "headerRemarks": lead.HeaderRemarks = text; break;
+            case "opportunityNo": lead.OpportunityNo = text; break;
+            case "rfqType": lead.Rfqtype = text; break;
+            case "durationAgreement": lead.DurationAgreement = text; break;
+            case "requiredDeliveryDate": lead.RequiredDeliveryDate = date; break;
+            case "deliveryLocation": lead.DeliveryLocation = text; break;
+            case "agreementReference": lead.AgreementReference = text; break;
+            case "bidClosingDateHijri": lead.BidClosingDateHijri = amended ? "1448-04-02" : "1448-03-01"; break;
+            case "inquiryType": lead.InquiryType = amended ? "mixed" : "product"; break;
+            default: throw new ArgumentOutOfRangeException(nameof(field), field, null);
+        }
+    }
+
+    private static LeadIntakeDescriptor Intake(string key, string hash, Guid batch,
+        string? sender = "buyer@acme.test", string? subject = "RFQ") => new(
+        batch, "ManualUpload", key, null, null, "test", sender, subject, $"{key}.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 100, hash.PadRight(64, '0')[..64],
         null, null, null, DateTimeOffset.UtcNow, LeadProcessingPath.Deterministic, false, 0, "User", "tester", $"test:{key}");
 

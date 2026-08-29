@@ -137,6 +137,37 @@ public sealed class Phase1SpineSeamTests
         }
     }
 
+    [Fact]
+    public async Task Promotion_consumes_the_frozen_revision_not_later_mutable_header_or_line_values()
+    {
+        using var spine = new UpstreamSpine();
+        var lead = await spine.EstablishLeadAsync();
+
+        await using (var mutate = spine.Context())
+        {
+            var current = await mutate.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == lead.Id);
+            current.BuyersName = "MUTATED BUYER MUST NOT PROMOTE";
+            current.HeaderRemarks = "MUTATED HEADER MUST NOT PROMOTE";
+            current.RequiredDeliveryDate = UpstreamSpine.RequiredDeliveryDate.AddYears(1);
+            var first = current.LeadItems.Single(x => x.IsCurrentRevisionProjection
+                && x.LineItemNo == "00010");
+            first.ProductShortDescription = "MUTATED DESCRIPTION MUST NOT PROMOTE";
+            first.UnitPrice = 999_999m;
+            await mutate.SaveChangesAsync();
+        }
+
+        var (rfqId, _) = await spine.ConvertAsync(lead.Id);
+
+        await using var read = spine.Context();
+        var rfq = await read.Rfqs.Include(x => x.Rfqitems).SingleAsync(x => x.Id == rfqId);
+        Assert.Equal("Spine Bid Desk", rfq.BuyersName);
+        Assert.Equal("Two deterministic lines.", rfq.HeaderRemarks);
+        var promoted = Assert.Single(rfq.Rfqitems);
+        Assert.Equal("Ball valve 2IN class 300", promoted.ProductShortDescription);
+        Assert.Null(promoted.UnitPrice);
+        Assert.Equal(UpstreamSpine.RequiredDeliveryDate, promoted.RequiredDesiredDate);
+    }
+
     // ==========================================================================================
     // SEAMS 5-7. Supplier PO -> inbound shipment -> receipt -> lot -> stock -> despatch -> POD
     //            -> invoice ceiling
@@ -403,6 +434,9 @@ internal sealed class UpstreamSpine : IDisposable
             lead.ResolveCommercialIdentity(CustomerId, null, "CUSTOMER_CONFIRMED");
             lead.CommercialFactsVerified = true;
             await context.SaveChangesAsync();
+            await new LeadIdentityApplicationService(context).AppendHumanRevisionAsync(
+                Tenant, leadId, "qa", "Test reviewer confirmed the customer identity.",
+                $"spine-customer-revision:{Tenant}:{leadId}");
         }
 
         // Lead status is domain-protected; the policy graph refuses a shortcut to QUALIFIED, so
@@ -574,16 +608,26 @@ internal sealed class UpstreamSpine : IDisposable
 
         foreach (var (item, canonical) in canonicalLines)
         {
-            var evidence = FieldEvidence.ForLineItem(
-                Tenant, region.Id, canonical.Id, "requestedLine",
-                item.ProductShortDescription ?? item.ItemText,
-                item.ManufacturerPartNumber ?? item.ItemMaterialCode,
-                1m, "spine-test", runId,
-                validationStatus: FieldValidationStatus.Valid);
-            context.Add(evidence);
+            var evidence = new[]
+            {
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "requestedLine",
+                    item.ProductShortDescription ?? item.ItemText,
+                    item.ManufacturerPartNumber ?? item.ItemMaterialCode, 1m, "spine-test", runId,
+                    validationStatus: FieldValidationStatus.Valid),
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "Quantity",
+                    Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture),
+                    Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture),
+                    1m, "spine-test", runId, valueKind: FieldValueKind.Number,
+                    validationStatus: FieldValidationStatus.Valid),
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "UnitOfMeasure",
+                    item.UnitOfMeasure, item.UnitOfMeasure, 1m, "spine-test", runId,
+                    validationStatus: FieldValidationStatus.Valid)
+            };
+            context.AddRange(evidence);
             // SQLite does not execute the provider-specific evidence mapping and therefore
             // exposes the conventional ExtractionRunId shadow FK. PostgreSQL uses (BU, RunId).
-            context.Entry(evidence).Property("ExtractionRunId").CurrentValue = run.Id;
+            foreach (var field in evidence)
+                context.Entry(field).Property("ExtractionRunId").CurrentValue = run.Id;
         }
         await context.SaveChangesAsync();
     }
