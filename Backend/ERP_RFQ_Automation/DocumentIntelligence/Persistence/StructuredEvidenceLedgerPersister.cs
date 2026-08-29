@@ -97,7 +97,7 @@ public sealed class StructuredEvidenceLedgerPersister
         var pendingFields = new List<PendingField>();
         var inquiryByDocument = new Dictionary<CanonicalRfqDocument, CanonicalInquiry>();
         var lineByCanonical = new Dictionary<CanonicalRfqLineItem, CanonicalLineItem>();
-        var leadItemOffsets = leads.ToDictionary(x => x.Id, _ => 0);
+        var boundLeadItemIds = leads.ToDictionary(x => x.Id, _ => new HashSet<long>());
         var firstInquiryNumber = await ReserveInquiryNumbersAsync(
             source.CorpusId, import.Documents.Count, ct);
 
@@ -105,7 +105,6 @@ public sealed class StructuredEvidenceLedgerPersister
         {
             var document = import.Documents[documentIndex];
             var lead = leads.Count == import.Documents.Count ? leads[documentIndex] : leads[0];
-            var leadItemOffset = leadItemOffsets[lead.Id];
             var inquiry = CanonicalInquiry.Create(
                 job.BusinessUnitId, source.CorpusId, firstInquiryNumber + documentIndex);
             inquiry.PopulateHeader(document.RfqNo.Value, document.BuyerName.Value,
@@ -136,9 +135,16 @@ public sealed class StructuredEvidenceLedgerPersister
                 line.Enrich(canonical.ManufacturerName.Value, canonical.ManufacturerPartNumber.Value,
                     canonical.Currency.Value, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),
                     JsonSerializer.Serialize(canonical), MapLineStatus(canonical.ValidationStatus));
-                var leadItems = lead.LeadItems.OrderBy(x => x.Id).ToArray();
-                if (leadItemOffset + lineIndex < leadItems.Length)
-                    line.BindLeadItem(leadItems[leadItemOffset + lineIndex].Id);
+                var availableLeadItems = lead.LeadItems
+                    .Where(x => x.IsCurrentRevisionProjection
+                        && !boundLeadItemIds[lead.Id].Contains(x.Id))
+                    .ToArray();
+                var leadItem = ResolveEvidenceLeadItem(canonical, availableLeadItems);
+                if (leadItem is not null)
+                {
+                    line.BindLeadItem(leadItem.Id);
+                    boundLeadItemIds[lead.Id].Add(leadItem.Id);
+                }
                 _context.Add(line);
                 await _context.SaveChangesAsync(ct);
                 lineByCanonical[canonical] = line;
@@ -154,7 +160,6 @@ public sealed class StructuredEvidenceLedgerPersister
                 AddField(pendingFields, null, line, "LeadTimeDays", canonical.LeadTimeDays);
                 AddField(pendingFields, null, line, "ItemText", canonical.ItemText);
             }
-            leadItemOffsets[lead.Id] += document.LineItems.Count;
         }
 
         var coordinates = pendingFields.Select(x => ParseCoordinate(x.Evidence.Location, job.FileType))
@@ -381,6 +386,76 @@ public sealed class StructuredEvidenceLedgerPersister
         CanonicalDtos.ValidationSeverity.Warning => LedgerSeverity.Warning,
         _ => LedgerSeverity.Information
     };
+
+    /// <summary>
+    /// Resolves a structured source line to the same canonical Lead projection without using
+    /// database identity as a proxy for source order. Exact customer line references win. When
+    /// a source omits them, the item identity carried by the same canonical import is used. An
+    /// explicit but ambiguous reference fails closed instead of attaching another line's proof.
+    /// </summary>
+    internal static LeadItem? ResolveEvidenceLeadItem(
+        CanonicalRfqLineItem sourceLine,
+        IReadOnlyCollection<LeadItem> availableLeadItems)
+    {
+        if (availableLeadItems.Count == 0) return null;
+
+        var sourceReference = CanonicalTexts(sourceLine.LineItemNo).FirstOrDefault();
+        if (sourceReference is not null)
+        {
+            var referenceMatches = availableLeadItems
+                .Where(item => SameText(item.LineItemNo, sourceReference))
+                .ToArray();
+            if (referenceMatches.Length == 1) return referenceMatches[0];
+            if (referenceMatches.Length > 1)
+                return UniqueIdentityMatch(sourceLine, referenceMatches);
+            return null;
+        }
+
+        var identityMatch = UniqueIdentityMatch(sourceLine, availableLeadItems);
+        if (identityMatch is not null) return identityMatch;
+
+        // A usable but ambiguous or contradictory commercial identity must not degrade into a
+        // positional guess. Leaving it unbound makes the promotion gate report missing lineage.
+        if (HasUsableIdentity(sourceLine)) return null;
+
+        // Compatibility for legacy spreadsheets whose parser supplied neither line reference
+        // nor a usable identity. Indistinguishable rows retain the previous insertion-id order;
+        // they cannot be meaningfully separated by commercial content.
+        return availableLeadItems.OrderBy(item => item.Id).First();
+    }
+
+    private static bool HasUsableIdentity(CanonicalRfqLineItem sourceLine)
+        => CanonicalTexts(sourceLine.ProductName).Any()
+            || CanonicalTexts(sourceLine.ManufacturerPartNumber).Any();
+
+    private static LeadItem? UniqueIdentityMatch(
+        CanonicalRfqLineItem sourceLine,
+        IReadOnlyCollection<LeadItem> candidates)
+    {
+        var matches = candidates.Where(item =>
+        {
+            var productMatches = CanonicalTexts(sourceLine.ProductName)
+                .Any(value => SameText(item.ProductShortName, value)
+                    || SameText(item.ProductShortDescription, value));
+            var partMatches = CanonicalTexts(sourceLine.ManufacturerPartNumber)
+                .Any(value => SameText(item.ManufacturerPartNumber, value));
+            if (!productMatches && !partMatches) return false;
+            if (sourceLine.Quantity.Value is { } quantity && item.Quantity != quantity) return false;
+            return !CanonicalTexts(sourceLine.UnitOfMeasure).Any()
+                || CanonicalTexts(sourceLine.UnitOfMeasure).Any(value => SameText(item.UnitOfMeasure, value));
+        }).ToArray();
+        return matches.Length == 1 ? matches[0] : null;
+    }
+
+    private static IEnumerable<string> CanonicalTexts(CanonicalDtos.CanonicalValue<string> value)
+        => new[] { value.Value, value.OriginalValue }
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .Select(text => text!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+    private static bool SameText(string? left, string right)
+        => !string.IsNullOrWhiteSpace(left)
+            && string.Equals(left.Trim(), right, StringComparison.OrdinalIgnoreCase);
 
     private sealed record PendingField(
         CanonicalInquiry? Inquiry,
