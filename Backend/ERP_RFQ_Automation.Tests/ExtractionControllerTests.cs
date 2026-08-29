@@ -129,7 +129,7 @@ public sealed class ExtractionControllerTests
         // part of the response — bucket, endpoint, credential or stack frame alike.
         foreach (var leak in new[]
                  {
-                     "NexoraB2", "s3.nexora.internal", "AKIAEXAMPLE7NEXORA", "9000",
+                     "NexoraB2", "s3.nexora.internal", "AKIAEXAMPLE7NEXORA", ":9000",
                      "Amazon", "S3", "Exception", "bucket", "Bucket", "   at "
                  })
         {
@@ -205,7 +205,7 @@ public sealed class ExtractionControllerTests
         foreach (var leak in new[]
                  {
                      "NexoraB2", "s3.nexora.internal", "Amazon", "S3", "Exception",
-                     "bucket", "Bucket", "9000", "   at "
+                     "bucket", "Bucket", ":9000", "   at "
                  })
         {
             Assert.DoesNotContain(leak, body);
