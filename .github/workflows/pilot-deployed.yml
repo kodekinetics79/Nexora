@@ -1,0 +1,71 @@
+name: Deployed pilot verification (read-only)
+
+# This is a post-deployment gate, not a PR check: running it before both hosts
+# deploy would test yesterday's code. Missing configuration FAILS, never skips.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Full main SHA confirmed deployed on Vercel and Render
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployed-pilot-verification
+  cancel-in-progress: false
+
+jobs:
+  deployed-pilot:
+    name: Deployed runtime and three-role access (not full journey certification)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pilot-certification
+    env:
+      PILOT_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      PILOT_FRONTEND_URL: https://nexora1-ai.vercel.app
+      PILOT_API_URL: https://nexora-fyjw.onrender.com
+      PILOT_MANAGER_EMAIL: ${{ secrets.PILOT_MANAGER_EMAIL }}
+      PILOT_MANAGER_PASSWORD: ${{ secrets.PILOT_MANAGER_PASSWORD }}
+      PILOT_MANAGER_BUSINESS_UNIT_ID: ${{ vars.PILOT_BUSINESS_UNIT_ID }}
+      PILOT_MANAGER_ROLE_NAME: ${{ vars.PILOT_MANAGER_ROLE_NAME }}
+      PILOT_EDITOR_EMAIL: ${{ secrets.PILOT_EDITOR_EMAIL }}
+      PILOT_EDITOR_PASSWORD: ${{ secrets.PILOT_EDITOR_PASSWORD }}
+      PILOT_EDITOR_BUSINESS_UNIT_ID: ${{ vars.PILOT_BUSINESS_UNIT_ID }}
+      PILOT_EDITOR_ROLE_NAME: ${{ vars.PILOT_EDITOR_ROLE_NAME }}
+      PILOT_DENIED_EMAIL: ${{ secrets.PILOT_DENIED_EMAIL }}
+      PILOT_DENIED_PASSWORD: ${{ secrets.PILOT_DENIED_PASSWORD }}
+      PILOT_DENIED_BUSINESS_UNIT_ID: ${{ vars.PILOT_BUSINESS_UNIT_ID }}
+      PILOT_DENIED_ROLE_NAME: ${{ vars.PILOT_DENIED_ROLE_NAME }}
+    steps:
+      - name: Reject non-main dispatches rather than reporting a skipped green job
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require the checkout to match the release being certified
+        run: test "$(git rev-parse HEAD)" = "$PILOT_EXPECTED_SHA"
+      - name: Require all role settings before browser installation or requests
+        run: node scripts/deploy/verify-pilot-runtime.mjs --preflight --roles
+      - name: Verify release identity and runtime dependencies
+        run: node scripts/deploy/verify-pilot-runtime.mjs
+      - run: npm ci
+        working-directory: Frontend
+      - run: npm run e2e:install
+        working-directory: Frontend
+      - name: Verify login and three-role read boundaries without business writes
+        run: npm run e2e:deployed
+        working-directory: Frontend
+      - name: Retain only sanitised runtime and test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-pilot-results
+          retention-days: 7
+          path: |
+            Frontend/test-results/deployed-pilot/runtime.json
+            Frontend/test-results/deployed-pilot-browser/results.json
+          if-no-files-found: ignore

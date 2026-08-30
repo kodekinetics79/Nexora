@@ -121,7 +121,7 @@ export default defineConfig({
       name: 'desktop-chromium',
       use: { ...devices['Desktop Chrome'], storageState: `${authDir}/manager.json` },
       dependencies: ['auth-setup'],
-      testIgnore: [/auth\.setup\.ts/, /platform-admin-visible-certification\.spec\.ts/],
+      testIgnore: [/auth\.setup\.ts/, /platform-admin-visible-certification\.spec\.ts/, /deployed-pilot\.spec\.ts/],
     },
     {
       name: 'mobile-chromium',
@@ -131,7 +131,7 @@ export default defineConfig({
         storageState: `${authDir}/manager.json`,
       },
       dependencies: ['auth-setup'],
-      testIgnore: [/auth\.setup\.ts/, /platform-admin-visible-certification\.spec\.ts/],
+      testIgnore: [/auth\.setup\.ts/, /platform-admin-visible-certification\.spec\.ts/, /deployed-pilot\.spec\.ts/],
     },
     ...(visibleGoogleChromeRequested ? [{
         name: 'visible-google-chrome',

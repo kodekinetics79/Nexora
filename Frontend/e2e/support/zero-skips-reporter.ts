@@ -14,6 +14,11 @@ const EXPECTED_TESTS = 41;
 export default class ZeroSkipsReporter implements Reporter {
   private discovered = 0;
   private skipped: string[] = [];
+  private expectedTests: number | undefined;
+
+  constructor(options?: { expectedTests?: number }) {
+    this.expectedTests = options?.expectedTests;
+  }
 
   onBegin(_config: unknown, suite: Suite): void {
     this.discovered = suite.allTests().length;
@@ -24,11 +29,11 @@ export default class ZeroSkipsReporter implements Reporter {
   }
 
   onEnd(result: FullResult): { status: FullResult['status'] } | void {
-    const enforceFullSuite = process.env.E2E_FULL_ACCEPTANCE === 'true';
-    if ((!enforceFullSuite || this.discovered === EXPECTED_TESTS) && this.skipped.length === 0) return;
+    const expected = this.expectedTests ?? (process.env.E2E_FULL_ACCEPTANCE === 'true' ? EXPECTED_TESTS : undefined);
+    if ((expected === undefined || this.discovered === expected) && this.skipped.length === 0) return;
     const reasons = [
-      enforceFullSuite && this.discovered !== EXPECTED_TESTS
-        ? `expected ${EXPECTED_TESTS} discovered tests, found ${this.discovered}`
+      expected !== undefined && this.discovered !== expected
+        ? `expected ${expected} discovered tests, found ${this.discovered}`
         : null,
       this.skipped.length > 0 ? `skipped tests: ${this.skipped.join('; ')}` : null,
     ].filter(Boolean).join(' | ');

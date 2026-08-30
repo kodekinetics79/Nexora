@@ -1,4 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
+import { requireDisposableTargets } from './e2e/support/acceptance-boundary.mjs';
+
+requireDisposableTargets();
 
 export default defineConfig({
   testDir: './e2e',
