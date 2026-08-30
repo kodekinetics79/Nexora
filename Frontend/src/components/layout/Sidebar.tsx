@@ -20,7 +20,6 @@ import {
   FiberManualRecord as BulletIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
-import { SETUP_ENTRIES } from '../../pages/Setup/setupCatalog';
 import {
   ADVANCED_GROUPS,
   ALL_SCREENS_ENTRY,
@@ -130,22 +129,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
     onNavigate?.();
   };
 
-  /**
-   * Setup keeps its rail row when the user can open at least one screen inside it. The rule reads
-   * from the setup catalogue — one register, no second list of setup screens to forget to update.
-   */
-  const setupIsReachable = useMemo(
-    () => SETUP_ENTRIES.some((entry) => !entry.moduleName || hasPermission(entry.moduleName)),
-    [hasPermission],
-  );
-
   const primaryRows = useMemo(
-    () =>
-      PRIMARY_NAV.filter((item) => {
-        if (item.key === 'setup') return setupIsReachable;
-        return !item.moduleName || hasPermission(item.moduleName);
-      }),
-    [hasPermission, setupIsReachable],
+    () => PRIMARY_NAV.filter((item) => !item.moduleName || hasPermission(item.moduleName)),
+    [hasPermission],
   );
   // Overlapping legacy prefixes are resolved by journey order. This gives every route exactly one
   // primary owner (Inbox before Leads for intake), and keeps duplicate directory entries secondary.
