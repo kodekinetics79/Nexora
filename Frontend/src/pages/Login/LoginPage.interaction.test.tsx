@@ -87,6 +87,37 @@ beforeEach(() => {
 });
 
 describe('LoginPage accessible interaction contract', () => {
+  it.each([
+    [403, { type: 'https://nexora.invalid/problems/tenant-not-activated' }, /workspace is not active yet/i],
+    [403, { type: 'https://nexora.invalid/problems/tenant-suspended' }, /organization’s access is restricted/i],
+    [403, { title: 'Forbidden' }, /sign-in is not permitted/i],
+    [401, { error: 'Invalid email or password.' }, /email or password was not accepted/i],
+    [429, { error: 'Too many failed sign-in attempts.' }, /too many sign-in attempts/i],
+    [503, { type: 'https://nexora.invalid/problems/tenant-access-unresolvable' }, /could not confirm your workspace status/i],
+    [502, '<html>upstream unavailable</html>', /sign-in could not be completed/i],
+    [500, { error: { stack: 'Npgsql.PostgresException' } }, /sign-in could not be completed/i],
+  ])('shows the correct sign-in recovery for status %s and %j', async (status, data, expected) => {
+    mocks.post.mockRejectedValueOnce({ response: { status, data } });
+    renderLogin();
+    enterCredentials();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(expected);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/Invalid credentials|Npgsql|<html>|\[object Object\]/i);
+    expect(mocks.setToken).not.toHaveBeenCalled();
+    expect(mocks.getMyPermissions).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+  });
+
+  it('does not call a network outage a credential failure', async () => {
+    mocks.post.mockRejectedValueOnce({ code: 'ERR_NETWORK', request: {} });
+    renderLogin();
+    enterCredentials();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not reach the service/i);
+    expect(mocks.setToken).not.toHaveBeenCalled();
+  });
+
   it('names the credential fields, controls, recovery paths, and password reveal state', () => {
     renderLogin();
 

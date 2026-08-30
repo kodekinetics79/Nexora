@@ -145,7 +145,7 @@ interface Props {
 /**
  * Watches one durable provisioning attempt and lets an operator repair it.
  *
- * <p>The whole reason this screen exists is that provisioning commits eight separate
+ * <p>The whole reason this screen exists is that provisioning commits separate
  * pieces of a customer's workspace, and a failure at step six leaves five of them
  * standing. A spinner cannot say which; this can.</p>
  */
@@ -225,7 +225,7 @@ export default function ProvisioningProgressDialog({ executionId, submission, on
         <DialogTitle id="provisioning-progress-title" sx={{ fontWeight: 800 }}>
           Provisioning {execution?.name ?? 'workspace'}
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 500, mt: 0.5 }}>
-            Eight steps, committed one at a time. You can close this and come back — the attempt is
+            {execution ? `${execution.totalStepCount} steps` : 'Provisioning steps'}, committed one at a time. You can close this and come back — the attempt is
             durable and keeps running.
           </Typography>
         </DialogTitle>
@@ -310,12 +310,14 @@ export default function ProvisioningProgressDialog({ executionId, submission, on
               {execution.state === 'Succeeded' && (
                 <Alert severity="info" sx={{ borderRadius: 2 }}>
                   <AlertTitle sx={{ fontWeight: 800 }}>Provisioned — not yet active</AlertTitle>
-                  Every step committed, and {execution.name} now exists. It is in{' '}
+                  Provisioning completed, and {execution.name} now exists. It is in{' '}
                   <strong>Provisioning</strong>, which denies tenant access by design, and it stays there
                   until an Owner activates it.
-                  {submission?.generatedPassword
+                  {execution.adminActivation === 'password'
                     ? ` ${execution.adminEmail} has a password but cannot sign in until the tenant is active.`
-                    : ` ${execution.adminEmail} has been invited and must redeem the link before they can sign in — that is one of the activation controls.`}
+                    : execution.adminActivation === 'invite'
+                      ? ` ${execution.adminEmail} uses activation-link sign-in and must redeem the link before they can sign in — that is one of the activation controls.`
+                      : ` Check the administrator's credential status on the Activation tab.`}
                   {' '}Open the tenant's <strong>Activation</strong> tab to see what is still outstanding.
                 </Alert>
               )}

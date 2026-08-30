@@ -122,5 +122,64 @@ historical incidents into client onboarding.
 
 ## Release verdict
 
+### Authenticated operator continuation — 2026-08-30, 21:23–21:47 UTC
+
+- PR **#137** merged after all **24** reported checks passed, with unchanged head
+  `228553385a180870a43a6242e126cce48a6d398d`. Merge commit:
+  **`3cdf249e6a606843b76bcedb40d070317cce9549`**.
+- Vercel production deployment `dpl_6BD7v61ZewFvwVUt7nTL4xj6Lft8` is **READY**, identifies
+  that merge SHA and owns `nexora1-ai.vercel.app`.
+- Render is configured **After CI Checks Pass**. Main run `33336279319` completed
+  **successfully** at this checkpoint, including backend, commercial operations, all five
+  frontend shards and the governed Lead-to-RFQ gate. The last Render identity probe reports
+  `e6aa2ddc948928f2e5887b9af3db79464e8e2a01`. Matching-host release certification is pending,
+  not a demonstrated failed deployment. No manual deployment bypass was used.
+- The existing Platform Owner session was successfully claimed and used. Through the normal
+  production wizard, provisioned an **internal, non-billable QA tenant**:
+  tenant **4**, business unit **8**, slug **`pilot-certification-20260830`**, name
+  **Nexora Pilot Certification 20260830**. Provisioning correlation
+  `3c2e4018cc9545ea9a422db8e78e676f`: eight steps succeeded and the invitation step was
+  deliberately skipped. The new administrator uses a password, not an email invitation.
+  No real customer/supplier contacts or financial postings were created.
+- Enabled the nine scoped capabilities through the Modules screen: RFQs, Quotes, Orders,
+  Procurement, Inventory, OCR, Email intake, Supplier search and Exports. Existing tenants
+  were not modified; no mailbox was connected and no outbound email was sent.
+- The new tenant remains **Provisioning**, under the production activation profile. Blocking
+  controls include legal identity, plan, billing recipient, rate card, approved terms, typed
+  hard limits, data residency/isolation with external evidence, and privileged MFA policy
+  certification. No fabricated attestation or DEMO/LOCAL_TEST downgrade was applied.
+- At **21:32:52 UTC** and **21:34:45 UTC**, Render logs confirmed the new administrator's
+  login was denied because business unit **8** is **Provisioning**. The page instead said
+  **Invalid credentials**. This is a confirmed response-to-UI defect, not proof of a bad
+  password or a working tenant journey.
+
+### Repairs from that live continuation
+
+- Login now maps canonical problem types and HTTP statuses to actionable, non-sensitive
+  messages: inactive workspace, restricted access, wrong credentials, throttling, unresolved
+  tenant status and transport/service failures. Failed login still establishes no session.
+- Provisioning completion reads the server's activation method, not whether a generated
+  password happens to be present in the current dialog. Supplied-password and reopened
+  executions no longer invent an invitation. Unknown methods give a safe next step. Step
+  count is server-driven rather than hard-coded to eight.
+- Verification: **75 tests passed across five files**, focused ESLint passed, production build
+  and bundle budget passed. Four provisioning regressions failed before the repair and passed
+  after it. The original authentication/navigation contracts remain covered.
+- The actual changed React components were viewed in an isolated loopback-only synthetic
+  preview. Desktop sign-in displayed the corrected activation message and an enabled retry
+  button; desktop provisioning displayed the password-specific instruction and nine-step count.
+  A 390px iframe viewport check showed readable provisioning copy and the sign-in layout.
+  This was a component visual check, not authenticated production acceptance or a full mobile
+  sign-in scenario. Temporary preview files were removed; no preview code ships.
+- Impeccable's clarification checks kept the change to truthful state/recovery messaging;
+  both changed UI files passed its detector. React review found no new effects, auth persistence,
+  layout changes, or broadened access. Existing design-sidecar freshness warnings were not
+  repaired in this scope.
+
+**Next dependency:** complete and evidence the new tenant's production activation prerequisites,
+then provision three distinct pilot personas without external invitations and run their deployed
+access checks. The authenticated fresh-tenant commercial journey and isolated restore rehearsal
+remain unexecuted. Local message fixes do not close those gates.
+
 **Independent-pilot approval remains pending the unverified gates above.** Runtime checks alone,
 the new read-only lane, a build, or an old consultant report cannot grant full approval.

@@ -36,6 +36,7 @@ import userService, { type MePermissionsResponse } from '../../api/services/user
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
 import { INBOX_ROOT } from '../../components/layout/navCatalog';
+import { loginErrorMessage } from './loginError';
 
 /** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
 const LOGIN_ERROR_ID = 'login-error';
@@ -359,8 +360,8 @@ const LoginPage: React.FC = () => {
         entitlements: me.entitlements ?? [],
       });
       navigate(landingRouteFor(me.isSuperAdmin === true, me.permissions ?? []));
-    } catch (err: any) {
-      setError(err.response?.data?.error || err.response?.data?.message || "Invalid credentials");
+    } catch (err: unknown) {
+      setError(loginErrorMessage(err));
     } finally {
       setLoading(false);
     }
