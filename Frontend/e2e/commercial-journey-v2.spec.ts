@@ -1255,18 +1255,22 @@ test('39 platform owner console uses authenticated persisted operational data', 
   await page.getByRole('button', { name: 'Exit impersonation', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible();
 
-  tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Acceptance' });
+  // Exercise destructive lifecycle controls against the seeded secondary tenant, whose own
+  // cross-tenant scenario has already finished. The newly provisioned tenant is still in its
+  // honest Provisioning state here, while suspending the primary acceptance tenant makes every
+  // later commercial login fail.
+  tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Other Tenant' });
   await tenantRow.getByRole('button', { name: 'Suspend tenant', exact: true }).click();
   await page.getByLabel('Audit reason').fill('V1 acceptance lifecycle verification');
   await page.getByRole('button', { name: 'Suspend', exact: true }).click();
   await expect(tenantRow.getByText('suspended', { exact: true })).toBeVisible();
 
-  tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Acceptance' });
+  tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Other Tenant' });
   await tenantRow.getByRole('button', { name: 'Resume tenant', exact: true }).click();
   await page.getByLabel('Audit reason').fill('V1 acceptance lifecycle restoration');
   const refusedResume = page.waitForResponse(
     (response) => response.request().method() === 'POST'
-      && response.url().endsWith('/api/platform/tenants/1/resume'),
+      && /\/api\/platform\/tenants\/\d+\/resume$/.test(response.url()),
   );
   await page.getByRole('button', { name: 'Resume', exact: true }).click();
   expect((await refusedResume).status()).toBe(409);
@@ -1289,7 +1293,7 @@ test('39 platform owner console uses authenticated persisted operational data', 
   await expect(page.getByText('tenant.provision', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('impersonate.issue', { exact: true }).first()).toBeVisible();
   expect(failures).toEqual([
-    expect.stringMatching(/^409 .*\/api\/platform\/tenants\/1\/resume$/),
+    expect.stringMatching(/^409 .*\/api\/platform\/tenants\/\d+\/resume$/),
   ]);
 });
 
