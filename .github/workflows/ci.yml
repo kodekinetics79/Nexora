@@ -85,6 +85,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate deployment contract
         run: ./scripts/deploy/verify-deployment-contract.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify acceptance safety boundaries
+        run: node --test Frontend/scripts/acceptance-boundary.test.mjs
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -93,10 +98,12 @@ jobs:
               - 'Backend/**'
               - 'scripts/e2e/**'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/pilot-deployed.yml'
             frontend:
               - 'Frontend/**'
               - 'scripts/e2e/**'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/pilot-deployed.yml'
 
   backend:
     name: Backend (.NET 8)
@@ -239,18 +246,20 @@ jobs:
       - name: Build (tsc + vite)
         run: npm run build
 
+      - name: Type-check deployed acceptance without credentials or network requests
+        run: npm run typecheck:deployed
+
       - name: Accessibility lint
         run: npm run lint:a11y
 
       - name: List browser acceptance suite
         run: npm run e2e:list
 
-      # THE ONE BROWSER SUITE THAT CAN ACTUALLY RUN HERE.
+      # Fast fixture-backed accessibility coverage, in addition to the real API lanes below.
       #
-      # Everything below is gated on E2E_ACCEPTANCE_ENABLED and has therefore never executed, so
-      # this repository has had ZERO browser coverage. The a11y config does not need that gate:
-      # it starts its own fixture API and dev server, needs no secrets, no deployed environment
-      # and no credentials, and finishes in about a minute.
+      # The accessibility lane uses its own fixture API. The pilot-gate and enterprise-gate
+      # below exercise the real API and PostgreSQL using disposable data. Deployed-role checks
+      # are separate in pilot-deployed.yml; a green PR is not live release certification.
       #
       # It is not a substitute for the authenticated journey. It is the part that can be turned on
       # today. It earns its place: collapsing the rail from 17 rows to 5 moved 64 destinations
@@ -264,79 +273,9 @@ jobs:
         run: npm run e2e:a11y
 
 
-      # SAY OUT LOUD WHETHER THE ACCEPTANCE SUITE IS ACTUALLY GUARDING ANYTHING.
-      #
-      # Everything below this point is gated on `vars.E2E_ACCEPTANCE_ENABLED == 'true'`. When the
-      # variable is unset the steps report SKIPPED, the job goes green, and the run is
-      # indistinguishable from one where the authenticated journey passed. As of this commit the
-      # repository has NO Actions variables and NO Actions secrets at all — `gh variable list` and
-      # `gh secret list` both return nothing — so the gate is OFF and every E2E_* reference in
-      # this file resolves to an empty string. The suite has never run here.
-      #
-      # This step does not turn it on; it refuses to let it be silently off. It also fails fast on
-      # the halfway state, which is the genuinely expensive one: flip the variable to true without
-      # populating the credentials and Playwright starts, navigates to the default
-      # http://127.0.0.1:5173 with nothing serving it, and reports a timeout that looks like a
-      # broken application rather than missing configuration.
-      - name: Report browser acceptance gate
-        env:
-          ENABLED: ${{ vars.E2E_ACCEPTANCE_ENABLED }}
-          BASE_URL: ${{ vars.E2E_BASE_URL }}
-          MANAGER_EMAIL: ${{ secrets.E2E_MANAGER_EMAIL }}
-          MANAGER_PASSWORD: ${{ secrets.E2E_MANAGER_PASSWORD }}
-          EDITOR_EMAIL: ${{ secrets.E2E_EDITOR_EMAIL }}
-          DENIED_EMAIL: ${{ secrets.E2E_DENIED_EMAIL }}
-        run: |
-          if [ "$ENABLED" != "true" ]; then
-            echo "::warning title=Browser acceptance suite is DISABLED::vars.E2E_ACCEPTANCE_ENABLED is '${ENABLED:-<unset>}'. The authenticated journey did NOT run. This job being green says the frontend COMPILES, nothing more. To enable: set the repository variable E2E_ACCEPTANCE_ENABLED=true plus E2E_BASE_URL and the E2E_* credentials."
-            exit 0
-          fi
-          missing=""
-          for name in BASE_URL MANAGER_EMAIL MANAGER_PASSWORD EDITOR_EMAIL DENIED_EMAIL; do
-            [ -n "${!name}" ] || missing="$missing E2E_$name"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error title=Acceptance suite enabled but not configured::Missing:$missing. Playwright would fail against the default localhost base URL with a timeout that looks like an application fault. Populate these or set E2E_ACCEPTANCE_ENABLED=false."
-            exit 1
-          fi
-          echo "Browser acceptance ENABLED against $BASE_URL."
-
-      - name: Install Playwright Chromium
-        if: ${{ vars.E2E_ACCEPTANCE_ENABLED == 'true' }}
-        run: npm run e2e:install
-
-      - name: Run authenticated browser acceptance
-        if: ${{ vars.E2E_ACCEPTANCE_ENABLED == 'true' }}
-        run: npm run e2e:acceptance
-        env:
-          E2E_ACCEPTANCE_MODE: 'true'
-          E2E_FIXTURE_MODE: 'false'
-          E2E_SKIP_WEB_SERVER: 'true'
-          E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
-          E2E_MANAGER_EMAIL: ${{ secrets.E2E_MANAGER_EMAIL }}
-          E2E_MANAGER_PASSWORD: ${{ secrets.E2E_MANAGER_PASSWORD }}
-          E2E_MANAGER_BUSINESS_UNIT_ID: ${{ vars.E2E_MANAGER_BUSINESS_UNIT_ID }}
-          E2E_EDITOR_EMAIL: ${{ secrets.E2E_EDITOR_EMAIL }}
-          E2E_EDITOR_PASSWORD: ${{ secrets.E2E_EDITOR_PASSWORD }}
-          E2E_EDITOR_BUSINESS_UNIT_ID: ${{ vars.E2E_EDITOR_BUSINESS_UNIT_ID }}
-          E2E_DENIED_EMAIL: ${{ secrets.E2E_DENIED_EMAIL }}
-          E2E_DENIED_PASSWORD: ${{ secrets.E2E_DENIED_PASSWORD }}
-          E2E_DENIED_BUSINESS_UNIT_ID: ${{ vars.E2E_DENIED_BUSINESS_UNIT_ID }}
-          E2E_BATCH_ID: ${{ vars.E2E_BATCH_ID }}
-          E2E_UPLOAD_FILE: ${{ vars.E2E_UPLOAD_FILE }}
-          E2E_LEAD_ID: ${{ vars.E2E_LEAD_ID }}
-          E2E_REVISION_LEAD_ID: ${{ vars.E2E_REVISION_LEAD_ID }}
-          E2E_RFQ_ID: ${{ vars.E2E_RFQ_ID }}
-          E2E_QUOTE_ID: ${{ vars.E2E_QUOTE_ID }}
-          E2E_NEXORA_SERIAL: ${{ vars.E2E_NEXORA_SERIAL }}
-          E2E_CUSTOMER_NAME: ${{ vars.E2E_CUSTOMER_NAME }}
-          E2E_DASHBOARD_KPI_LABEL: ${{ vars.E2E_DASHBOARD_KPI_LABEL }}
-          E2E_DASHBOARD_KPI_VALUE: ${{ vars.E2E_DASHBOARD_KPI_VALUE }}
-          E2E_DASHBOARD_DRILLDOWN_COUNT: ${{ vars.E2E_DASHBOARD_DRILLDOWN_COUNT }}
-          E2E_EXPECTED_NEW_LEADS: ${{ vars.E2E_EXPECTED_NEW_LEADS }}
-          E2E_EXPECTED_EXACT_DUPLICATES: ${{ vars.E2E_EXPECTED_EXACT_DUPLICATES }}
-          E2E_EXPECTED_REVISIONS: ${{ vars.E2E_EXPECTED_REVISIONS }}
-          E2E_EXPECTED_POSSIBLE_MATCHES: ${{ vars.E2E_EXPECTED_POSSIBLE_MATCHES }}
+      # Deployed credentials must never be handed to the disposable mutation suite.
+      # Live verification has its own main-only, post-deploy workflow (pilot-deployed.yml).
+      # Its missing configuration is a failure, not a quietly skipped step in a green PR.
 
       - name: Upload Playwright artifacts
         if: ${{ always() }}
