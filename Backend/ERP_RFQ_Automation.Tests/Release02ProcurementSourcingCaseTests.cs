@@ -54,6 +54,67 @@ public sealed class Release02ProcurementSourcingCaseTests
     }
 
     [Fact]
+    public async Task Unresolved_product_must_be_decided_before_supplier_sourcing()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        await using (var setup = fixture.Context())
+        {
+            var line = await setup.Rfqitems.SingleAsync(x => x.Id == fixture.RfqItemId);
+            line.ProductId = null;
+            await setup.SaveChangesAsync();
+        }
+
+        var error = await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
+            service.CreateOrOpenSourcingCaseAsync(CreateCase(fixture, "unresolved-product"))));
+
+        Assert.Contains("Resolve this RFQ line", error.Message, StringComparison.Ordinal);
+        await using var verify = fixture.Context();
+        Assert.Empty(await verify.SourcingCases.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Human_product_correction_reconciles_the_uncontacted_case_in_place()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var original = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            CreateCase(fixture, "product-before-review")));
+        const long correctedProductId = 97_500;
+        await using (var setup = fixture.Context())
+        {
+            setup.Products.Add(new Product
+            {
+                Id = correctedProductId,
+                Buid = fixture.BusinessUnitId,
+                PartNo = "CORRECTED-PART",
+                ProductName = "Corrected QA Product",
+                WarehouseId = ProcurementTestData.Warehouse,
+                QtyOnHand = 0,
+                ReorderPoint = 0,
+                PreferredSupplierId = ProcurementTestData.Supplier,
+                IsActive = true,
+                CreatedBy = "qa",
+                CreatedOn = DateTime.UtcNow
+            });
+            var line = await setup.Rfqitems.SingleAsync(x => x.Id == fixture.RfqItemId);
+            line.ProductId = correctedProductId;
+            await setup.SaveChangesAsync();
+        }
+
+        var reconciled = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            CreateCase(fixture, "product-after-review")));
+
+        Assert.Equal(original.Id, reconciled.Id);
+        Assert.Equal(correctedProductId, reconciled.ProductId);
+        Assert.Contains(reconciled.Candidates, x => x.SupplierId == ProcurementTestData.Supplier);
+        await using var verify = fixture.Context();
+        Assert.Single(await verify.SourcingCases.ToListAsync());
+        Assert.Contains(await verify.ProcurementEvents.ToListAsync(), x =>
+            x.AggregateId == original.Id && x.EventType == "SOURCING_CASE_PRODUCT_RECONCILED");
+    }
+
+    [Fact]
     public async Task Prior_supplier_quote_becomes_candidate_without_copying_commercial_price_into_evidence()
     {
         using var fixture = new ProcurementScenario();

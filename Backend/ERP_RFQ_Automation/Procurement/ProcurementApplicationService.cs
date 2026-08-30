@@ -93,6 +93,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var item = await _db.Rfqitems.SingleOrDefaultAsync(x => x.Id == command.RfqItemId
                 && x.Rfqid == command.RfqId, ct)
                 ?? throw new ProcurementValidationException("RFQ line was not found in the authenticated tenant.");
+            if (!item.ProductId.HasValue)
+                throw new ProcurementConflictException(
+                    "Resolve this RFQ line to a tenant catalogue product before opening Supplier sourcing.");
             var shortfall = await GetNetSourcingRequirementAsync(command.BusinessUnitId, item, ct);
             if (shortfall <= 0)
                 throw new ProcurementConflictException("This RFQ line is fully covered and does not require a Sourcing Case.");
@@ -153,6 +156,57 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 var existingView = await ToSourcingCaseViewAsync(existingDecision, ct);
                 await tx.CommitAsync(ct);
                 return existingView;
+            }
+
+            // A case may have been opened before a reviewer supplied the product identity. Reuse
+            // that uncontacted case instead of leaving a misleading UNKNOWN case beside a second
+            // case for the same immutable demand line. Once outreach exists, rebinding is forbidden
+            // by the RFQ command and requires an explicit cancellation/reissue workflow.
+            var rebindable = await _db.SourcingCases.Include(x => x.Candidates)
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId
+                    && x.CommercialDemandLineId == demandLine.Id
+                    && x.ProductId != item.ProductId
+                    && (x.Status == SourcingCaseStatuses.Draft
+                        || x.Status == SourcingCaseStatuses.InternalSearch
+                        || x.Status == SourcingCaseStatuses.DiscoveryRequired)
+                    && !_db.Set<SupplierSolicitation>().Any(s => s.BusinessUnitId == command.BusinessUnitId
+                        && s.SourcingCaseId == x.Id))
+                .OrderByDescending(x => x.UpdatedOn)
+                .ThenByDescending(x => x.Id)
+                .FirstOrDefaultAsync(ct);
+            if (rebindable is not null)
+            {
+                var priorProductId = rebindable.ProductId;
+                _db.SourcingCaseCandidates.RemoveRange(rebindable.Candidates);
+                rebindable.Candidates.Clear();
+                rebindable.ProductId = item.ProductId;
+                rebindable.RequestedQuantity = requested;
+                rebindable.StockQuantity = stock;
+                rebindable.UnfulfilledQuantity = unfulfilled;
+                rebindable.RequiredOn = item.RequiredDesiredDate;
+                rebindable.SearchLimit = command.SearchLimit;
+                rebindable.ShortageDecisionKey = shortageDecisionKey;
+                rebindable.Version++;
+                rebindable.UpdatedOn = now;
+                rebindable.UpdatedBy = command.Actor.Trim();
+                await RefreshCandidatesAsync(rebindable, command.SearchLimit, now, ct);
+                rebindable.Status = rebindable.Candidates.Count == 0
+                    ? SourcingCaseStatuses.DiscoveryRequired : SourcingCaseStatuses.InternalSearch;
+                rebindable.NextAction = rebindable.Candidates.Count == 0
+                    ? "Review discovery options" : "Select suppliers for outreach";
+                AddEvent(command.BusinessUnitId, "SourcingCase", rebindable.Id, rebindable.Version,
+                    "SOURCING_CASE_PRODUCT_RECONCILED", command.Actor, command.CorrelationId,
+                    command.IdempotencyKey, JsonSerializer.Serialize(new
+                    {
+                        PriorProductId = priorProductId,
+                        ProductId = item.ProductId,
+                        CandidateCount = rebindable.Candidates.Count,
+                        rebindable.ShortageDecisionKey
+                    }), now);
+                await _db.SaveChangesAsync(ct);
+                var reboundView = await ToSourcingCaseViewAsync(rebindable, ct);
+                await tx.CommitAsync(ct);
+                return reboundView;
             }
 
             var sourcingCase = new SourcingCase

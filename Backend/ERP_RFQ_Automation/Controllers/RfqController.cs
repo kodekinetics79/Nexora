@@ -12,6 +12,8 @@ using System.Security.Claims;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
+using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.Agent.Models;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -228,9 +230,40 @@ namespace ERP_RFQ_Automation.Controllers
                 return BadRequest(Problem(StatusCodes.Status400BadRequest, "Unknown product",
                     "The selected product was not found in this tenant."));
 
+            if (string.IsNullOrWhiteSpace(request.Reason))
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Resolution reason required",
+                    "Explain why this catalogue product is the correct identity for the customer line."));
+
+            // A product correction before outreach is ordinary. After a numbered Supplier RFQ has
+            // been prepared it would silently change what an already-addressed document was asking
+            // for, so the correction must be handled as an explicit cancellation/reissue instead.
+            var sourcingCaseIds = await _context.SourcingCases.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == id && x.RfqItemId == lineId)
+                .Select(x => x.Id)
+                .ToArrayAsync(ct);
+            if (sourcingCaseIds.Length > 0 && await _context.Set<SupplierSolicitation>().AsNoTracking()
+                    .AnyAsync(x => x.BusinessUnitId == businessUnitId
+                                   && x.SourcingCaseId.HasValue
+                                   && sourcingCaseIds.Contains(x.SourcingCaseId.Value), ct))
+                return Conflict(Problem(StatusCodes.Status409Conflict, "Supplier outreach already prepared",
+                    "This line cannot be rebound after Supplier outreach preparation. Cancel and reissue the governed solicitation first."));
+
+            var normalizedReason = request.Reason.Trim();
+            if (line.ProductId == request.ProductId && line.IsProductHumanResolved
+                && string.Equals(line.ProductResolutionReason, normalizedReason, StringComparison.Ordinal))
+                return Ok(new
+                {
+                    lineId = line.Id,
+                    productId = line.ProductId,
+                    productResolvedBy = line.ProductResolvedBy,
+                    productResolvedOn = line.ProductResolvedOn,
+                    productResolutionReason = line.ProductResolutionReason,
+                    replayed = true
+                });
+
             try
             {
-                line.ResolveProduct(request.ProductId, request.Reason, actor!, DateTime.UtcNow);
+                line.ResolveProduct(request.ProductId, normalizedReason, actor!, DateTime.UtcNow);
                 await _context.SaveChangesAsync(ct);
                 return Ok(new
                 {
@@ -238,7 +271,8 @@ namespace ERP_RFQ_Automation.Controllers
                     productId = line.ProductId,
                     productResolvedBy = line.ProductResolvedBy,
                     productResolvedOn = line.ProductResolvedOn,
-                    productResolutionReason = line.ProductResolutionReason
+                    productResolutionReason = line.ProductResolutionReason,
+                    replayed = false
                 });
             }
             catch (ArgumentException ex)

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import ViewRFQPage, { presentRfqExtraFields } from './ViewRFQPage';
@@ -11,6 +11,8 @@ const getRfq = vi.fn();
 const getWorkbench = vi.fn();
 const getRfqIntelligence = vi.fn();
 const getRfqLineResolutions = vi.fn();
+const resolveLineProduct = vi.fn();
+const getProducts = vi.fn();
 const testAccess = vi.hoisted(() => ({
   navigate: vi.fn(),
   denied: new Set<string>(),
@@ -25,7 +27,11 @@ vi.mock('../../../api/services/rfqService', () => ({
     getById: (...args: unknown[]) => getRfq(...args),
     approve: vi.fn(),
     prepareQuoteDraft: vi.fn(),
+    resolveLineProduct: (...args: unknown[]) => resolveLineProduct(...args),
   },
+}));
+vi.mock('../../../api/services/productService', () => ({
+  default: { getAll: (...args: unknown[]) => getProducts(...args) },
 }));
 vi.mock('../../../api/services/procurementService', () => ({
   default: { getWorkbench: (...a: unknown[]) => getWorkbench(...a), createOrOpenSourcingCase: vi.fn() },
@@ -151,6 +157,25 @@ beforeEach(() => {
   getWorkbench.mockResolvedValue(workbench(rfq().rfqitems));
   getRfqIntelligence.mockResolvedValue(intelligence());
   getRfqLineResolutions.mockResolvedValue([]);
+  resolveLineProduct.mockResolvedValue({ lineId: 1, productId: 501, replayed: false });
+  getProducts.mockResolvedValue({
+    items: [{
+      id: 501,
+      partNo: 'VALVE-A',
+      productName: 'Control Valve',
+      qtyOnHand: 0,
+      reorderPoint: 0,
+      isActive: true,
+      createdBy: 'qa',
+      createdOn: '2026-08-01T00:00:00Z',
+      images: [],
+      attachments: [],
+    }],
+    totalItems: 1,
+    pageNumber: 1,
+    pageSize: 20,
+    totalPages: 1,
+  });
 });
 
 describe('ViewRFQPage — cross-module Lead links', () => {
@@ -218,6 +243,42 @@ describe('ViewRFQPage — Sourcing Case authority', () => {
     render(<ViewRFQPage />, { wrapper });
 
     expect(await screen.findByRole('button', { name: 'Create / Open Sourcing Case' })).toBeInTheDocument();
+  });
+});
+
+describe('ViewRFQPage — governed RFQ product resolution', () => {
+  it('does not advertise catalogue mutation without both required grants', async () => {
+    testAccess.denied.add('Products:view');
+    render(<ViewRFQPage />, { wrapper });
+
+    await screen.findAllByText('RFQ-9001');
+    expect(screen.queryByRole('button', { name: 'Resolve catalogue product' })).not.toBeInTheDocument();
+  });
+
+  it('records a human product choice and its evidence reason', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
+    expect(await screen.findByRole('dialog', { name: 'Resolve catalogue product' })).toBeInTheDocument();
+
+    const productInput = screen.getByRole('combobox', { name: 'Tenant catalogue product' });
+    fireEvent.change(productInput, { target: { value: 'VALVE' } });
+    fireEvent.click(await screen.findByRole('option', { name: /VALVE-A/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Resolution reason' }), {
+      target: { value: 'Customer part number VALVE-A matches the approved tenant catalogue record.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save product resolution' }));
+
+    await waitFor(() => {
+      expect(resolveLineProduct).toHaveBeenCalledWith(
+        9001,
+        1,
+        501,
+        'Customer part number VALVE-A matches the approved tenant catalogue record.',
+      );
+    });
   });
 });
 
