@@ -37,17 +37,6 @@ import { INBOX_ROOT } from '../../components/layout/navCatalog';
 
 /** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
 const LOGIN_ERROR_ID = 'login-error';
-const visuallyHidden = {
-  position: 'absolute',
-  width: 1,
-  height: 1,
-  p: 0,
-  m: -1,
-  overflow: 'hidden',
-  clip: 'rect(0 0 0 0)',
-  whiteSpace: 'nowrap',
-  border: 0,
-} as const;
 
 const Container = styled.div<{ mode: string }>`
   min-height: 100vh;
@@ -63,10 +52,10 @@ const LoginShell = styled.div`
   min-height: 100vh;
   min-height: 100dvh;
   display: grid;
-  grid-template-columns: minmax(0, 63%) minmax(420px, 37%);
-  overflow: hidden;
+  grid-template-columns: minmax(420px, 44%) minmax(0, 56%);
+  overflow-x: hidden;
 
-  @media (max-width: 1100px) {
+  @media (max-width: 1024px) {
     grid-template-columns: 1fr;
     overflow: visible;
   }
@@ -74,28 +63,27 @@ const LoginShell = styled.div`
 
 const EvidencePanel = styled.section`
   min-width: 0;
-  padding: clamp(28px, 3vw, 48px);
+  padding: clamp(32px, 4vw, 64px);
   background: #08172a;
   color: #f8fafc;
   display: flex;
   flex-direction: column;
   border-right: 1px solid #283b58;
 
-  @media (max-width: 1100px) {
-    min-height: 290px;
+  @media (max-width: 1024px) {
+    min-height: 252px;
     padding: 24px 32px;
     border-right: 0;
     border-bottom: 1px solid #283b58;
   }
-  @media (max-width: 600px) {
-    min-height: 188px;
-    padding: 16px 20px;
+  @media (max-width: 599.95px) {
+    display: none;
   }
 `;
 
 const FormSection = styled.main<{ mode: string }>`
   min-width: 0;
-  padding: clamp(32px, 3vw, 52px);
+  padding: clamp(32px, 5vw, 72px);
   background: ${props => props.mode === 'dark' ? '#0f1b2d' : '#f8f8f8'};
   color: ${props => props.mode === 'dark' ? '#f8fafc' : '#0b172a'};
   display: flex;
@@ -103,13 +91,13 @@ const FormSection = styled.main<{ mode: string }>`
   justify-content: center;
   position: relative;
 
-  @media (max-width: 1100px) {
-    min-height: calc(100dvh - 290px);
+  @media (max-width: 1024px) {
+    min-height: calc(100dvh - 252px);
   }
 
-  @media (max-width: 600px) {
-    min-height: calc(100dvh - 188px);
-    padding: 28px 20px 24px;
+  @media (max-width: 599.95px) {
+    min-height: auto;
+    padding: 16px 20px 28px;
     justify-content: flex-start;
   }
 `;
@@ -157,22 +145,9 @@ const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) =>
 }));
 
 const evidenceStages = [
-  { title: 'Email captured', date: '29 AUG 2026', time: '09:14' },
-  { title: 'Lead reconciled', date: '29 AUG 2026', time: '09:27' },
-  { title: 'Partial bid approved', date: '29 AUG 2026', time: '11:03' },
-  { title: 'RFQ promoted', date: '29 AUG 2026', time: '14:42' },
-  { title: 'Order fulfilled', date: '29 AUG 2026', time: '16:18' },
-  { title: 'Payment posted', date: '30 AUG 2026', time: '10:31' },
-];
-
-const ledgerRows = [
-  ['Status', 'Complete', 'Complete', 'Complete', 'Complete', 'Complete', 'Complete'],
-  ['Source document', 'Email', 'CRM Lead', 'BID-2026-0017 (Partial)', 'RFQ-2026-0042', 'SO-2026-0156', 'INV-2026-0312 / PAY-2026-0289'],
-  ['Reference', 'MSG-87321', 'LEAD-009871', 'BID-2026-0017-P1', 'RFQ-2026-0042', 'SO-2026-0156', 'INV-2026-0312 / PAY-2026-0289'],
-  ['Approved lines', '1 of 12', '1 of 12', '3 of 12', '6 of 12', '8 of 12', '8 of 12'],
-  ['Amount (USD)', '—', '—', '38,250.00', '76,500.00', '128,750.00', '128,750.00'],
-  ['By', 'System', 'Sarah Mitchell', 'Daniel Archer', 'Daniel Archer', 'Operations bot', 'Finance bot'],
-  ['Notes', 'Inbound email captured', 'Account matched and validated', 'Partial bid approved', 'RFQ created from bid', 'Order fulfilled and goods shipped', 'Payment received and applied'],
+  { title: 'Capture & reconcile', detail: 'Customer email → Canonical Lead' },
+  { title: 'Approve & source', detail: 'Participation → Formal RFQ' },
+  { title: 'Fulfil & collect', detail: 'Order → Delivery evidence → Payment' },
 ];
 
 // --- Auth service typing ---
@@ -354,86 +329,59 @@ const LoginPage: React.FC = () => {
             sx={{
               '& .MuiTypography-root': { color: '#f8fafc !important' },
               '& img': { filter: 'brightness(0) invert(1)' },
-              mb: { xs: 1.5, md: 3 },
+              mb: { xs: 2, md: 6 },
             }}
           >
-            <Branding fontSize={28} logoSize={38} />
+            <Branding fontSize={28} logoSize={38} showTagline={false} />
           </Box>
 
           <Typography
-            component="h2"
+            component="p"
             sx={{
-              maxWidth: 720,
+              maxWidth: 500,
               fontFamily: '"Cambay", "Source Sans 3", sans-serif',
-              fontSize: { xs: 29, sm: 48, lg: 56 },
+              fontSize: { xs: 29, sm: 40, lg: 46 },
               fontWeight: 700,
               lineHeight: 1.08,
               letterSpacing: '-0.025em',
               color: '#f8fafc',
-              mb: { xs: .5, md: 3.5 },
+              mb: { xs: .75, md: 2 },
             }}
           >
-            Every commercial decision, connected to its evidence.
+            From source evidence to collected cash.
           </Typography>
-
-          <Box sx={{ display: { xs: 'none', lg: 'block' } }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, mb: 2 }}>
-              <Typography sx={{ color: '#9fb0c8', fontSize: 14, letterSpacing: '0.13em', textTransform: 'uppercase' }}>
-                Commercial chain-of-custody command ledger
-              </Typography>
-              <Typography sx={{ flexShrink: 0, color: '#b8c9de', fontSize: 12, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
-                Illustrative record
-              </Typography>
-            </Box>
-            <Box
-              aria-label="Illustrative commercial record"
-              sx={{
-                py: 1.25,
-                borderTop: '1px solid #283b58',
-                display: 'grid',
-                gridTemplateColumns: '1fr 1.3fr .8fr 1.1fr 1fr',
-                gap: 2,
-              }}
-            >
-              {[
-                ['Enquiry ID', 'ENQ-2026-DEMO'],
-                ['Account', 'Northbridge Logistics Ltd'],
-                ['Value (USD)', '128,750.00'],
-                ['Created', '29 Aug 2026 · 09:14'],
-                ['Owner', 'Sarah Mitchell'],
-              ].map(([label, value]) => (
-                <Box key={label}>
-                  <Typography sx={{ color: '#9fb0c8', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</Typography>
-                  <Typography
-                    className="tabular-nums"
-                    sx={{
-                      color: '#f8fafc',
-                      fontSize: 16,
-                      fontWeight: 600,
-                      mt: .5,
-                    }}
-                  >
-                    {value}
-                  </Typography>
-                </Box>
-              ))}
-            </Box>
-          </Box>
 
           <Typography
             sx={{
-              display: { xs: 'block', lg: 'none' },
+              maxWidth: 500,
               color: '#b8c9de',
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: '.1em',
-              textAlign: 'center',
-              textTransform: 'uppercase',
-              mb: .5,
+              fontSize: { xs: 14, sm: 18 },
+              lineHeight: 1.55,
+              mb: { xs: 0, sm: 4 },
             }}
           >
-            Illustrative workflow · demonstration only
+            Ownership, approvals and status stay attached at every handoff.
           </Typography>
+
+          <Box
+            aria-label="Illustrative commercial record"
+            sx={{
+              display: { xs: 'none', sm: 'flex' },
+              alignItems: 'center',
+              justifyContent: 'flex-start',
+              gap: 2,
+              py: 1.5,
+              borderTop: '1px solid #35506f',
+              borderBottom: '1px solid #35506f',
+            }}
+          >
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <IntegrityIcon aria-hidden="true" sx={{ color: '#20c7b5', fontSize: 22 }} />
+              <Typography sx={{ color: '#dce5f0', fontSize: 14, fontWeight: 600 }}>
+                Illustrative workflow · governed through payment
+              </Typography>
+            </Box>
+          </Box>
 
           <Box
             component="ol"
@@ -441,123 +389,77 @@ const LoginPage: React.FC = () => {
             sx={{
               listStyle: 'none',
               p: 0,
-              m: { xs: 'auto 0 0', lg: '8px 0 0' },
+              m: { xs: 0, sm: '28px 0 0' },
               display: 'grid',
-              gridTemplateColumns: { xs: 'repeat(3, 1fr)', sm: 'repeat(6, 1fr)' },
-              border: { xs: 0, lg: '1px solid #35506f' },
-              borderBottom: { xs: '1px solid #283b58', lg: '1px solid #35506f' },
+              gridTemplateColumns: 'minmax(0, 1fr)',
+              borderTop: '1px solid #283b58',
+              borderLeft: '1px solid #283b58',
+              '@media (max-width: 599.95px)': { display: 'none' },
             }}
           >
-            {evidenceStages.map((stage, index) => (
+            {evidenceStages.map((stage) => (
               <Box
                 component="li"
                 key={stage.title}
                 sx={{
                   minWidth: 0,
-                  px: { xs: .5, lg: 1.5 },
-                  py: { xs: .5, lg: 3.75 },
-                  textAlign: 'center',
-                  borderRight: index < evidenceStages.length - 1 ? { xs: 0, lg: '1px solid #35506f' } : 0,
-                  position: 'relative',
+                  minHeight: 72,
+                  px: 2,
+                  py: 1.5,
+                  display: 'grid',
+                  gridTemplateColumns: '34px minmax(0, 1fr)',
+                  alignItems: 'center',
+                  gap: 1.5,
+                  borderRight: '1px solid #283b58',
+                  borderBottom: '1px solid #283b58',
                 }}
               >
-                <Typography sx={{ color: '#f8fafc', fontSize: { xs: 10, sm: 11, lg: 13 }, fontWeight: 400, letterSpacing: '.04em', lineHeight: 1.15, minHeight: { lg: 30 }, maxWidth: { lg: 86 }, mx: 'auto' }}>
-                  {stage.title}
-                </Typography>
-                <Typography className="tabular-nums" sx={{ display: { xs: 'none', sm: 'block' }, color: '#9fb0c8', fontSize: 10, mt: .5 }}>
-                  {stage.date}<br />{stage.time}
-                </Typography>
-                <Box sx={{ display: { xs: 'none', lg: 'flex' }, alignItems: 'center', my: 1, '&::before, &::after': { content: '""', height: 2, flex: 1, background: '#20c7b5' } }}>
-                  <Box sx={{ width: 46, height: 46, mx: -.5, border: '2px solid #20c7b5', borderRadius: '50%', display: 'grid', placeItems: 'center', background: '#08172a' }}>
-                    <CheckIcon aria-hidden="true" sx={{ color: '#f8fafc', fontSize: 23 }} />
-                  </Box>
+                <Box sx={{ width: 32, height: 32, border: '1px solid #20c7b5', borderRadius: '50%', display: 'grid', placeItems: 'center' }}>
+                  <CheckIcon aria-hidden="true" sx={{ color: '#20c7b5', fontSize: 18 }} />
                 </Box>
-                <CheckIcon aria-hidden="true" sx={{ display: { xs: 'inline-flex', lg: 'none' }, color: '#20c7b5', fontSize: 17, mt: .5 }} />
+                <Box>
+                  <Typography sx={{ color: '#f8fafc', fontSize: 14, fontWeight: 700, lineHeight: 1.2 }}>
+                    {stage.title}
+                  </Typography>
+                  <Typography sx={{ color: '#9fb0c8', fontSize: 12, mt: .4, lineHeight: 1.2 }}>
+                    {stage.detail}
+                  </Typography>
+                </Box>
               </Box>
             ))}
           </Box>
 
-          <Box sx={{ display: { xs: 'none', lg: 'block' }, mt: 0 }}>
-            <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-              <Box component="caption" sx={visuallyHidden}>
-                Illustrative commercial chain-of-custody ledger from captured email through payment.
-              </Box>
-              <Box component="thead" sx={visuallyHidden}>
-                <Box component="tr">
-                  <th id="ledger-attribute" scope="col">Attribute</th>
-                  {evidenceStages.map((stage, index) => (
-                    <th id={`ledger-stage-${index}`} scope="col" key={stage.title}>{stage.title}</th>
-                  ))}
-                </Box>
-              </Box>
-              <Box component="tbody">
-                {ledgerRows.map((row) => {
-                  const rowHeaderId = `ledger-row-${row[0].toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-
-                  return (
-                    <Box component="tr" key={row[0]}>
-                      {row.map((cell, index) => {
-                        const cellStyle = {
-                          padding: '12px 10px',
-                          border: '1px solid #35506f',
-                          color: index === 0 ? '#b2c4dc' : row[0] === 'Status' || (row[0] === 'Approved lines' && index === row.length - 1) || (row[0] === 'Amount (USD)' && index === row.length - 1) ? '#20c7b5' : '#e1e9f3',
-                          fontSize: 11.5,
-                          fontWeight: index === 0 ? 600 : 400,
-                          textAlign: 'left' as const,
-                          overflowWrap: 'anywhere' as const,
-                        };
-
-                        return index === 0 ? (
-                          <th
-                            scope="row"
-                            id={rowHeaderId}
-                            key={`${row[0]}-${index}`}
-                            style={cellStyle}
-                          >
-                            {cell}
-                          </th>
-                        ) : (
-                          <td
-                            headers={`${rowHeaderId} ledger-stage-${index - 1}`}
-                            key={`${row[0]}-${index}`}
-                            style={cellStyle}
-                          >
-                            {cell}
-                          </td>
-                        );
-                      })}
-                    </Box>
-                  );
-                })}
-              </Box>
-            </Box>
-          </Box>
-
           <Box
             sx={{
-              display: { xs: 'none', lg: 'flex' },
+              display: 'flex',
               alignItems: 'center',
-              gap: 1.5,
+              gap: 1,
               mt: 'auto',
-              px: 2,
-              py: 1.75,
-              border: '1px solid #35506f',
-              borderRadius: '4px',
-              color: '#dce5f0',
+              pt: { xs: 2, sm: 4 },
+              color: '#b8c9de',
             }}
           >
-            <IntegrityIcon aria-hidden="true" sx={{ color: '#8fa6c3', fontSize: 38 }} />
-            <Box>
-              <Typography sx={{ fontSize: 12, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>Ledger integrity</Typography>
-              <Typography sx={{ color: '#9fb0c8', fontSize: 12 }}>All events are tamper-evident and time-stamped (UTC).</Typography>
-            </Box>
-            <Typography sx={{ ml: 'auto', color: '#b8c9de', fontSize: 12, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
-              Demonstration only
+            <IntegrityIcon aria-hidden="true" sx={{ color: '#8fa6c3', fontSize: 18 }} />
+            <Typography sx={{ color: '#b8c9de', fontSize: { xs: 11, sm: 12 }, lineHeight: 1.4 }}>
+              Illustrative workflow · source, owner and timestamp retained at every transition
             </Typography>
           </Box>
         </EvidencePanel>
 
         <FormSection mode={mode} id={MAIN_CONTENT_ID} tabIndex={-1}>
+          <Box
+            sx={{
+              display: { xs: 'block', sm: 'none' },
+              maxWidth: 440,
+              width: '100%',
+              mx: 'auto',
+              mb: 4,
+              pr: 7,
+            }}
+          >
+            <Branding fontSize={24} logoSize={34} showTagline={false} />
+          </Box>
+
           <Box sx={{ position: 'absolute', top: { xs: 14, sm: 24 }, right: { xs: 14, sm: 24 } }}>
             <IconButton
               onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}
@@ -568,22 +470,22 @@ const LoginPage: React.FC = () => {
             </IconButton>
           </Box>
 
-          <Box sx={{ maxWidth: 480, width: '100%', mx: 'auto', pt: { xs: 4, sm: 0 } }}>
+          <Box sx={{ maxWidth: 440, width: '100%', mx: 'auto' }}>
             <Typography
               component="h1"
               sx={{
                 fontFamily: '"Cambay", "Source Sans 3", sans-serif',
-                fontSize: { xs: 36, md: 56 },
+                fontSize: { xs: 36, md: 48 },
                 fontWeight: 700,
                 lineHeight: 1.1,
                 letterSpacing: '-0.025em',
                 mb: 1.5,
               }}
             >
-              Sign in to Nexora
+              Sign in
             </Typography>
-            <Typography variant="body1" sx={{ color: mode === 'dark' ? '#b7c4d6' : '#526174', mb: { xs: 3, sm: 6 }, lineHeight: 1.55, maxWidth: 440, fontSize: { sm: 18 } }}>
-              Access your procurement and order-to-cash workspace with complete chain-of-custody visibility.
+            <Typography variant="body1" sx={{ color: mode === 'dark' ? '#b7c4d6' : '#526174', mb: { xs: 3, sm: 4 }, lineHeight: 1.55, maxWidth: 420, fontSize: { sm: 17 } }}>
+              Use your work account to access your Nexora workspace.
             </Typography>
 
             <Box component="form" onSubmit={handleLogin}>
@@ -745,7 +647,7 @@ const LoginPage: React.FC = () => {
                   boxShadow: '0 10px 24px -16px rgba(9, 105, 232, .8)',
                   transition: 'background-color 160ms ease-out, box-shadow 160ms ease-out',
                   '&:hover': { background: '#064da9', boxShadow: '0 12px 26px -16px rgba(9, 105, 232, .9)' },
-                  '@media (min-width: 1101px)': { mt: 4 },
+                  mt: 1,
                 }}
               >
                 {loading ? (
@@ -774,7 +676,7 @@ const LoginPage: React.FC = () => {
                 component="aside"
                 aria-label="Platform administration sign-in"
                 sx={{
-                  mt: { xs: 2, sm: 7 },
+                  mt: { xs: 3, sm: 4 },
                   pt: { xs: 2, sm: 2.5 },
                   borderTop: '1px solid',
                   borderColor: 'divider',
@@ -789,7 +691,7 @@ const LoginPage: React.FC = () => {
                   startIcon={<SettingsIcon aria-hidden="true" />}
                   sx={{ minHeight: 44, color: mode === 'dark' ? '#79b7ff' : '#075dcc', fontSize: 17, fontWeight: 600, textTransform: 'none' }}
                 >
-                  Platform administration
+                  Platform administrator sign-in
                 </Button>
               </Box>
             )}

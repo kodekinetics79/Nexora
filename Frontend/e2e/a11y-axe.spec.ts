@@ -46,7 +46,7 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
 
       // Regression guards for the fixes this spec was added alongside.
       await expect(page).toHaveTitle('Sign In | NEXORA');
-      await expect(page.getByRole('heading', { level: 1, name: 'Sign in to Nexora' })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1, name: 'Sign in' })).toBeVisible();
       await expect(page.getByLabel('Email Address')).toHaveAttribute('type', 'email');
       await expect(page.getByLabel('Email Address')).toHaveAttribute('autocomplete', 'username');
       await expect(page.getByRole('textbox', { name: 'Password', exact: true })).toHaveAttribute('autocomplete', 'current-password');
@@ -56,24 +56,21 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
       expect(releaseBlocking(results.violations), describeViolations(results.violations)).toEqual([]);
     });
 
-    test('mobile login retains Nexora identity, evidence context, and usable landmarks without horizontal overflow', async ({ page }) => {
-      await page.setViewportSize({ width: 390, height: 844 });
+    test('mobile login keeps identity, the primary action, and usable landmarks above the fold', async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 640 });
       await page.goto('/login');
 
       const workflow = page.getByRole('region', { name: 'Nexora evidence-to-cash workflow' });
-      await expect(workflow.getByText('NEXORA', { exact: true })).toBeVisible();
-      await expect(workflow.getByRole('heading', {
-        level: 2,
-        name: 'Every commercial decision, connected to its evidence.',
-      })).toBeVisible();
-      await expect(workflow.getByRole('list', { name: 'Governed commercial stages' })).toBeVisible();
+      await expect(workflow).toBeHidden();
 
       const main = page.getByRole('main');
       await expect(main).toHaveAttribute('id', 'main-content');
-      await expect(main.getByRole('heading', { level: 1, name: 'Sign in to Nexora' })).toBeVisible();
+      await expect(main.getByText('NEXORA', { exact: true })).toBeVisible();
+      await expect(main.getByRole('heading', { level: 1, name: 'Sign in' })).toBeVisible();
       await expect(main.getByLabel('Email address')).toBeVisible();
       await expect(main.getByRole('textbox', { name: 'Password', exact: true })).toBeVisible();
-      await expect(main.getByRole('button', { name: 'Sign in' })).toBeVisible();
+      const signIn = main.getByRole('button', { name: 'Sign in' });
+      await expect(signIn).toBeVisible();
       await expect(main.getByRole('button', { name: 'Switch to dark theme' })).toBeVisible();
 
       const mobileGeometry = await page.evaluate(() => {
@@ -84,6 +81,12 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
 
         return {
           noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+          signInAboveFold: (() => {
+            const button = document.querySelector('button[type="submit"]');
+            if (!button) return false;
+            const rect = button.getBoundingClientRect();
+            return rect.top >= 0 && rect.bottom <= window.innerHeight;
+          })(),
           touchTargets: targets.map((element) => {
             const rect = element.getBoundingClientRect();
             return { width: rect.width, height: rect.height };
@@ -92,11 +95,20 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
       });
 
       expect(mobileGeometry.noHorizontalOverflow).toBe(true);
+      expect(mobileGeometry.signInAboveFold).toBe(true);
       expect(mobileGeometry.touchTargets).toHaveLength(2);
       for (const target of mobileGeometry.touchTargets) {
         expect(target.width).toBeGreaterThanOrEqual(44);
         expect(target.height).toBeGreaterThanOrEqual(44);
       }
+
+      // Guard the exact hand-off between the compact mobile brand and the
+      // evidence panel. A mismatched 600px boundary once hid both.
+      await page.setViewportSize({ width: 600, height: 800 });
+      await page.reload();
+      await expect(
+        page.getByRole('region', { name: 'Nexora evidence-to-cash workflow' }).getByText('NEXORA', { exact: true }),
+      ).toBeVisible();
     });
   });
 

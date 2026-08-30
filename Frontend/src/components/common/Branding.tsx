@@ -6,12 +6,14 @@ interface BrandingProps {
   fontSize?: number;
   logoSize?: number;
   showText?: boolean;
+  showTagline?: boolean;
 }
 
 const Branding: React.FC<BrandingProps> = ({
   fontSize = 24,
   logoSize = 40,
   showText = true,
+  showTagline = true,
 }) => {
   const theme = useTheme();
 
@@ -51,19 +53,21 @@ const Branding: React.FC<BrandingProps> = ({
           >
             NEXORA
           </Typography>
-          <Typography
-            sx={{
-              fontSize: Math.max(9, Math.round(fontSize * 0.35)),
-              fontWeight: 700,
-              color: 'primary.main',
-              letterSpacing: '0.1em',
-              textTransform: 'uppercase',
-              whiteSpace: 'nowrap',
-              opacity: 0.8
-            }}
-          >
-            The Intelligence Platform
-          </Typography>
+          {showTagline && (
+            <Typography
+              sx={{
+                fontSize: Math.max(9, Math.round(fontSize * 0.35)),
+                fontWeight: 700,
+                color: 'primary.main',
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+                whiteSpace: 'nowrap',
+                opacity: 0.8
+              }}
+            >
+              The Intelligence Platform
+            </Typography>
+          )}
         </Box>
       )}
     </Box>
