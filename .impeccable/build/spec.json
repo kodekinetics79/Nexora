@@ -1,0 +1,1035 @@
+{
+  "tool": "comp-spec",
+  "version": 1,
+  "createdAt": "2026-08-30T03:50:49.950Z",
+  "comp": ".impeccable/mocks/login-chain-ledger-a.png",
+  "warnings": [
+    "region brand: \"codeDrawn\": true set in the regions file (the painted-material refusal is overridden: code draws this region)",
+    "region journey-line: \"codeDrawn\": true set in the regions file (the painted-material refusal is overridden: code draws this region)",
+    "region evidence-table: \"codeDrawn\": true set in the regions file (the painted-material refusal is overridden: code draws this region)",
+    "region integrity-note: \"codeDrawn\": true set in the regions file (the painted-material refusal is overridden: code draws this region)"
+  ],
+  "uncoveredInkCells": [],
+  "compSize": {
+    "width": 1487,
+    "height": 1058
+  },
+  "aspect": 1.4055,
+  "orientation": "landscape",
+  "palette": [
+    {
+      "hex": "#08172a",
+      "coverage": 0.5928
+    },
+    {
+      "hex": "#f8f8f8",
+      "coverage": 0.3671
+    },
+    {
+      "hex": "#0969e8",
+      "coverage": 0.0173
+    },
+    {
+      "hex": "#283b58",
+      "coverage": 0.0152
+    },
+    {
+      "hex": "#bec2cd",
+      "coverage": 0.0076
+    }
+  ],
+  "bands": [
+    {
+      "y": 0.1209,
+      "strength": 0.3434
+    },
+    {
+      "y": 0.1538,
+      "strength": 0.6151
+    },
+    {
+      "y": 0.1868,
+      "strength": 0.6036
+    },
+    {
+      "y": 0.2198,
+      "strength": 0.4748
+    },
+    {
+      "y": 0.2418,
+      "strength": 0.2442
+    },
+    {
+      "y": 0.3407,
+      "strength": 0.4466
+    },
+    {
+      "y": 0.5934,
+      "strength": 0.3328
+    },
+    {
+      "y": 0.6593,
+      "strength": 0.8751
+    },
+    {
+      "y": 0.7143,
+      "strength": 0.6195
+    },
+    {
+      "y": 0.7912,
+      "strength": 0.2248
+    }
+  ],
+  "regions": [
+    {
+      "id": "brand",
+      "kind": "chrome",
+      "note": "Nexora mark and wordmark on navy",
+      "grid": "A0:B0",
+      "codeDrawn": true,
+      "box": {
+        "x": 0,
+        "y": 0,
+        "w": 0.2,
+        "h": 0.1
+      },
+      "px": {
+        "x": 0,
+        "y": 0,
+        "w": 297,
+        "h": 106
+      },
+      "aspect": 2.8019,
+      "palette": [
+        {
+          "hex": "#081829",
+          "coverage": 0.9297
+        },
+        {
+          "hex": "#f6f6f7",
+          "coverage": 0.0429
+        },
+        {
+          "hex": "#0868f4",
+          "coverage": 0.016
+        },
+        {
+          "hex": "#364656",
+          "coverage": 0.0066
+        },
+        {
+          "hex": "#c3c5d0",
+          "coverage": 0.0049
+        }
+      ],
+      "detail": {
+        "energy": 18.5934
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "ledger-headline",
+      "kind": "text",
+      "note": "Every commercial decision, connected to its evidence.",
+      "grid": "A1:E2",
+      "coverBox": {
+        "x": 0,
+        "y": 0.1,
+        "w": 0.5,
+        "h": 0.2
+      },
+      "box": {
+        "x": 0.0161,
+        "y": 0.1059,
+        "w": 0.4438,
+        "h": 0.0681
+      },
+      "px": {
+        "x": 24,
+        "y": 112,
+        "w": 660,
+        "h": 72
+      },
+      "aspect": 9.1667,
+      "palette": [
+        {
+          "hex": "#08172a",
+          "coverage": 0.7605
+        },
+        {
+          "hex": "#f5f5f6",
+          "coverage": 0.1783
+        },
+        {
+          "hex": "#bbc0ca",
+          "coverage": 0.0289
+        },
+        {
+          "hex": "#3c475b",
+          "coverage": 0.0185
+        },
+        {
+          "hex": "#202546",
+          "coverage": 0.0138
+        }
+      ],
+      "detail": {
+        "energy": 88.7401
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null,
+      "type": {
+        "comp": {
+          "lines": 1,
+          "glyphs": 22,
+          "capHeightPx": 39.2,
+          "inkIsDark": false,
+          "allCaps": false,
+          "advance": 0.6382,
+          "advTall": 0.2042,
+          "advX": 0.6637,
+          "gap": 0.1021,
+          "xRatio": 0.7257,
+          "stemW": 0.1847,
+          "contrast": 1.111,
+          "serif": 0.9961,
+          "densTall": 0.8212,
+          "densX": 0.5924,
+          "weight": 0.8212
+        },
+        "widthClass": "normal",
+        "weightClass": "black",
+        "chosen": {
+          "family": "Cambay",
+          "weight": 700,
+          "fontSizePx": 56,
+          "source": "catalog",
+          "estimatedSize": true,
+          "stamp": "a89f761c85c7"
+        }
+      }
+    },
+    {
+      "id": "ledger-kicker",
+      "kind": "text",
+      "note": "Commercial chain-of-custody command ledger label",
+      "grid": "A2:C2",
+      "coverBox": {
+        "x": 0,
+        "y": 0.2,
+        "w": 0.3,
+        "h": 0.1
+      },
+      "box": {
+        "x": 0.0161,
+        "y": 0.2628,
+        "w": 0.2838,
+        "h": 0.0284
+      },
+      "px": {
+        "x": 24,
+        "y": 278,
+        "w": 422,
+        "h": 30
+      },
+      "aspect": 14.0667,
+      "palette": [
+        {
+          "hex": "#09162c",
+          "coverage": 0.8398
+        },
+        {
+          "hex": "#405375",
+          "coverage": 0.0551
+        },
+        {
+          "hex": "#9db0d5",
+          "coverage": 0.0465
+        },
+        {
+          "hex": "#7087aa",
+          "coverage": 0.0379
+        },
+        {
+          "hex": "#0d1242",
+          "coverage": 0.0207
+        }
+      ],
+      "detail": {
+        "energy": 46.6661
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null,
+      "type": {
+        "comp": {
+          "lines": 1,
+          "glyphs": 41,
+          "capHeightPx": 10.4,
+          "inkIsDark": false,
+          "allCaps": true,
+          "advance": 0.8006,
+          "advTall": 0.8006,
+          "advX": null,
+          "gap": 0.2242,
+          "xRatio": null,
+          "stemW": 0.2006,
+          "contrast": 1.0438,
+          "serif": null,
+          "densTall": 0.536,
+          "densX": null,
+          "weight": 0.536
+        },
+        "widthClass": "wide",
+        "weightClass": "medium"
+      }
+    },
+    {
+      "id": "enquiry-meta",
+      "kind": "text",
+      "note": "Synthetic enquiry reference, account, value, created time and owner",
+      "grid": "A3:F3",
+      "coverBox": {
+        "x": 0,
+        "y": 0.3,
+        "w": 0.6,
+        "h": 0.1
+      },
+      "box": {
+        "x": 0.1332,
+        "y": 0.2996,
+        "w": 0.1332,
+        "h": 0.051
+      },
+      "px": {
+        "x": 198,
+        "y": 317,
+        "w": 198,
+        "h": 54
+      },
+      "aspect": 3.6667,
+      "palette": [
+        {
+          "hex": "#08162a",
+          "coverage": 0.8602
+        },
+        {
+          "hex": "#eff0f2",
+          "coverage": 0.059
+        },
+        {
+          "hex": "#afb5c0",
+          "coverage": 0.0365
+        },
+        {
+          "hex": "#2a3756",
+          "coverage": 0.0252
+        },
+        {
+          "hex": "#6c7a91",
+          "coverage": 0.0191
+        }
+      ],
+      "detail": {
+        "energy": 35.7724
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null,
+      "type": {
+        "comp": {
+          "lines": 1,
+          "glyphs": 18,
+          "capHeightPx": 12.6,
+          "inkIsDark": false,
+          "allCaps": false,
+          "advance": 0.6356,
+          "advTall": 0.6753,
+          "advX": 0.5958,
+          "gap": 0.0794,
+          "xRatio": 0.741,
+          "stemW": 0.196,
+          "contrast": 1.0369,
+          "serif": 0.6295,
+          "densTall": 0.5799,
+          "densX": 0.6304,
+          "weight": 0.5799
+        },
+        "widthClass": "normal",
+        "weightClass": "bold"
+      }
+    },
+    {
+      "id": "journey-labels",
+      "kind": "text",
+      "note": "Email captured through Payment posted stage labels and times",
+      "grid": "B4:F4",
+      "box": {
+        "x": 0.1,
+        "y": 0.4,
+        "w": 0.5,
+        "h": 0.1
+      },
+      "px": {
+        "x": 149,
+        "y": 423,
+        "w": 744,
+        "h": 106
+      },
+      "aspect": 7.0189,
+      "palette": [
+        {
+          "hex": "#08172b",
+          "coverage": 0.9205
+        },
+        {
+          "hex": "#37455b",
+          "coverage": 0.0335
+        },
+        {
+          "hex": "#8d96a6",
+          "coverage": 0.0209
+        },
+        {
+          "hex": "#eef0f0",
+          "coverage": 0.0129
+        },
+        {
+          "hex": "#666e81",
+          "coverage": 0.0122
+        }
+      ],
+      "detail": {
+        "energy": 36.3793
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null,
+      "type": {
+        "comp": {
+          "lines": 2,
+          "glyphs": 91,
+          "capHeightPx": 11.1,
+          "inkIsDark": false,
+          "allCaps": true,
+          "advance": 0.6345,
+          "advTall": 0.6345,
+          "advX": null,
+          "gap": 0.0815,
+          "xRatio": null,
+          "stemW": 0.191,
+          "contrast": 1.0741,
+          "serif": 0.4094,
+          "densTall": 0.4587,
+          "densX": null,
+          "weight": 0.4587
+        },
+        "widthClass": "normal",
+        "weightClass": "regular"
+      }
+    },
+    {
+      "id": "journey-line",
+      "kind": "chrome",
+      "note": "Code-drawn connected stage line with six restrained circular status markers",
+      "grid": "B4:F5",
+      "codeDrawn": true,
+      "box": {
+        "x": 0.1,
+        "y": 0.4,
+        "w": 0.5,
+        "h": 0.2
+      },
+      "px": {
+        "x": 149,
+        "y": 423,
+        "w": 744,
+        "h": 212
+      },
+      "aspect": 3.5094,
+      "palette": [
+        {
+          "hex": "#08172b",
+          "coverage": 0.9366
+        },
+        {
+          "hex": "#2b3752",
+          "coverage": 0.0238
+        },
+        {
+          "hex": "#848d9d",
+          "coverage": 0.0147
+        },
+        {
+          "hex": "#eeeff0",
+          "coverage": 0.0129
+        },
+        {
+          "hex": "#55a5ad",
+          "coverage": 0.0121
+        }
+      ],
+      "detail": {
+        "energy": 31.4912
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "evidence-table",
+      "kind": "chrome",
+      "note": "Code-drawn compact evidence ledger table with status, source, reference, approved lines, amount, actor and notes",
+      "grid": "A5:F8",
+      "codeDrawn": true,
+      "box": {
+        "x": 0,
+        "y": 0.5,
+        "w": 0.6,
+        "h": 0.4
+      },
+      "px": {
+        "x": 0,
+        "y": 529,
+        "w": 892,
+        "h": 423
+      },
+      "aspect": 2.1087,
+      "palette": [
+        {
+          "hex": "#08172a",
+          "coverage": 0.8892
+        },
+        {
+          "hex": "#253755",
+          "coverage": 0.0703
+        },
+        {
+          "hex": "#a6adbd",
+          "coverage": 0.0163
+        },
+        {
+          "hex": "#687284",
+          "coverage": 0.016
+        },
+        {
+          "hex": "#dde0e2",
+          "coverage": 0.0081
+        }
+      ],
+      "detail": {
+        "energy": 22.5954
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "integrity-note",
+      "kind": "chrome",
+      "note": "Ledger integrity assurance row; no export action in the implemented sign-in screen",
+      "grid": "A9:F9",
+      "codeDrawn": true,
+      "box": {
+        "x": 0,
+        "y": 0.9,
+        "w": 0.6,
+        "h": 0.1
+      },
+      "px": {
+        "x": 0,
+        "y": 952,
+        "w": 892,
+        "h": 106
+      },
+      "aspect": 8.4151,
+      "palette": [
+        {
+          "hex": "#08182a",
+          "coverage": 0.9551
+        },
+        {
+          "hex": "#8b95a9",
+          "coverage": 0.0207
+        },
+        {
+          "hex": "#5d6a85",
+          "coverage": 0.0107
+        },
+        {
+          "hex": "#abb6cf",
+          "coverage": 0.0078
+        },
+        {
+          "hex": "#2e405a",
+          "coverage": 0.0058
+        }
+      ],
+      "detail": {
+        "energy": 14.5117
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "theme-toggle",
+      "kind": "control",
+      "note": "Light and dark theme toggle",
+      "grid": "J0:J0",
+      "box": {
+        "x": 0.9,
+        "y": 0,
+        "w": 0.1,
+        "h": 0.1
+      },
+      "px": {
+        "x": 1338,
+        "y": 0,
+        "w": 149,
+        "h": 106
+      },
+      "aspect": 1.4057,
+      "palette": [
+        {
+          "hex": "#f8f8f8",
+          "coverage": 0.9911
+        },
+        {
+          "hex": "#6f7a8d",
+          "coverage": 0.0039
+        },
+        {
+          "hex": "#9ba5ae",
+          "coverage": 0.0028
+        },
+        {
+          "hex": "#304050",
+          "coverage": 0.0011
+        },
+        {
+          "hex": "#586080",
+          "coverage": 0.0011
+        }
+      ],
+      "detail": {
+        "energy": 3.2163
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "signin-heading",
+      "kind": "text",
+      "note": "Sign in to Nexora",
+      "grid": "G2:J2",
+      "coverBox": {
+        "x": 0.6,
+        "y": 0.2,
+        "w": 0.4,
+        "h": 0.1
+      },
+      "box": {
+        "x": 0.6241,
+        "y": 0.2004,
+        "w": 0.3759,
+        "h": 0.1002
+      },
+      "px": {
+        "x": 928,
+        "y": 212,
+        "w": 559,
+        "h": 106
+      },
+      "aspect": 5.2736,
+      "palette": [
+        {
+          "hex": "#f7f7f8",
+          "coverage": 0.8505
+        },
+        {
+          "hex": "#0c162d",
+          "coverage": 0.0925
+        },
+        {
+          "hex": "#aaafbb",
+          "coverage": 0.0276
+        },
+        {
+          "hex": "#6f798a",
+          "coverage": 0.0202
+        },
+        {
+          "hex": "#3a445a",
+          "coverage": 0.0093
+        }
+      ],
+      "detail": {
+        "energy": 48.4718
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null,
+      "type": {
+        "comp": {
+          "lines": 1,
+          "glyphs": 14,
+          "capHeightPx": 36.9,
+          "inkIsDark": true,
+          "allCaps": false,
+          "advance": 0.6233,
+          "advTall": 0.4336,
+          "advX": 0.6233,
+          "gap": 0.1355,
+          "xRatio": 0.7375,
+          "stemW": 0.1828,
+          "contrast": 1.1175,
+          "serif": null,
+          "densTall": 0.6415,
+          "densX": 0.6186,
+          "weight": 0.6415
+        },
+        "widthClass": "normal",
+        "weightClass": "bold"
+      }
+    },
+    {
+      "id": "signin-support",
+      "kind": "text",
+      "note": "Truthful procurement and order-to-cash workspace explanation",
+      "grid": "G2:J3",
+      "coverBox": {
+        "x": 0.6,
+        "y": 0.2,
+        "w": 0.4,
+        "h": 0.2
+      },
+      "box": {
+        "x": 0.6241,
+        "y": 0.2004,
+        "w": 0.3759,
+        "h": 0.2004
+      },
+      "px": {
+        "x": 928,
+        "y": 212,
+        "w": 559,
+        "h": 212
+      },
+      "aspect": 2.6368,
+      "palette": [
+        {
+          "hex": "#f8f8f8",
+          "coverage": 0.895
+        },
+        {
+          "hex": "#0c172d",
+          "coverage": 0.0556
+        },
+        {
+          "hex": "#727c8e",
+          "coverage": 0.0233
+        },
+        {
+          "hex": "#adb1bd",
+          "coverage": 0.0216
+        },
+        {
+          "hex": "#243149",
+          "coverage": 0.0045
+        }
+      ],
+      "detail": {
+        "energy": 29.7368
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null,
+      "type": {
+        "comp": {
+          "lines": 1,
+          "glyphs": 14,
+          "capHeightPx": 36.9,
+          "inkIsDark": true,
+          "allCaps": false,
+          "advance": 0.6228,
+          "advTall": 0.4333,
+          "advX": 0.6228,
+          "gap": 0.1354,
+          "xRatio": 0.7374,
+          "stemW": 0.1848,
+          "contrast": 1.1141,
+          "serif": null,
+          "densTall": 0.6501,
+          "densX": 0.6256,
+          "weight": 0.6501
+        },
+        "widthClass": "normal",
+        "weightClass": "bold"
+      }
+    },
+    {
+      "id": "email-field",
+      "kind": "control",
+      "note": "Email address label and visible bordered input",
+      "grid": "G4:J4",
+      "coverBox": {
+        "x": 0.6,
+        "y": 0.4,
+        "w": 0.4,
+        "h": 0.1
+      },
+      "box": {
+        "x": 0.6241,
+        "y": 0.3998,
+        "w": 0.3759,
+        "h": 0.1002
+      },
+      "px": {
+        "x": 928,
+        "y": 423,
+        "w": 559,
+        "h": 106
+      },
+      "aspect": 5.2736,
+      "palette": [
+        {
+          "hex": "#f8f8f8",
+          "coverage": 0.9545
+        },
+        {
+          "hex": "#081728",
+          "coverage": 0.0177
+        },
+        {
+          "hex": "#bbbfcc",
+          "coverage": 0.0118
+        },
+        {
+          "hex": "#828899",
+          "coverage": 0.01
+        },
+        {
+          "hex": "#252646",
+          "coverage": 0.006
+        }
+      ],
+      "detail": {
+        "energy": 11.8204
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "password-field",
+      "kind": "control",
+      "note": "Password label, visible bordered input and reveal control",
+      "grid": "G5:J5",
+      "coverBox": {
+        "x": 0.6,
+        "y": 0.5,
+        "w": 0.4,
+        "h": 0.1
+      },
+      "box": {
+        "x": 0.6241,
+        "y": 0.5,
+        "w": 0.3759,
+        "h": 0.1002
+      },
+      "px": {
+        "x": 928,
+        "y": 529,
+        "w": 559,
+        "h": 106
+      },
+      "aspect": 5.2736,
+      "palette": [
+        {
+          "hex": "#f7f8f8",
+          "coverage": 0.9406
+        },
+        {
+          "hex": "#aebac9",
+          "coverage": 0.0333
+        },
+        {
+          "hex": "#081828",
+          "coverage": 0.0165
+        },
+        {
+          "hex": "#282a4a",
+          "coverage": 0.006
+        },
+        {
+          "hex": "#5b6777",
+          "coverage": 0.0036
+        }
+      ],
+      "detail": {
+        "energy": 13.3053
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "forgot-password",
+      "kind": "control",
+      "note": "Forgot password recovery link",
+      "grid": "I6:J6",
+      "box": {
+        "x": 0.8,
+        "y": 0.6,
+        "w": 0.2,
+        "h": 0.1
+      },
+      "px": {
+        "x": 1190,
+        "y": 635,
+        "w": 297,
+        "h": 106
+      },
+      "aspect": 2.8019,
+      "palette": [
+        {
+          "hex": "#f8f8f8",
+          "coverage": 0.6064
+        },
+        {
+          "hex": "#0a68e8",
+          "coverage": 0.3696
+        },
+        {
+          "hex": "#b6d1f8",
+          "coverage": 0.0135
+        },
+        {
+          "hex": "#5599f0",
+          "coverage": 0.0082
+        },
+        {
+          "hex": "#8ab4f4",
+          "coverage": 0.0023
+        }
+      ],
+      "detail": {
+        "energy": 13.5126
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "signin-action",
+      "kind": "control",
+      "note": "Primary Sign in button",
+      "grid": "G6:J7",
+      "coverBox": {
+        "x": 0.6,
+        "y": 0.6,
+        "w": 0.4,
+        "h": 0.2
+      },
+      "box": {
+        "x": 0.6241,
+        "y": 0.6002,
+        "w": 0.3759,
+        "h": 0.2004
+      },
+      "px": {
+        "x": 928,
+        "y": 635,
+        "w": 559,
+        "h": 212
+      },
+      "aspect": 2.6368,
+      "palette": [
+        {
+          "hex": "#f8f8f8",
+          "coverage": 0.7376
+        },
+        {
+          "hex": "#0968e8",
+          "coverage": 0.2283
+        },
+        {
+          "hex": "#091929",
+          "coverage": 0.0169
+        },
+        {
+          "hex": "#6398f7",
+          "coverage": 0.0125
+        },
+        {
+          "hex": "#282848",
+          "coverage": 0.0046
+        }
+      ],
+      "detail": {
+        "energy": 11.4573
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    },
+    {
+      "id": "platform-link",
+      "kind": "control",
+      "note": "Quiet Platform administration link separated by a fine rule",
+      "grid": "G9:J9",
+      "coverBox": {
+        "x": 0.6,
+        "y": 0.9,
+        "w": 0.4,
+        "h": 0.1
+      },
+      "box": {
+        "x": 0.6241,
+        "y": 0.8998,
+        "w": 0.3759,
+        "h": 0.1002
+      },
+      "px": {
+        "x": 928,
+        "y": 952,
+        "w": 559,
+        "h": 106
+      },
+      "aspect": 5.2736,
+      "palette": [
+        {
+          "hex": "#f8f8f8",
+          "coverage": 0.9663
+        },
+        {
+          "hex": "#0a1929",
+          "coverage": 0.017
+        },
+        {
+          "hex": "#aecff6",
+          "coverage": 0.0062
+        },
+        {
+          "hex": "#1570ea",
+          "coverage": 0.0054
+        },
+        {
+          "hex": "#74aaf4",
+          "coverage": 0.0051
+        }
+      ],
+      "detail": {
+        "energy": 8.351
+      },
+      "medium": "semantic",
+      "plate": null,
+      "text": null
+    }
+  ]
+}

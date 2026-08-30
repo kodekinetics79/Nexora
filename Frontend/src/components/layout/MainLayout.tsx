@@ -20,16 +20,18 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const theme = useTheme();
-  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+  // The full rail needs enough room for both the navigation and an operational
+  // workspace. Tablets and compact laptops use the same overlay pattern as
+  // phones so a 280px rail never consumes half of the working canvas.
+  const hasPersistentNavigation = useMediaQuery(theme.breakpoints.up('lg'));
 
   const toggleSidebar = () => {
-    if (isMobile) setMobileOpen((open) => !open);
+    if (!hasPersistentNavigation) setMobileOpen((open) => !open);
     else setCollapsed((value) => !value);
   };
 
   const currentWidth = collapsed ? collapsedWidth : drawerWidth;
-  // On mobile the sidebar is shown/hidden; on desktop it is expanded/collapsed.
-  const sidebarExpanded = isMobile ? mobileOpen : !collapsed;
+  const sidebarExpanded = hasPersistentNavigation ? !collapsed : mobileOpen;
 
   return (
     <Box sx={{ display: 'flex' }}>
@@ -50,51 +52,48 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         id={SIDEBAR_NAV_ID}
         aria-label="Main"
         sx={{
-          width: { sm: currentWidth }, 
-          flexShrink: { sm: 0 },
-          transition: (theme) => theme.transitions.create('width', {
-            easing: theme.transitions.easing.sharp,
-            duration: theme.transitions.duration.enteringScreen,
-          }),
+          width: hasPersistentNavigation ? currentWidth : 0,
+          flexShrink: 0,
         }}
       >
-        <Drawer
-          variant="temporary"
-          open={mobileOpen}
-          onClose={() => setMobileOpen(false)}
-          ModalProps={{ keepMounted: true }}
-          sx={{
-            display: { xs: 'block', sm: 'none' },
-            '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth, bgcolor: 'background.default' },
-          }}
-        >
-          <Toolbar sx={{ px: 2.5, mb: 1 }}><Branding showText fontSize={20} logoSize={32} /></Toolbar>
-          <Sidebar collapsed={false} onNavigate={() => setMobileOpen(false)} />
-        </Drawer>
-        <Drawer
-          variant="permanent"
-          sx={{
-            display: { xs: 'none', sm: 'block' },
-            '& .MuiDrawer-paper': { 
-              boxSizing: 'border-box', 
-              width: currentWidth,
-              borderRight: '1px solid',
-              borderColor: 'divider',
-              backgroundColor: 'background.default',
-              transition: (theme) => theme.transitions.create('width', {
-                easing: theme.transitions.easing.sharp,
-                duration: theme.transitions.duration.enteringScreen,
-              }),
-              overflowX: 'hidden',
-            },
-          }}
-          open
-        >
-          <Toolbar sx={{ px: collapsed ? 1 : 2.5, display: 'flex', justifyContent: collapsed ? 'center' : 'flex-start', mb: 2 }}>
-            <Branding showText={!collapsed} fontSize={20} logoSize={32} />
-          </Toolbar>
-          <Sidebar collapsed={collapsed} onRequestExpand={() => setCollapsed(false)} />
-        </Drawer>
+        {hasPersistentNavigation ? (
+          <Drawer
+            variant="permanent"
+            sx={{
+              '& .MuiDrawer-paper': {
+                boxSizing: 'border-box',
+                width: currentWidth,
+                borderRight: '1px solid',
+                borderColor: 'divider',
+                backgroundColor: 'background.default',
+                overflowX: 'hidden',
+              },
+            }}
+            open
+          >
+            <Toolbar sx={{ px: collapsed ? 1 : 2.5, display: 'flex', justifyContent: collapsed ? 'center' : 'flex-start', mb: 2 }}>
+              <Branding showText={!collapsed} fontSize={20} logoSize={32} />
+            </Toolbar>
+            <Sidebar collapsed={collapsed} onRequestExpand={() => setCollapsed(false)} />
+          </Drawer>
+        ) : (
+          <Drawer
+            variant="temporary"
+            open={mobileOpen}
+            onClose={() => setMobileOpen(false)}
+            ModalProps={{ keepMounted: true }}
+            sx={{
+              '& .MuiDrawer-paper': {
+                boxSizing: 'border-box',
+                width: 'min(320px, calc(100vw - 48px))',
+                bgcolor: 'background.default',
+              },
+            }}
+          >
+            <Toolbar sx={{ px: 2.5, mb: 1 }}><Branding showText fontSize={20} logoSize={32} /></Toolbar>
+            <Sidebar collapsed={false} onNavigate={() => setMobileOpen(false)} />
+          </Drawer>
+        )}
       </Box>
 
       <Box
@@ -112,17 +111,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             outlineOffset: -3,
           },
           p: 1.5, 
-          width: { sm: `calc(100% - ${currentWidth}px)` },
+          width: hasPersistentNavigation ? `calc(100% - ${currentWidth}px)` : '100%',
           minWidth: 0,
           maxWidth: '100%',
           boxSizing: 'border-box',
           overflowX: 'hidden',
           minHeight: '100vh',
           backgroundColor: 'background.default',
-          transition: (theme) => theme.transitions.create(['width', 'margin'], {
-            easing: theme.transitions.easing.sharp,
-            duration: theme.transitions.duration.enteringScreen,
-          }),
         }}
       >
         <Toolbar />

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -9,24 +9,59 @@ import {
 import {
   ArrowBack as BackIcon,
   ReceiptLong as ReceivableIcon,
+  RequestQuote as InvoiceIcon,
   LocalShipping as ShipmentIcon
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
+import shipmentService from '../../../api/services/shipmentService';
 import dayjs from 'dayjs';
 import { formatMoney } from '../../../utils/currency';
+import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
+
+// The same physical states counted by the server's shipment ceiling. SCHEDULED and CANCELLED
+// notes did not move stock and must not consume an order line's remaining quantity on screen.
+const DESPATCHED_DELIVERY_STATES = new Set([
+  'DISPATCHED', 'IN_TRANSIT', 'DELIVERED', 'DELIVERY_EXCEPTION',
+]);
 
 const OrderViewPage: React.FC = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const { userData, hasPermission } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
+  const [invoiceOpen, setInvoiceOpen] = useState(false);
+  const canCreateShipment = hasPermission('Shipments', 'create');
+  const canViewShipments = hasPermission('Shipments', 'view');
+  const canCreateInvoice = hasPermission('Accounts Receivable', 'create');
 
   const { data: order, isLoading, isError, refetch } = useQuery({
     queryKey: ['order-details', id, businessUnitId],
     queryFn: () => orderService.getById(Number(id), businessUnitId),
     enabled: !!id && !isNaN(Number(id)),
   });
+
+  const shipmentsQuery = useQuery({
+    queryKey: ['shipments-for-order', order?.id, businessUnitId],
+    queryFn: () => shipmentService.getByOrderId(Number(order!.id), businessUnitId),
+    enabled: Boolean(order?.id) && canCreateShipment && canViewShipments,
+  });
+
+  const hasRemainingShipmentQuantity = useMemo(() => {
+    if (!order || !shipmentsQuery.data) return false;
+    const shippedByLine = new Map<number, number>();
+    shipmentsQuery.data
+      .filter(shipment => DESPATCHED_DELIVERY_STATES.has(shipment.deliveryStatus))
+      .forEach(shipment => shipment.items.forEach(item => {
+        shippedByLine.set(item.orderItemId, (shippedByLine.get(item.orderItemId) ?? 0) + item.quantity);
+      }));
+    return order.items.some(item => (shippedByLine.get(item.id) ?? 0) < item.quantity);
+  }, [order, shipmentsQuery.data]);
+
+  const orderIsTerminal = ['SHIPPED', 'DELIVERED', 'CANCELLED']
+    .includes(order?.status?.replaceAll('_', '').toUpperCase() ?? '');
+  const canCreateNextShipment = canCreateShipment && canViewShipments
+    && shipmentsQuery.isSuccess && hasRemainingShipmentQuantity && !orderIsTerminal;
 
   const getStatusColor = (status: string) => {
     switch (status?.toUpperCase()) {
@@ -67,7 +102,12 @@ const OrderViewPage: React.FC = () => {
           {hasPermission('Accounts Receivable', 'view') && (
             <Button variant="outlined" startIcon={<ReceivableIcon />} size="small" onClick={() => navigate('/sales/finance')}>Accounts Receivable</Button>
           )}
-          {!order.hasShipments && !['Shipped', 'Delivered', 'Cancelled'].includes(order.status) && (
+          {canCreateInvoice && (
+            <Button variant="outlined" startIcon={<InvoiceIcon />} size="small" onClick={() => setInvoiceOpen(true)}>
+              Invoice accepted delivery
+            </Button>
+          )}
+          {canCreateNextShipment && (
              <Button 
                 variant="contained" 
                 startIcon={<ShipmentIcon />} 
@@ -75,7 +115,7 @@ const OrderViewPage: React.FC = () => {
                 size="small"
                 onClick={() => navigate(`/sales/shipments/from-order/${order.id}`)}
               >
-                Create Shipment
+                {shipmentsQuery.data.length > 0 ? 'Create next shipment' : 'Create shipment'}
               </Button>
           )}
         </Stack>
@@ -192,6 +232,19 @@ const OrderViewPage: React.FC = () => {
           </Card>
         </Grid>
       </Grid>
+
+      {invoiceOpen && (
+        <InvoiceFromOrderDialog
+          orderId={order.id}
+          orderNo={order.orderNo || order.orderNumber || String(order.id)}
+          businessUnitId={businessUnitId}
+          onClose={() => setInvoiceOpen(false)}
+          onCreated={(document) => {
+            setInvoiceOpen(false);
+            navigate(`/sales/finance?documentId=${document.id}`);
+          }}
+        />
+      )}
     </Box>
   );
 };

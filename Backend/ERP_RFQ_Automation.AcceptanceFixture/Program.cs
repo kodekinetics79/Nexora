@@ -8,7 +8,9 @@ using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Agent.Models;
+using ERP_RFQ_Automation.BankReconciliation;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.GeneralLedger;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.LeadIdentity;
@@ -66,11 +68,13 @@ await EnsureUomAsync("EA", "Each");
 await EnsureUomAsync("JOB", "Job");
 var ownerRole = await EnsureRoleAsync(tenantId, "R01C1_OWNER", "Acceptance Tenant Owner", RoleRanks.Owner);
 var managerRole = await EnsureRoleAsync(tenantId, "R01C1_MANAGER", "Acceptance Manager", RoleRanks.Manager);
+var financeRole = await EnsureRoleAsync(tenantId, "R01C1_FINANCE", "Acceptance Finance Officer", RoleRanks.Member);
 var editorRole = await EnsureRoleAsync(tenantId, "R01C1_EDITOR", "Acceptance Sales Editor", RoleRanks.Member);
 var deniedRole = await EnsureRoleAsync(tenantId, "R01C1_DENIED", "Acceptance Denied", RoleRanks.Member);
 var otherRole = await EnsureRoleAsync(otherTenantId, "R01C1_OTHER", "Acceptance Other Tenant", RoleRanks.Member);
 await EnsureUserAsync(tenantId, ownerRole.SetupId, "owner@release01c1.local", "Olivia", "Owner");
 var manager = await EnsureUserAsync(tenantId, managerRole.SetupId, "manager@release01c1.local", "Morgan", "Manager");
+await EnsureUserAsync(tenantId, financeRole.SetupId, "finance@release01c1.local", "Finley", "Finance");
 await EnsureUserAsync(tenantId, editorRole.SetupId, "editor@release01c1.local", "Elliot", "Editor");
 await EnsureUserAsync(tenantId, deniedRole.SetupId, "denied@release01c1.local", "Dana", "Denied");
 await EnsureUserAsync(otherTenantId, otherRole.SetupId, "other@release01c1.local", "Taylor", "Other Tenant");
@@ -86,6 +90,23 @@ foreach (var moduleName in permissionModules)
     var module = await EnsureModuleAsync(moduleName);
     foreach (var role in new[] { managerRole, editorRole })
         await EnsurePermissionAsync(tenantId, role.SetupId, module.Id, create: true, edit: true);
+}
+var accountsReceivableModule = await EnsureModuleAsync("Accounts Receivable");
+var customerPaymentsModule = await EnsureModuleAsync("Customer Payments");
+var bankAccountsModule = await EnsureModuleAsync("Bank Accounts");
+await EnsurePermissionAsync(tenantId, managerRole.SetupId, accountsReceivableModule.Id,
+    create: false, edit: false, view: true);
+await EnsurePermissionAsync(tenantId, financeRole.SetupId, accountsReceivableModule.Id,
+    create: true, edit: true, view: true);
+await EnsurePermissionAsync(tenantId, financeRole.SetupId, customerPaymentsModule.Id,
+    create: true, edit: true, view: true);
+await EnsurePermissionAsync(tenantId, financeRole.SetupId, bankAccountsModule.Id,
+    create: false, edit: false, view: true);
+foreach (var moduleName in new[] { "Dashboard", "Customers", "Orders" })
+{
+    var module = await EnsureModuleAsync(moduleName);
+    await EnsurePermissionAsync(tenantId, financeRole.SetupId, module.Id,
+        create: false, edit: false, view: true);
 }
 var otherLeadsModule = await EnsureModuleAsync("Leads");
 await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, otherLeadsModule.Id, create: true, edit: true);
@@ -195,6 +216,7 @@ await EnsureFollowUpAsync(ahmed.Id, backupLead.Id, abc.Id, now.AddHours(4), 90, 
 await EnsureFollowUpAsync(daniel.Id, sixLineLead.Id, abc.Id, now.AddHours(-2), 60, "WORKLOAD_EVIDENCE");
 
 var currency = await EnsureCurrencyAsync("USD", "US Dollar", "$");
+var acceptanceBankAccount = await EnsureFinanceFoundationAsync(currency.Id);
 var supplier = await EnsureSupplierAsync("Precision Controls Supply", "quotes@precision-controls.local");
 var supplierTwo = await EnsureSupplierAsync("Atlas Automation Partners", "quotes@atlas-automation.local");
 var supplierThree = await EnsureSupplierAsync("Meridian Process Equipment", "rfq@meridian-process.local");
@@ -356,9 +378,22 @@ var partialAwardQuote = await EnsureQuoteAsync(partialAwardRfq, sentStatus.Setup
 PrepareClientPoQuote(exactAwardQuote, currency.Id, 525m);
 PrepareClientPoQuote(partialAwardQuote, currency.Id, 575m);
 PrepareClientPoQuote(sendQuote, currency.Id, 475m);
+// The downstream sourced-order scenario represents a customer-accepted sell line, not an
+// unpriced draft. Its frozen customer PO/order snapshot must therefore carry the same positive
+// governed price that the Atlas offer (446 + 3 freight allocation) yields at a 24% target margin.
+// Without this, delivery succeeds but finance correctly refuses to issue a zero-value invoice.
+var sourcedQuoteLine = mainQuote.QuoteItems.Single(item => item.ProductId == outOfStock.Id);
+sourcedQuoteLine.UnitPrice = decimal.Round(449m / 0.76m, 6, MidpointRounding.AwayFromZero);
+sourcedQuoteLine.TotalAmount = sourcedQuoteLine.Quantity * sourcedQuoteLine.UnitPrice;
+mainQuote.CurrencyId = currency.Id;
+mainQuote.TotalAmount = mainQuote.QuoteItems.Sum(item => item.TotalAmount);
 await db.SaveChangesAsync();
 await EnsureSetupAsync("OrderStatus", "DRAFT", "Draft");
 var orderStatus = await EnsureSetupAsync("OrderStatus", "CONFIRMED", "Confirmed");
+await EnsureSetupAsync("OrderStatus", "SHIPPED", "Shipped");
+await EnsureSetupAsync("OrderStatus", "DELIVERED", "Delivered");
+await EnsureSetupAsync("OrderStatus", "COMPLETED", "Completed");
+var shipmentStatus = await EnsureSetupAsync("ShipmentStatus", "DISPATCHED", "Dispatched");
 var allocationOrder = await EnsureOrderAsync(mainQuote, mainRfq, sixLineLead, orderStatus.SetupId,
     sufficient, primaryWarehouse);
 var sourcedCustomerOrderLineId = await EnsureSourcedCustomerOrderAsync(mainQuote, mainRfq, outOfStock,
@@ -723,6 +758,140 @@ async Task<Currency> EnsureCurrencyAsync(string code, string name, string symbol
     db.Add(value);
     await db.SaveChangesAsync();
     return value;
+}
+
+async Task<BankAccount> EnsureFinanceFoundationAsync(long currencyId)
+{
+    async Task<LedgerAccount> EnsureLedgerAccountAsync(
+        string code,
+        string name,
+        string category,
+        string normalBalance,
+        bool isControlAccount,
+        char hashCharacter,
+        bool currencySpecific = false)
+    {
+        var account = await db.LedgerAccounts.SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == tenantId && x.Code == code);
+        if (account is null)
+        {
+            account = new LedgerAccount
+            {
+                BusinessUnitId = tenantId,
+                Code = code,
+                Name = name,
+                Category = category,
+                NormalBalance = normalBalance,
+                CurrencyId = currencySpecific ? currencyId : null,
+                IsControlAccount = isControlAccount,
+                IsContraAccount = false,
+                AllowsManualPosting = false,
+                IsActive = true,
+                IdempotencyKey = $"acceptance-ledger-{code}",
+                RequestHash = new string(hashCharacter, 64),
+                CreatedBy = fixtureActor,
+                CreatedOn = now
+            };
+            db.LedgerAccounts.Add(account);
+            await db.SaveChangesAsync();
+        }
+        return account;
+    }
+
+    var cash = await EnsureLedgerAccountAsync(
+        "1010", "Operating cash", LedgerAccountCategories.Asset, LedgerNormalBalances.Debit,
+        isControlAccount: true, '1', currencySpecific: true);
+    var receivables = await EnsureLedgerAccountAsync(
+        "1100", "Trade receivables", LedgerAccountCategories.Asset, LedgerNormalBalances.Debit,
+        isControlAccount: true, '2');
+    var unapplied = await EnsureLedgerAccountAsync(
+        "2100", "Unapplied cash", LedgerAccountCategories.Liability, LedgerNormalBalances.Credit,
+        isControlAccount: false, '3');
+
+    var book = await db.LedgerBooks.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId);
+    if (book is null)
+    {
+        book = new LedgerBook
+        {
+            BusinessUnitId = tenantId,
+            Name = "Acceptance general ledger",
+            FunctionalCurrencyId = currencyId,
+            TimeZoneId = "UTC",
+            FiscalYearStartMonth = 1,
+            ReceivablesControlAccountId = receivables.Id,
+            UnappliedCashAccountId = unapplied.Id,
+            IdempotencyKey = "acceptance-ledger-book",
+            RequestHash = new string('4', 64),
+            CreatedBy = fixtureActor,
+            CreatedOn = now
+        };
+        db.LedgerBooks.Add(book);
+    }
+    else
+    {
+        book.FunctionalCurrencyId = currencyId;
+        book.ReceivablesControlAccountId = receivables.Id;
+        book.UnappliedCashAccountId = unapplied.Id;
+    }
+    await db.SaveChangesAsync();
+
+    var period = await db.AccountingPeriods.SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.FiscalYear == now.Year && x.PeriodNumber == 1);
+    if (period is null)
+    {
+        period = new AccountingPeriod
+        {
+            BusinessUnitId = tenantId,
+            FiscalYear = now.Year,
+            PeriodNumber = 1,
+            Name = $"Acceptance {now.Year}",
+            StartsOn = new DateTime(now.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            EndsOn = new DateTime(now.Year, 12, 31, 23, 59, 59, DateTimeKind.Utc),
+            Status = AccountingPeriodStatuses.Open,
+            IdempotencyKey = $"acceptance-period-{now.Year}-1",
+            RequestHash = new string('5', 64),
+            CreatedBy = fixtureActor,
+            CreatedOn = now
+        };
+        db.AccountingPeriods.Add(period);
+    }
+    else
+    {
+        period.Status = AccountingPeriodStatuses.Open;
+    }
+    await db.SaveChangesAsync();
+
+    var bankAccount = await db.BankAccounts.SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.IdempotencyKey == "acceptance-operating-bank");
+    if (bankAccount is null)
+    {
+        bankAccount = new BankAccount
+        {
+            BusinessUnitId = tenantId,
+            Name = "Acceptance operating bank",
+            InstitutionName = "Acceptance Test Bank",
+            MaskedAccountNumber = "****4242",
+            AccountFingerprint = new string('6', 64),
+            CurrencyId = currencyId,
+            LedgerAccountId = cash.Id,
+            Status = BankAccountStatuses.Active,
+            OpeningDate = new DateTime(now.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            IdempotencyKey = "acceptance-operating-bank",
+            RequestHash = new string('7', 64),
+            CreatedBy = fixtureActor,
+            CreatedOn = now
+        };
+        db.BankAccounts.Add(bankAccount);
+        await db.SaveChangesAsync();
+    }
+    else
+    {
+        bankAccount.CurrencyId = currencyId;
+        bankAccount.LedgerAccountId = cash.Id;
+        bankAccount.Status = BankAccountStatuses.Active;
+        await db.SaveChangesAsync();
+    }
+    return bankAccount;
 }
 
 async Task<ProductCategory> EnsureProductCategoryAsync(string name)
@@ -1771,6 +1940,7 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"CUSTOMER_OWNERSHIP_ID={ownership.Id}");
     Console.WriteLine($"PRODUCT_IDS={sufficient.Id},{partial.Id},{outOfStock.Id},{incomingProduct.Id}");
     Console.WriteLine($"WAREHOUSE_IDS={primaryWarehouse.Id},{overflowWarehouse.Id},{transitWarehouse.Id}");
+    Console.WriteLine($"E2E_CORE_PRIMARY_WAREHOUSE_ID={primaryWarehouse.Id}");
     Console.WriteLine($"INVENTORY_IDS={sufficientPrimary.Id},{sufficientOverflow.Id},{partialStock.Id},{zeroStock.Id},{incomingStock.Id}");
     Console.WriteLine($"E2E_CORE_CURRENCY_ID={currency.Id}");
     Console.WriteLine($"E2E_CORE_LEAD_ID={sixLineLead.Id}");
@@ -1826,6 +1996,8 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"E2E_V2_CLIENT_PO_PARTIAL_QUOTE_ITEM_ID={partialAwardQuote.QuoteItems.Single().Id}");
     Console.WriteLine($"E2E_V2_CLIENT_PO_PARTIAL_PRODUCT_ID={partialAwardQuote.QuoteItems.Single().ProductId}");
     Console.WriteLine($"E2E_V2_CLIENT_PO_PARTIAL_NEXORA_SERIAL={partialAwardQuote.NexoraSerial}");
+    Console.WriteLine($"E2E_V2_SHIPMENT_STATUS_ID={shipmentStatus.SetupId}");
+    Console.WriteLine($"E2E_V2_BANK_ACCOUNT_ID={acceptanceBankAccount.Id}");
     Console.WriteLine($"E2E_CORE_NEXORA_SERIAL={sixLineLead.CommercialCaseReference}");
     Console.WriteLine($"E2E_CORE_DUPLICATE_BATCH_ID={duplicateBatchId}");
     Console.WriteLine("E2E_CORE_REVISION_CHANGED_LINE_COUNT=1");

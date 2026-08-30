@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
+import { isAxiosError } from 'axios';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert, AlertTitle, Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
-  DialogContent, DialogTitle, Divider, MenuItem, Stack, Table, TableBody, TableCell,
+  CircularProgress, DialogContent, DialogTitle, Divider, MenuItem, Stack, Table, TableBody, TableCell,
   TableHead, TableRow, TextField, Typography,
 } from '@mui/material';
 import dayjs from 'dayjs';
@@ -30,6 +31,7 @@ interface Props {
   orderId: number;
   deliveryStatus: string;
   items: ShipmentItemDTO[];
+  canEdit: boolean;
 }
 
 const serverMessage = (error: unknown, fallback: string): string => {
@@ -39,7 +41,13 @@ const serverMessage = (error: unknown, fallback: string): string => {
   return detail?.detail ?? detail?.message ?? fallback;
 };
 
-const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliveryStatus, items }) => {
+const responseStatus = (error: unknown) => isAxiosError(error) ? error.response?.status : undefined;
+const resultIsUncertain = (error: unknown) => {
+  const status = responseStatus(error);
+  return status == null || status >= 500;
+};
+
+const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliveryStatus, items, canEdit }) => {
   const queryClient = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [decisionFor, setDecisionFor] = useState<number | null>(null);
@@ -49,9 +57,14 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
     queryKey: ['delivery-confirmation', shipmentId],
     queryFn: () => deliveryService.getConfirmation(shipmentId),
     enabled: shipmentId > 0,
+    // Absence (404) and outage are different operator states below. Neither should auto-retry and
+    // silently move the action while somebody is deciding whether it is safe to record a POD.
     retry: false,
   });
   const proof = proofQuery.data;
+  const proofNotRecorded = (proofQuery.isSuccess && !proof)
+    || (proofQuery.isError && responseStatus(proofQuery.error) === 404);
+  const proofReadFailed = proofQuery.isError && !proofNotRecorded;
 
   const ledgerQuery = useQuery({
     queryKey: ['delivered-quantities', orderId],
@@ -99,8 +112,30 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
           <Alert severity="error" sx={{ mb: 2 }} onClose={() => setActionError(null)}>{actionError}</Alert>
         )}
 
+        {proofQuery.isLoading && (
+          <Alert severity="info" icon={<CircularProgress size={18} />} sx={{ mb: 2 }}>
+            Checking whether proof of delivery has already been recorded…
+          </Alert>
+        )}
+        {proofReadFailed && (
+          <Alert severity="error" sx={{ mb: 2 }} action={
+            <Button color="inherit" size="small" onClick={() => void proofQuery.refetch()}>
+              Retry
+            </Button>
+          }>
+            <AlertTitle>Proof-of-delivery status could not be verified</AlertTitle>
+            Recording is locked until the current state can be read. An outage must not look like
+            an unconfirmed shipment.
+          </Alert>
+        )}
+        {proofNotRecorded && canConfirm && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            No proof of delivery is recorded for this shipment yet.
+          </Typography>
+        )}
+
         <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', mb: 2 }}>
-          {allowed.map(status => (
+          {canEdit && allowed.map(status => (
             <Button
               key={status}
               size="small"
@@ -111,7 +146,7 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
               Mark {DELIVERY_STATUS_LABEL[status]}
             </Button>
           ))}
-          {canConfirm && !proof && (
+          {canEdit && canConfirm && proofNotRecorded && (
             <Button size="small" variant="contained" onClick={() => setConfirmOpen(true)}>
               Record proof of delivery
             </Button>
@@ -124,7 +159,7 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
           )}
         </Stack>
 
-        {cancellationRefused && (
+        {canEdit && cancellationRefused && (
           <Alert severity="info" sx={{ mb: 2 }}>
             <AlertTitle sx={{ fontWeight: 700 }}>This delivery cannot be cancelled</AlertTitle>
             {CANNOT_CANCEL_REASON}
@@ -132,6 +167,25 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
         )}
 
         {/* FR-DLM-02. Despatched and accepted are two numbers, and both are shown. */}
+        {ledgerQuery.isLoading && (
+          <Alert severity="info" icon={<CircularProgress size={18} />} sx={{ mb: 2 }}>
+            Loading cumulative delivery quantities…
+          </Alert>
+        )}
+        {ledgerQuery.isError && (
+          <Alert severity="error" sx={{ mb: 2 }} action={
+            <Button color="inherit" size="small" onClick={() => void ledgerQuery.refetch()}>
+              Retry
+            </Button>
+          }>
+            Cumulative delivery quantities could not be loaded. No quantity has been assumed to be zero.
+          </Alert>
+        )}
+        {ledgerQuery.isSuccess && ledgerQuery.data.length === 0 && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+            No cumulative delivery quantities are recorded for this order yet.
+          </Typography>
+        )}
         {ledgerQuery.data && ledgerQuery.data.length > 0 && (
           <>
             <Divider sx={{ my: 2 }} />
@@ -227,8 +281,10 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
                               <br />
                               {l.commercialDecisionBy} on {dayjs(l.commercialDecisionOn).format('DD MMM YYYY')}
                             </Typography>
-                          ) : (
+                          ) : canEdit ? (
                             <Button size="small" onClick={() => setDecisionFor(l.id)}>Decide</Button>
+                          ) : (
+                            <Typography variant="caption" color="text.secondary">Awaiting authorized decision</Typography>
                           )}
                         </TableCell>
                       </TableRow>
@@ -241,7 +297,7 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
         )}
       </CardContent>
 
-      {confirmOpen && (
+      {canEdit && confirmOpen && (
         <ConfirmDeliveryDialog
           shipmentId={shipmentId}
           items={items}
@@ -249,7 +305,7 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
           onRecorded={() => { setConfirmOpen(false); invalidate(); }}
         />
       )}
-      {decisionFor !== null && (
+      {canEdit && decisionFor !== null && (
         <ShortfallDecisionDialog
           proofLineId={decisionFor}
           onClose={() => setDecisionFor(null)}
@@ -293,11 +349,13 @@ const ConfirmDeliveryDialog: React.FC<{
   const [gps, setGps] = useState<{ lat: number; lon: number; acc?: number; at: string } | null>(null);
   const [gpsMessage, setGpsMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // One key per dialog opening. A retry after a dropped connection replays rather than doubling
-  // every accepted unit on the consignment.
-  const idempotencyKey = useMemo(
-    () => `pod-${shipmentId}-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`, [shipmentId]);
+  const [operationKey, setOperationKey] = useState(
+    () => `pod-${shipmentId}-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`);
+  const [pendingOperation, setPendingOperation] = useState<{
+    key: string;
+    command: Parameters<typeof deliveryService.confirm>[2];
+  } | null>(null);
+  const [uncertainResult, setUncertainResult] = useState(false);
 
   const upload = useMutation({
     mutationFn: ({ kind, file }: { kind: 'SIGNATURE' | 'STAMP' | 'PHOTO'; file: File }) =>
@@ -305,24 +363,62 @@ const ConfirmDeliveryDialog: React.FC<{
   });
 
   const confirm = useMutation({
-    mutationFn: () => deliveryService.confirm(shipmentId, idempotencyKey, {
-      receivedByName,
-      receivedByPosition: receivedByPosition || null,
-      receivedByContact: receivedByContact || null,
-      receivedOn: dayjs(receivedOn).toISOString(),
-      signatureEvidenceId: evidence.signature ?? null,
-      stampEvidenceId: evidence.stamp ?? null,
-      photoEvidenceId: evidence.photo ?? null,
-      gpsLatitude: gps?.lat ?? null,
-      gpsLongitude: gps?.lon ?? null,
-      gpsAccuracyMeters: gps?.acc ?? null,
-      gpsCapturedOn: gps?.at ?? null,
-      notes: notes || null,
-      lines,
-    }),
+    mutationFn: (operation: NonNullable<typeof pendingOperation>) =>
+      deliveryService.confirm(shipmentId, operation.key, operation.command),
     onSuccess: onRecorded,
-    onError: (e) => setError(serverMessage(e, 'The delivery confirmation was refused.')),
+    onError: (e) => {
+      if (resultIsUncertain(e)) {
+        setUncertainResult(true);
+        setError('The result is uncertain. The request may already have recorded this proof of delivery. Check the current status or retry safely with the identical command.');
+        return;
+      }
+      setPendingOperation(null);
+      setUncertainResult(false);
+      setOperationKey(`pod-${shipmentId}-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`);
+      setError(serverMessage(e, 'The delivery confirmation was refused.'));
+    },
   });
+
+  const checkStatus = useMutation({
+    mutationFn: () => deliveryService.getConfirmation(shipmentId),
+    onSuccess: onRecorded,
+    onError: (e) => setError(responseStatus(e) === 404
+      ? 'No proof is recorded yet. Retry safely to replay the unchanged command.'
+      : serverMessage(e, 'The current proof-of-delivery status could not be checked.')),
+  });
+
+  const submit = () => {
+    if (pendingOperation) {
+      confirm.mutate(pendingOperation);
+      return;
+    }
+    const operation = {
+      key: operationKey,
+      command: {
+        receivedByName,
+        receivedByPosition: receivedByPosition || null,
+        receivedByContact: receivedByContact || null,
+        receivedOn: dayjs(receivedOn).toISOString(),
+        signatureEvidenceId: evidence.signature ?? null,
+        stampEvidenceId: evidence.stamp ?? null,
+        photoEvidenceId: evidence.photo ?? null,
+        gpsLatitude: gps?.lat ?? null,
+        gpsLongitude: gps?.lon ?? null,
+        gpsAccuracyMeters: gps?.acc ?? null,
+        gpsCapturedOn: gps?.at ?? null,
+        notes: notes || null,
+        lines,
+      },
+    };
+    setPendingOperation(operation);
+    confirm.mutate(operation);
+  };
+
+  const formFrozen = confirm.isPending || uncertainResult || checkStatus.isPending;
+  const closeLocked = formFrozen || upload.isPending;
+  const closeIfSafe = () => {
+    if (!closeLocked) onClose();
+  };
 
   const setLine = (shipmentItemId: number, patch: Partial<ConfirmDeliveryLineCommand>) =>
     setLines(prev => prev.map(l => l.shipmentItemId === shipmentItemId ? { ...l, ...patch } : l));
@@ -361,11 +457,13 @@ const ConfirmDeliveryDialog: React.FC<{
   };
 
   return (
-    <Dialog open fullWidth maxWidth="md" onClose={onClose}>
+    <Dialog open fullWidth maxWidth="md" onClose={closeIfSafe}>
       <DialogTitle>Record proof of delivery</DialogTitle>
       <DialogContent dividers>
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
+        <Box component="fieldset" disabled={formFrozen}
+          sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}>
         <Stack spacing={2}>
           <TextField
             label="Received by (name)"
@@ -478,15 +576,22 @@ const ConfirmDeliveryDialog: React.FC<{
           <TextField label="Notes" multiline minRows={2} value={notes}
             onChange={e => setNotes(e.target.value)} />
         </Stack>
+        </Box>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
+        {uncertainResult && (
+          <Button disabled={checkStatus.isPending || confirm.isPending}
+            onClick={() => checkStatus.mutate()}>
+            Check current status
+          </Button>
+        )}
+        <Button disabled={closeLocked} onClick={closeIfSafe}>Cancel</Button>
         <Button
           variant="contained"
-          disabled={confirm.isPending || !receivedByName.trim()}
-          onClick={() => confirm.mutate()}
+          disabled={confirm.isPending || checkStatus.isPending || upload.isPending || !receivedByName.trim()}
+          onClick={submit}
         >
-          Record proof of delivery
+          {uncertainResult ? 'Retry safely' : 'Record proof of delivery'}
         </Button>
       </DialogActions>
     </Dialog>

@@ -54,6 +54,8 @@ public sealed class CrossModuleStockIntegrityTests
     private const long ShippedStatus = 94_061;
     private const long CancelledStatus = 94_062;
     private const long OtherOpenStatus = 94_063;
+    private const long ShipmentStatus = 94_064;
+    private const long OtherShipmentStatus = 94_065;
 
     private static readonly DateTime Now = new(2026, 8, 4, 9, 0, 0, DateTimeKind.Utc);
 
@@ -110,6 +112,41 @@ public sealed class CrossModuleStockIntegrityTests
         Assert.Equal(6m, await verify.Set<Models.Inventory>().Where(x => x.Id == InventoryRow)
             .Select(x => x.QtyOnHand).SingleAsync());
         Assert.Equal(1, await verify.Shipments.CountAsync());
+    }
+
+    [Fact]
+    public async Task Retrying_the_same_shipment_command_replays_without_moving_stock_twice()
+    {
+        using var database = NewDatabase();
+
+        var first = Assert.IsType<CreatedAtActionResult>(
+            await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, 4m, "shipment-retry-1"));
+        var replay = Assert.IsType<OkObjectResult>(
+            await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, 4m, "shipment-retry-1"));
+        Assert.Equal(((ShipmentDto)first.Value!).Id, ((ShipmentDto)replay.Value!).Id);
+
+        await using var verify = database.ContextFor(Tenant);
+        Assert.Single(await verify.Shipments.ToListAsync());
+        Assert.Single(await verify.InventoryMovements.ToListAsync());
+        Assert.Equal(6m, await verify.Set<Models.Inventory>().Where(x => x.Id == InventoryRow)
+            .Select(x => x.QtyOnHand).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Reusing_a_shipment_key_for_a_changed_command_is_refused()
+    {
+        using var database = NewDatabase();
+        await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, 1m, "shipment-hash-1");
+
+        var conflict = Assert.IsType<ConflictObjectResult>(
+            await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, 2m, "shipment-hash-1"));
+        Assert.Contains("different shipment command",
+            conflict.Value?.GetType().GetProperty("message")?.GetValue(conflict.Value)?.ToString() ?? "");
+
+        await using var verify = database.ContextFor(Tenant);
+        Assert.Single(await verify.Shipments.ToListAsync());
+        Assert.Equal(9m, await verify.Set<Models.Inventory>().Where(x => x.Id == InventoryRow)
+            .Select(x => x.QtyOnHand).SingleAsync());
     }
 
     [Fact]
@@ -620,7 +657,7 @@ public sealed class CrossModuleStockIntegrityTests
         => new(context, NullLogger<ProductUploaderService>.Instance);
 
     private static async Task<IActionResult> CreateShipmentAsync(TestDb database, long tenant,
-        long orderId, long orderItemId, decimal quantity)
+        long orderId, long orderItemId, decimal quantity, string? idempotencyKey = null)
     {
         await using var context = database.ContextFor(tenant);
         var controller = new ShipmentController(
@@ -639,12 +676,14 @@ public sealed class CrossModuleStockIntegrityTests
                 }
             }
         };
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            controller.ControllerContext.HttpContext.Request.Headers["Idempotency-Key"] = idempotencyKey;
 
         return await controller.CreateShipment(new CreateShipmentDto
         {
             OrderId = orderId,
             BusinessUnitId = tenant,
-            StatusId = tenant == Tenant ? OpenStatus : OtherOpenStatus,
+            StatusId = tenant == Tenant ? ShipmentStatus : OtherShipmentStatus,
             ShipmentDate = Now,
             Items = [new CreateShipmentItemDto { OrderItemId = orderItemId, Quantity = quantity }]
         });
@@ -665,7 +704,9 @@ public sealed class CrossModuleStockIntegrityTests
         SeedTenant(seed, Tenant, Warehouse, Product, InventoryRow, OrderId, OrderItemId, OpenStatus, "home");
         seed.SetupMasters.AddRange(
             OrderStatus(ShippedStatus, Tenant, "SHIPPED"),
-            OrderStatus(CancelledStatus, Tenant, "CANCELLED"));
+            OrderStatus(CancelledStatus, Tenant, "CANCELLED"),
+            ShipmentStatusRow(ShipmentStatus, Tenant),
+            ShipmentStatusRow(OtherShipmentStatus, OtherTenant));
         SeedTenant(seed, OtherTenant, OtherWarehouse, OtherProduct, OtherInventoryRow, OtherOrderId,
             OtherOrderItemId, OtherOpenStatus, "victim");
         seed.SaveChanges();
@@ -712,6 +753,12 @@ public sealed class CrossModuleStockIntegrityTests
     private static SetupMaster OrderStatus(long setupId, long tenant, string value) => new()
     {
         SetupId = setupId, SetupType = "OrderStatus", SetupCode = value, SetupValue = value,
+        BusinessUnitId = tenant, IsActive = true, CreatedBy = "qa", CreatedOn = Now
+    };
+
+    private static SetupMaster ShipmentStatusRow(long setupId, long tenant) => new()
+    {
+        SetupId = setupId, SetupType = "ShipmentStatus", SetupCode = "READY", SetupValue = "READY",
         BusinessUnitId = tenant, IsActive = true, CreatedBy = "qa", CreatedOn = Now
     };
 }

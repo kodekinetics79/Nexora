@@ -1,0 +1,20 @@
+{
+  "regions": [
+    { "id": "brand", "kind": "chrome", "grid": "A0:B0", "note": "Nexora mark and wordmark on navy", "codeDrawn": true },
+    { "id": "ledger-headline", "kind": "text", "grid": "A1:E2", "note": "Every commercial decision, connected to its evidence." },
+    { "id": "ledger-kicker", "kind": "text", "grid": "A2:C2", "note": "Commercial chain-of-custody command ledger label" },
+    { "id": "enquiry-meta", "kind": "text", "grid": "A3:F3", "note": "Synthetic enquiry reference, account, value, created time and owner" },
+    { "id": "journey-labels", "kind": "text", "grid": "B4:F4", "note": "Email captured through Payment posted stage labels and times" },
+    { "id": "journey-line", "kind": "chrome", "grid": "B4:F5", "note": "Code-drawn connected stage line with six restrained circular status markers", "codeDrawn": true },
+    { "id": "evidence-table", "kind": "chrome", "grid": "A5:F8", "note": "Code-drawn compact evidence ledger table with status, source, reference, approved lines, amount, actor and notes", "codeDrawn": true },
+    { "id": "integrity-note", "kind": "chrome", "grid": "A9:F9", "note": "Ledger integrity assurance row; no export action in the implemented sign-in screen", "codeDrawn": true },
+    { "id": "theme-toggle", "kind": "control", "grid": "J0:J0", "note": "Light and dark theme toggle" },
+    { "id": "signin-heading", "kind": "text", "grid": "G2:J2", "note": "Sign in to Nexora" },
+    { "id": "signin-support", "kind": "text", "grid": "G2:J3", "note": "Truthful procurement and order-to-cash workspace explanation" },
+    { "id": "email-field", "kind": "control", "grid": "G4:J4", "note": "Email address label and visible bordered input" },
+    { "id": "password-field", "kind": "control", "grid": "G5:J5", "note": "Password label, visible bordered input and reveal control" },
+    { "id": "forgot-password", "kind": "control", "grid": "I6:J6", "note": "Forgot password recovery link" },
+    { "id": "signin-action", "kind": "control", "grid": "G6:J7", "note": "Primary Sign in button" },
+    { "id": "platform-link", "kind": "control", "grid": "G9:J9", "note": "Quiet Platform administration link separated by a fine rule" }
+  ]
+}

@@ -17,11 +17,25 @@ import {
   Receipt as InvoiceIcon
 } from '@mui/icons-material';
 import shipmentService from '../../../api/services/shipmentService';
+import { DELIVERY_STATUS, DELIVERY_STATUS_LABEL } from '../../../api/services/deliveryService';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
 
 import PermissionGuard from '../../../components/common/PermissionGuard';
 import { Add as AddIcon } from '@mui/icons-material';
+
+const deliveryStatusColor = (status: string): 'default' | 'primary' | 'success' | 'warning' | 'error' => {
+  if (status === DELIVERY_STATUS.Delivered) return 'success';
+  if (status === DELIVERY_STATUS.Dispatched || status === DELIVERY_STATUS.InTransit) return 'primary';
+  if (status === DELIVERY_STATUS.DeliveryException) return 'warning';
+  if (status === DELIVERY_STATUS.Cancelled) return 'default';
+  return 'default';
+};
+
+const shipmentCost = (value: number, currencyCode?: string) => {
+  const amount = value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return currencyCode ? `${currencyCode} ${amount}` : amount;
+};
 
 const ShipmentListPage: React.FC = () => {
   const navigate = useNavigate();
@@ -48,11 +62,14 @@ const ShipmentListPage: React.FC = () => {
 
       switch (statusFilter) {
         case 'inTransit':
-          return s.status === 'In Transit' || s.status === 'Shipped';
+          return s.deliveryStatus === DELIVERY_STATUS.Dispatched || s.deliveryStatus === DELIVERY_STATUS.InTransit;
         case 'delivered':
-          return s.status === 'Delivered';
+          return s.deliveryStatus === DELIVERY_STATUS.Delivered;
         case 'overdue':
-          return s.status !== 'Delivered' && !!s.estimatedDeliveryDate && dayjs(s.estimatedDeliveryDate).isBefore(now);
+          return s.deliveryStatus !== DELIVERY_STATUS.Delivered
+            && s.deliveryStatus !== DELIVERY_STATUS.Cancelled
+            && !!s.estimatedDeliveryDate
+            && dayjs(s.estimatedDeliveryDate).isBefore(now);
         default:
           return true;
       }
@@ -151,7 +168,11 @@ const ShipmentListPage: React.FC = () => {
         <Typography sx={{ 
           fontSize: '0.85rem', 
           fontWeight: 700,
-          color: dayjs(p.value).isBefore(dayjs()) && p.row.status !== 'Delivered' ? 'error.main' : 'text.primary' 
+          color: dayjs(p.value).isBefore(dayjs())
+            && p.row.deliveryStatus !== DELIVERY_STATUS.Delivered
+            && p.row.deliveryStatus !== DELIVERY_STATUS.Cancelled
+            ? 'error.main'
+            : 'text.primary'
         }}>
           {p.value ? dayjs(p.value).format('DD MMM YYYY') : '-'}
         </Typography>
@@ -165,28 +186,35 @@ const ShipmentListPage: React.FC = () => {
       headerAlign: 'right',
       renderCell: (p) => (
         <Typography sx={{ fontWeight: 800, fontSize: '0.85rem', color: 'success.main' }}>
-          {p.value ? `$${p.value.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+          {p.value != null ? shipmentCost(p.value, p.row.currencyCode) : '-'}
+          {p.value != null && !p.row.currencyCode && (
+            <Typography component="span" variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+              Currency not supplied
+            </Typography>
+          )}
         </Typography>
       )
     },
     {
-      field: 'status',
-      headerName: 'Status',
-      width: 150,
+      field: 'deliveryStatus',
+      headerName: 'Delivery status',
+      width: 180,
       renderCell: (p) => {
-        let color: any = 'default';
-        if (p.value === 'Delivered') color = 'success';
-        if (p.value === 'Shipped' || p.value === 'In Transit') color = 'primary';
-        if (p.value === 'Pending' || p.value === 'Processing') color = 'warning';
-        if (p.value === 'Cancelled' || p.value === 'Delayed') color = 'error';
-        
+        const canonicalLabel = DELIVERY_STATUS_LABEL[p.value] ?? p.value;
         return (
-          <Chip
-            label={p.value?.toUpperCase()}
-            size="small"
-            color={color}
-            sx={{ fontWeight: 900, height: 24, fontSize: '0.7rem', borderRadius: 1.5, px: 1 }}
-          />
+          <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'flex-start', height: '100%', minWidth: 0 }}>
+            <Chip
+              label={canonicalLabel}
+              size="small"
+              color={deliveryStatusColor(p.value)}
+              sx={{ fontWeight: 800, height: 24, fontSize: '0.7rem', borderRadius: 1.5, px: 0.5 }}
+            />
+            {p.row.status && (
+              <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: '100%', mt: 0.25 }}>
+                Tenant status: {p.row.status}
+              </Typography>
+            )}
+          </Box>
         );
       }
     },

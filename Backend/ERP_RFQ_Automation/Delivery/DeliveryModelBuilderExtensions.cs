@@ -104,6 +104,7 @@ public static class DeliveryModelBuilderExtensions
             entity.Property(x => x.Notes).HasMaxLength(1000);
             entity.Property(x => x.NexoraSerial).HasMaxLength(100);
             entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.RequestHash).HasMaxLength(64);
             entity.Property(x => x.RecordedBy).HasMaxLength(255).IsRequired();
             entity.Property(x => x.Version).HasDefaultValue(1L).IsConcurrencyToken();
 

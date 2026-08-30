@@ -1496,6 +1496,12 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ExternalId)
                 .HasMaxLength(255)
                 .HasColumnName("ExternalID");
+            entity.Property(e => e.IdempotencyKey).HasMaxLength(160);
+            entity.Property(e => e.RequestHash).HasMaxLength(64);
+            entity.HasIndex(e => new { e.BusinessUnitId, e.IdempotencyKey })
+                .IsUnique()
+                .HasFilter("\"IdempotencyKey\" IS NOT NULL")
+                .HasDatabaseName("UX_Shipments_BU_IdempotencyKey");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.LabelUrl).HasMaxLength(500);
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);

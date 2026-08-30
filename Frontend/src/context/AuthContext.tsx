@@ -190,6 +190,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const stamped: UserData = { ...data, schemaVersion: PERMISSION_SCHEMA_VERSION };
     setUserDataState(stamped);
     localStorage.setItem("userData", JSON.stringify(stamped));
+    // Login obtains this snapshot from the same authoritative `/me/permissions` endpoint used by
+    // refreshPermissions. Mark it current immediately; otherwise every create/edit/delete control
+    // is suppressed until a redundant background refresh happens to finish, leaving a freshly
+    // authenticated operator in a misleading read-only shell.
+    if (data.permissions) {
+      const loadedAt = Date.now();
+      lastLoadedAtRef.current = loadedAt;
+      setPermissionsLoadedAt(loadedAt);
+      setPermissionsStale(false);
+      setPermissionsError(null);
+    }
   }, []);
 
   /**

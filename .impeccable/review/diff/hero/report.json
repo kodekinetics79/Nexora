@@ -1,0 +1,647 @@
+{
+  "tool": "comp-diff",
+  "version": 1,
+  "createdAt": "2026-08-30T04:18:20.331Z",
+  "label": "hero",
+  "comp": ".impeccable/mocks/login-chain-ledger-a.png",
+  "build": ".impeccable/review/hero-repro.png",
+  "spec": ".impeccable/build/spec.json",
+  "compSize": "1487x1058",
+  "buildSize": "1487x1058",
+  "align": "top",
+  "overall": 0.7892,
+  "verdict": "drift",
+  "scores": {
+    "overall": 0.7892,
+    "structure": 0.7381,
+    "color": 0.901,
+    "colorIntersection": 0.8426,
+    "paletteMatch": 0.9325,
+    "detail": 0.6996,
+    "detailRaw": 0.7152,
+    "detailAdded": 0.0313,
+    "bands": 0.8714
+  },
+  "palette": {
+    "comp": [
+      {
+        "hex": "#08172a",
+        "coverage": 0.5895
+      },
+      {
+        "hex": "#f8f8f8",
+        "coverage": 0.3651
+      },
+      {
+        "hex": "#0969e8",
+        "coverage": 0.0172
+      },
+      {
+        "hex": "#283b58",
+        "coverage": 0.0151
+      },
+      {
+        "hex": "#bec2cd",
+        "coverage": 0.0075
+      },
+      {
+        "hex": "#657181",
+        "coverage": 0.0056
+      }
+    ],
+    "build": [
+      {
+        "hex": "#081828",
+        "coverage": 0.5842
+      },
+      {
+        "hex": "#f8f8f8",
+        "coverage": 0.3575
+      },
+      {
+        "hex": "#253242",
+        "coverage": 0.0226
+      },
+      {
+        "hex": "#2958c7",
+        "coverage": 0.0171
+      },
+      {
+        "hex": "#4a5268",
+        "coverage": 0.0124
+      },
+      {
+        "hex": "#b2b8c3",
+        "coverage": 0.0064
+      }
+    ]
+  },
+  "regions": [
+    {
+      "id": "brand",
+      "x": 0,
+      "y": 0,
+      "w": 0.2,
+      "h": 0.1,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.4858,
+        "structure": 0.634,
+        "color": 0.9367,
+        "colorIntersection": 0.8991,
+        "paletteMatch": 0.957,
+        "detail": 0.1189,
+        "detailRaw": 0.2647,
+        "detailAdded": 0.2917,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 29,
+          "y": 26,
+          "w": 193,
+          "h": 42
+        },
+        "build": {
+          "x": 44,
+          "y": 51,
+          "w": 207,
+          "h": 46
+        }
+      }
+    },
+    {
+      "id": "ledger-headline",
+      "x": 0.0161,
+      "y": 0.1059,
+      "w": 0.4438,
+      "h": 0.0681,
+      "kind": "text",
+      "score": {
+        "overall": 0.7231,
+        "structure": 0.6429,
+        "color": 0.8803,
+        "colorIntersection": 0.8145,
+        "paletteMatch": 0.9158,
+        "detail": 0.6868,
+        "detailRaw": 0.7441,
+        "detailAdded": 0.1146,
+        "bands": 0.7857
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 8,
+          "y": 11,
+          "w": 644,
+          "h": 52
+        },
+        "build": {
+          "x": 25,
+          "y": 14,
+          "w": 635,
+          "h": 55
+        }
+      }
+    },
+    {
+      "id": "ledger-kicker",
+      "x": 0.0161,
+      "y": 0.2628,
+      "w": 0.2838,
+      "h": 0.0284,
+      "kind": "text",
+      "score": {
+        "overall": 0.6129,
+        "structure": 0.8358,
+        "color": 0.7743,
+        "colorIntersection": 0.6801,
+        "paletteMatch": 0.8251,
+        "detail": 0.0095,
+        "detailRaw": 0.2543,
+        "detailAdded": 0.4896,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 6,
+          "y": 19,
+          "w": 413,
+          "h": 11
+        },
+        "build": {
+          "x": 21,
+          "y": 11,
+          "w": 388,
+          "h": 10
+        }
+      }
+    },
+    {
+      "id": "enquiry-meta",
+      "x": 0.1332,
+      "y": 0.2996,
+      "w": 0.1332,
+      "h": 0.051,
+      "kind": "text",
+      "score": {
+        "overall": 0.6441,
+        "structure": 0.6069,
+        "color": 0.803,
+        "colorIntersection": 0.6932,
+        "paletteMatch": 0.8621,
+        "detail": 0.444,
+        "detailRaw": 0.4596,
+        "detailAdded": 0.0313,
+        "bands": 0.7333
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 5,
+          "y": 5,
+          "w": 182,
+          "h": 40
+        },
+        "build": {
+          "x": 13,
+          "y": 9,
+          "w": 120,
+          "h": 32
+        }
+      }
+    },
+    {
+      "id": "journey-labels",
+      "x": 0.1,
+      "y": 0.4,
+      "w": 0.5,
+      "h": 0.1,
+      "kind": "text",
+      "score": {
+        "overall": 0.6103,
+        "structure": 0.6524,
+        "color": 0.8229,
+        "colorIntersection": 0.7341,
+        "paletteMatch": 0.8708,
+        "detail": 0.2393,
+        "detailRaw": 0.3643,
+        "detailAdded": 0.25,
+        "bands": 0.425
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 2,
+          "y": 0,
+          "w": 721,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 742,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "journey-line",
+      "x": 0.1,
+      "y": 0.4,
+      "w": 0.5,
+      "h": 0.2,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.6111,
+        "structure": 0.5406,
+        "color": 0.8031,
+        "colorIntersection": 0.6878,
+        "paletteMatch": 0.8651,
+        "detail": 0.3268,
+        "detailRaw": 0.3789,
+        "detailAdded": 0.1042,
+        "bands": 0.9294
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 2,
+          "y": 0,
+          "w": 741,
+          "h": 212
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 742,
+          "h": 212
+        }
+      }
+    },
+    {
+      "id": "evidence-table",
+      "x": 0,
+      "y": 0.5,
+      "w": 0.6,
+      "h": 0.4,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.658,
+        "structure": 0.6211,
+        "color": 0.8098,
+        "colorIntersection": 0.7073,
+        "paletteMatch": 0.865,
+        "detail": 0.507,
+        "detailRaw": 0.533,
+        "detailAdded": 0.0521,
+        "bands": 0.7429
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 29,
+          "y": 0,
+          "w": 863,
+          "h": 417
+        },
+        "build": {
+          "x": 45,
+          "y": 0,
+          "w": 846,
+          "h": 423
+        }
+      }
+    },
+    {
+      "id": "integrity-note",
+      "x": 0,
+      "y": 0.9,
+      "w": 0.6,
+      "h": 0.1,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.6318,
+        "structure": 0.8174,
+        "color": 0.902,
+        "colorIntersection": 0.8485,
+        "paletteMatch": 0.9309,
+        "detail": 0.2409,
+        "detailRaw": 0.3034,
+        "detailAdded": 0.125,
+        "bands": 0.4
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 29,
+          "y": 11,
+          "w": 863,
+          "h": 67
+        },
+        "build": {
+          "x": 66,
+          "y": 0,
+          "w": 825,
+          "h": 58
+        }
+      }
+    },
+    {
+      "id": "theme-toggle",
+      "x": 0.9,
+      "y": 0,
+      "w": 0.1,
+      "h": 0.1,
+      "kind": "control",
+      "score": {
+        "overall": 0.8601,
+        "structure": 0.9361,
+        "color": 0.9841,
+        "colorIntersection": 0.9736,
+        "paletteMatch": 0.9897,
+        "detail": 0.4721,
+        "detailRaw": 0.4878,
+        "detailAdded": 0.0313,
+        "bands": 0.6
+      },
+      "verdict": "match",
+      "inkBox": {
+        "comp": {
+          "x": 83,
+          "y": 38,
+          "w": 25,
+          "h": 24
+        },
+        "build": {
+          "x": 75,
+          "y": 31,
+          "w": 34,
+          "h": 27
+        }
+      }
+    },
+    {
+      "id": "signin-heading",
+      "x": 0.6241,
+      "y": 0.2004,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "text",
+      "score": {
+        "overall": 0.5702,
+        "structure": 0.5362,
+        "color": 0.9393,
+        "colorIntersection": 0.9001,
+        "paletteMatch": 0.9604,
+        "detail": 0.1843,
+        "detailRaw": 0.351,
+        "detailAdded": 0.3333,
+        "bands": 0.3964
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 446,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 469,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "signin-support",
+      "x": 0.6241,
+      "y": 0.2004,
+      "w": 0.3759,
+      "h": 0.2004,
+      "kind": "text",
+      "score": {
+        "overall": 0.7545,
+        "structure": 0.7689,
+        "color": 0.9619,
+        "colorIntersection": 0.9391,
+        "paletteMatch": 0.9742,
+        "detail": 0.353,
+        "detailRaw": 0.4155,
+        "detailAdded": 0.125,
+        "bands": 0.7667
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 446,
+          "h": 212
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 469,
+          "h": 212
+        }
+      }
+    },
+    {
+      "id": "email-field",
+      "x": 0.6241,
+      "y": 0.3998,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "control",
+      "score": {
+        "overall": 0.7592,
+        "structure": 0.8523,
+        "color": 0.9747,
+        "colorIntersection": 0.9562,
+        "paletteMatch": 0.9847,
+        "detail": 0.1729,
+        "detailRaw": 0.3344,
+        "detailAdded": 0.3229,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 508,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 514,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "password-field",
+      "x": 0.6241,
+      "y": 0.5,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "control",
+      "score": {
+        "overall": 0.712,
+        "structure": 0.7811,
+        "color": 0.9666,
+        "colorIntersection": 0.9536,
+        "paletteMatch": 0.9736,
+        "detail": 0.1106,
+        "detailRaw": 0.1731,
+        "detailAdded": 0.125,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 508,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 512,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "forgot-password",
+      "x": 0.8,
+      "y": 0.6,
+      "w": 0.2,
+      "h": 0.1,
+      "kind": "control",
+      "score": {
+        "overall": 0.7101,
+        "structure": 0.8466,
+        "color": 0.7077,
+        "colorIntersection": 0.4825,
+        "paletteMatch": 0.829,
+        "detail": 0.4069,
+        "detailRaw": 0.4955,
+        "detailAdded": 0.1771,
+        "bands": 0.56
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 4,
+          "w": 247,
+          "h": 102
+        },
+        "build": {
+          "x": 0,
+          "y": 3,
+          "w": 253,
+          "h": 103
+        }
+      }
+    },
+    {
+      "id": "signin-action",
+      "x": 0.6241,
+      "y": 0.6002,
+      "w": 0.3759,
+      "h": 0.2004,
+      "kind": "control",
+      "score": {
+        "overall": 0.809,
+        "structure": 0.9125,
+        "color": 0.811,
+        "colorIntersection": 0.6944,
+        "paletteMatch": 0.8738,
+        "detail": 0.5728,
+        "detailRaw": 0.6353,
+        "detailAdded": 0.125,
+        "bands": 0.22
+      },
+      "verdict": "match",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 509,
+          "h": 212
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 515,
+          "h": 212
+        }
+      }
+    },
+    {
+      "id": "platform-link",
+      "x": 0.6241,
+      "y": 0.8998,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "control",
+      "score": {
+        "overall": 0.7301,
+        "structure": 0.83,
+        "color": 0.9646,
+        "colorIntersection": 0.9412,
+        "paletteMatch": 0.9772,
+        "detail": 0.0947,
+        "detailRaw": 0.1572,
+        "detailAdded": 0.125,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 371,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 547,
+          "h": 106
+        }
+      }
+    }
+  ],
+  "files": {
+    "sideBySide": ".impeccable/review/diff/hero/side-by-side.png",
+    "heatmap": ".impeccable/review/diff/hero/heatmap.png",
+    "regionFiles": [
+      ".impeccable/review/diff/hero/regions/brand.png",
+      ".impeccable/review/diff/hero/regions/ledger-headline.png",
+      ".impeccable/review/diff/hero/regions/ledger-kicker.png",
+      ".impeccable/review/diff/hero/regions/enquiry-meta.png",
+      ".impeccable/review/diff/hero/regions/journey-labels.png",
+      ".impeccable/review/diff/hero/regions/journey-line.png",
+      ".impeccable/review/diff/hero/regions/evidence-table.png",
+      ".impeccable/review/diff/hero/regions/integrity-note.png",
+      ".impeccable/review/diff/hero/regions/theme-toggle.png",
+      ".impeccable/review/diff/hero/regions/signin-heading.png",
+      ".impeccable/review/diff/hero/regions/signin-support.png",
+      ".impeccable/review/diff/hero/regions/email-field.png",
+      ".impeccable/review/diff/hero/regions/password-field.png",
+      ".impeccable/review/diff/hero/regions/forgot-password.png",
+      ".impeccable/review/diff/hero/regions/signin-action.png",
+      ".impeccable/review/diff/hero/regions/platform-link.png"
+    ]
+  }
+}

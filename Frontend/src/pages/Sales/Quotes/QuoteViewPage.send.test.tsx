@@ -144,6 +144,19 @@ describe('sending a Draft quote', () => {
     await screen.findByRole('button', { name: /send to customer/i });
     expect(screen.queryByRole('button', { name: /ready to send/i })).not.toBeInTheDocument();
   });
+
+  it('names an inventory revalidation hold and keeps customer send disabled', async () => {
+    getById.mockResolvedValue({
+      ...quoteFixture('Draft'),
+      revisionImpact: 'INVENTORY_REVALIDATION_REQUIRED',
+    });
+    renderQuote();
+
+    expect(await screen.findByText('Inventory Revalidation Required')).toBeVisible();
+    expect(screen.getByText(/Stock changed after this Quote Draft was prepared/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /send to customer/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /mark revalidation complete/i })).toBeVisible();
+  });
 });
 
 describe('a quote already with the customer', () => {

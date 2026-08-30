@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.Delivery;
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Interfaces;
@@ -6,8 +7,12 @@ using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -83,15 +88,32 @@ namespace ERP_RFQ_Automation.Controllers
 
             if (targetBUId <= 0)
                 return BadRequest(new { message = "Business Unit ID is required." });
+            if (dto.Items is null || dto.Items.Count == 0)
+                return BadRequest(new { message = "A shipment must contain at least one active order line." });
+            if (!await IsAuthorizedShipmentStatusAsync(targetBUId, dto.StatusId))
+                return BadRequest(new { message = "The shipment status is not active for this business unit." });
+
+            var requestHash = HashCreateCommand(dto);
+            var idempotencyKey = ShipmentIdempotencyKey(dto, requestHash);
+            if (idempotencyKey.Length > 160)
+                return BadRequest(new { message = "Idempotency-Key must not exceed 160 characters." });
+
+            var replay = await FindShipmentReplayAsync(targetBUId, idempotencyKey);
+            if (replay is not null)
+            {
+                if (!string.Equals(replay.RequestHash, requestHash, StringComparison.Ordinal))
+                    return Conflict(new { message = "That Idempotency-Key was already used for a different shipment command." });
+                return Ok(MapToDto(replay));
+            }
 
             // TENANT ISOLATION: the order used to be resolved with `_context.Orders.FindAsync(id)`,
             // which carries no business-unit predicate. A caller could therefore create a shipment
             // against another tenant's order — and now that a shipment issues stock, that would
             // have decremented the victim tenant's on-hand as well. The order is proven to belong
             // to the caller BEFORE anything is written.
-            var orderExists = await _context.Orders.AsNoTracking()
-                .AnyAsync(o => o.Id == dto.OrderId && o.BusinessUnitId == targetBUId);
-            if (!orderExists)
+            var sourceOrder = await _context.Orders.AsNoTracking().Include(x => x.Status)
+                .SingleOrDefaultAsync(o => o.Id == dto.OrderId && o.BusinessUnitId == targetBUId && o.IsActive);
+            if (sourceOrder is null)
                 return NotFound(new { message = $"Order {dto.OrderId} was not found in this business unit." });
 
             // The declared lines drive a goods issue, so they are validated BEFORE anything is
@@ -99,7 +121,7 @@ namespace ERP_RFQ_Automation.Controllers
             // is parent-derived), so a caller could otherwise name another order's — or another
             // tenant's — line and have it recorded on this shipment.
             var orderLines = await _context.Set<OrderItem>().AsNoTracking()
-                .Where(i => i.OrderId == dto.OrderId)
+                .Where(i => i.OrderId == dto.OrderId && i.IsActive)
                 .Select(i => new { i.Id, i.Quantity })
                 .ToListAsync();
             var orderLineIds = orderLines.Select(i => i.Id).ToList();
@@ -130,33 +152,18 @@ namespace ERP_RFQ_Automation.Controllers
             // a new state that every hand-written guard has to be told about. The set lives in
             // DeliveryStatuses.Despatched so the next status added is a visible decision in one
             // file rather than a clause somebody forgets in one method out of three.
-            var alreadyShipped = await _context.ShipmentItems.AsNoTracking()
-                .Where(si => si.IsActive && si.Shipment.OrderId == dto.OrderId
-                             && si.Shipment.BusinessUnitId == targetBUId && si.Shipment.IsActive
-                             && DeliveryStatuses.DespatchedForQuery.Contains(si.Shipment.DeliveryStatus))
-                .GroupBy(si => si.OrderItemId)
-                .Select(g => new { OrderItemId = g.Key, Quantity = g.Sum(x => x.Quantity) })
-                .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
             var declaredByLine = dto.Items.GroupBy(i => i.OrderItemId)
                 .ToDictionary(g => g.Key, g => g.Sum(i => i.Quantity));
-            var overShipped = orderLines
-                .Where(line => declaredByLine.ContainsKey(line.Id)
-                               && alreadyShipped.GetValueOrDefault(line.Id) + declaredByLine[line.Id] > line.Quantity)
-                .OrderBy(line => line.Id)
-                // Quantities are normalised before they are written into the sentence. A SUM read
-                // back through the portable lane carries the column's scale, so the same figure
-                // rendered as "100" on one side of the message and "100.0000" on the other — the
-                // operator is being asked to compare three numbers and they have to look alike.
-                .Select(line => $"line {line.Id}: {Units(line.Quantity)} ordered, "
-                                + $"{Units(alreadyShipped.GetValueOrDefault(line.Id))} already shipped, "
-                                + $"{Units(declaredByLine[line.Id])} declared now")
-                .ToList();
+            var orderedByLine = orderLines.ToDictionary(x => x.Id, x => x.Quantity);
+            var overShipped = await OverShippedLinesAsync(targetBUId, dto.OrderId, orderedByLine, declaredByLine);
             if (overShipped.Count > 0)
                 return Conflict(new
                 {
                     message = "Shipment quantity exceeds the remaining quantity for "
                               + string.Join("; ", overShipped) + "."
                 });
+            if (IsTerminalOrder(sourceOrder))
+                return Conflict(new { message = $"A {OrderStatus(sourceOrder)} order cannot be shipped." });
 
             try
             {
@@ -174,8 +181,30 @@ namespace ERP_RFQ_Automation.Controllers
                     // Read inside the transaction, and inside the tenant predicate, so the master
                     // reference stamped on the despatch note is the one the order held when the
                     // goods were issued — and can only ever be this tenant's.
-                    var order = await _context.Orders.AsNoTracking()
-                        .SingleAsync(o => o.Id == dto.OrderId && o.BusinessUnitId == targetBUId);
+                    // Serialise every despatch for one order. Idempotency protects retries of ONE
+                    // command; this lock protects two separately-keyed commands arriving together.
+                    // Both must observe the quantity written by the other before either may issue
+                    // stock, otherwise two valid 60-unit requests can despatch 120 against 100.
+                    var order = await LockActiveOrderForShipmentAsync(targetBUId, dto.OrderId)
+                        ?? throw new InvalidOperationException(
+                            $"Order {dto.OrderId} is no longer active in this business unit.");
+                    var lockedOrderLines = await _context.Set<OrderItem>().AsNoTracking()
+                        .Where(i => i.OrderId == dto.OrderId && i.IsActive)
+                        .Select(i => new { i.Id, i.Quantity })
+                        .ToListAsync();
+                    var vanishedLines = declaredByLine.Keys.Except(lockedOrderLines.Select(x => x.Id)).OrderBy(x => x).ToList();
+                    if (vanishedLines.Count > 0)
+                        throw new InvalidOperationException(
+                            $"Order line(s) {string.Join(", ", vanishedLines)} are no longer active on order {dto.OrderId}.");
+                    var concurrentOverShipment = await OverShippedLinesAsync(
+                        targetBUId, dto.OrderId,
+                        lockedOrderLines.ToDictionary(x => x.Id, x => x.Quantity), declaredByLine);
+                    if (concurrentOverShipment.Count > 0)
+                        throw new InvalidOperationException(
+                            "Shipment quantity exceeds the remaining quantity for "
+                            + string.Join("; ", concurrentOverShipment) + ".");
+                    if (IsTerminalOrder(order))
+                        throw new InvalidOperationException($"A {OrderStatus(order)} order cannot be shipped.");
 
                     var shipment = new Shipment
                     {
@@ -189,6 +218,8 @@ namespace ERP_RFQ_Automation.Controllers
                         ServiceLevel = dto.ServiceLevel,
                         TrackingNumber = dto.TrackingNumber,
                         ExternalId = dto.ExternalId,
+                        IdempotencyKey = idempotencyKey,
+                        RequestHash = requestHash,
                         ShippingCost = dto.ShippingCost,
                         LabelUrl = dto.LabelUrl,
                         ShippingAddress = dto.ShippingAddress,
@@ -253,6 +284,15 @@ namespace ERP_RFQ_Automation.Controllers
                 });
 
                 return CreatedAtAction(nameof(GetShipment), new { id = created.Id }, MapToDto(created));
+            }
+            catch (DbUpdateException ex) when (IsShipmentIdempotencyConflict(ex))
+            {
+                _context.ChangeTracker.Clear();
+                var replayAfterRace = await FindShipmentReplayAsync(targetBUId, idempotencyKey);
+                if (replayAfterRace is not null &&
+                    string.Equals(replayAfterRace.RequestHash, requestHash, StringComparison.Ordinal))
+                    return Ok(MapToDto(replayAfterRace));
+                return Conflict(new { message = "That Idempotency-Key was already used for a different shipment command." });
             }
             catch (ERP_RFQ_Automation.Inventory.InsufficientStockException ex)
             {
@@ -371,12 +411,11 @@ namespace ERP_RFQ_Automation.Controllers
 
             if (!ordered.All(line => shipped.GetValueOrDefault(line.Id) >= line.Quantity)) return;
 
-            var shippedStatus = await _context.SetupMasters.FirstOrDefaultAsync(s =>
-                s.BusinessUnitId == businessUnitId && s.SetupType == "OrderStatus"
-                && (s.SetupCode == "SHIPPED" || s.SetupValue.ToUpper() == "SHIPPED"));
-            if (shippedStatus == null) return;
-
-            order.StatusId = shippedStatus.SetupId;
+            // Resolve through the same canonical, active-only rule used by provisioning and every
+            // other governed lifecycle. Legacy tenants may spell this type "Order Status" or keep
+            // a lower-case code; neither is a reason to strand a physically completed despatch.
+            order.StatusId = await LifecycleStatusCatalog.ResolveIdAsync(
+                _context, businessUnitId, "Order", "SHIPPED");
             _context.Orders.Update(order);
             await _context.SaveChangesAsync();
         }
@@ -390,6 +429,8 @@ namespace ERP_RFQ_Automation.Controllers
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 var shipment = await _repository.GetShipmentByIdAsync(id, claimBUId);
                 if (shipment == null) return NotFound();
+                if (!await IsAuthorizedShipmentStatusAsync(claimBUId, dto.StatusId))
+                    return BadRequest(new { message = "The shipment status is not active for this business unit." });
 
                 if (shipment.StatusId != dto.StatusId)
                 {
@@ -500,6 +541,105 @@ namespace ERP_RFQ_Automation.Controllers
         private static string Units(decimal quantity)
             => quantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
 
+        private async Task<List<string>> OverShippedLinesAsync(
+            long businessUnitId, long orderId, IReadOnlyDictionary<long, decimal> orderedByLine,
+            IReadOnlyDictionary<long, decimal> declaredByLine)
+        {
+            var alreadyShipped = await _context.ShipmentItems.AsNoTracking()
+                .Where(si => si.IsActive && si.Shipment.OrderId == orderId
+                             && si.Shipment.BusinessUnitId == businessUnitId && si.Shipment.IsActive
+                             && DeliveryStatuses.DespatchedForQuery.Contains(si.Shipment.DeliveryStatus))
+                .GroupBy(si => si.OrderItemId)
+                .Select(g => new { OrderItemId = g.Key, Quantity = g.Sum(x => x.Quantity) })
+                .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
+
+            return orderedByLine
+                .Where(line => declaredByLine.ContainsKey(line.Key)
+                               && alreadyShipped.GetValueOrDefault(line.Key) + declaredByLine[line.Key] > line.Value)
+                .OrderBy(line => line.Key)
+                .Select(line => $"line {line.Key}: {Units(line.Value)} ordered, "
+                                + $"{Units(alreadyShipped.GetValueOrDefault(line.Key))} already shipped, "
+                                + $"{Units(declaredByLine[line.Key])} declared now")
+                .ToList();
+        }
+
+        private async Task<Order?> LockActiveOrderForShipmentAsync(long businessUnitId, long orderId)
+        {
+            IQueryable<Order> orders = _context.Orders;
+            if (_context.Database.IsNpgsql())
+                orders = _context.Orders.FromSqlInterpolated(
+                    $"SELECT * FROM \"Orders\" WHERE \"ID\" = {orderId} FOR UPDATE");
+            return await orders.Include(x => x.Status).Include(x => x.Currency)
+                .SingleOrDefaultAsync(x => x.Id == orderId && x.BusinessUnitId == businessUnitId && x.IsActive);
+        }
+
+        private async Task<bool> IsAuthorizedShipmentStatusAsync(long businessUnitId, long statusId)
+            => statusId > 0 && await _context.SetupMasters.AsNoTracking().AnyAsync(status =>
+                status.SetupId == statusId && status.BusinessUnitId == businessUnitId && status.IsActive != false
+                && status.SetupType.ToLower().Replace(" ", "") == "shipmentstatus");
+
+        private static string OrderStatus(Order order)
+            => LifecyclePolicy.Canonicalize("Order", order.Status?.SetupCode, order.Status?.SetupValue);
+
+        private static bool IsTerminalOrder(Order order)
+            => OrderStatus(order) is "SHIPPED" or "DELIVERED" or "COMPLETED" or "CANCELLED" or "CANCELED";
+
+        private string ShipmentIdempotencyKey(CreateShipmentDto dto, string requestHash)
+        {
+            var header = Request.Headers["Idempotency-Key"].FirstOrDefault()?.Trim();
+            if (!string.IsNullOrWhiteSpace(header)) return header;
+            if (!string.IsNullOrWhiteSpace(dto.ExternalId))
+                return $"external:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dto.ExternalId.Trim()))).ToLowerInvariant()}";
+
+            // Backward-compatible callers receive an isolated command identity. New browser and
+            // integration clients should send the header; legacy calls remain valid but cannot
+            // accidentally alias two separately intended partial despatches.
+            return $"legacy:{Guid.NewGuid():N}:{requestHash[..16]}";
+        }
+
+        private static string HashCreateCommand(CreateShipmentDto dto)
+        {
+            var canonical = JsonSerializer.Serialize(new
+            {
+                dto.OrderId,
+                dto.StatusId,
+                dto.ShipmentDate,
+                dto.EstimatedDeliveryDate,
+                Carrier = dto.Carrier?.Trim(),
+                ServiceLevel = dto.ServiceLevel?.Trim(),
+                TrackingNumber = dto.TrackingNumber?.Trim(),
+                ExternalId = dto.ExternalId?.Trim(),
+                dto.ShippingCost,
+                LabelUrl = dto.LabelUrl?.Trim(),
+                ShippingAddress = dto.ShippingAddress?.Trim(),
+                dto.DeliveryCityId,
+                Notes = dto.Notes?.Trim(),
+                ComplianceOverrideReason = dto.ComplianceOverrideReason?.Trim(),
+                Items = dto.Items.OrderBy(x => x.OrderItemId).ThenBy(x => x.Quantity)
+                    .Select(x => new { x.OrderItemId, x.Quantity, Notes = x.Notes?.Trim() })
+            });
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        }
+
+        private async Task<Shipment?> FindShipmentReplayAsync(long businessUnitId, string key)
+            => await _context.Shipments.AsNoTracking()
+                .Include(x => x.Order).ThenInclude(x => x.Currency)
+                .Include(x => x.Status)
+                .Include(x => x.DeliveryCity).ThenInclude(x => x!.State)
+                .Include(x => x.ShipmentItems).ThenInclude(x => x.OrderItem).ThenInclude(x => x.Product)
+                .Include(x => x.ShipmentStatusHistories).ThenInclude(x => x.PreviousStatus)
+                .Include(x => x.ShipmentStatusHistories).ThenInclude(x => x.NewStatus)
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == key);
+
+        private static bool IsShipmentIdempotencyConflict(DbUpdateException exception)
+        {
+            for (Exception? current = exception; current is not null; current = current.InnerException)
+                if (current is PostgresException postgres && postgres.SqlState == PostgresErrorCodes.UniqueViolation &&
+                    postgres.ConstraintName == "UX_Shipments_BU_IdempotencyKey")
+                    return true;
+            return false;
+        }
+
         private ShipmentDto MapToDto(Shipment shipment)
         {
             return new ShipmentDto
@@ -518,6 +658,7 @@ namespace ERP_RFQ_Automation.Controllers
                 TrackingNumber = shipment.TrackingNumber,
                 ExternalId = shipment.ExternalId,
                 ShippingCost = shipment.ShippingCost,
+                CurrencyCode = shipment.Order?.Currency?.Code,
                 LabelUrl = shipment.LabelUrl,
                 ShippingAddress = shipment.ShippingAddress,
                 // FR-DLM-05 / FR-DLM-01. The governed state and the governed region reach the API

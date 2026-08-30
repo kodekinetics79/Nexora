@@ -20,7 +20,6 @@ import {
   FiberManualRecord as BulletIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
-import { SETUP_ENTRIES } from '../../pages/Setup/setupCatalog';
 import {
   ADVANCED_GROUPS,
   ALL_SCREENS_ENTRY,
@@ -91,6 +90,9 @@ const isPathMatched = (
     if (params.length === 0) return true;
     if (params.every(([key, value]) => current.get(key) === value)) return true;
   }
+  // Setup is one workspace whose established screens also live under
+  // `/security` and `/admin/platform`; keep those deep links inside it.
+  if (path === '/setup' && /^\/(security|admin\/platform)/.test(location.pathname)) return true;
   return prefixes?.some((prefix) => location.pathname.startsWith(prefix)) ?? false;
 };
 
@@ -127,23 +129,13 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
     onNavigate?.();
   };
 
-  /**
-   * Setup keeps its rail row when the user can open at least one screen inside it. The rule reads
-   * from the setup catalogue — one register, no second list of setup screens to forget to update.
-   */
-  const setupIsReachable = useMemo(
-    () => SETUP_ENTRIES.some((entry) => !entry.moduleName || hasPermission(entry.moduleName)),
+  const primaryRows = useMemo(
+    () => PRIMARY_NAV.filter((item) => !item.moduleName || hasPermission(item.moduleName)),
     [hasPermission],
   );
-
-  const primaryRows = useMemo(
-    () =>
-      PRIMARY_NAV.filter((item) => {
-        if (item.key === 'setup') return setupIsReachable;
-        return !item.moduleName || hasPermission(item.moduleName);
-      }),
-    [hasPermission, setupIsReachable],
-  );
+  // Overlapping legacy prefixes are resolved by journey order. This gives every route exactly one
+  // primary owner (Inbox before Leads for intake), and keeps duplicate directory entries secondary.
+  const activePrimary = primaryRows.find((item) => isPrimaryActive(item, location));
 
   /** Operational workspaces belong in the navigation; permissions still decide what users see. */
   const advancedRows: RailGroup[] = useMemo(() => {
@@ -163,7 +155,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
     px: 2,
     borderRadius: '10px',
     color: 'text.primary',
-    '&:hover': { backgroundColor: 'action.hover', transform: 'translateX(4px)' },
+    '&:hover': { backgroundColor: 'action.hover' },
     // `&.Mui-selected` keeps our colours ahead of MUI's default selected styling in the cascade.
     '&.Mui-selected': {
       backgroundColor: 'primary.main',
@@ -173,13 +165,12 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
     '&.Mui-selected:hover': {
       backgroundColor: 'primary.dark',
       color: 'primary.contrastText',
-      transform: 'translateX(4px)',
     },
     '&.Mui-focusVisible': {
       outline: (theme: any) => `3px solid ${theme.palette.primary.main}`,
       outlineOffset: 2,
     },
-    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+    transition: 'background-color 160ms ease-out, color 160ms ease-out, box-shadow 160ms ease-out',
     opacity: isSelected ? 1 : undefined,
   });
 
@@ -227,7 +218,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
   );
 
   const renderAdvancedGroup = (group: RailGroup) => {
-    const isSelected = group.entries.some((entry) => isPathMatched(entry.path, location));
+    const isSelected = !activePrimary && group.entries.some((entry) => isPathMatched(entry.path, location));
     // Reveal the current screen's home on first arrival. An explicit user collapse remains closed.
     const isOpen = openGroups[group.key] ?? isSelected;
     // The child list only exists in the DOM while expanded (unmountOnExit) and is never rendered
@@ -284,7 +275,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
           <Collapse in={isOpen} timeout="auto" unmountOnExit>
             <List component="ul" disablePadding id={groupListId} aria-label={group.title}>
               {group.entries.map((entry) => {
-                const isChildSelected = isPathMatched(entry.path, location);
+                const isChildSelected = isSelected && isPathMatched(entry.path, location);
                 return (
                   <ListItem key={entry.key} disablePadding sx={{ display: 'block' }}>
                     <ListItemButton
@@ -292,7 +283,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
                       selected={isChildSelected}
                       aria-current={isChildSelected ? 'page' : undefined}
                       sx={{
-                        minHeight: 40,
+                        minHeight: 44,
                         pl: 4,
                         pr: 2,
                         mx: 1,
@@ -348,7 +339,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
             navEntryLabel(item, t),
             item.icon,
             item.path,
-            isPrimaryActive(item, location),
+            item === activePrimary,
             item.description,
           ),
         )}

@@ -16,7 +16,7 @@ const Branding: React.FC<BrandingProps> = ({
   const theme = useTheme();
 
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, cursor: 'pointer' }}>
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
       <Box
         sx={{
           width: logoSize,
@@ -32,7 +32,7 @@ const Branding: React.FC<BrandingProps> = ({
       >
         <img 
           src={logo} 
-          alt="Logo" 
+          alt={showText ? '' : 'Nexora'}
           height={logoSize * 0.6} 
           style={{ filter: 'brightness(0) invert(1)' }} 
         />
@@ -44,7 +44,7 @@ const Branding: React.FC<BrandingProps> = ({
               fontSize: fontSize,
               fontWeight: 900,
               color: 'text.primary',
-              fontFamily: '"Outfit", sans-serif',
+              fontFamily: '"Cambay", "Source Sans 3", sans-serif',
               letterSpacing: '-1px',
               whiteSpace: 'nowrap',
             }}

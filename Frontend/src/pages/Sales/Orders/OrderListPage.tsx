@@ -177,11 +177,14 @@ const OrderListPage: React.FC = () => {
                         </Tooltip>
                       </PermissionGuard>
                       <PermissionGuard moduleName="Shipments" action="create">
-                        {!order.hasShipments && !['Shipped', 'Delivered', 'Cancelled'].includes(order.status) && (
-                          <Tooltip title="Create Shipment">
+                        {!['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(
+                          order.status.replaceAll('_', '').toUpperCase(),
+                        ) && (
+                          <Tooltip title={order.hasShipments ? 'Create next shipment' : 'Create shipment'}>
                             <IconButton 
                               size="small" 
                               color="secondary" 
+                              aria-label={`${order.hasShipments ? 'Create next shipment' : 'Create shipment'} for ${order.orderNo || order.orderNumber}`}
                               onClick={() => navigate(`/sales/shipments/from-order/${order.id}`)}
                             >
                               <ShipmentIcon fontSize="small" />

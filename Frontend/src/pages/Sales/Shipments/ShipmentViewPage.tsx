@@ -26,8 +26,9 @@ import { formatMoney } from '../../../utils/currency';
 const ShipmentViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
+  const canEditShipment = hasPermission('Shipments', 'edit');
 
   const { data: shipment, isLoading: isLoadingShipment } = useQuery({
     queryKey: ['shipment-details', id],
@@ -95,9 +96,11 @@ const ShipmentViewPage: React.FC = () => {
           {shipment.labelUrl && (
             <Button variant="outlined" startIcon={<DownloadIcon />} size="small" href={shipment.labelUrl} target="_blank">Shipping Label</Button>
           )}
-          <Button variant="contained" startIcon={<EditIcon />} size="small" onClick={() => navigate(`/sales/shipments/edit/${shipment.id}`)}>
-            Edit Shipment
-          </Button>
+          {canEditShipment && (
+            <Button variant="contained" startIcon={<EditIcon />} size="small" onClick={() => navigate(`/sales/shipments/edit/${shipment.id}`)}>
+              Edit Shipment
+            </Button>
+          )}
         </Stack>
       </Stack>
 
@@ -109,6 +112,7 @@ const ShipmentViewPage: React.FC = () => {
             orderId={shipment.orderId}
             deliveryStatus={shipment.deliveryStatus}
             items={shipment.items}
+            canEdit={canEditShipment}
           />
 
           {/* General Information */}

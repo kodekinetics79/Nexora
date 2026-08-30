@@ -16,11 +16,12 @@ import { SETUP_ENTRIES } from '../../pages/Setup/setupCatalog';
 import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from '../../pages/Setup/setupRoutes';
 
 /**
- * The rail went from 17 top-level rows over 69 destinations to 5 rows.
+ * The rail went from 17 undifferentiated top-level rows over 69 destinations to a seven-stage,
+ * permission-filtered commercial spine.
  *
  * The property that matters more than the count is the one this file exists to pin: NOTHING WAS
  * DELETED TO ACHIEVE IT. Every destination the old rail carried is still reachable — as one of the
- * five, as a tab on one of the five, as a Setup entry, or as a card on All screens — and every one
+ * seven, as a tab on one of the seven, as a Setup entry, or as a card on All screens — and every one
  * of those paths is a live route in `App.tsx`.
  *
  * `OLD_RAIL_DESTINATIONS` below is transcribed from the rail as it stood before this change
@@ -137,15 +138,17 @@ const reachablePaths = new Set<string>([
   ALL_SCREENS_ENTRY.path,
 ]);
 
-describe('the rail was cut to five rows', () => {
-  it('carries exactly five primary destinations', () => {
-    expect(PRIMARY_NAV).toHaveLength(5);
+describe('the rail exposes the complete commercial spine', () => {
+  it('carries no more than seven role-filtered commercial destinations in journey order', () => {
+    expect(PRIMARY_NAV).toHaveLength(7);
     expect(PRIMARY_NAV.map((item) => item.key)).toEqual([
       'inbox',
       'leads',
       'rfqs',
       'quotes',
-      'setup',
+      'orders',
+      'shipments',
+      'accounts-receivable',
     ]);
   });
 
@@ -155,12 +158,36 @@ describe('the rail was cut to five rows', () => {
 
   it('accounts for all 69 old destinations across four surfaces', () => {
     // These are the numbers the before/after rests on, so they are asserted rather than counted by
-    // hand: 5 rail rows + 15 tabs + 59 directory cards + 25 Setup entries + the All-screens door.
-    expect(PRIMARY_NAV).toHaveLength(5);
+    // hand: 7 commercial rows + 15 tabs + 57 directory cards + 25 Setup entries + the directory door.
+    expect(PRIMARY_NAV).toHaveLength(7);
     expect(PRIMARY_VIEWS).toHaveLength(15);
-    expect(ADVANCED_ENTRIES).toHaveLength(59);
-    expect(ADVANCED_GROUPS).toHaveLength(9);
+    expect(ADVANCED_ENTRIES).toHaveLength(57);
+    expect(ADVANCED_GROUPS).toHaveLength(10);
     expect(SETUP_ENTRIES).toHaveLength(25);
+  });
+
+  it('keeps every post-quote destination directly visible and governed by its route permission', () => {
+    expect(PRIMARY_NAV.slice(-3).map(({ key, label, path, moduleName }) => ({ key, label, path, moduleName })))
+      .toEqual([
+        { key: 'orders', label: 'Orders', path: '/sales/orders', moduleName: 'Orders' },
+        { key: 'shipments', label: 'Fulfilment', path: '/sales/shipments', moduleName: 'Shipments' },
+        {
+          key: 'accounts-receivable',
+          label: 'Receivables',
+          path: '/sales/finance',
+          moduleName: 'Accounts Receivable',
+        },
+      ]);
+
+    expect(appSource).toContain(
+      '<Route path="/sales/orders" element={<MainLayout><PermissionGuard moduleName="Orders"><OrderListPage /></PermissionGuard></MainLayout>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="/sales/shipments" element={<MainLayout><PermissionGuard moduleName="Shipments"><ShipmentListPage /></PermissionGuard></MainLayout>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="/sales/finance" element={<MainLayout><PermissionGuard moduleName="Accounts Receivable"><AccountsReceivablePage /></PermissionGuard></MainLayout>} />',
+    );
   });
 
   it('keeps Lead decision work in Leads and out of the formal RFQ views', () => {

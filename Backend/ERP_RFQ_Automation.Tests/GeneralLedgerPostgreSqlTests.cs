@@ -422,7 +422,7 @@ public sealed class GeneralLedgerPostgreSqlTests(PostgreSqlTestDatabase database
         return new(issuedAt, expiresAt, nonce, signature);
     }
 
-    private const string ActorSecret = "ledger-test-audit-secret-32-bytes-minimum";
+    private const string ActorSecret = PostgreSqlTestDatabase.AuditActorSecret;
     private const long LifecycleTenantId = 97_101;
     private const long LifecycleCurrencyId = 97_102;
     private const long GuardTenantId = 97_201;

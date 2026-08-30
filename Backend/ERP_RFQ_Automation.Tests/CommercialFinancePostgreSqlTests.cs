@@ -61,28 +61,33 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             });
             await seed.SaveChangesAsync();
 
-            var service = new CommercialFinanceApplicationService(seed);
-            var draft = await service.CreateInvoiceAsync(ExceptionBusinessUnitId, ExceptionOrderId,
-                "pg-finance-exception-invoice", new(null, null, null), "invoice-maker");
-            var invoice = await service.IssueAsync(ExceptionBusinessUnitId, draft.Id,
-                new(draft.Version), "invoice-checker");
+            var draft = await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "invoice-maker", service =>
+                service.CreateInvoiceAsync(ExceptionBusinessUnitId, ExceptionOrderId,
+                    "pg-finance-exception-invoice", new(null, null, null), "invoice-maker"));
+            var invoice = await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "invoice-checker", service =>
+                service.IssueAsync(ExceptionBusinessUnitId, draft.Id, new(draft.Version), "invoice-checker"));
             invoiceId = invoice.Id;
-            firstWriteOffId = (await service.CreateWriteOffAsync(ExceptionBusinessUnitId, "pg-write-off-race-1",
-                new(null, "BAD_DEBT", "Customer debt is no longer collectible.", "case://wo-1",
-                    [new(invoice.Id, 80m)]), "write-off-maker-1")).Id;
-            secondWriteOffId = (await service.CreateWriteOffAsync(ExceptionBusinessUnitId, "pg-write-off-race-2",
-                new(null, "BAD_DEBT", "Customer debt is no longer collectible.", "case://wo-2",
-                    [new(invoice.Id, 80m)]), "write-off-maker-2")).Id;
+            firstWriteOffId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "write-off-maker-1", service =>
+                service.CreateWriteOffAsync(ExceptionBusinessUnitId, "pg-write-off-race-1",
+                    new(null, "BAD_DEBT", "Customer debt is no longer collectible.", "case://wo-1",
+                        [new(invoice.Id, 80m)]), "write-off-maker-1"))).Id;
+            secondWriteOffId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "write-off-maker-2", service =>
+                service.CreateWriteOffAsync(ExceptionBusinessUnitId, "pg-write-off-race-2",
+                    new(null, "BAD_DEBT", "Customer debt is no longer collectible.", "case://wo-2",
+                        [new(invoice.Id, 80m)]), "write-off-maker-2"))).Id;
 
-            paymentId = (await service.PostPaymentAsync(ExceptionBusinessUnitId, "pg-refund-source",
-                new(ExceptionCustomerId, null, ExceptionCurrencyId, null, 100m, "BankTransfer", "BANK-PG", []),
-                "cashier")).Id;
-            firstRefundId = (await service.CreateRefundAsync(ExceptionBusinessUnitId, "pg-refund-race-1",
-                new(paymentId, null, 80m, "BankTransfer", "token:acct_pg_1200", true, "OVERPAYMENT",
-                    "Verified customer overpayment requires return.", "case://refund-1"), "refund-maker-1")).Id;
-            secondRefundId = (await service.CreateRefundAsync(ExceptionBusinessUnitId, "pg-refund-race-2",
-                new(paymentId, null, 80m, "BankTransfer", "token:acct_pg_1200", true, "OVERPAYMENT",
-                    "Verified customer overpayment requires return.", "case://refund-2"), "refund-maker-2")).Id;
+            paymentId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "cashier", service =>
+                service.PostPaymentAsync(ExceptionBusinessUnitId, "pg-refund-source",
+                    new(ExceptionCustomerId, null, ExceptionCurrencyId, null, 100m, "BankTransfer", "BANK-PG", []),
+                    "cashier"))).Id;
+            firstRefundId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "refund-maker-1", service =>
+                service.CreateRefundAsync(ExceptionBusinessUnitId, "pg-refund-race-1",
+                    new(paymentId, null, 80m, "BankTransfer", "token:acct_pg_1200", true, "OVERPAYMENT",
+                        "Verified customer overpayment requires return.", "case://refund-1"), "refund-maker-1"))).Id;
+            secondRefundId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "refund-maker-2", service =>
+                service.CreateRefundAsync(ExceptionBusinessUnitId, "pg-refund-race-2",
+                    new(paymentId, null, 80m, "BankTransfer", "token:acct_pg_1200", true, "OVERPAYMENT",
+                        "Verified customer overpayment requires return.", "case://refund-2"), "refund-maker-2"))).Id;
         }
 
         var writeOffRace = await Task.WhenAll(
@@ -95,22 +100,17 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             CaptureRefundApprovalAsync(firstRefundId), CaptureRefundApprovalAsync(secondRefundId));
         var approvedRefund = Assert.Single(refundRace, x => x.Result is not null).Result!;
         Assert.IsType<FinanceConflictException>(Assert.Single(refundRace, x => x.Error is not null).Error);
-        await using (var release = _database.ContextFor(ExceptionBusinessUnitId))
-        {
-            approvedRefund = await new CommercialFinanceApplicationService(release).ReleaseRefundAsync(
-                ExceptionBusinessUnitId, approvedRefund.Id, new(approvedRefund.Version), "refund-releaser");
-        }
+        approvedRefund = await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "refund-releaser", service =>
+            service.ReleaseRefundAsync(ExceptionBusinessUnitId, approvedRefund.Id,
+                new(approvedRefund.Version), "refund-releaser"));
         Assert.Matches($"^RFD-{DateTime.UtcNow.Year}-[0-9]{{6}}$", approvedRefund.RefundNumber!);
-        await using (var reconcile = _database.ContextFor(ExceptionBusinessUnitId))
-        {
-            approvedRefund = await new CommercialFinanceApplicationService(reconcile).FailRefundDisbursementAsync(
-                ExceptionBusinessUnitId, approvedRefund.Id,
+        approvedRefund = await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "refund-reconciler", service =>
+            service.FailRefundDisbursementAsync(ExceptionBusinessUnitId, approvedRefund.Id,
                 new(approvedRefund.Version, "provider:failed-pg-1001",
-                    "Provider rejected the submitted refund transfer."), "refund-reconciler");
-        }
+                    "Provider rejected the submitted refund transfer."), "refund-reconciler"));
         Assert.Equal("Failed", approvedRefund.PostingStatus);
 
-        await using (var verify = _database.ContextFor(ExceptionBusinessUnitId))
+        await using (var verify = _database.TenantApplicationContext(ExceptionBusinessUnitId, "controller"))
         {
             var service = new CommercialFinanceApplicationService(verify);
             Assert.Equal(20m, (await service.GetWriteOffEligibilityAsync(ExceptionBusinessUnitId, invoiceId)).CurrentBalance);
@@ -122,20 +122,19 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         long crossWriteOffId;
         long reversalRacePaymentId;
         long reversalRaceRefundId;
-        await using (var prepareRaces = _database.ContextFor(ExceptionBusinessUnitId))
-        {
-            var service = new CommercialFinanceApplicationService(prepareRaces);
-            crossWriteOffId = (await service.CreateWriteOffAsync(ExceptionBusinessUnitId, "pg-payment-write-off-race",
+        crossWriteOffId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "cross-race-maker", service =>
+            service.CreateWriteOffAsync(ExceptionBusinessUnitId, "pg-payment-write-off-race",
                 new(null, "SMALL_BALANCE", "Final collectible balance approved for write-off.", "case://cross-race",
-                    [new(invoiceId, 20m)]), "cross-race-maker")).Id;
-            reversalRacePaymentId = (await service.PostPaymentAsync(ExceptionBusinessUnitId,
-                "pg-refund-reversal-race-source", new(ExceptionCustomerId, null, ExceptionCurrencyId, null,
-                    100m, "BankTransfer", "BANK-RACE", []), "race-cashier")).Id;
-            reversalRaceRefundId = (await service.CreateRefundAsync(ExceptionBusinessUnitId,
-                "pg-refund-reversal-race", new(reversalRacePaymentId, null, 80m, "BankTransfer",
-                    "token:acct_race_8080", true, "OVERPAYMENT",
-                    "Verified customer overpayment requires return.", "case://refund-race"), "race-refund-maker")).Id;
-        }
+                    [new(invoiceId, 20m)]), "cross-race-maker"))).Id;
+        reversalRacePaymentId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "race-cashier", service =>
+            service.PostPaymentAsync(ExceptionBusinessUnitId, "pg-refund-reversal-race-source",
+                new(ExceptionCustomerId, null, ExceptionCurrencyId, null, 100m, "BankTransfer", "BANK-RACE", []),
+                "race-cashier"))).Id;
+        reversalRaceRefundId = (await ExecuteFinanceCommandAsync(ExceptionBusinessUnitId, "race-refund-maker", service =>
+            service.CreateRefundAsync(ExceptionBusinessUnitId, "pg-refund-reversal-race",
+                new(reversalRacePaymentId, null, 80m, "BankTransfer", "token:acct_race_8080", true,
+                    "OVERPAYMENT", "Verified customer overpayment requires return.", "case://refund-race"),
+                "race-refund-maker"))).Id;
 
         var paymentWriteOffRace = await Task.WhenAll(
             CaptureWriteOffPostOutcomeAsync(crossWriteOffId), CapturePaymentAllocationAsync(invoiceId));
@@ -287,14 +286,11 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         insert.Parameters.AddWithValue("currency", BridgeFlagCurrencyId);
         var insertFailure = await Record.ExceptionAsync(() => insert.ExecuteNonQueryAsync());
 
-        long paymentId;
-        await using (var context = _database.ContextFor(null))
-        {
-            paymentId = (await new CommercialFinanceApplicationService(context).PostPaymentAsync(
+        var paymentId = (await ExecuteFinanceCommandAsync(BridgeFlagTenantId, "cashier@test", service =>
+            service.PostPaymentAsync(
                 BridgeFlagTenantId, "pg-bridge-required-payment",
                 new(BridgeFlagCustomerId, null, BridgeFlagCurrencyId, null, 25m,
-                    "BankTransfer", "BANK-BRIDGE-TRUE", []), "cashier@test")).Id;
-        }
+                    "BankTransfer", "BANK-BRIDGE-TRUE", []), "cashier@test"))).Id;
         await using var downgrade = connection.CreateCommand();
         downgrade.CommandText = "UPDATE \"CustomerPayments\" SET \"AccountingBridgeRequired\" = false WHERE \"Id\" = @id";
         downgrade.Parameters.AddWithValue("id", paymentId);
@@ -311,17 +307,13 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         await SeedBridgeTenantAsync(AuditBridgeTenantId, AuditBridgeCustomerId, AuditBridgeCurrencyId,
             AuditBridgeIdBase, "ABR");
-        CustomerPaymentDto reversed;
-        await using (var context = _database.ContextFor(null))
-        {
-            var service = new CommercialFinanceApplicationService(context);
-            var payment = await service.PostPaymentAsync(AuditBridgeTenantId, "pg-audit-bridge-payment",
+        var payment = await ExecuteFinanceCommandAsync(AuditBridgeTenantId, "cashier@test", service =>
+            service.PostPaymentAsync(AuditBridgeTenantId, "pg-audit-bridge-payment",
                 new(AuditBridgeCustomerId, null, AuditBridgeCurrencyId, null, 75m,
-                    "BankTransfer", "BANK-AUDIT-BRIDGE", []), "cashier@test");
-            context.ChangeTracker.Clear();
-            reversed = await service.ReversePaymentAsync(AuditBridgeTenantId, payment.Id,
-                new(payment.Version, "Independent controller reversed duplicate receipt"), "controller@test");
-        }
+                    "BankTransfer", "BANK-AUDIT-BRIDGE", []), "cashier@test"));
+        var reversed = await ExecuteFinanceCommandAsync(AuditBridgeTenantId, "controller@test", service =>
+            service.ReversePaymentAsync(AuditBridgeTenantId, payment.Id,
+                new(payment.Version, "Independent controller reversed duplicate receipt"), "controller@test"));
 
         await using var verify = _database.ContextFor(null);
         var audit = await verify.CommercialFinanceAudits.AsNoTracking().SingleAsync(x =>
@@ -375,23 +367,22 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
 
         var paymentFailure = await CommitCurrencyMismatchedPaymentAsync();
 
-        CustomerRefundDto released;
-        await using (var context = _database.ContextFor(null))
-        {
-            var service = new CommercialFinanceApplicationService(context);
-            var payment = await service.PostPaymentAsync(CurrencyBridgeTenantId, "pg-currency-refund-source",
+        var payment = await ExecuteFinanceCommandAsync(CurrencyBridgeTenantId, "cashier@test", service =>
+            service.PostPaymentAsync(CurrencyBridgeTenantId, "pg-currency-refund-source",
                 new(CurrencyBridgeCustomerId, null, CurrencyBridgeCurrencyId, null, 60m,
-                    "BankTransfer", "BANK-CURRENCY-SOURCE", [], CurrencyBridgeIdBase + 6), "cashier@test");
-            var draft = await service.CreateRefundAsync(CurrencyBridgeTenantId, "pg-currency-refund",
+                    "BankTransfer", "BANK-CURRENCY-SOURCE", [], CurrencyBridgeIdBase + 6), "cashier@test"));
+        var draft = await ExecuteFinanceCommandAsync(CurrencyBridgeTenantId, "refund-maker@test", service =>
+            service.CreateRefundAsync(CurrencyBridgeTenantId, "pg-currency-refund",
                 new(payment.Id, null, 30m, "BankTransfer", "token:currency_refund_8830", true,
                     "OVERPAYMENT", "Verified overpayment requires customer refund.", "case://currency-refund",
                     CurrencyBridgeIdBase + 6),
-                "refund-maker@test");
-            var approved = await service.ApproveRefundAsync(CurrencyBridgeTenantId, draft.Id,
-                new(draft.Version), "refund-checker@test");
-            released = await service.ReleaseRefundAsync(CurrencyBridgeTenantId, approved.Id,
-                new(approved.Version), "refund-releaser@test");
-        }
+                "refund-maker@test"));
+        var approved = await ExecuteFinanceCommandAsync(CurrencyBridgeTenantId, "refund-checker@test", service =>
+            service.ApproveRefundAsync(CurrencyBridgeTenantId, draft.Id,
+                new(draft.Version), "refund-checker@test"));
+        var released = await ExecuteFinanceCommandAsync(CurrencyBridgeTenantId, "refund-releaser@test", service =>
+            service.ReleaseRefundAsync(CurrencyBridgeTenantId, approved.Id,
+                new(approved.Version), "refund-releaser@test"));
         var refundFailure = await CommitCurrencyMismatchedRefundAsync(released);
 
         Assert.NotNull(paymentFailure);
@@ -449,40 +440,50 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             };
             context.Orders.Add(order);
             await context.SaveChangesAsync();
-            var service = new CommercialFinanceApplicationService(context);
-            var invoiceDraft = await service.CreateInvoiceAsync(AdjustmentBusinessUnitId, order.Id,
-                "pg-adjustment-invoice", new CreateInvoiceRequest(null, null, null), "invoice-maker");
-            invoice = await service.IssueAsync(AdjustmentBusinessUnitId, invoiceDraft.Id,
-                new(invoiceDraft.Version), "invoice-checker");
+            var invoiceDraft = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "invoice-maker", service =>
+                service.CreateInvoiceAsync(AdjustmentBusinessUnitId, order.Id,
+                    "pg-adjustment-invoice", new CreateInvoiceRequest(null, null, null), "invoice-maker"));
+            invoice = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "invoice-checker", service =>
+                service.IssueAsync(AdjustmentBusinessUnitId, invoiceDraft.Id,
+                    new(invoiceDraft.Version), "invoice-checker"));
             var parentLineId = invoice.Lines.Single().Id;
-            var creditDraft = await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
-                "pg-adjustment-credit", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
-                    "Partial return", [new(parentLineId, 1m)]), "credit-maker");
-            credit = await service.IssueAdjustmentAsync(AdjustmentBusinessUnitId, creditDraft.Id,
-                new(creditDraft.Version), "credit-checker");
-            var debitDraft = await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
-                "pg-adjustment-debit", new(ReceivableDocumentTypes.DebitNote, null, null, "CORRECTION",
-                    "Underbilling correction", [new(parentLineId, 1m)]), "debit-maker");
-            debit = await service.IssueAdjustmentAsync(AdjustmentBusinessUnitId, debitDraft.Id,
-                new(debitDraft.Version), "debit-checker");
-            var overCredit = await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
-                "pg-adjustment-over-credit", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
-                    "Excess return", [new(parentLineId, 2m)]), "other-maker");
+            var creditDraft = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "credit-maker", service =>
+                service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                    "pg-adjustment-credit", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                        "Partial return", [new(parentLineId, 1m)]), "credit-maker"));
+            credit = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "credit-checker", service =>
+                service.IssueAdjustmentAsync(AdjustmentBusinessUnitId, creditDraft.Id,
+                    new(creditDraft.Version), "credit-checker"));
+            var debitDraft = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "debit-maker", service =>
+                service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                    "pg-adjustment-debit", new(ReceivableDocumentTypes.DebitNote, null, null, "CORRECTION",
+                        "Underbilling correction", [new(parentLineId, 1m)]), "debit-maker"));
+            debit = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "debit-checker", service =>
+                service.IssueAdjustmentAsync(AdjustmentBusinessUnitId, debitDraft.Id,
+                    new(debitDraft.Version), "debit-checker"));
+            var overCredit = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "other-maker", service =>
+                service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                    "pg-adjustment-over-credit", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                        "Excess return", [new(parentLineId, 2m)]), "other-maker"));
             overCreditDraftId = overCredit.Id;
             overCreditDraftLineId = overCredit.Lines.Single().Id;
 
-            var open = await service.GetOpenItemsAsync(AdjustmentBusinessUnitId, DateTime.UtcNow);
+            var open = await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "collector", service =>
+                service.GetOpenItemsAsync(AdjustmentBusinessUnitId, DateTime.UtcNow));
             Assert.Contains(open, x => x.DocumentId == invoice.Id && x.OutstandingAmount == 104.50m);
             Assert.Contains(open, x => x.DocumentId == debit.Id && x.OutstandingAmount == 104.50m);
-            await service.PostPaymentAsync(AdjustmentBusinessUnitId, "pg-adjustment-debit-payment",
-                new(AdjustmentCustomerId, null, AdjustmentCurrencyId, null, 104.50m, "BankTransfer", null,
-                    [new(debit.Id, 104.50m)]), "collector");
-            firstRaceCreditDraftId = (await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
-                "pg-adjustment-credit-race-1", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
-                    "Concurrent return one", [new(parentLineId, 1m)]), "race-maker-one")).Id;
-            secondRaceCreditDraftId = (await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
-                "pg-adjustment-credit-race-2", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
-                    "Concurrent return two", [new(parentLineId, 1m)]), "race-maker-two")).Id;
+            await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "collector", service =>
+                service.PostPaymentAsync(AdjustmentBusinessUnitId, "pg-adjustment-debit-payment",
+                    new(AdjustmentCustomerId, null, AdjustmentCurrencyId, null, 104.50m, "BankTransfer", null,
+                        [new(debit.Id, 104.50m)]), "collector"));
+            firstRaceCreditDraftId = (await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "race-maker-one", service =>
+                service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                    "pg-adjustment-credit-race-1", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                        "Concurrent return one", [new(parentLineId, 1m)]), "race-maker-one"))).Id;
+            secondRaceCreditDraftId = (await ExecuteFinanceCommandAsync(AdjustmentBusinessUnitId, "race-maker-two", service =>
+                service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                    "pg-adjustment-credit-race-2", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                        "Concurrent return two", [new(parentLineId, 1m)]), "race-maker-two"))).Id;
         }
 
         var creditRace = await Task.WhenAll(
@@ -566,7 +567,8 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             var directIssueOrder = NewOrder(OrderSevenId, "ORD-PG-AR-7");
             seed.Orders.AddRange(firstOrder, secondOrder, replayOrder, conflictingReplayOrder, cancellationOrder, raceOrder, directIssueOrder);
             await seed.SaveChangesAsync();
-            var service = new CommercialFinanceApplicationService(seed);
+            await using var application = _database.TenantApplicationContext(BusinessUnitId, "tests");
+            var service = new CommercialFinanceApplicationService(application);
             firstDraftId = (await service.CreateInvoiceAsync(
                 BusinessUnitId, firstOrder.Id, "pg-finance-draft-1", new CreateInvoiceRequest(null, null, null), "tests")).Id;
             secondDraftId = (await service.CreateInvoiceAsync(
@@ -612,7 +614,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         }
 
         long paymentId;
-        await using (var paymentContext = _database.ContextFor(BusinessUnitId))
+        await using (var paymentContext = _database.TenantApplicationContext(BusinessUnitId, "tests"))
         {
             var payment = await new CommercialFinanceApplicationService(paymentContext).PostPaymentAsync(
                 BusinessUnitId, "pg-finance-payment", new PostPaymentRequest(
@@ -845,16 +847,25 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         await transaction.RollbackAsync();
     }
 
+    private async Task<T> ExecuteFinanceCommandAsync<T>(
+        long businessUnitId,
+        string actor,
+        Func<CommercialFinanceApplicationService, Task<T>> command)
+    {
+        await using var context = _database.TenantApplicationContext(businessUnitId, actor);
+        return await command(new CommercialFinanceApplicationService(context));
+    }
+
     private async Task<ReceivableDocumentDto> IssueAsync(long documentId)
     {
-        await using var context = _database.ContextFor(BusinessUnitId);
+        await using var context = _database.TenantApplicationContext(BusinessUnitId, "tests");
         return await new CommercialFinanceApplicationService(context)
             .IssueAsync(BusinessUnitId, documentId, new IssueDocumentRequest(1), "tests");
     }
 
     private async Task<ReceivableDocumentDto> CancelAsync(long documentId)
     {
-        await using var context = _database.ContextFor(BusinessUnitId);
+        await using var context = _database.TenantApplicationContext(BusinessUnitId, "tests");
         return await new CommercialFinanceApplicationService(context)
             .CancelAsync(BusinessUnitId, documentId, new CancelDocumentRequest(1, "Duplicate draft"), "tests");
     }
@@ -875,7 +886,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         try
         {
-            await using var context = _database.ContextFor(AdjustmentBusinessUnitId);
+            await using var context = _database.TenantApplicationContext(AdjustmentBusinessUnitId, "race-checker");
             var document = await new CommercialFinanceApplicationService(context).IssueAdjustmentAsync(
                 AdjustmentBusinessUnitId, documentId, new IssueDocumentRequest(1), "race-checker");
             return (document, null);
@@ -887,7 +898,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         try
         {
-            await using var context = _database.ContextFor(ExceptionBusinessUnitId);
+            await using var context = _database.TenantApplicationContext(ExceptionBusinessUnitId, "write-off-checker");
             var result = await new CommercialFinanceApplicationService(context).PostWriteOffAsync(
                 ExceptionBusinessUnitId, id, new(1), "write-off-checker");
             return (result, null);
@@ -899,7 +910,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         try
         {
-            await using var context = _database.ContextFor(ExceptionBusinessUnitId);
+            await using var context = _database.TenantApplicationContext(ExceptionBusinessUnitId, "refund-approver");
             var result = await new CommercialFinanceApplicationService(context).ApproveRefundAsync(
                 ExceptionBusinessUnitId, id, new(1), "refund-approver");
             return (result, null);
@@ -911,7 +922,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         try
         {
-            await using var context = _database.ContextFor(ExceptionBusinessUnitId);
+            await using var context = _database.TenantApplicationContext(ExceptionBusinessUnitId, "cross-race-cashier");
             await new CommercialFinanceApplicationService(context).PostPaymentAsync(ExceptionBusinessUnitId,
                 "pg-payment-write-off-race-payment", new(ExceptionCustomerId, null, ExceptionCurrencyId, null,
                     20m, "BankTransfer", "BANK-CROSS-RACE", [new(documentId, 20m)]), "cross-race-cashier");
@@ -924,7 +935,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         try
         {
-            await using var context = _database.ContextFor(ExceptionBusinessUnitId);
+            await using var context = _database.TenantApplicationContext(ExceptionBusinessUnitId, "cross-race-checker");
             await new CommercialFinanceApplicationService(context).PostWriteOffAsync(
                 ExceptionBusinessUnitId, writeOffId, new(1), "cross-race-checker");
             return (true, null);
@@ -936,7 +947,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         try
         {
-            await using var context = _database.ContextFor(ExceptionBusinessUnitId);
+            await using var context = _database.TenantApplicationContext(ExceptionBusinessUnitId, "race-refund-approver");
             await new CommercialFinanceApplicationService(context).ApproveRefundAsync(
                 ExceptionBusinessUnitId, refundId, new(1), "race-refund-approver");
             return (true, null);
@@ -948,7 +959,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         try
         {
-            await using var context = _database.ContextFor(ExceptionBusinessUnitId);
+            await using var context = _database.TenantApplicationContext(ExceptionBusinessUnitId, "race-payment-reverser");
             await new CommercialFinanceApplicationService(context).ReversePaymentAsync(
                 ExceptionBusinessUnitId, paymentId, new(1, "Concurrent refund approval reversal request"),
                 "race-payment-reverser");
@@ -959,7 +970,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
 
     private async Task<ReceivableDocumentDto> CreateDraftAsync(long orderId, string idempotencyKey)
     {
-        await using var context = _database.ContextFor(BusinessUnitId);
+        await using var context = _database.TenantApplicationContext(BusinessUnitId, "tests");
         return await new CommercialFinanceApplicationService(context).CreateInvoiceAsync(
             BusinessUnitId, orderId, idempotencyKey, new CreateInvoiceRequest(null, null, null), "tests");
     }

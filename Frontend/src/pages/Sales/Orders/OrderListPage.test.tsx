@@ -94,4 +94,18 @@ describe('the invoice action on the order list', () => {
       '/api/delivery/orders/900/delivered-quantities', undefined));
     expect(post).not.toHaveBeenCalled();
   });
+
+  it('keeps the next-shipment action available on a non-terminal partial order', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter><OrderListPage /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // `hasShipments` is true in this fixture. It means at least one despatch exists, not that every
+    // active line has shipped in full. Only the terminal order status closes this door.
+    expect(await screen.findByRole('button', { name: 'Create next shipment for SO-SYNTH-900' }))
+      .toBeVisible();
+  });
 });

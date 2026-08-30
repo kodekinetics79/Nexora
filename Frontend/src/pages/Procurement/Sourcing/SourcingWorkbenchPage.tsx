@@ -1482,6 +1482,7 @@ function SourcingWorkbenchPage() {
                   }))}
                   canEdit={canIssuePo}
                   canManagePorts={hasPermission("Products", "create")}
+                  canManagePolicy={userData.isManager === true}
                 />
               </Paper>
             ))

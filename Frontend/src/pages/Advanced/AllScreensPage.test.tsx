@@ -38,11 +38,12 @@ describe('Screen directory primary navigation', () => {
     expect(shortcuts.queryByRole('link', { name: 'Setup' })).not.toBeInTheDocument();
   });
 
-  it('shows Setup when at least one Setup screen is permitted', () => {
+  it('keeps Setup in the administrative directory instead of the commercial shortcuts', () => {
     auth.grants.add('Users');
     renderPage();
 
     const shortcuts = within(screen.getByRole('navigation', { name: 'Primary navigation shortcuts' }));
-    expect(shortcuts.getByRole('link', { name: 'Setup' })).toBeInTheDocument();
+    expect(shortcuts.queryByRole('link', { name: 'Setup' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Setup/ })).toBeInTheDocument();
   });
 });

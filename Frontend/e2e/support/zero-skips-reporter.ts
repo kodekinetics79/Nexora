@@ -2,14 +2,14 @@ import type { FullResult, Reporter, Suite, TestCase, TestResult } from '@playwri
 
 // SCOPE: this count applies ONLY to the suite that sets E2E_FULL_ACCEPTANCE=true — the
 // `e2e:acceptance` script, which runs `playwright.commercial-journey-v2.config.ts` with
-// `testMatch: /commercial-journey-v2\.spec\.ts/`. That single file contains exactly 39 tests.
+// `testMatch: /commercial-journey-v2\.spec\.ts/`. That single file contains exactly 41 tests.
 //
 // The reporter is shared by ten configs, so this constant is easy to misread as a global. It was
 // briefly raised to 40 when a test was added to core-commercial-journey.spec.ts — a DIFFERENT
 // file under a DIFFERENT config — which would have failed the acceptance run by expecting a test
 // that suite never contained. Only change this when the count of tests in
 // commercial-journey-v2.spec.ts itself changes.
-const EXPECTED_TESTS = 39;
+const EXPECTED_TESTS = 41;
 
 export default class ZeroSkipsReporter implements Reporter {
   private discovered = 0;

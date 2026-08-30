@@ -67,14 +67,15 @@ import {
  * them. Two lists disagreeing about one rail is the same defect as two rails: a screen can be
  * routed, permitted, and still unfindable, and nobody can tell which list is wrong.
  *
- * So the rail now reads from here and nothing else, and it carries FIVE rows — the five nouns a
- * rep uses to describe their own job:
+ * The primary rail therefore reads from here and nothing else. It carries the seven successive
+ * commercial nouns an operator needs to follow work all the way to cash:
  *
- *     Inbox -> Leads -> RFQs -> Quotes,  plus Setup for everything that is settled once.
+ *     Inbox -> Leads -> RFQs -> Quotes -> Orders -> Fulfilment -> Receivables
  *
  * Everything else is RELOCATED, never removed: it keeps its route, its permission gate, its page
  * title, its deep links and its tests, and it is listed — with a sentence saying what it decides —
- * on the "All screens" directory at `/advanced`. `navCatalog.test.ts` fails the build if a
+ * on the "All screens" directory at `/advanced`. Setup is an administrative workspace beneath the
+ * commercial spine rather than an eighth daily destination. `navCatalog.test.ts` fails the build if a
  * destination that used to be on the rail stops being reachable from either place.
  *
  * Modelled deliberately on `pages/Setup/setupCatalog.tsx`, which already solved this problem for
@@ -139,11 +140,12 @@ export const INBOX_ROOT = '/inbox';
 export const ADVANCED_ROOT = '/advanced';
 
 /**
- * The five rows.
+ * The seven commercial rows.
  *
  * Ordered by the journey, not by module name: work arrives (Inbox), becomes an enquiry (Leads),
- * becomes a request we can price (RFQs), becomes an offer (Quotes). Setup is last because it is
- * the only one a rep touches less than daily.
+ * becomes a request we can price (RFQs), becomes an offer (Quotes), an Order, a fulfilled delivery,
+ * and finally a receivable. Permission filtering means each role sees only the stages it can open,
+ * while the order stays stable across roles.
  */
 export const PRIMARY_NAV: PrimaryNavItem[] = [
   {
@@ -192,7 +194,7 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     icon: <LeadIcon />,
     path: '/procurement/leads/all',
     moduleName: 'Leads',
-    activePrefixes: ['/procurement/leads/view', '/procurement/leads/', '/leads/view', '/commercial-cases'],
+    activePrefixes: ['/procurement/leads/', '/leads/view', '/commercial-cases'],
     views: [
       {
         key: 'leads-all',
@@ -292,14 +294,31 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     ],
   },
   {
-    key: 'setup',
-    label: 'Setup',
-    labelKey: 'setup_master',
-    description: 'Everything the platform treats as settled — company, rates, formats, people and access.',
-    icon: <SetupIcon />,
-    path: '/setup',
-    // Setup is 'here' on every address it governs, not only its own URL space.
-    activePrefixes: ['/setup', '/security', '/admin/platform'],
+    key: 'orders',
+    label: 'Orders',
+    description: 'Accepted customer commitments ready to fulfil, invoice and close.',
+    icon: <OrderIcon />,
+    path: '/sales/orders',
+    moduleName: 'Orders',
+    activePrefixes: ['/sales/orders'],
+  },
+  {
+    key: 'shipments',
+    label: 'Fulfilment',
+    description: 'Outbound shipments, delivery confirmation and proof of delivery.',
+    icon: <ShipmentIcon />,
+    path: '/sales/shipments',
+    moduleName: 'Shipments',
+    activePrefixes: ['/sales/shipments'],
+  },
+  {
+    key: 'accounts-receivable',
+    label: 'Receivables',
+    description: 'Issued invoices, collections, adjustments and customer payments.',
+    icon: <FinanceIcon />,
+    path: '/sales/finance',
+    moduleName: 'Accounts Receivable',
+    activePrefixes: ['/sales/finance'],
   },
 ];
 
@@ -583,8 +602,8 @@ export const ADVANCED_GROUPS: NavGroup[] = [
   },
   {
     key: 'fulfilment',
-    title: 'Orders & fulfilment',
-    caption: 'What happens after a customer says yes.',
+    title: 'Customer PO & handoffs',
+    caption: 'The award evidence and procurement handoff that precede an active customer order.',
     entries: [
       {
         key: 'client-po-inbox',
@@ -596,25 +615,6 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         keywords: ['customer po', 'award', 'purchase order', 'match', 'accept'],
       },
       {
-        key: 'orders',
-        label: 'Customer orders',
-        description: 'Confirmed sales orders and what each one still owes the customer.',
-        path: '/sales/orders',
-        icon: <OrderIcon />,
-        moduleName: 'Orders',
-        keywords: ['sales order', 'order', 'confirmed', 'so'],
-      },
-      {
-        key: 'shipments',
-        label: 'Shipments',
-        labelKey: 'shipments',
-        description: 'Outbound deliveries to the customer, with their documents.',
-        path: '/sales/shipments',
-        icon: <ShipmentIcon />,
-        moduleName: 'Shipments',
-        keywords: ['delivery', 'dispatch', 'shipment', 'waybill'],
-      },
-      {
         key: 'procurement-handoffs',
         label: 'Procurement handoffs',
         description: 'Sales orders passed to procurement to buy against, and their acknowledgement.',
@@ -622,15 +622,6 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <HandoffIcon />,
         moduleName: 'Orders',
         keywords: ['handoff', 'procurement', 'buy', 'fulfilment'],
-      },
-      {
-        key: 'accounts-receivable',
-        label: 'Accounts receivable',
-        description: 'Issued invoices, what is overdue, and the credit and debit notes against them.',
-        path: '/sales/finance',
-        icon: <FinanceIcon />,
-        moduleName: 'Accounts Receivable',
-        keywords: ['ar', 'invoice', 'collections', 'aging', 'receivable', 'payment'],
       },
     ],
   },
@@ -946,6 +937,22 @@ export const ADVANCED_GROUPS: NavGroup[] = [
       },
     ],
   },
+  {
+    key: 'administration',
+    title: 'Administration',
+    caption: 'Workspace configuration, people, access and governed operating rules.',
+    entries: [
+      {
+        key: 'setup',
+        label: 'Setup',
+        labelKey: 'setup_master',
+        description: 'Configure the workspace, rates, formats, people, permissions and integrations.',
+        path: '/setup',
+        icon: <SetupIcon />,
+        keywords: ['administration', 'configuration', 'settings', 'people', 'permissions'],
+      },
+    ],
+  },
 ];
 
 /** Every relocated destination, flattened — the directory page, search and the tests read this. */
@@ -954,7 +961,7 @@ export const ADVANCED_ENTRIES: NavEntry[] = ADVANCED_GROUPS.flatMap((group) => g
 /** Every tab offered by a primary destination, flattened. */
 export const PRIMARY_VIEWS: NavView[] = PRIMARY_NAV.flatMap((item) => item.views ?? []);
 
-/** The rail row that owns `/advanced`. Rendered apart from the five, because it is a door, not a job. */
+/** The rail row that owns `/advanced`. Rendered apart from the commercial spine, because it is a door, not a job. */
 export const ALL_SCREENS_ENTRY = {
   key: 'all-screens',
   label: 'Screen directory',
