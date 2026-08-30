@@ -49,6 +49,7 @@ import { retryOperation, type RetryOperation } from './retryIdempotency';
 import FeatureHelp from '../../../components/common/FeatureHelp';
 import {
   blockerAction,
+  blockerActionAllowed,
   countDecisions,
   decisionRecordIsLocked,
   deduplicateDisplayedPromotionBlockers,
@@ -69,6 +70,7 @@ import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import { catalogPolicyLabel, catalogWarningSummary } from './catalogWarningPresentation';
 import ParticipationHandoffGuidance from './ParticipationHandoffGuidance';
 import CustomerRequestTerms from './CustomerRequestTerms';
+import LegacyDecisionRecordNotice from './LegacyDecisionRecordNotice';
 
 const CountChip = ({ label, count, color = 'default' }: { label: string; count: number; color?: 'default' | 'success' | 'warning' | 'info' }) => (
   <Chip size="small" label={`${label} ${count}`} color={color} variant={count > 0 ? 'filled' : 'outlined'} sx={{ fontWeight: 800 }} />
@@ -300,6 +302,8 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
 
   const workbench = workbenchQuery.data;
   const rfqRevisionBlocker = workbench.blockers.find((blocker) => blocker.code === 'RFQ_REVISION_REQUIRED');
+  const legacyRfqBlocker = workbench.blockers.find((blocker) => blocker.code === 'LEGACY_RFQ');
+  const legacyRfqAction = legacyRfqBlocker ? blockerAction(legacyRfqBlocker, leadId) : null;
   const counts = countDecisions(decisions);
   const dirty = !decisionsEqual(decisions, baselineDecisions);
   const governed = Object.values(decisions).every(validGovernedDecision);
@@ -358,7 +362,8 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const primaryBlocker = promotionPermissionBlocker ?? displayedBlockers[0] ?? null;
   const actionableBlockers = workbench.blockers
     .map((blocker) => ({ code: blocker.code, action: blockerAction(blocker, leadId) }))
-    .filter((item): item is { code: string; action: { label: string; path: string } } => Boolean(item.action));
+    .filter((item): item is { code: string; action: { label: string; path: string } } => Boolean(item.action))
+    .filter((item) => blockerActionAllowed(item.action, commercialAccess.canViewPromotedRfq));
   const sourceEvidenceAvailable = workbench.evidence.some((evidence) => evidence.sourceAvailable);
   const sourceCoverageComplete = !workbench.sourceCoverage
     || workbench.sourceCoverage.totalLines === 0
@@ -436,7 +441,18 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         requiredDeliveryDate={workbench.requiredDeliveryDate}
         deliveryLocation={workbench.deliveryLocation}
         agreementReference={workbench.agreementReference}
+        historicalReadOnly={Boolean(legacyRfqBlocker) && !workbench.hasFrozenCommercialHeader}
       />
+
+      {legacyRfqBlocker ? (
+        <LegacyDecisionRecordNotice
+          message={legacyRfqBlocker.message}
+          actionLabel={commercialAccess.canViewPromotedRfq ? legacyRfqAction?.label : null}
+          onOpenRfq={commercialAccess.canViewPromotedRfq && legacyRfqAction
+            ? () => navigate(legacyRfqAction.path)
+            : undefined}
+        />
+      ) : null}
 
       {decisionGuard.recoveredDraft && !decisionRecordLocked ? (
         <Alert

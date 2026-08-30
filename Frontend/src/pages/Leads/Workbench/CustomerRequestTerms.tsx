@@ -5,6 +5,7 @@ interface CustomerRequestTermsProps {
   requiredDeliveryDate?: string | null;
   deliveryLocation?: string | null;
   agreementReference?: string | null;
+  historicalReadOnly?: boolean;
 }
 
 const Term = ({ label, value }: { label: string; value?: string | null }) => (
@@ -29,10 +30,11 @@ const CustomerRequestTerms: React.FC<CustomerRequestTermsProps> = ({
   requiredDeliveryDate,
   deliveryLocation,
   agreementReference,
+  historicalReadOnly = false,
 }) => {
   const missing = !requiredDeliveryDate || !deliveryLocation || !agreementReference;
   return (
-    <Alert severity={missing ? 'warning' : 'info'} sx={{ mb: 1.5 }}>
+    <Alert severity={missing && !historicalReadOnly ? 'warning' : 'info'} sx={{ mb: 1.5 }}>
       <Typography sx={{ fontWeight: 850, mb: 0.75 }}>Customer request terms</Typography>
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={{ xs: 1, md: 4 }}>
         <Term label="Required delivery date" value={requiredDeliveryDate ? formatCalendarDate(requiredDeliveryDate) : null} />
@@ -41,7 +43,9 @@ const CustomerRequestTerms: React.FC<CustomerRequestTermsProps> = ({
       </Stack>
       {missing ? (
         <Typography variant="caption" sx={{ display: 'block', mt: 1 }}>
-          One or more customer terms were not captured. Check the source evidence before committing participation.
+          {historicalReadOnly
+            ? 'This historical revision predates frozen customer terms. No values were inferred from the mutable Lead.'
+            : 'One or more customer terms were not captured. Check the source evidence before committing participation.'}
         </Typography>
       ) : null}
     </Alert>
