@@ -23,8 +23,10 @@ import {
   CheckCircleOutlined as CheckIcon,
   VerifiedUserOutlined as IntegrityIcon,
   SettingsOutlined as SettingsIcon,
+  ArrowForwardRounded as ArrowIcon,
 } from '@mui/icons-material';
 import styled from '@emotion/styled';
+import { keyframes } from '@emotion/react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppTheme } from '../../context/ThemeContext';
 import Branding from '../../components/common/Branding';
@@ -38,6 +40,11 @@ import { INBOX_ROOT } from '../../components/layout/navCatalog';
 /** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
 const LOGIN_ERROR_ID = 'login-error';
 
+const signalTravel = keyframes`
+  0%, 100% { transform: translate3d(0, 0, 0); opacity: .42; }
+  50% { transform: translate3d(0, 140px, 0); opacity: 1; }
+`;
+
 const Container = styled.div<{ mode: string }>`
   min-height: 100vh;
   min-height: 100dvh;
@@ -46,6 +53,11 @@ const Container = styled.div<{ mode: string }>`
   background: ${props => props.mode === 'dark' ? '#07111f' : '#f5f7fa'};
   font-family: ${(props: any) => props.theme.typography.fontFamily};
   color-scheme: ${props => props.mode};
+
+  ::selection {
+    background: ${props => props.mode === 'dark' ? '#20c7b5' : '#075dcc'};
+    color: #ffffff;
+  }
 `;
 
 const LoginShell = styled.div`
@@ -64,11 +76,17 @@ const LoginShell = styled.div`
 const EvidencePanel = styled.section`
   min-width: 0;
   padding: clamp(32px, 4vw, 64px);
-  background: #08172a;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(40, 123, 211, .27), transparent 34%),
+    radial-gradient(circle at 88% 82%, rgba(32, 199, 181, .16), transparent 33%),
+    linear-gradient(145deg, #071424 0%, #081a31 54%, #061321 100%);
   color: #f8fafc;
   display: flex;
   flex-direction: column;
   border-right: 1px solid #283b58;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
 
   @media (max-width: 1024px) {
     min-height: 252px;
@@ -84,12 +102,15 @@ const EvidencePanel = styled.section`
 const FormSection = styled.main<{ mode: string }>`
   min-width: 0;
   padding: clamp(32px, 5vw, 72px);
-  background: ${props => props.mode === 'dark' ? '#0f1b2d' : '#f8f8f8'};
+  background: ${props => props.mode === 'dark'
+    ? 'radial-gradient(circle at 85% 18%, rgba(42, 109, 190, .17), transparent 30%), radial-gradient(circle at 14% 88%, rgba(32, 199, 181, .09), transparent 28%), #0c1728'
+    : 'radial-gradient(circle at 88% 15%, rgba(69, 133, 216, .14), transparent 32%), radial-gradient(circle at 10% 88%, rgba(32, 199, 181, .10), transparent 28%), linear-gradient(145deg, #f5f8fc 0%, #eef4fb 100%)'};
   color: ${props => props.mode === 'dark' ? '#f8fafc' : '#0b172a'};
   display: flex;
   flex-direction: column;
   justify-content: center;
   position: relative;
+  overflow: hidden;
 
   @media (max-width: 1024px) {
     min-height: calc(100dvh - 252px);
@@ -102,16 +123,56 @@ const FormSection = styled.main<{ mode: string }>`
   }
 `;
 
+const AuthSurface = styled.div<{ mode: string }>`
+  position: relative;
+  z-index: 1;
+  max-width: 472px;
+  width: 100%;
+  margin: 0 auto;
+  padding: clamp(32px, 3.4vw, 46px);
+  border: 1px solid ${props => props.mode === 'dark' ? 'rgba(143, 166, 195, .24)' : 'rgba(94, 119, 151, .20)'};
+  border-radius: 22px;
+  background: ${props => props.mode === 'dark' ? 'rgba(8, 20, 36, .86)' : 'rgba(255, 255, 255, .86)'};
+  box-shadow: ${props => props.mode === 'dark'
+    ? '0 28px 70px -32px rgba(0, 0, 0, .82), 0 10px 30px -24px rgba(32, 199, 181, .32)'
+    : '0 30px 72px -34px rgba(22, 55, 94, .36), 0 12px 32px -26px rgba(7, 93, 204, .34)'};
+  backdrop-filter: blur(18px) saturate(118%);
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: 38px;
+    right: 38px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(73, 163, 255, .7), rgba(32, 199, 181, .72), transparent);
+  }
+
+  @media (max-width: 599.95px) {
+    max-width: 440px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+
+    &::before { display: none; }
+  }
+`;
+
 const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: any) => ({
   '& .MuiOutlinedInput-root': {
     minHeight: 58,
-    backgroundColor: mode === 'dark' ? '#0b172a' : '#ffffff',
-    borderRadius: 8,
-    transition: 'border-color 160ms ease-out, box-shadow 160ms ease-out',
+    backgroundColor: mode === 'dark' ? 'rgba(12, 27, 47, .92)' : 'rgba(255, 255, 255, .94)',
+    borderRadius: 12,
+    boxShadow: mode === 'dark' ? '0 8px 24px -22px rgba(0, 0, 0, .9)' : '0 10px 26px -24px rgba(20, 54, 94, .55)',
+    transition: 'border-color 180ms ease-out, box-shadow 180ms ease-out, background-color 180ms ease-out',
     '& fieldset': { borderColor: mode === 'dark' ? '#52627a' : '#aeb8c7' },
     '&:hover fieldset': { borderColor: mode === 'dark' ? '#8fa1b8' : '#65758b' },
     '&.Mui-focused': {
-      boxShadow: `0 0 0 3px ${theme.palette.primary.main}24`,
+      backgroundColor: mode === 'dark' ? '#0c1b2f' : '#ffffff',
+      boxShadow: `0 0 0 3px ${theme.palette.primary.main}24, 0 14px 30px -24px ${theme.palette.primary.main}99`,
     },
   },
   '& input': {
@@ -135,7 +196,7 @@ const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: a
 const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) => ({
   minHeight: 58,
   backgroundColor: mode === 'dark' ? '#0b172a' : '#ffffff',
-  borderRadius: 8,
+  borderRadius: 12,
   transition: 'border-color 160ms ease-out, box-shadow 160ms ease-out',
   '& fieldset': { borderColor: mode === 'dark' ? '#52627a' : '#aeb8c7' },
   '&:hover fieldset': { borderColor: mode === 'dark' ? '#8fa1b8' : '#65758b' },
@@ -324,12 +385,32 @@ const LoginPage: React.FC = () => {
   return (
     <Container mode={mode} data-testid="login-viewport">
       <LoginShell data-testid="login-card">
-        <EvidencePanel aria-label="Nexora evidence-to-cash workflow">
+        <EvidencePanel aria-label="Nexora evidence-to-cash workflow" data-decorative-motion="true">
+          <Box
+            aria-hidden="true"
+            sx={{
+              position: 'absolute',
+              width: 330,
+              height: 330,
+              right: -168,
+              bottom: -148,
+              border: '1px solid rgba(94, 191, 229, .18)',
+              borderRadius: '50%',
+              '&::before, &::after': {
+                content: '""',
+                position: 'absolute',
+                border: '1px solid rgba(32, 199, 181, .15)',
+                borderRadius: '50%',
+              },
+              '&::before': { inset: 48 },
+              '&::after': { inset: 104 },
+            }}
+          />
           <Box
             sx={{
               '& .MuiTypography-root': { color: '#f8fafc !important' },
               '& img': { filter: 'brightness(0) invert(1)' },
-              mb: { xs: 2, md: 6 },
+              mb: { xs: 2, md: 7 },
             }}
           >
             <Branding fontSize={28} logoSize={38} showTagline={false} />
@@ -340,10 +421,10 @@ const LoginPage: React.FC = () => {
             sx={{
               maxWidth: 500,
               fontFamily: '"Cambay", "Source Sans 3", sans-serif',
-              fontSize: { xs: 29, sm: 40, lg: 46 },
+              fontSize: { xs: 29, sm: 42, lg: 54 },
               fontWeight: 700,
-              lineHeight: 1.08,
-              letterSpacing: '-0.025em',
+              lineHeight: 1.02,
+              letterSpacing: '-0.035em',
               color: '#f8fafc',
               mb: { xs: .75, md: 2 },
             }}
@@ -357,7 +438,7 @@ const LoginPage: React.FC = () => {
               color: '#b8c9de',
               fontSize: { xs: 14, sm: 18 },
               lineHeight: 1.55,
-              mb: { xs: 0, sm: 4 },
+              mb: { xs: 0, sm: 4.5 },
             }}
           >
             Ownership, approvals and status stay attached at every handoff.
@@ -370,9 +451,13 @@ const LoginPage: React.FC = () => {
               alignItems: 'center',
               justifyContent: 'flex-start',
               gap: 2,
-              py: 1.5,
-              borderTop: '1px solid #35506f',
-              borderBottom: '1px solid #35506f',
+              py: 1.25,
+              px: 1.5,
+              width: 'fit-content',
+              border: '1px solid rgba(109, 156, 205, .32)',
+              borderRadius: 999,
+              background: 'rgba(8, 25, 47, .55)',
+              backdropFilter: 'blur(10px)',
             }}
           >
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -392,8 +477,33 @@ const LoginPage: React.FC = () => {
               m: { xs: 0, sm: '28px 0 0' },
               display: 'grid',
               gridTemplateColumns: 'minmax(0, 1fr)',
-              borderTop: '1px solid #283b58',
-              borderLeft: '1px solid #283b58',
+              position: 'relative',
+              maxWidth: 500,
+              '&::before': {
+                content: '""',
+                position: 'absolute',
+                left: 16,
+                top: 30,
+                bottom: 30,
+                width: '1px',
+                background: 'linear-gradient(#5bc9f2, #20c7b5)',
+                opacity: .55,
+              },
+              '&::after': {
+                content: '""',
+                position: 'absolute',
+                left: 13,
+                top: 28,
+                width: 7,
+                height: 7,
+                borderRadius: '50%',
+                background: '#73efe2',
+                boxShadow: '0 0 0 4px rgba(32, 199, 181, .12), 0 0 18px rgba(32, 199, 181, .9)',
+                animation: `${signalTravel} 7s cubic-bezier(.16, 1, .3, 1) infinite`,
+              },
+              '@media (prefers-reduced-motion: reduce)': {
+                '&::after': { animation: 'none' },
+              },
               '@media (max-width: 599.95px)': { display: 'none' },
             }}
           >
@@ -403,25 +513,33 @@ const LoginPage: React.FC = () => {
                 key={stage.title}
                 sx={{
                   minWidth: 0,
-                  minHeight: 72,
-                  px: 2,
-                  py: 1.5,
+                  minHeight: 70,
+                  py: 1.25,
                   display: 'grid',
                   gridTemplateColumns: '34px minmax(0, 1fr)',
                   alignItems: 'center',
-                  gap: 1.5,
-                  borderRight: '1px solid #283b58',
-                  borderBottom: '1px solid #283b58',
+                  gap: 2,
+                  position: 'relative',
                 }}
               >
-                <Box sx={{ width: 32, height: 32, border: '1px solid #20c7b5', borderRadius: '50%', display: 'grid', placeItems: 'center' }}>
+                <Box sx={{
+                  width: 32,
+                  height: 32,
+                  border: '1px solid #4edacb',
+                  borderRadius: '50%',
+                  display: 'grid',
+                  placeItems: 'center',
+                  background: '#0a2135',
+                  boxShadow: '0 10px 28px -16px rgba(32, 199, 181, .95)',
+                  zIndex: 1,
+                }}>
                   <CheckIcon aria-hidden="true" sx={{ color: '#20c7b5', fontSize: 18 }} />
                 </Box>
                 <Box>
-                  <Typography sx={{ color: '#f8fafc', fontSize: 14, fontWeight: 700, lineHeight: 1.2 }}>
+                  <Typography sx={{ color: '#f8fafc', fontSize: 15, fontWeight: 700, lineHeight: 1.2 }}>
                     {stage.title}
                   </Typography>
-                  <Typography sx={{ color: '#9fb0c8', fontSize: 12, mt: .4, lineHeight: 1.2 }}>
+                  <Typography sx={{ color: '#aebfd4', fontSize: 13, mt: .45, lineHeight: 1.25 }}>
                     {stage.detail}
                   </Typography>
                 </Box>
@@ -464,28 +582,37 @@ const LoginPage: React.FC = () => {
             <IconButton
               onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}
               aria-label={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-              sx={{ width: 50, height: 50, border: '1px solid', borderColor: mode === 'dark' ? '#52627a' : '#c7ced8', borderRadius: '7px' }}
+              sx={{
+                width: 46,
+                height: 46,
+                border: '1px solid',
+                borderColor: mode === 'dark' ? 'rgba(143, 166, 195, .36)' : 'rgba(82, 97, 116, .24)',
+                borderRadius: '50%',
+                background: mode === 'dark' ? 'rgba(8, 20, 36, .62)' : 'rgba(255, 255, 255, .68)',
+                backdropFilter: 'blur(12px)',
+                boxShadow: mode === 'dark' ? '0 12px 30px -24px #000' : '0 12px 30px -24px rgba(22, 55, 94, .7)',
+              }}
             >
               {mode === 'dark' ? <SunIcon /> : <MoonIcon />}
             </IconButton>
           </Box>
 
-          <Box sx={{ maxWidth: 440, width: '100%', mx: 'auto' }}>
+          <AuthSurface mode={mode}>
             <Typography
               component="h1"
               sx={{
                 fontFamily: '"Cambay", "Source Sans 3", sans-serif',
-                fontSize: { xs: 36, md: 48 },
+                fontSize: { xs: 36, md: 46 },
                 fontWeight: 700,
-                lineHeight: 1.1,
-                letterSpacing: '-0.025em',
-                mb: 1.5,
+                lineHeight: 1.04,
+                letterSpacing: '-0.035em',
+                mb: 1.25,
               }}
             >
               Sign in
             </Typography>
             <Typography variant="body1" sx={{ color: mode === 'dark' ? '#b7c4d6' : '#526174', mb: { xs: 3, sm: 4 }, lineHeight: 1.55, maxWidth: 420, fontSize: { sm: 17 } }}>
-              Use your work account to access your Nexora workspace.
+              Welcome back. Use your work account to access your Nexora workspace.
             </Typography>
 
             <Box component="form" onSubmit={handleLogin}>
@@ -635,18 +762,26 @@ const LoginPage: React.FC = () => {
                 variant="contained"
                 size="large"
                 type="submit"
+                endIcon={!loading && !businessUnitOptions ? <ArrowIcon aria-hidden="true" /> : undefined}
                 disabled={loading || (businessUnitOptions !== null && selectedBusinessUnitId === '')}
                 aria-busy={loading}
                 sx={{
                   minHeight: 61,
                   py: 1.5,
                   fontSize: 16,
-                  borderRadius: '8px',
-                  background: '#075dcc',
+                  borderRadius: '12px',
+                  background: 'linear-gradient(110deg, #075dcc 0%, #0879d6 58%, #078fa9 112%)',
                   color: '#ffffff',
-                  boxShadow: '0 10px 24px -16px rgba(9, 105, 232, .8)',
-                  transition: 'background-color 160ms ease-out, box-shadow 160ms ease-out',
-                  '&:hover': { background: '#064da9', boxShadow: '0 12px 26px -16px rgba(9, 105, 232, .9)' },
+                  boxShadow: '0 16px 34px -20px rgba(7, 93, 204, .88)',
+                  transition: 'box-shadow 180ms ease-out, transform 180ms ease-out, filter 180ms ease-out',
+                  '&:hover': {
+                    background: 'linear-gradient(110deg, #064da9 0%, #076bc2 58%, #067d96 112%)',
+                    boxShadow: '0 20px 38px -20px rgba(7, 93, 204, .92)',
+                    transform: 'translateY(-1px)',
+                  },
+                  '&:active': { transform: 'translateY(0)' },
+                  '& .MuiButton-endIcon': { transition: 'transform 180ms ease-out' },
+                  '&:hover .MuiButton-endIcon': { transform: 'translateX(3px)' },
                   mt: 1,
                 }}
               >
@@ -695,7 +830,7 @@ const LoginPage: React.FC = () => {
                 </Button>
               </Box>
             )}
-          </Box>
+          </AuthSurface>
         </FormSection>
       </LoginShell>
     </Container>
