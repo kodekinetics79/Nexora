@@ -181,27 +181,28 @@ public sealed class ProvisioningDiagnosticsService(
                       + $"({ProvisioningOptions.SectionName}:Enabled=false), so accepted work is never acted on.");
 
         if (execution.State == ProvisioningExecutionState.Cancelled)
-            return (ProvisioningIssueClassifications.CustomerInput,
+            return (ProvisioningIssueClassifications.Cancelled,
                 $"An operator abandoned this attempt{(execution.CancelledBy is { Length: > 0 } by ? $" ({by})" : "")}. "
                 + "Anything earlier steps committed is still there, in Provisioning status.",
                 null);
 
         if (execution.State == ProvisioningExecutionState.Succeeded)
-            return (ProvisioningIssueClassifications.RetryableSystemFailure,
-                "Every step reached a terminal success. Nothing is wrong with provisioning; if the tenant is "
-                + "still not usable, the activation controls below are what is left.",
+            return (ProvisioningIssueClassifications.NoFailure,
+                "All required steps succeeded; non-applicable steps were skipped. "
+                + "Provisioning is complete. Tenant activation is evaluated separately.",
                 null);
 
-        if (failed is null)
-            return (ProvisioningIssueClassifications.RetryableSystemFailure,
+        if (failed is null && execution.FailureReason is null && !execution.FailureIsTerminal
+            && execution.State is ProvisioningExecutionState.Pending or ProvisioningExecutionState.Running)
+            return (ProvisioningIssueClassifications.NoFailure,
                 execution.State == ProvisioningExecutionState.Running
                     ? "A runner holds this execution and is working through the steps."
-                    : "No step has recorded a failure yet.",
+                    : "The request is queued for provisioning. No step has recorded a failure.",
                 null);
 
         // Step-specific codes first: they are the precise ones, and a SQLSTATE match on the same
         // failure would say something true but less useful.
-        return failed.FailureCode switch
+        return failed?.FailureCode switch
         {
             "slug-taken" => (ProvisioningIssueClassifications.CustomerInput,
                 "The workspace address now belongs to another tenant. Retrying loses the same race again.",

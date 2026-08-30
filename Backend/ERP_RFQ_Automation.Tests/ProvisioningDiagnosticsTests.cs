@@ -25,6 +25,61 @@ namespace ERP_RFQ_Automation.Tests;
 /// </summary>
 public sealed class ProvisioningDiagnosticsTests
 {
+    [Theory]
+    [InlineData(ProvisioningExecutionState.Pending, "NO_FAILURE")]
+    [InlineData(ProvisioningExecutionState.Running, "NO_FAILURE")]
+    [InlineData(ProvisioningExecutionState.Cancelled, "CANCELLED")]
+    [InlineData(ProvisioningExecutionState.Failed, "RETRYABLE_SYSTEM_FAILURE")]
+    public async Task Execution_state_without_a_failed_step_is_classified_truthfully(
+        ProvisioningExecutionState state, string expected)
+    {
+        using var harness = new ProvisioningHarness();
+        var planId = await harness.PlanAsync();
+        var submitted = await harness.SubmitAsync(ProvisioningHarness.Request(
+            "northwind-state", "state@northwind.test", planId,
+            activation: AdminActivationMethods.Password, password: "Correct-Horse-9!"));
+        await using (var db = harness.Context())
+        {
+            var row = await db.Set<ProvisioningExecution>().SingleAsync(x => x.Id == submitted.Execution!.Id);
+            row.State = state;
+            if (state == ProvisioningExecutionState.Running)
+            {
+                row.StartedOn = DateTime.UtcNow;
+                row.LeaseUntil = DateTime.UtcNow.AddMinutes(5);
+                row.LeaseOwner = "test-runner";
+            }
+            await db.SaveChangesAsync();
+        }
+
+        var result = await DiagnoseExecutionAsync(harness, submitted.Execution!.Id);
+        Assert.Equal(expected, result.Classification);
+        Assert.Null(result.FailedStep);
+        if (state is ProvisioningExecutionState.Running or ProvisioningExecutionState.Cancelled)
+            Assert.All(result.RecoveryActions, action => Assert.False(action.Available));
+    }
+
+    [Fact]
+    public async Task Terminal_execution_failure_without_a_failed_step_is_not_reported_as_healthy()
+    {
+        using var harness = new ProvisioningHarness();
+        var planId = await harness.PlanAsync();
+        var submitted = await harness.SubmitAsync(ProvisioningHarness.Request(
+            "northwind-terminal", "terminal@northwind.test", planId,
+            activation: AdminActivationMethods.Password, password: "Correct-Horse-9!"));
+        await using (var db = harness.Context())
+        {
+            var row = await db.Set<ProvisioningExecution>().SingleAsync(x => x.Id == submitted.Execution!.Id);
+            row.State = ProvisioningExecutionState.Failed;
+            row.FailureIsTerminal = true;
+            row.FailureReason = "A required platform configuration is missing.";
+            await db.SaveChangesAsync();
+        }
+
+        var result = await DiagnoseExecutionAsync(harness, submitted.Execution!.Id);
+        Assert.Equal(ProvisioningIssueClassifications.PlatformConfiguration, result.Classification);
+        Assert.False(result.RecoveryActions.Single(x => x.Action == "resume").Safe);
+    }
+
     [Fact]
     public async Task A_taken_administrator_address_is_named_as_customer_input_and_is_not_retry_safe()
     {
@@ -124,6 +179,12 @@ public sealed class ProvisioningDiagnosticsTests
         var diagnostics = await DiagnoseTenantAsync(harness, tenantId);
 
         Assert.Equal(nameof(ProvisioningExecutionState.Succeeded), diagnostics.Status);
+        Assert.Equal("NO_FAILURE", diagnostics.Classification);
+        Assert.Null(diagnostics.FailureReason);
+        Assert.Null(diagnostics.FailedStep);
+        Assert.Null(diagnostics.MissingPrerequisite);
+        Assert.Equal(diagnostics.TotalStepCount, diagnostics.CompletedStepCount);
+        Assert.False(diagnostics.RecoveryActions.Single(x => x.Action == "resume").Available);
         Assert.Equal(TenantDeploymentProfiles.Production, diagnostics.DeploymentProfile);
         Assert.Null(diagnostics.BlockersUnavailableReason);
 

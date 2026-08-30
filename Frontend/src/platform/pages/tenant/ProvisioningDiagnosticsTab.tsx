@@ -40,10 +40,21 @@ import type {
  * product — and the reason is exactly the thing they came here to find out.
  */
 
-const CLASSIFICATION_COPY: Record<
-  ProvisioningIssueClassification,
-  { label: string; tone: 'error' | 'warning' | 'info' | 'neutral'; owner: string }
-> = {
+type ClassificationCopy = {
+  label: string; tone: 'success' | 'error' | 'warning' | 'info' | 'neutral'; owner: string;
+};
+
+const CLASSIFICATION_COPY: Record<ProvisioningIssueClassification, ClassificationCopy> = {
+  NO_FAILURE: {
+    label: 'No provisioning failure',
+    tone: 'info',
+    owner: 'Check the execution status and the separate activation controls below.',
+  },
+  CANCELLED: {
+    label: 'Provisioning cancelled',
+    tone: 'neutral',
+    owner: 'This attempt will not resume. Review the retained records before submitting a new request.',
+  },
   CUSTOMER_INPUT: {
     label: 'Customer input',
     tone: 'warning',
@@ -64,6 +75,26 @@ const CLASSIFICATION_COPY: Record<
     tone: 'info',
     owner: 'Unclassified and not terminal. Retrying is the correct first move.',
   },
+};
+
+const HEALTHY_STATE_COPY: Record<string, ClassificationCopy> = {
+  Succeeded: {
+    label: 'Provisioning complete', tone: 'success',
+    owner: 'Review the activation controls below before enabling tenant access. No retry is needed.',
+  },
+  Running: {
+    label: 'Provisioning in progress', tone: 'info',
+    owner: 'Wait for the current attempt to finish. Recovery availability is shown below.',
+  },
+  Pending: {
+    label: 'Provisioning queued', tone: 'info',
+    owner: 'The request is waiting to run. Check back for progress.',
+  },
+};
+
+const UNKNOWN_CLASSIFICATION: ClassificationCopy = {
+  label: 'Review required', tone: 'neutral',
+  owner: 'The problem category is not recognised. Review the recorded details and recovery restrictions before acting.',
 };
 
 const DISPOSITION_TONE: Record<ActivationControlDisposition, 'success' | 'error' | 'warning' | 'info'> = {
@@ -246,8 +277,15 @@ export default function ProvisioningDiagnosticsTab({ tenant }: { tenant: Tenant 
   }
 
   const diagnostics = diagnosticsQuery.data;
-  const classification = CLASSIFICATION_COPY[diagnostics.classification]
-    ?? CLASSIFICATION_COPY.RETRYABLE_SYSTEM_FAILURE;
+  // Terminal status remains truthful during a staggered frontend/backend rollout, including
+  // older servers that classified successful provisioning as a retryable failure.
+  const classification = diagnostics.status === 'Succeeded'
+    ? HEALTHY_STATE_COPY.Succeeded
+    : diagnostics.status === 'Cancelled'
+      ? CLASSIFICATION_COPY.CANCELLED
+      : diagnostics.classification === 'NO_FAILURE'
+        ? HEALTHY_STATE_COPY[diagnostics.status] ?? UNKNOWN_CLASSIFICATION
+        : CLASSIFICATION_COPY[diagnostics.classification] ?? UNKNOWN_CLASSIFICATION;
   const progress = diagnostics.totalStepCount > 0
     ? Math.round((diagnostics.completedStepCount / diagnostics.totalStepCount) * 100)
     : 0;
@@ -279,7 +317,7 @@ export default function ProvisioningDiagnosticsTab({ tenant }: { tenant: Tenant 
 
         <LinearProgress variant="determinate" value={progress} sx={{ mt: 2, height: 8, borderRadius: 4 }} />
 
-        <Alert severity={classification.tone === 'error' ? 'error' : classification.tone === 'warning' ? 'warning' : 'info'} sx={{ mt: 2 }}>
+        <Alert severity={classification.tone === 'neutral' ? 'info' : classification.tone} sx={{ mt: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>
             {diagnostics.failedStep
               ? `${diagnostics.failedStep.label} failed`
@@ -293,7 +331,9 @@ export default function ProvisioningDiagnosticsTab({ tenant }: { tenant: Tenant 
             {diagnostics.failureReason ?? diagnostics.classificationDetail}
           </Typography>
           <Typography variant="body2" sx={{ mt: 1 }}>{classification.owner}</Typography>
-          <Typography variant="body2" sx={{ mt: 1 }}>{diagnostics.classificationDetail}</Typography>
+          {diagnostics.failureReason && diagnostics.failureReason !== diagnostics.classificationDetail && (
+            <Typography variant="body2" sx={{ mt: 1 }}>{diagnostics.classificationDetail}</Typography>
+          )}
         </Alert>
 
         {diagnostics.missingPrerequisite && (
