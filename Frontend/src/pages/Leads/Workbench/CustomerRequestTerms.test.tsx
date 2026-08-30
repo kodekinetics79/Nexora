@@ -25,4 +25,19 @@ describe('CustomerRequestTerms', () => {
     expect(screen.getAllByText('Not captured')).toHaveLength(2);
     expect(screen.getByText(/check the source evidence before committing participation/i)).toBeInTheDocument();
   });
+
+  it('does not tell an immutable legacy record to enter unavailable terms', () => {
+    render(
+      <CustomerRequestTerms
+        requiredDeliveryDate={null}
+        deliveryLocation={null}
+        agreementReference={null}
+        historicalReadOnly
+      />,
+    );
+
+    expect(screen.getByText(/predates frozen customer terms/i)).toBeInTheDocument();
+    expect(screen.getByText(/no values were inferred from the mutable lead/i)).toBeInTheDocument();
+    expect(screen.queryByText(/before committing participation/i)).not.toBeInTheDocument();
+  });
 });

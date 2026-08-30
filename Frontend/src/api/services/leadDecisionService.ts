@@ -118,6 +118,7 @@ export interface LeadDecisionWorkbenchDTO {
   emailSubject?: string | null;
   emailMessageId?: string | null;
   receivedAtUtc?: string | null;
+  hasFrozenCommercialHeader: boolean;
   bidClosingDate?: string | null;
   requiredDeliveryDate?: string | null;
   deliveryLocation?: string | null;

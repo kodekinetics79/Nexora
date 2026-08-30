@@ -143,6 +143,84 @@ public sealed class LeadIdentityApplicationServiceTests
     }
 
     [Fact]
+    public async Task Completed_legacy_rfq_with_an_old_revision_snapshot_remains_a_read_only_record()
+    {
+        const long tenant = 697;
+        using var db = new TestDb();
+        await using var context = db.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        Seed.EmailConfig(context, 6971, tenant);
+        Seed.EmailIngest(context, 6972, 6971, "NeedsReview");
+        await context.SaveChangesAsync();
+
+        var created = await new LeadIdentityApplicationService(context).ReconcileAsync(
+            Candidate(tenant, 6972, "RFQ-LEGACY-697", "buyer@legacy.test", 17),
+            Intake("legacy-read-only", "legacy-read-only", Guid.NewGuid(), "buyer@legacy.test"));
+        // Historical rows predate the append-only v2 snapshot contract. Use raw SQL to model
+        // one exactly as it already exists in production; ordinary application writes must
+        // remain unable to mutate an immutable revision.
+        const string legacySnapshot = """{"rfq":"rfqlegacy697","buyer":"buyer","items":[]}""";
+        await context.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE "LeadRevisions"
+            SET "SnapshotJson" = {legacySnapshot}
+            WHERE "Id" = {created.RevisionId}
+            """);
+        var rfq = new Rfq
+        {
+            Rfqno = "RFQ-LEGACY-697", BuyersName = "Buyer", RecDate = DateTime.UtcNow,
+            LeadId = created.LeadId, CreatedBy = "legacy-import", CreatedDate = DateTime.UtcNow,
+            BusinessUnitId = tenant
+        };
+        context.Rfqs.Add(rfq);
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+
+        var workbench = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
+            .GetAsync(tenant, created.LeadId);
+
+        var blocker = Assert.Single(workbench.Blockers, item => item.Code == "LEGACY_RFQ");
+        Assert.Contains("read-only", blocker.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("predates frozen commercial-header snapshots", blocker.Message, StringComparison.Ordinal);
+        Assert.Equal("Open existing RFQ", blocker.ActionLabel);
+        Assert.Equal($"/procurement/rfqs/view/{rfq.Id}", blocker.ActionPath);
+        Assert.Null(workbench.Promotion);
+        Assert.False(workbench.HasFrozenCommercialHeader);
+        Assert.Null(workbench.BidClosingDate);
+        Assert.Null(workbench.RequiredDeliveryDate);
+        Assert.Null(workbench.DeliveryLocation);
+        Assert.Null(workbench.AgreementReference);
+    }
+
+    [Fact]
+    public async Task Active_lead_with_an_old_revision_snapshot_still_fails_closed()
+    {
+        const long tenant = 698;
+        using var db = new TestDb();
+        await using var context = db.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        Seed.EmailConfig(context, 6981, tenant);
+        Seed.EmailIngest(context, 6982, 6981, "NeedsReview");
+        await context.SaveChangesAsync();
+
+        var created = await new LeadIdentityApplicationService(context).ReconcileAsync(
+            Candidate(tenant, 6982, "RFQ-ACTIVE-698", "buyer@active.test", 17),
+            Intake("active-old-snapshot", "active-old-snapshot", Guid.NewGuid(), "buyer@active.test"));
+        const string legacySnapshot = """{"rfq":"rfqactive698","buyer":"buyer","items":[]}""";
+        await context.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE "LeadRevisions"
+            SET "SnapshotJson" = {legacySnapshot}
+            WHERE "Id" = {created.RevisionId}
+            """);
+        context.ChangeTracker.Clear();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
+                .GetAsync(tenant, created.LeadId));
+
+        Assert.Contains("no valid frozen commercial header", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Header_only_commercial_amendment_changes_the_identity_fingerprint()
     {
         var original = Candidate(68, 6802, "RFQ-68", "buyer@header.test", 5);
@@ -546,6 +624,7 @@ public sealed class LeadIdentityApplicationServiceTests
 
         var workbench = new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context));
         var original = await workbench.GetAsync(tenant, created.LeadId);
+        Assert.True(original.HasFrozenCommercialHeader);
         Assert.Equal(ingest.EmailSubject, original.EmailSubject);
         Assert.Equal(ingest.MessageId, original.EmailMessageId);
         Assert.NotEqual("source-occurrence-204", original.EmailMessageId);

@@ -301,10 +301,20 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                     lineDecision.CatalogPolicyVersion, lineDecision.WarningSnapshotJson));
         }).ToArray();
 
+        var hasFrozenCommercialHeader = LeadRevisionCommercialSnapshot.TryParse(
+            revision.SnapshotJson, out var frozenHeader) && frozenHeader is not null;
+        var isLegacyRfqRecord = rfq is not null && promotion is null;
+        if (!hasFrozenCommercialHeader && !isLegacyRfqRecord)
+            throw new InvalidOperationException(
+                "The current Lead revision has no valid frozen commercial header. Reconcile it before making a participation decision.");
+
         var blockers = new List<DecisionBlockerDto>();
-        if (rfq is not null && promotion is null)
+        if (isLegacyRfqRecord)
             blockers.Add(new("LEGACY_RFQ",
-                "A formal RFQ already exists for this Lead without a governed promotion receipt. The decision record is read-only; review the existing RFQ without fabricating missing lineage.",
+                "A formal RFQ already exists for this Lead without a governed promotion receipt. "
+                + "The decision record is read-only; review the existing RFQ without fabricating missing lineage."
+                + (hasFrozenCommercialHeader ? string.Empty
+                    : " This historical revision predates frozen commercial-header snapshots, so unavailable header values are not inferred from the mutable Lead."),
                 "Open existing RFQ", $"/procurement/rfqs/view/{rfq.Id}"));
         if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue)
                 == "CONVERTED_TO_RFQ" && rfq is null)
@@ -363,10 +373,6 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .ToArrayAsync(ct);
 
         var status = LeadDecisionParticipationState.Resolve(decision, fit, hasDecisionOnPriorRevision);
-        if (!LeadRevisionCommercialSnapshot.TryParse(revision.SnapshotJson, out var frozenHeader)
-            || frozenHeader is null)
-            throw new InvalidOperationException(
-                "The current Lead revision has no valid frozen commercial header. Reconcile it before making a participation decision.");
         return new LeadDecisionWorkbenchDto(lead.Id, revision.Id, revision.RevisionNumber, lead.CurrentRevisionNumber,
             decision?.Sequence, status, lead.LeadStatus?.SetupCode ?? "UNKNOWN", lead.LeadStatus?.SetupValue,
             lead.CommercialCaseReference, revision.CustomerRfqReference, lead.CustomerId, customerName,
@@ -374,8 +380,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             sourceOccurrence?.Subject ?? emailProvenance?.EmailSubject,
             RfcMessageId(sourceOccurrence) ?? emailProvenance?.MessageId,
             sourceOccurrence?.SourceReceivedAtUtc ?? occurrence.SourceReceivedAtUtc,
-            frozenHeader.BidClosingDate, frozenHeader.RequiredDeliveryDate, frozenHeader.DeliveryLocation,
-            frozenHeader.AgreementReference, lead.AssignToNavigation is null ? null
+            hasFrozenCommercialHeader, frozenHeader?.BidClosingDate, frozenHeader?.RequiredDeliveryDate,
+            frozenHeader?.DeliveryLocation, frozenHeader?.AgreementReference, lead.AssignToNavigation is null ? null
                 : $"{lead.AssignToNavigation.FirstName} {lead.AssignToNavigation.LastName}".Trim(),
             sourceRequiredLines.All(x => x.VerificationStatus == "VERIFIED")
                 ? "VERIFIED" : evidence.Count > 0 ? "NEEDS_REVIEW" : "SOURCE_UNAVAILABLE",
@@ -615,7 +621,7 @@ public sealed record LeadDecisionWorkbenchDto(long LeadId, long LeadRevisionId, 
     int DecisionVersion, int? ParticipationVersion, string ParticipationStatus, string LifecycleStatusCode,
     string? LifecycleStatusLabel, string? NexoraSerial, string? CustomerRfqReference, long? CustomerId,
     string? CustomerName, string? BuyerName, string? SenderEmail, string? EmailSubject, string? EmailMessageId,
-    DateTimeOffset? ReceivedAtUtc, DateTime? BidClosingDate, DateTime? RequiredDeliveryDate,
+    DateTimeOffset? ReceivedAtUtc, bool HasFrozenCommercialHeader, DateTime? BidClosingDate, DateTime? RequiredDeliveryDate,
     string? DeliveryLocation, string? AgreementReference, string? AssignedToName, string VerificationStatus,
     string? VerifiedBy, DateTimeOffset? VerifiedAtUtc, SourceCoverageDto? SourceCoverage,
     IReadOnlyList<LeadDecisionEvidenceDto> Evidence, IReadOnlyList<LeadDecisionLineDto> Lines,

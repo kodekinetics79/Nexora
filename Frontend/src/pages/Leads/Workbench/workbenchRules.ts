@@ -146,6 +146,11 @@ export const blockerAction = (
   return null;
 };
 
+export const blockerActionAllowed = (
+  action: { path: string },
+  canViewPromotedRfq: boolean,
+): boolean => canViewPromotedRfq || !action.path.startsWith('/procurement/rfqs/');
+
 export interface PromotionRuleInput {
   workbench: LeadDecisionWorkbenchDTO;
   decisions: DecisionMap;

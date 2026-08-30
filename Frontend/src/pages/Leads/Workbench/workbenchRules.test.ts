@@ -3,6 +3,7 @@ import type { LeadDecisionWorkbenchDTO } from '../../../api/services/leadDecisio
 import {
   bidCommercialValuesReady,
   blockerAction,
+  blockerActionAllowed,
   countDecisions,
   decisionRecordIsLocked,
   deduplicateDisplayedPromotionBlockers,
@@ -71,6 +72,7 @@ const workbench = (over: Partial<LeadDecisionWorkbenchDTO> = {}): LeadDecisionWo
   decisionVersion: 3,
   participationVersion: null,
   participationStatus: 'NONE',
+  hasFrozenCommercialHeader: true,
   lifecycleStatusCode: 'UNDER_REVIEW',
   customerId: 7,
   customerName: 'Client Co',
@@ -157,6 +159,12 @@ describe('Lead Decision Workbench rules', () => {
       actionLabel: 'Open Lead lifecycle',
       actionPath: '/procurement/leads/42',
     }, 42)).toEqual({ label: 'Open Lead lifecycle', path: '/procurement/leads/view/42' });
+  });
+
+  it('hides RFQ blocker actions from viewers without RFQ access', () => {
+    expect(blockerActionAllowed({ path: '/procurement/rfqs/view/63' }, false)).toBe(false);
+    expect(blockerActionAllowed({ path: '/procurement/rfqs/view/63' }, true)).toBe(true);
+    expect(blockerActionAllowed({ path: '/procurement/leads/view/42' }, false)).toBe(true);
   });
 
   it('blocks promotion until validation, fit, complete participation and commit are all true', () => {
@@ -268,6 +276,12 @@ describe('Lead Decision Workbench rules', () => {
     expect(decisionRecordIsLocked(workbench({ blockers: [{
       code: 'RFQ_REVISION_REQUIRED',
       message: 'Review the amendment against the existing RFQ.',
+    }] }), initializeDecisionMap(workbench()))).toBe(true);
+    expect(decisionRecordIsLocked(workbench({ blockers: [{
+      code: 'LEGACY_RFQ',
+      message: 'This historical Lead already has an RFQ and is read-only.',
+      actionLabel: 'Open existing RFQ',
+      actionPath: '/procurement/rfqs/view/77',
     }] }), initializeDecisionMap(workbench()))).toBe(true);
   });
 });
