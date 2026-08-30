@@ -109,7 +109,7 @@ describe('LoginPage accessible interaction contract', () => {
     expect(screen.getByRole('button', { name: 'Switch to dark theme' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Sign in' })).toHaveAttribute('aria-busy', 'false');
     expect(screen.getByRole('link', { name: 'Forgot password?' })).toHaveAttribute('href', '/forgot-password');
-    expect(screen.getByRole('link', { name: 'Platform administration' })).toHaveAttribute('href', '/platform/tenants');
+    expect(screen.getByRole('link', { name: 'Platform administrator sign-in' })).toHaveAttribute('href', '/platform/tenants');
   });
 
   it('retains an accessible name, exposes busy state, and prevents duplicate submission while loading', async () => {
@@ -145,7 +145,7 @@ describe('LoginPage accessible interaction contract', () => {
     const continueButton = screen.getByRole('button', { name: 'Continue' });
     expect(continueButton).toBeDisabled();
     expect(screen.queryByRole('link', { name: 'Forgot password?' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Platform administration' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Platform administrator sign-in' })).not.toBeInTheDocument();
 
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Which organization?' }));
     fireEvent.click(await screen.findByRole('option', { name: 'North America Operations' }));
@@ -177,6 +177,6 @@ describe('LoginPage accessible interaction contract', () => {
     expect(screen.getByLabelText(/^Email address/, { selector: 'input' })).toHaveValue('shared-buyer@example.test');
     expect(screen.getByLabelText(/^Password/, { selector: 'input' })).toHaveValue('Workspace-Pass-77!');
     expect(screen.getByRole('link', { name: 'Forgot password?' })).toBeVisible();
-    expect(screen.getByRole('link', { name: 'Platform administration' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Platform administrator sign-in' })).toBeVisible();
   });
 });
