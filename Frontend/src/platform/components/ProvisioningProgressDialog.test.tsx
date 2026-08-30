@@ -108,9 +108,46 @@ describe('ProvisioningProgressDialog completion banner', () => {
 
   it('tells the password path the account is blocked by the tenant, not by the credential', async () => {
     vi.spyOn(platformApi, 'getProvisioningExecution').mockResolvedValue(execution({ adminActivation: 'password' }));
-    renderDialog({ execution: execution(), created: true, generatedPassword: 'x'.repeat(24) });
+    renderDialog({ execution: execution({ adminActivation: 'password' }), created: true, generatedPassword: 'x'.repeat(24) });
 
     await screen.findByText(/Provisioned — not yet active/i);
     expect(screen.getByText(/cannot sign in until the tenant is active/i)).toBeVisible();
+  });
+
+  it('recognises an operator-supplied password without a generated secret', async () => {
+    const suppliedPassword = execution({ adminActivation: 'password' });
+    vi.spyOn(platformApi, 'getProvisioningExecution').mockResolvedValue(suppliedPassword);
+    renderDialog({ execution: suppliedPassword, created: true });
+
+    await screen.findByText(/Provisioned — not yet active/i);
+    expect(screen.getByText(/has a password but cannot sign in until the tenant is active/i)).toBeVisible();
+    expect(screen.queryByText(/has been invited|must redeem the link/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/One-time password for/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps the correct password instructions when an execution is reopened', async () => {
+    vi.spyOn(platformApi, 'getProvisioningExecution').mockResolvedValue(execution({ adminActivation: 'password' }));
+    renderDialog();
+
+    await screen.findByText(/Provisioned — not yet active/i);
+    expect(screen.getByText(/has a password but cannot sign in until the tenant is active/i)).toBeVisible();
+    expect(screen.queryByText(/has been invited|must redeem the link/i)).not.toBeInTheDocument();
+  });
+
+  it('does not invent an invitation for an unknown activation method', async () => {
+    vi.spyOn(platformApi, 'getProvisioningExecution').mockResolvedValue(execution({ adminActivation: 'unknown' }));
+    renderDialog();
+
+    await screen.findByText(/Provisioned — not yet active/i);
+    expect(screen.queryByText(/has been invited|has a password|must redeem the link/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Check the administrator.*credential status/i)).toBeVisible();
+  });
+
+  it('uses the server step count instead of a hard-coded eight steps', async () => {
+    vi.spyOn(platformApi, 'getProvisioningExecution').mockResolvedValue(execution({ totalStepCount: 9, completedStepCount: 9 }));
+    renderDialog();
+
+    expect(await screen.findByText(/9 steps, committed one at a time/i)).toBeVisible();
+    expect(screen.queryByText(/Eight steps/i)).not.toBeInTheDocument();
   });
 });
