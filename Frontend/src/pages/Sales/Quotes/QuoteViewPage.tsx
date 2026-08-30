@@ -235,6 +235,19 @@ const QuoteViewPage: React.FC = () => {
   const isUnpricedDraft = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT'
     && !quote.currencyId
     && quote.quoteItems.every((item) => Number(item.unitPrice || 0) === 0);
+  const revisionImpactPresentation = quote.revisionImpact === 'INVENTORY_REVALIDATION_REQUIRED'
+    ? {
+        title: 'Inventory Revalidation Required',
+        detail: 'Stock changed after this Quote Draft was prepared. Revalidate inventory before sending it to the customer.',
+        action: 'Mark revalidation complete',
+      }
+    : quote.revisionImpact
+      ? {
+          title: 'Customer Revision Received',
+          detail: `This Quote Draft is stale and must be reviewed against Lead Revision ${quote.sourceLeadRevision}. The customer-issued document has not been overwritten.`,
+          action: 'Mark review complete',
+        }
+      : null;
 
   return (
     <Box sx={{ p: { xs: 1.5, md: 3 }, bgcolor: 'background.default', minHeight: '100vh', minWidth: 0, overflowX: 'hidden' }}>
@@ -440,7 +453,7 @@ const QuoteViewPage: React.FC = () => {
           {supplierValidityWarnings.length} priced line{supplierValidityWarnings.length === 1 ? '' : 's'} use an expired, unstated, or shorter Supplier Quote validity. Review the source offer before sending.
         </Alert>
       )}
-      {quote.revisionImpact && (
+      {revisionImpactPresentation && (
         <Alert
           severity="error"
           sx={{ mb: 3 }}
@@ -451,12 +464,12 @@ const QuoteViewPage: React.FC = () => {
               disabled={resolveImpactMutation.isPending}
               onClick={() => resolveImpactMutation.mutate()}
             >
-              Mark review complete
+              {revisionImpactPresentation.action}
             </Button>
           ) : undefined}
         >
-          <Typography sx={{ fontWeight: 800 }}>Customer Revision Received</Typography>
-          This Quote Draft is stale and must be reviewed against Lead Revision {quote.sourceLeadRevision}. The customer-issued document has not been overwritten.
+          <Typography sx={{ fontWeight: 800 }}>{revisionImpactPresentation.title}</Typography>
+          {revisionImpactPresentation.detail}
         </Alert>
       )}
 
