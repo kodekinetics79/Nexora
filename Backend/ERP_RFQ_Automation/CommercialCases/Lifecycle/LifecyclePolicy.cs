@@ -35,6 +35,13 @@ public static partial class LifecyclePolicy
         ["CANCELLED"] = "REJECTED"
     };
 
+    // Order statuses currently have no legacy semantic aliases, but they still pass through the
+    // same normalizer as every other lifecycle aggregate. Keeping the empty map explicit lets the
+    // shared resolver accept tenant labels/codes with legacy casing and separators without
+    // pretending that order transition policy is defined here.
+    private static readonly IReadOnlyDictionary<string, string> OrderAliases =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> LeadTransitions = Graph(
         Edge("RECEIVED", "PENDING_IDENTIFICATION", "QUALIFIED", "DISQUALIFIED", "CANCELLED"),
         Edge("PENDING_IDENTIFICATION", "UNASSIGNED", "ASSIGNED", "QUALIFIED", "DISQUALIFIED", "CANCELLED"),
@@ -94,6 +101,7 @@ public static partial class LifecyclePolicy
             "Lead" => LeadAliases,
             "Rfq" => RfqAliases,
             "Quote" => QuoteAliases,
+            "Order" => OrderAliases,
             _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
         };
         return aliases.TryGetValue(normalized, out var canonical) ? canonical : normalized;

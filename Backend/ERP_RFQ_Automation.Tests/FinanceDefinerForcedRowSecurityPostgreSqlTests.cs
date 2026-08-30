@@ -285,6 +285,42 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
     }
 
     /// <summary>
+    /// The application-side receipt and statement allocator is a SECURITY DEFINER boundary, not a
+    /// general counter-writing privilege. It must retain tenant scope under FORCE RLS and serialize
+    /// concurrent callers without handing the same legal number to two documents.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Application_legal_number_allocator_is_tenant_scoped_typed_and_concurrency_safe()
+    {
+        var missingScope = await Assert.ThrowsAsync<PostgresException>(() =>
+            AllocateLegalNumberAsync(null, Tenant, "Receipt", 2026));
+        Assert.Equal("42501", missingScope.SqlState);
+
+        var wrongTenant = await Assert.ThrowsAsync<PostgresException>(() =>
+            AllocateLegalNumberAsync(Neighbour, Tenant, "Receipt", 2026));
+        Assert.Equal("42501", wrongTenant.SqlState);
+
+        var unsupportedType = await Assert.ThrowsAsync<PostgresException>(() =>
+            AllocateLegalNumberAsync(Tenant, Tenant, "Invoice", 2026));
+        Assert.Equal("22023", unsupportedType.SqlState);
+
+        var receiptAllocations = await Task.WhenAll(Enumerable.Range(0, 8)
+            .Select(_ => AllocateLegalNumberAsync(Tenant, Tenant, "Receipt", 2026)));
+        Assert.Equal(Enumerable.Range(1, 8).Select(value => (long)value), receiptAllocations.Order());
+
+        Assert.Equal(1L, await AllocateLegalNumberAsync(Tenant, Tenant, "Statement", 2026));
+        Assert.Equal(2L, await AllocateLegalNumberAsync(Tenant, Tenant, "Statement", 2026));
+
+        Assert.Equal(1L, await CountAsync("public.\"LegalDocumentCounters\"",
+            $"\"BusinessUnitId\" = {Tenant} AND \"DocumentType\" = 'Receipt' AND \"NextNumber\" = 9"));
+        Assert.Equal(1L, await CountAsync("public.\"LegalDocumentCounters\"",
+            $"\"BusinessUnitId\" = {Tenant} AND \"DocumentType\" = 'Statement' AND \"NextNumber\" = 3"));
+        Assert.Equal(0L, await CountAsync("public.\"LegalDocumentCounters\"",
+            $"\"BusinessUnitId\" = {Neighbour} AND \"DocumentType\" IN ('Receipt','Statement')"));
+    }
+
+    /// <summary>
     /// The defect itself, driven rather than described: with the three policies dropped, the ledger
     /// book journey answers the original <c>42501</c> from inside
     /// <c>nexora_gl_evidence_event</c>.
@@ -722,6 +758,27 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
         var value = await ScalarOnAsync(connection, sql);
         await transaction.RollbackAsync();
         return value;
+    }
+
+    private async Task<long> AllocateLegalNumberAsync(
+        long? scope, long requestedTenant, string documentType, int fiscalYear)
+    {
+        await using var connection = new NpgsqlConnection(database.OwnerConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await ExecuteOnAsync(connection, "SET LOCAL ROLE nexora_tenant_app;");
+        if (scope.HasValue)
+            await ExecuteOnAsync(connection,
+                $"SELECT set_config('nexora.business_unit_id','{scope.Value}',true);");
+
+        await using var command = new NpgsqlCommand(
+            "SELECT public.nexora_allocate_legal_document_number($1,$2,$3);", connection, transaction);
+        command.Parameters.AddWithValue(requestedTenant);
+        command.Parameters.AddWithValue(documentType);
+        command.Parameters.AddWithValue(fiscalYear);
+        var allocated = (long)(await command.ExecuteScalarAsync())!;
+        await transaction.CommitAsync();
+        return allocated;
     }
 
     private Task<long> CountAsync(string source, string predicate)

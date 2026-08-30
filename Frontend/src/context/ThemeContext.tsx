@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { ThemeProvider, createTheme } from '@mui/material';
-import { alpha } from '@mui/material/styles';
 import type { PaletteMode } from '@mui/material';
 import {
   AA_NON_TEXT_CONTRAST,
@@ -94,7 +93,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       divider: mode === 'dark' ? 'rgba(148, 163, 184, 0.1)' : 'rgba(100, 116, 139, 0.1)',
     },
     typography: {
-      fontFamily: '"Outfit", "Inter", sans-serif',
+      fontFamily: '"Source Sans 3", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       h1: { fontWeight: 800, letterSpacing: '-0.02em' },
       h2: { fontWeight: 800, letterSpacing: '-0.02em' },
       h3: { fontWeight: 800, letterSpacing: '-0.02em' },
@@ -110,11 +109,12 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       MuiButton: {
         styleOverrides: {
           root: {
-            borderRadius: 10,
-            padding: '8px 16px',
+            minHeight: 44,
+            borderRadius: 8,
+            padding: '9px 16px',
             boxShadow: 'none',
             '&:hover': {
-              boxShadow: `0 4px 12px ${alpha(primaryColor, 0.2)}`,
+              boxShadow: 'none',
             },
           },
         },
@@ -127,8 +127,9 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
               // side of every primary CTA sat below 4.5:1 against its label.
               // Both stops are now opaque shades that clear AA against
               // primary.contrastText.
-              background: `linear-gradient(135deg, ${primaryPalette.main} 0%, ${primaryPalette.dark} 100%)`,
+              background: primaryPalette.main,
               color: primaryPalette.contrastText,
+              '&:hover': { background: primaryPalette.dark },
             },
           },
           {
@@ -163,19 +164,17 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
         styleOverrides: {
           root: {
             backgroundImage: 'none',
-            boxShadow: mode === 'dark' 
-              ? '0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1)' 
-              : '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.02)',
+            boxShadow: 'none',
             border: '1px solid',
-            borderColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
+            borderColor: mode === 'dark' ? 'rgba(148, 163, 184, 0.16)' : 'rgba(100, 116, 139, 0.16)',
           },
         },
       },
       MuiCard: {
         styleOverrides: {
           root: {
-            borderRadius: 16,
-            padding: '24px',
+            borderRadius: 12,
+            padding: '16px',
           },
         },
       },
@@ -233,11 +232,12 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
           // login page) run infinite decorative animations. Honour the OS
           // "reduce motion" setting globally.
           '@media (prefers-reduced-motion: reduce)': {
-            '*, *::before, *::after': {
-              animationDuration: '0.01ms !important',
-              animationIterationCount: '1 !important',
-              transitionDuration: '0.01ms !important',
+            'html:focus-within': {
               scrollBehavior: 'auto !important',
+            },
+            '[data-decorative-motion="true"]': {
+              animation: 'none !important',
+              transition: 'none !important',
             },
           },
         },

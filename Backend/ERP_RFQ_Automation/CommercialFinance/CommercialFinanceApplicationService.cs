@@ -171,7 +171,13 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                     + "Confirm the delivery before invoicing it.");
 
             var ratio = pair.Value / source.Quantity;
-            var gross = Round(pair.Value * source.UnitPrice);
+            // ReceivableDocumentLine.UnitPrice is authoritative at two decimals. Normalize the
+            // price before deriving LineTotal; otherwise a six-decimal sourced sell price is
+            // rounded by PostgreSQL on write while LineTotal still reflects the pre-rounded
+            // value, violating CK_ReceivableDocumentLines_Reconciles and rejecting a valid
+            // delivered order at the invoice boundary.
+            var unitPrice = Round(source.UnitPrice);
+            var gross = Round(pair.Value * unitPrice);
             var discount = Round(source.Discount * ratio);
             var tax = Round(source.TaxAmount * ratio);
             document.Lines.Add(new ReceivableDocumentLine
@@ -180,7 +186,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 OrderItemId = source.Id,
                 Description = source.Description ?? $"Order item {source.Id}",
                 Quantity = pair.Value,
-                UnitPrice = source.UnitPrice,
+                UnitPrice = unitPrice,
                 DiscountAmount = discount,
                 TaxAmount = tax,
                 LineTotal = Round(gross - discount + tax)
@@ -1214,31 +1220,27 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
 
     private async Task<string> AllocateNumberAsync(long businessUnitId, string documentType, int fiscalYear)
     {
-        LegalDocumentCounter? counter;
         if (_context.Database.IsNpgsql())
         {
-            await _context.Database.ExecuteSqlInterpolatedAsync($"""
-                INSERT INTO "LegalDocumentCounters" ("BusinessUnitId", "DocumentType", "FiscalYear", "NextNumber")
-                VALUES ({businessUnitId}, {documentType}, {fiscalYear}, 1)
-                ON CONFLICT ("BusinessUnitId", "DocumentType", "FiscalYear") DO NOTHING
-                """);
-            counter = await _context.LegalDocumentCounters.FromSqlInterpolated($"""
-                SELECT * FROM "LegalDocumentCounters"
-                WHERE "BusinessUnitId" = {businessUnitId} AND "DocumentType" = {documentType} AND "FiscalYear" = {fiscalYear}
-                FOR UPDATE
-                """).SingleAsync();
+            var privilegedSequence = await _context.Database.SqlQueryRaw<long>(
+                "SELECT public.nexora_allocate_legal_document_number({0}, {1}, {2}) AS \"Value\"",
+                businessUnitId, documentType, fiscalYear).SingleAsync();
+            return FormatNumber(documentType, fiscalYear, privilegedSequence);
         }
-        else
+
+        var counter = await _context.LegalDocumentCounters.SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == businessUnitId && x.DocumentType == documentType && x.FiscalYear == fiscalYear);
+        if (counter is null)
         {
-            counter = await _context.LegalDocumentCounters.SingleOrDefaultAsync(x =>
-                x.BusinessUnitId == businessUnitId && x.DocumentType == documentType && x.FiscalYear == fiscalYear);
-            if (counter is null)
-            {
-                counter = new LegalDocumentCounter { BusinessUnitId = businessUnitId, DocumentType = documentType, FiscalYear = fiscalYear };
-                _context.LegalDocumentCounters.Add(counter);
-            }
+            counter = new LegalDocumentCounter { BusinessUnitId = businessUnitId, DocumentType = documentType, FiscalYear = fiscalYear };
+            _context.LegalDocumentCounters.Add(counter);
         }
         var sequence = counter.NextNumber++;
+        return FormatNumber(documentType, fiscalYear, sequence);
+    }
+
+    private static string FormatNumber(string documentType, int fiscalYear, long sequence)
+    {
         var prefix = documentType switch
         {
             ReceivableDocumentTypes.Invoice => "INV",
@@ -1344,7 +1346,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             payment.Id, payment.CustomerId, payment.CommercialCaseId, payment.CurrencyId,
             await CurrencyCodeAsync(payment.CurrencyId), payment.ReceiptNumber, payment.Status, payment.PaymentDate, payment.Amount,
             allocated, isPosted ? Round(payment.Amount - allocated - unavailableForRefund) : 0m, payment.Version,
-            payment.BankAccountId, payment.JournalEntryId, payment.ReversalJournalEntryId,
+            payment.BankReference, payment.BankAccountId, payment.JournalEntryId, payment.ReversalJournalEntryId,
             payment.JournalEntryId.HasValue ? "Integrated" : "LegacyUnlinked");
     }
 

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
@@ -22,17 +22,29 @@ const renderLogin = () => render(
 );
 
 describe('LoginPage navigation and value statement', () => {
-  it('lets short and mobile viewports scroll instead of clipping the form', () => {
+  it('keeps the product identity and governed evidence narrative in the document', () => {
     renderLogin();
 
-    expect(screen.getByTestId('login-viewport')).toHaveStyle({
-      width: '100%',
-      overflowY: 'auto',
-    });
-    expect(screen.getByTestId('login-viewport')).not.toHaveStyle({
-      fontFamily: "'Poppins', sans-serif",
-    });
-    expect(screen.getByTestId('login-card')).not.toHaveStyle({ height: '850px' });
+    const workflow = screen.getByRole('region', { name: 'Nexora evidence-to-cash workflow' });
+    expect(workflow).not.toHaveAttribute('aria-hidden');
+    expect(within(workflow).getByText('NEXORA')).toBeVisible();
+    expect(within(workflow).getByRole('heading', {
+      level: 2,
+      name: 'Every commercial decision, connected to its evidence.',
+    })).toBeVisible();
+
+    const stages = within(workflow).getByRole('list', { name: 'Governed commercial stages' });
+    expect(within(stages).getAllByRole('listitem')).toHaveLength(6);
+    for (const stage of [
+      'Email captured',
+      'Lead reconciled',
+      'Partial bid approved',
+      'RFQ promoted',
+      'Order fulfilled',
+      'Payment posted',
+    ]) {
+      expect(within(stages).getByText(stage)).toBeVisible();
+    }
   });
 
   it('exposes recovery and platform destinations as links', () => {
@@ -42,17 +54,27 @@ describe('LoginPage navigation and value statement', () => {
       'href',
       '/forgot-password',
     );
-    expect(screen.getByRole('link', { name: 'Platform Owner? Manage or delete tenants' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Platform administration' })).toHaveAttribute(
       'href',
       '/platform/tenants',
     );
   });
 
-  it('keeps the inquiry-to-RFQ value statement visible when decoration is unavailable', () => {
+  it('keeps mobile-safe landmarks and the brand narrative ahead of the sign-in task', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    window.dispatchEvent(new Event('resize'));
     renderLogin();
 
-    const workflow = screen.getByRole('complementary', { name: 'Nexora inquiry-to-RFQ workflow' });
-    expect(workflow).toHaveTextContent('Email evidence to governed RFQ');
-    expect(workflow).toHaveTextContent('Every approved line stays traceable to its source.');
+    const viewport = screen.getByTestId('login-viewport');
+    const workflow = screen.getByRole('region', { name: 'Nexora evidence-to-cash workflow' });
+    const main = screen.getByRole('main');
+
+    expect(viewport).toContainElement(workflow);
+    expect(viewport).toContainElement(main);
+    expect(main).toHaveAttribute('id', 'main-content');
+    expect(main).toHaveAttribute('tabindex', '-1');
+    expect(workflow.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1, name: 'Sign in to Nexora' })).toBeVisible();
+    expect(screen.getByText(/procurement and order-to-cash workspace/i)).toBeVisible();
   });
 });

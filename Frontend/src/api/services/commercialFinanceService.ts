@@ -91,6 +91,23 @@ export interface CustomerPayment {
   allocatedAmount: number;
   unappliedAmount: number;
   version: number;
+  bankReference?: string | null;
+  bankAccountId?: number | null;
+  journalEntryId?: number | null;
+  reversalJournalEntryId?: number | null;
+  accountingIntegrationStatus?: string;
+}
+
+export interface BankAccountOption {
+  id: number;
+  name: string;
+  institutionName: string;
+  maskedAccountNumber: string;
+  currencyId: number;
+  ledgerAccountId: number;
+  status: string;
+  openingDate: string;
+  version: number;
 }
 
 export interface WriteOffAllocation {
@@ -205,6 +222,11 @@ const commercialFinanceService = {
   getPayments: async (params?: { customerId?: number; status?: string }) =>
     (await axiosInstance.get<CustomerPayment[]>('/api/commercial-finance/payments', { params })).data,
 
+  getBankAccounts: async () =>
+    (await axiosInstance.get<BankAccountOption[]>('/api/treasury/bank-accounts', {
+      params: { includeClosed: false },
+    })).data,
+
   getWriteOffs: async (params?: { customerId?: number; status?: string }) =>
     (await axiosInstance.get<ReceivableWriteOff[]>('/api/commercial-finance/write-offs', { params })).data,
 
@@ -315,6 +337,7 @@ const commercialFinanceService = {
     customerId: number;
     commercialCaseId?: number;
     currencyId?: number;
+    bankAccountId: number;
     paymentDate: string;
     amount: number;
     method?: string;

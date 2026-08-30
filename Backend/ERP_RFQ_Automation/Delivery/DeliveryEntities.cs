@@ -357,6 +357,9 @@ public sealed class DeliveryProof
 
     public string IdempotencyKey { get; set; } = null!;
 
+    /// <summary>SHA-256 of the normalized confirmation command.</summary>
+    public string? RequestHash { get; set; }
+
     public string RecordedBy { get; set; } = null!;
 
     public DateTime RecordedOn { get; set; }

@@ -634,7 +634,7 @@ public sealed class BankReconciliationPostgreSqlTests(PostgreSqlTestDatabase dat
     }
 
     private sealed record SignedEnvelope(long IssuedAt, long ExpiresAt, string Nonce, string Signature);
-    private const string ActorSecret = "ledger-test-audit-secret-32-bytes-minimum";
+    private const string ActorSecret = PostgreSqlTestDatabase.AuditActorSecret;
 
     private sealed record Fixture(long TenantId, BankAccountDto BankAccount, BankStatementDto Statement,
         long? CashJournalLineId);

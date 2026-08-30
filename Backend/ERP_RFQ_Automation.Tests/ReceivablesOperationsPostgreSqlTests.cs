@@ -19,7 +19,7 @@ public sealed class ReceivablesOperationsPostgreSqlTests(PostgreSqlTestDatabase 
     private const long OtherCurrencyId = 9_823_031;
     private const string ContactProviderSecret = "postgres-contact-provider-secret-at-least-32-bytes";
     private const string DeliveryProviderSecret = "postgres-delivery-provider-secret-at-least-32-bytes";
-    private const string AuditActorSecret = "postgres-audit-actor-secret-at-least-32-bytes";
+    private const string AuditActorSecret = PostgreSqlTestDatabase.AuditActorSecret;
 
     private static readonly string[] GovernedTables =
     [

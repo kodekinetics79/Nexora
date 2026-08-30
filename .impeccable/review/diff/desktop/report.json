@@ -1,0 +1,647 @@
+{
+  "tool": "comp-diff",
+  "version": 1,
+  "createdAt": "2026-08-30T04:29:51.627Z",
+  "label": "desktop",
+  "comp": ".impeccable/mocks/login-chain-ledger-a.png",
+  "build": ".impeccable/review/desktop.png",
+  "spec": ".impeccable/build/spec.json",
+  "compSize": "1487x1058",
+  "buildSize": "1440x1024",
+  "align": "top",
+  "overall": 0.7706,
+  "verdict": "drift",
+  "scores": {
+    "overall": 0.7706,
+    "structure": 0.6654,
+    "color": 0.9001,
+    "colorIntersection": 0.8438,
+    "paletteMatch": 0.9304,
+    "detail": 0.7136,
+    "detailRaw": 0.7344,
+    "detailAdded": 0.0417,
+    "bands": 0.8956
+  },
+  "palette": {
+    "comp": [
+      {
+        "hex": "#08172a",
+        "coverage": 0.5895
+      },
+      {
+        "hex": "#f8f8f8",
+        "coverage": 0.3651
+      },
+      {
+        "hex": "#0969e8",
+        "coverage": 0.0172
+      },
+      {
+        "hex": "#283b58",
+        "coverage": 0.0151
+      },
+      {
+        "hex": "#bec2cd",
+        "coverage": 0.0075
+      },
+      {
+        "hex": "#657181",
+        "coverage": 0.0056
+      }
+    ],
+    "build": [
+      {
+        "hex": "#091828",
+        "coverage": 0.5917
+      },
+      {
+        "hex": "#f8f8f8",
+        "coverage": 0.3546
+      },
+      {
+        "hex": "#333e4e",
+        "coverage": 0.0184
+      },
+      {
+        "hex": "#2958c6",
+        "coverage": 0.0183
+      },
+      {
+        "hex": "#778291",
+        "coverage": 0.0115
+      },
+      {
+        "hex": "#ccccd3",
+        "coverage": 0.0056
+      }
+    ]
+  },
+  "regions": [
+    {
+      "id": "brand",
+      "x": 0,
+      "y": 0,
+      "w": 0.2,
+      "h": 0.1,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.4899,
+        "structure": 0.6404,
+        "color": 0.9335,
+        "colorIntersection": 0.9015,
+        "paletteMatch": 0.9508,
+        "detail": 0.1296,
+        "detailRaw": 0.2755,
+        "detailAdded": 0.2917,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 29,
+          "y": 26,
+          "w": 193,
+          "h": 42
+        },
+        "build": {
+          "x": 44,
+          "y": 51,
+          "w": 214,
+          "h": 48
+        }
+      }
+    },
+    {
+      "id": "ledger-headline",
+      "x": 0.0161,
+      "y": 0.1059,
+      "w": 0.4438,
+      "h": 0.0681,
+      "kind": "text",
+      "score": {
+        "overall": 0.509,
+        "structure": 0.3395,
+        "color": 0.871,
+        "colorIntersection": 0.8008,
+        "paletteMatch": 0.9088,
+        "detail": 0.5879,
+        "detailRaw": 0.6608,
+        "detailAdded": 0.1458,
+        "bands": 0.3333
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 8,
+          "y": 11,
+          "w": 644,
+          "h": 52
+        },
+        "build": {
+          "x": 25,
+          "y": 16,
+          "w": 635,
+          "h": 56
+        }
+      }
+    },
+    {
+      "id": "ledger-kicker",
+      "x": 0.0161,
+      "y": 0.2628,
+      "w": 0.2838,
+      "h": 0.0284,
+      "kind": "text",
+      "score": {
+        "overall": 0.7954,
+        "structure": 0.8663,
+        "color": 0.7729,
+        "colorIntersection": 0.6653,
+        "paletteMatch": 0.8308,
+        "detail": 0.5492,
+        "detailRaw": 0.6065,
+        "detailAdded": 0.1146,
+        "bands": 0.8667
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 6,
+          "y": 19,
+          "w": 413,
+          "h": 11
+        },
+        "build": {
+          "x": 21,
+          "y": 18,
+          "w": 400,
+          "h": 11
+        }
+      }
+    },
+    {
+      "id": "enquiry-meta",
+      "x": 0.1332,
+      "y": 0.2996,
+      "w": 0.1332,
+      "h": 0.051,
+      "kind": "text",
+      "score": {
+        "overall": 0.634,
+        "structure": 0.5739,
+        "color": 0.7936,
+        "colorIntersection": 0.7063,
+        "paletteMatch": 0.8406,
+        "detail": 0.4429,
+        "detailRaw": 0.5522,
+        "detailAdded": 0.2188,
+        "bands": 0.8222
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 5,
+          "y": 5,
+          "w": 182,
+          "h": 40
+        },
+        "build": {
+          "x": 5,
+          "y": 18,
+          "w": 177,
+          "h": 29
+        }
+      }
+    },
+    {
+      "id": "journey-labels",
+      "x": 0.1,
+      "y": 0.4,
+      "w": 0.5,
+      "h": 0.1,
+      "kind": "text",
+      "score": {
+        "overall": 0.631,
+        "structure": 0.6197,
+        "color": 0.8219,
+        "colorIntersection": 0.7263,
+        "paletteMatch": 0.8734,
+        "detail": 0.3045,
+        "detailRaw": 0.3879,
+        "detailAdded": 0.1667,
+        "bands": 0.7
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 2,
+          "y": 0,
+          "w": 721,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 742,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "journey-line",
+      "x": 0.1,
+      "y": 0.4,
+      "w": 0.5,
+      "h": 0.2,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.5715,
+        "structure": 0.4994,
+        "color": 0.7919,
+        "colorIntersection": 0.6822,
+        "paletteMatch": 0.851,
+        "detail": 0.3489,
+        "detailRaw": 0.3905,
+        "detailAdded": 0.0833,
+        "bands": 0.7435
+      },
+      "verdict": "contradicted",
+      "inkBox": {
+        "comp": {
+          "x": 2,
+          "y": 0,
+          "w": 741,
+          "h": 212
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 742,
+          "h": 212
+        }
+      }
+    },
+    {
+      "id": "evidence-table",
+      "x": 0,
+      "y": 0.5,
+      "w": 0.6,
+      "h": 0.4,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.6193,
+        "structure": 0.6608,
+        "color": 0.8093,
+        "colorIntersection": 0.6971,
+        "paletteMatch": 0.8697,
+        "detail": 0.3827,
+        "detailRaw": 0.4556,
+        "detailAdded": 0.1458,
+        "bands": 0.6
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 29,
+          "y": 0,
+          "w": 863,
+          "h": 417
+        },
+        "build": {
+          "x": 45,
+          "y": 0,
+          "w": 846,
+          "h": 421
+        }
+      }
+    },
+    {
+      "id": "integrity-note",
+      "x": 0,
+      "y": 0.9,
+      "w": 0.6,
+      "h": 0.1,
+      "kind": "chrome",
+      "score": {
+        "overall": 0.6162,
+        "structure": 0.7947,
+        "color": 0.8999,
+        "colorIntersection": 0.8406,
+        "paletteMatch": 0.9319,
+        "detail": 0.4522,
+        "detailRaw": 0.5356,
+        "detailAdded": 0.1667,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 29,
+          "y": 11,
+          "w": 863,
+          "h": 67
+        },
+        "build": {
+          "x": 0,
+          "y": 6,
+          "w": 892,
+          "h": 100
+        }
+      }
+    },
+    {
+      "id": "theme-toggle",
+      "x": 0.9,
+      "y": 0,
+      "w": 0.1,
+      "h": 0.1,
+      "kind": "control",
+      "score": {
+        "overall": 0.878,
+        "structure": 0.9571,
+        "color": 0.9822,
+        "colorIntersection": 0.9728,
+        "paletteMatch": 0.9873,
+        "detail": 0.5177,
+        "detailRaw": 0.5177,
+        "detailAdded": 0,
+        "bands": 1
+      },
+      "verdict": "match",
+      "inkBox": {
+        "comp": {
+          "x": 83,
+          "y": 38,
+          "w": 25,
+          "h": 24
+        },
+        "build": {
+          "x": 89,
+          "y": 41,
+          "w": 19,
+          "h": 19
+        }
+      }
+    },
+    {
+      "id": "signin-heading",
+      "x": 0.6241,
+      "y": 0.2004,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "text",
+      "score": {
+        "overall": 0.6413,
+        "structure": 0.6956,
+        "color": 0.9374,
+        "colorIntersection": 0.9088,
+        "paletteMatch": 0.9528,
+        "detail": 0.1299,
+        "detailRaw": 0.3018,
+        "detailAdded": 0.3438,
+        "bands": 0.3964
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 446,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 483,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "signin-support",
+      "x": 0.6241,
+      "y": 0.2004,
+      "w": 0.3759,
+      "h": 0.2004,
+      "kind": "text",
+      "score": {
+        "overall": 0.7252,
+        "structure": 0.736,
+        "color": 0.9615,
+        "colorIntersection": 0.9467,
+        "paletteMatch": 0.9695,
+        "detail": 0.3279,
+        "detailRaw": 0.3904,
+        "detailAdded": 0.125,
+        "bands": 0.6762
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 446,
+          "h": 212
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 483,
+          "h": 212
+        }
+      }
+    },
+    {
+      "id": "email-field",
+      "x": 0.6241,
+      "y": 0.3998,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "control",
+      "score": {
+        "overall": 0.7559,
+        "structure": 0.8094,
+        "color": 0.9695,
+        "colorIntersection": 0.9377,
+        "paletteMatch": 0.9866,
+        "detail": 0.2615,
+        "detailRaw": 0.3657,
+        "detailAdded": 0.2083,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 508,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 232,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "password-field",
+      "x": 0.6241,
+      "y": 0.5,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "control",
+      "score": {
+        "overall": 0.7189,
+        "structure": 0.798,
+        "color": 0.9676,
+        "colorIntersection": 0.9558,
+        "paletteMatch": 0.9739,
+        "detail": 0.1059,
+        "detailRaw": 0.1892,
+        "detailAdded": 0.1667,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 508,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 509,
+          "h": 106
+        }
+      }
+    },
+    {
+      "id": "forgot-password",
+      "x": 0.8,
+      "y": 0.6,
+      "w": 0.2,
+      "h": 0.1,
+      "kind": "control",
+      "score": {
+        "overall": 0.7366,
+        "structure": 0.8395,
+        "color": 0.7443,
+        "colorIntersection": 0.594,
+        "paletteMatch": 0.8252,
+        "detail": 0.4916,
+        "detailRaw": 0.5281,
+        "detailAdded": 0.0729,
+        "bands": 0.78
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 4,
+          "w": 247,
+          "h": 102
+        },
+        "build": {
+          "x": 0,
+          "y": 14,
+          "w": 253,
+          "h": 92
+        }
+      }
+    },
+    {
+      "id": "signin-action",
+      "x": 0.6241,
+      "y": 0.6002,
+      "w": 0.3759,
+      "h": 0.2004,
+      "kind": "control",
+      "score": {
+        "overall": 0.8392,
+        "structure": 0.8937,
+        "color": 0.8076,
+        "colorIntersection": 0.6855,
+        "paletteMatch": 0.8733,
+        "detail": 0.772,
+        "detailRaw": 0.7929,
+        "detailAdded": 0.0417,
+        "bands": 0.8133
+      },
+      "verdict": "match",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 509,
+          "h": 212
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 515,
+          "h": 212
+        }
+      }
+    },
+    {
+      "id": "platform-link",
+      "x": 0.6241,
+      "y": 0.8998,
+      "w": 0.3759,
+      "h": 0.1002,
+      "kind": "control",
+      "score": {
+        "overall": 0.7912,
+        "structure": 0.9133,
+        "color": 0.9747,
+        "colorIntersection": 0.958,
+        "paletteMatch": 0.9837,
+        "detail": 0.1954,
+        "detailRaw": 0.2423,
+        "detailAdded": 0.0938,
+        "bands": 0
+      },
+      "verdict": "drift",
+      "inkBox": {
+        "comp": {
+          "x": 0,
+          "y": 0,
+          "w": 371,
+          "h": 106
+        },
+        "build": {
+          "x": 0,
+          "y": 0,
+          "w": 386,
+          "h": 105
+        }
+      }
+    }
+  ],
+  "files": {
+    "sideBySide": ".impeccable/review/diff/desktop/side-by-side.png",
+    "heatmap": ".impeccable/review/diff/desktop/heatmap.png",
+    "regionFiles": [
+      ".impeccable/review/diff/desktop/regions/brand.png",
+      ".impeccable/review/diff/desktop/regions/ledger-headline.png",
+      ".impeccable/review/diff/desktop/regions/ledger-kicker.png",
+      ".impeccable/review/diff/desktop/regions/enquiry-meta.png",
+      ".impeccable/review/diff/desktop/regions/journey-labels.png",
+      ".impeccable/review/diff/desktop/regions/journey-line.png",
+      ".impeccable/review/diff/desktop/regions/evidence-table.png",
+      ".impeccable/review/diff/desktop/regions/integrity-note.png",
+      ".impeccable/review/diff/desktop/regions/theme-toggle.png",
+      ".impeccable/review/diff/desktop/regions/signin-heading.png",
+      ".impeccable/review/diff/desktop/regions/signin-support.png",
+      ".impeccable/review/diff/desktop/regions/email-field.png",
+      ".impeccable/review/diff/desktop/regions/password-field.png",
+      ".impeccable/review/diff/desktop/regions/forgot-password.png",
+      ".impeccable/review/diff/desktop/regions/signin-action.png",
+      ".impeccable/review/diff/desktop/regions/platform-link.png"
+    ]
+  }
+}

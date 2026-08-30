@@ -29,7 +29,8 @@ public sealed class Gate6DespatchCeilingTests
     private const long OrderId = 97_150;
     private const long OrderItemId = 97_160;
     private const long OrderStatusId = 97_170;
-    private const long ShipmentStatusId = 97_171;
+    private const long ShippedOrderStatusId = 97_171;
+    private const long ShipmentStatusId = 97_172;
 
     [Fact]
     public async Task Over_shipping_a_line_in_one_despatch_is_refused_by_the_server()
@@ -109,8 +110,67 @@ public sealed class Gate6DespatchCeilingTests
 
         await using var verify = db.ContextFor(Tenant);
         Assert.Equal(400m, await OnHandAsync(verify));
-        Assert.Equal(ShipmentStatusId,
+        Assert.Equal(ShippedOrderStatusId,
             await verify.Orders.Where(x => x.Id == OrderId).Select(x => x.StatusId).SingleAsync());
+    }
+
+    [Fact]
+    public async Task A_despatch_without_lines_is_refused_before_a_document_is_created()
+    {
+        using var db = Seeded(onHand: 10m, orderedQuantity: 10m);
+
+        var result = await CreateShipmentAsync(db, 0m, items: []);
+
+        var invalid = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("at least one", Message(invalid));
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.Shipments.ToListAsync());
+        Assert.Empty(await verify.InventoryMovements.ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_terminal_order_cannot_be_shipped_even_when_stock_and_quantity_are_available()
+    {
+        using var db = Seeded(onHand: 10m, orderedQuantity: 10m);
+        await using (var arrange = db.ContextFor(Tenant))
+        {
+            var order = await arrange.Orders.SingleAsync(x => x.Id == OrderId);
+            order.StatusId = ShippedOrderStatusId;
+            await arrange.SaveChangesAsync();
+        }
+
+        var result = await CreateShipmentAsync(db, 1m);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Contains("cannot be shipped", Message(conflict));
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.Shipments.ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_shipment_status_from_another_tenant_is_refused()
+    {
+        using var db = Seeded(onHand: 10m, orderedQuantity: 10m);
+        const long otherTenant = 97_199;
+        const long foreignStatus = 97_198;
+        await using (var arrange = db.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(arrange, otherTenant);
+            arrange.SetupMasters.Add(new SetupMaster
+            {
+                SetupId = foreignStatus, SetupType = "ShipmentStatus", SetupCode = "READY",
+                SetupValue = "Ready", BusinessUnitId = otherTenant, IsActive = true,
+                CreatedBy = "qa", CreatedOn = DateTime.UtcNow,
+            });
+            await arrange.SaveChangesAsync();
+        }
+
+        var result = await CreateShipmentAsync(db, 1m, statusId: foreignStatus);
+
+        var invalid = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("not active for this business unit", Message(invalid));
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.Shipments.ToListAsync());
     }
 
     // ------------------------------------------------------------------------------------------
@@ -122,7 +182,8 @@ public sealed class Gate6DespatchCeilingTests
         => context.Set<ERP_RFQ_Automation.Models.Inventory>()
             .Where(x => x.Id == InventoryId).Select(x => x.QtyOnHand).SingleAsync();
 
-    private static async Task<IActionResult> CreateShipmentAsync(TestDb db, decimal quantity)
+    private static async Task<IActionResult> CreateShipmentAsync(
+        TestDb db, decimal quantity, long? statusId = null, List<CreateShipmentItemDto>? items = null)
     {
         await using var context = db.ContextFor(Tenant);
         var controller = new ShipmentController(
@@ -145,9 +206,9 @@ public sealed class Gate6DespatchCeilingTests
         {
             OrderId = OrderId,
             BusinessUnitId = Tenant,
-            StatusId = ShipmentStatusId,
+            StatusId = statusId ?? ShipmentStatusId,
             ShipmentDate = DateTime.UtcNow,
-            Items = [new CreateShipmentItemDto { OrderItemId = OrderItemId, Quantity = quantity }],
+            Items = items ?? [new CreateShipmentItemDto { OrderItemId = OrderItemId, Quantity = quantity }],
         });
     }
 
@@ -164,8 +225,14 @@ public sealed class Gate6DespatchCeilingTests
         });
         context.SetupMasters.Add(new SetupMaster
         {
-            SetupId = ShipmentStatusId, SetupType = "OrderStatus", SetupCode = "SHIPPED",
+            SetupId = ShippedOrderStatusId, SetupType = "OrderStatus", SetupCode = "SHIPPED",
             SetupValue = "SHIPPED", BusinessUnitId = Tenant, IsActive = true, CreatedBy = "qa",
+            CreatedOn = DateTime.UtcNow,
+        });
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = ShipmentStatusId, SetupType = "ShipmentStatus", SetupCode = "READY",
+            SetupValue = "READY", BusinessUnitId = Tenant, IsActive = true, CreatedBy = "qa",
             CreatedOn = DateTime.UtcNow,
         });
         context.Warehouses.Add(new Warehouse

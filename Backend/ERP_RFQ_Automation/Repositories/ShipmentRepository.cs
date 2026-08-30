@@ -21,7 +21,7 @@ namespace ERP_RFQ_Automation.Repositories
         {
             return await _context.Shipments
                 .Where(s => s.BusinessUnitId == businessUnitId && s.IsActive)
-                .Include(s => s.Order)
+                .Include(s => s.Order).ThenInclude(o => o.Currency)
                 .Include(s => s.Status)
                 // FR-DLM-01. The governed region travels with the shipment so the list and the
                 // note read the same mapping rather than each deriving one.
@@ -33,7 +33,7 @@ namespace ERP_RFQ_Automation.Repositories
         public async Task<Shipment?> GetShipmentByIdAsync(long id, long businessUnitId)
         {
             return await _context.Shipments
-                .Include(s => s.Order)
+                .Include(s => s.Order).ThenInclude(o => o.Currency)
                 .Include(s => s.Status)
                 .Include(s => s.ShipmentStatusHistories)
                     .ThenInclude(h => h.PreviousStatus)

@@ -1,11 +1,11 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * What the rail shows, and where it says you are.
  *
- * The rail is five rows. The test that used to live here pinned a much harder problem: seven rail
+ * The rail is a seven-stage commercial spine. The test that used to live here pinned a much harder problem: seven rail
  * entries addressed a FILTERED list through a query string ("Sent Quotes", "Ready for Quote",
  * "Sourcing Cases", lead "Revisions") and `location.pathname` never carries a query, so none of
  * them could ever highlight. The cost was not cosmetic — a rep clicked "Quote Management > Sent
@@ -18,10 +18,12 @@ import { describe, expect, it, vi } from 'vitest';
  * stays lit rather than going dark while the tab strip says which slice is on screen.
  */
 
+const auth = vi.hoisted(() => ({ grants: null as Set<string> | null }));
+
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
     userData: { isManager: false, businessUnitId: 1 },
-    hasPermission: () => true,
+    hasPermission: (moduleName: string) => auth.grants === null || auth.grants.has(moduleName),
     hasEntitlement: () => false,
   }),
 }));
@@ -43,6 +45,10 @@ function renderRail(url: string) {
 const row = (name: string | RegExp) => screen.getByRole('button', { name });
 
 describe('the rail presents the commercial spine and grouped workspaces', () => {
+  beforeEach(() => {
+    auth.grants = null;
+  });
+
   it('shows the primary destinations, grouped workspaces and searchable directory', () => {
     renderRail('/inbox');
 
@@ -51,13 +57,25 @@ describe('the rail presents the commercial spine and grouped workspaces', () => 
       'Leads',
       'RFQs',
       'Quotes',
-      'Setup',
+      'Orders',
+      'Fulfilment',
+      'Receivables',
+      'Administration',
       'Customers & ownership',
       'Suppliers & sourcing',
-      'Orders & fulfilment',
+      'Customer PO & handoffs',
       'Catalogue & stock',
       'Screen directory',
     ]));
+  });
+
+  it('shows only the post-quote stages granted to the current role', () => {
+    auth.grants = new Set(['Orders']);
+    renderRail('/sales/orders');
+
+    expect(row('Orders')).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('button', { name: 'Fulfilment' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Receivables' })).not.toBeInTheDocument();
   });
 
   it('keeps secondary workspaces collapsed until needed', () => {
@@ -75,6 +93,10 @@ describe('the rail presents the commercial spine and grouped workspaces', () => 
 });
 
 describe('where the rail says you are', () => {
+  beforeEach(() => {
+    auth.grants = null;
+  });
+
   it('lights the row you are on', () => {
     renderRail('/inbox');
 
@@ -93,7 +115,9 @@ describe('where the rail says you are', () => {
 
     expect(row('Leads')).not.toHaveAttribute('aria-current');
     expect(row('RFQs')).not.toHaveAttribute('aria-current');
-    expect(row('Setup')).not.toHaveAttribute('aria-current');
+    expect(row('Orders')).not.toHaveAttribute('aria-current');
+    expect(row('Fulfilment')).not.toHaveAttribute('aria-current');
+    expect(row('Receivables')).not.toHaveAttribute('aria-current');
   });
 
   it('lights the owning row on a DETAIL page, not just on the list', () => {
@@ -110,9 +134,13 @@ describe('where the rail says you are', () => {
       '/procurement/extraction/review',
       '/procurement/leads/inbound-mail',
       '/procurement/leads/manual-upload',
+      '/procurement/leads/intelligence',
+      '/procurement/leads/ingestion/123',
     ]) {
       const view = renderRail(url);
       expect(screen.getByRole('button', { name: 'Inbox' })).toHaveAttribute('aria-current', 'page');
+      expect(screen.getByRole('button', { name: 'Leads' })).not.toHaveAttribute('aria-current');
+      expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
       view.unmount();
     }
   });
@@ -123,6 +151,15 @@ describe('where the rail says you are', () => {
     expect(row('RFQs')).toHaveAttribute('aria-current', 'page');
   });
 
+  it.each([
+    ['/sales/orders/42', 'Orders'],
+    ['/sales/shipments/21', 'Fulfilment'],
+    ['/sales/finance', 'Receivables'],
+  ])('keeps the post-quote journey visible at %s', (url, destination) => {
+    renderRail(url);
+    expect(row(destination)).toHaveAttribute('aria-current', 'page');
+  });
+
   it('marks the owning workspace rather than the Screen directory on an operational screen', () => {
     renderRail('/dashboard');
     expect(row('Dashboards & analytics')).toHaveAttribute('aria-expanded', 'true');
@@ -130,17 +167,17 @@ describe('where the rail says you are', () => {
     expect(row('Screen directory')).not.toHaveAttribute('aria-current');
   });
 
-  it('lights Setup on the addresses Setup governs outside its own URL space', () => {
-    // `/security/users` and `/admin/platform/*` are Setup screens that kept their old addresses.
-    renderRail('/security/users');
+  it('nests Setup under Administration without losing its current-screen signal', () => {
+    renderRail('/setup');
 
+    expect(row('Administration')).toHaveAttribute('aria-expanded', 'true');
     expect(row('Setup')).toHaveAttribute('aria-current', 'page');
   });
 
   it('lights nothing when the address belongs to no primary destination', () => {
     renderRail('/inventory/ageing');
 
-    for (const name of ['Inbox', 'Leads', 'RFQs', 'Quotes', 'Setup']) {
+    for (const name of ['Inbox', 'Leads', 'RFQs', 'Quotes', 'Orders', 'Fulfilment', 'Receivables']) {
       expect(row(name)).not.toHaveAttribute('aria-current');
     }
   });

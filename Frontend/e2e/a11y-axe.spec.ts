@@ -46,7 +46,7 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
 
       // Regression guards for the fixes this spec was added alongside.
       await expect(page).toHaveTitle('Sign In | NEXORA');
-      await expect(page.getByRole('heading', { level: 1, name: /welcome back/i })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1, name: 'Sign in to Nexora' })).toBeVisible();
       await expect(page.getByLabel('Email Address')).toHaveAttribute('type', 'email');
       await expect(page.getByLabel('Email Address')).toHaveAttribute('autocomplete', 'username');
       await expect(page.getByRole('textbox', { name: 'Password', exact: true })).toHaveAttribute('autocomplete', 'current-password');
@@ -54,6 +54,49 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
 
       const results = await scan(page);
       expect(releaseBlocking(results.violations), describeViolations(results.violations)).toEqual([]);
+    });
+
+    test('mobile login retains Nexora identity, evidence context, and usable landmarks without horizontal overflow', async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.goto('/login');
+
+      const workflow = page.getByRole('region', { name: 'Nexora evidence-to-cash workflow' });
+      await expect(workflow.getByText('NEXORA', { exact: true })).toBeVisible();
+      await expect(workflow.getByRole('heading', {
+        level: 2,
+        name: 'Every commercial decision, connected to its evidence.',
+      })).toBeVisible();
+      await expect(workflow.getByRole('list', { name: 'Governed commercial stages' })).toBeVisible();
+
+      const main = page.getByRole('main');
+      await expect(main).toHaveAttribute('id', 'main-content');
+      await expect(main.getByRole('heading', { level: 1, name: 'Sign in to Nexora' })).toBeVisible();
+      await expect(main.getByLabel('Email address')).toBeVisible();
+      await expect(main.getByRole('textbox', { name: 'Password', exact: true })).toBeVisible();
+      await expect(main.getByRole('button', { name: 'Sign in' })).toBeVisible();
+      await expect(main.getByRole('button', { name: 'Switch to dark theme' })).toBeVisible();
+
+      const mobileGeometry = await page.evaluate(() => {
+        const targets = [
+          document.querySelector('button[aria-label="Switch to dark theme"]'),
+          document.querySelector('button[aria-label="Show password"]'),
+        ].filter((element): element is Element => element !== null);
+
+        return {
+          noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+          touchTargets: targets.map((element) => {
+            const rect = element.getBoundingClientRect();
+            return { width: rect.width, height: rect.height };
+          }),
+        };
+      });
+
+      expect(mobileGeometry.noHorizontalOverflow).toBe(true);
+      expect(mobileGeometry.touchTargets).toHaveLength(2);
+      for (const target of mobileGeometry.touchTargets) {
+        expect(target.width).toBeGreaterThanOrEqual(44);
+        expect(target.height).toBeGreaterThanOrEqual(44);
+      }
     });
   });
 
@@ -149,7 +192,7 @@ test.describe('login form error handling', () => {
     await page.goto('/login');
     await page.getByLabel('Email Address').fill(credentials!.email);
     await page.getByRole('textbox', { name: 'Password', exact: true }).fill('definitely-the-wrong-password');
-    await page.getByRole('button', { name: 'LOGIN' }).click();
+    await page.getByRole('button', { name: 'Sign in' }).click();
 
     const alert = page.getByRole('alert');
     await expect(alert).toBeVisible();

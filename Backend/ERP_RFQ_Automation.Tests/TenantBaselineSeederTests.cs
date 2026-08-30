@@ -248,6 +248,10 @@ public sealed class TenantBaselineSeederTests
             ["ACCEPTED", "DRAFT", "EXPIRED", "ORDERED", "REJECTED", "SENT"],
             await verify.SetupMasters.Where(row => row.SetupType == "QuoteStatus")
                 .Select(row => row.SetupCode).OrderBy(code => code).ToListAsync());
+        Assert.Equal(
+            ["CANCELED", "CANCELLED", "COMPLETED", "CONFIRMED", "DELIVERED", "DRAFT", "ORDERED", "SHIPPED"],
+            await verify.SetupMasters.Where(row => row.SetupType == "OrderStatus")
+                .Select(row => row.SetupCode).OrderBy(code => code).ToListAsync());
 
         // And the call that used to throw now names a row that belongs to THIS tenant.
         var draftStatusId = await LifecycleStatusCatalog.ResolveIdAsync(verify, Bu, "Quote", "DRAFT");
@@ -449,6 +453,88 @@ public sealed class TenantBaselineSeederTests
         Assert.Equal("AED", (await verify.Currencies.SingleAsync(c => c.IsBaseCurrency == true)).Code);
         Assert.False((await verify.Currencies.SingleAsync(c => c.Code == "SAR")).IsBaseCurrency);
         Assert.NotNull(await new FxConversionService(verify).ResolveBaseCurrencyIdAsync(Bu));
+    }
+
+    [Fact]
+    public async Task Order_status_resolution_is_canonical_and_never_selects_an_inactive_row()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        var businessUnit = new BusinessUnit
+        {
+            Id = Bu,
+            BusinessUnitCode = "ORDER-STATUS",
+            BusinessUnitName = "Order status resolver",
+            IsActive = true,
+            CreatedBy = Actor,
+            CreatedOn = DateTime.UtcNow
+        };
+        context.BusinessUnits.Add(businessUnit);
+        context.SetupMasters.AddRange(
+            new SetupMaster
+            {
+                SetupId = 99101,
+                SetupType = "OrderStatus",
+                SetupCode = "SHIPPED",
+                SetupValue = "Shipped",
+                BusinessUnit = businessUnit,
+                IsActive = false,
+                CreatedBy = Actor,
+                CreatedOn = DateTime.UtcNow
+            },
+            new SetupMaster
+            {
+                SetupId = 99102,
+                SetupType = "Order Status",
+                SetupCode = "shipped",
+                SetupValue = "Tenant despatch label",
+                BusinessUnit = businessUnit,
+                IsActive = true,
+                CreatedBy = Actor,
+                CreatedOn = DateTime.UtcNow
+            });
+        await context.SaveChangesAsync();
+
+        await using var tenant = db.ContextFor(Bu);
+        Assert.Equal(99102, await LifecycleStatusCatalog.ResolveIdAsync(
+            tenant, Bu, "Order", "SHIPPED"));
+    }
+
+    [Fact]
+    public async Task Lifecycle_repair_replaces_an_inactive_required_order_status_with_an_active_row()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        var businessUnit = new BusinessUnit
+        {
+            Id = Bu,
+            BusinessUnitCode = "ORDER-REPAIR",
+            BusinessUnitName = "Order lifecycle repair",
+            IsActive = true,
+            CreatedBy = Actor,
+            CreatedOn = DateTime.UtcNow
+        };
+        context.BusinessUnits.Add(businessUnit);
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = 99103,
+            SetupType = "Order Status",
+            SetupCode = "shipped",
+            SetupValue = "Shipped",
+            BusinessUnit = businessUnit,
+            IsActive = false,
+            CreatedBy = Actor,
+            CreatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        await LifecycleStatusCatalog.EnsureAsync(context, businessUnit, Actor);
+        await context.SaveChangesAsync();
+
+        await using var tenant = db.ContextFor(Bu);
+        var resolved = await LifecycleStatusCatalog.ResolveIdAsync(tenant, Bu, "Order", "SHIPPED");
+        Assert.NotEqual(99103, resolved);
+        Assert.True((await tenant.SetupMasters.SingleAsync(row => row.SetupId == resolved)).IsActive);
     }
 
     [Fact]

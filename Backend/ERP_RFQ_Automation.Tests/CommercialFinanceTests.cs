@@ -433,6 +433,29 @@ public sealed class CommercialFinanceTests
     }
 
     [Fact]
+    public async Task InvoiceDraft_NormalizesSourcedPriceBeforeCalculatingReconciledTotal()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var order = SeedOrder(db);
+        var line = Assert.Single(order.OrderItems);
+        line.UnitPrice = 590.789474m;
+        line.Discount = 0m;
+        line.TaxAmount = 0m;
+        line.TotalAmount = 1181.58m;
+        await db.SaveChangesAsync();
+
+        var draft = await new CommercialFinanceApplicationService(db).CreateInvoiceAsync(
+            BusinessUnitId, order.Id, "sourced-price-precision", new CreateInvoiceRequest(null, null, null),
+            "finance@test");
+
+        var invoiceLine = Assert.Single(draft.Lines);
+        Assert.Equal(590.79m, invoiceLine.UnitPrice);
+        Assert.Equal(1181.58m, invoiceLine.LineTotal);
+        Assert.Equal(1181.58m, draft.TotalAmount);
+    }
+
+    [Fact]
     public async Task Issue_RechecksOrderQuantityAndRejectsCompetingDraft()
     {
         using var database = new TestDb();

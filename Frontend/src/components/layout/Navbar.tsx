@@ -395,7 +395,17 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between', px: 2, py: 1.25 }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Recently opened</Typography>
           {recentHits.length > 0 ? (
-            <ButtonBase onClick={clearHistory} sx={{ color: 'primary.main', borderRadius: 1, px: 1, py: 0.5, fontSize: '0.75rem', fontWeight: 700 }}>
+            <ButtonBase
+              onClick={clearHistory}
+              sx={{
+                color: 'primary.main',
+                borderRadius: 1,
+                px: 1,
+                minHeight: 44,
+                fontSize: '0.75rem',
+                fontWeight: 700,
+              }}
+            >
               Clear history
             </ButtonBase>
           ) : null}
@@ -452,7 +462,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
                     selected={activeOptionIndex === index}
                     onMouseMove={() => setActiveOptionIndex(index)}
                     onClick={() => openHit(hit)}
-                    sx={{ alignItems: 'flex-start', gap: 1, px: 2 }}
+                    sx={{ alignItems: 'flex-start', gap: 1, px: 2, minHeight: 44 }}
                   >
                     <Chip size="small" label={ENTITY_LABELS[hit.entity]} sx={{ fontWeight: 700, fontSize: 10, height: 20, mt: 0.25 }} />
                     <Box sx={{ minWidth: 0, flex: 1 }}>
@@ -512,8 +522,11 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
     <AppBar
       position="fixed"
       sx={{
-        width: { sm: `calc(100% - ${drawerWidth}px)` },
-        ml: { sm: `${drawerWidth}px` },
+        // The rail is persistent only at the desktop shell breakpoint. Below
+        // 1200px it overlays the page, so the top bar always keeps the full
+        // viewport width and cannot collide with account/search controls.
+        width: { lg: `calc(100% - ${drawerWidth}px)` },
+        ml: { lg: `${drawerWidth}px` },
         boxShadow: 'none',
         backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.8)' : 'rgba(255, 255, 255, 0.8)',
         backdropFilter: 'blur(12px)',
@@ -521,10 +534,6 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
         borderColor: 'divider',
         color: 'text.primary',
         zIndex: (theme) => theme.zIndex.drawer + 1,
-        transition: (theme) => theme.transitions.create(['width', 'margin'], {
-          easing: theme.transitions.easing.sharp,
-          duration: theme.transitions.duration.leavingScreen,
-        }),
       }}
     >
       <Toolbar sx={{ justifyContent: 'space-between' }}>
@@ -536,7 +545,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
             aria-label={sidebarExpanded ? 'Collapse navigation menu' : 'Expand navigation menu'}
             aria-expanded={sidebarExpanded}
             aria-controls={sidebarId}
-            sx={{ mr: 2 }}
+            sx={{ mr: { xs: 0.5, sm: 1, md: 2 }, width: 44, height: 44 }}
           >
             <MenuIcon />
           </IconButton>
@@ -581,7 +590,13 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
             </ClickAwayListener>
           ) : (
             <Tooltip title="Search Nexora">
-              <IconButton color="inherit" onClick={openMobileSearch} aria-label="Open global search" aria-haspopup="dialog">
+              <IconButton
+                color="inherit"
+                onClick={openMobileSearch}
+                aria-label="Open global search"
+                aria-haspopup="dialog"
+                sx={{ width: 44, height: 44 }}
+              >
                 <SearchIcon />
               </IconButton>
             </Tooltip>
@@ -604,7 +619,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
             <DialogTitle id="mobile-search-title" component="div" sx={{ px: 2, py: 1.5 }}>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Typography variant="h6" component="h2" sx={{ flex: 1, fontWeight: 800 }}>{GLOBAL_SEARCH_LABEL}</Typography>
-                <IconButton aria-label="Close search" onClick={closeMobileSearch}><CloseIcon /></IconButton>
+                <IconButton aria-label="Close search" onClick={closeMobileSearch} sx={{ width: 44, height: 44 }}><CloseIcon /></IconButton>
               </Stack>
             </DialogTitle>
             <DialogContent dividers sx={{ p: 1.5 }}>
@@ -644,7 +659,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
           {/* A string Tooltip title becomes the child's aria-label in MUI, so
               making it state-specific also fixes the accessible name (SC 4.1.2). */}
           <Tooltip title={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>
-            <IconButton color="inherit" onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')} sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
+            <IconButton color="inherit" onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')} sx={{ backgroundColor: 'action.hover', width: 44, height: 44, borderRadius: 2 }}>
               {mode === 'dark' ? <SunIcon sx={{ fontSize: 20 }} /> : <MoonIcon sx={{ fontSize: 20 }} />}
             </IconButton>
           </Tooltip>
@@ -692,11 +707,11 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
             >
               {initials || <Person aria-hidden sx={{ fontSize: 18 }} />}
             </Avatar>
-            <Box aria-hidden sx={{ display: { xs: 'none', sm: 'block' }, textAlign: 'left' }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 800, lineHeight: 1.2, fontSize: '0.85rem' }}>
+            <Box aria-hidden sx={{ display: { xs: 'none', lg: 'block' }, textAlign: 'left' }}>
+              <Typography noWrap variant="subtitle2" sx={{ fontWeight: 800, lineHeight: 1.2, fontSize: '0.85rem' }}>
                 {displayName || 'User'}
               </Typography>
-              <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, fontSize: '0.75rem', opacity: 0.7 }}>
+              <Typography noWrap variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, fontSize: '0.75rem', opacity: 0.7 }}>
                 {userData.roleName || 'Member'}
               </Typography>
             </Box>

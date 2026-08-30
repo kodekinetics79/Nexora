@@ -29,6 +29,7 @@ public sealed class Gate7DeliveryConfirmationTests
     private const long OrderItemId = 7110;
     private const long ShipmentId = 7200;
     private const long ShipmentItemId = 7210;
+    private const long DeliveredStatusId = 3300;
     private static readonly DateTime Now = new(2026, 8, 9, 9, 0, 0, DateTimeKind.Utc);
 
     // ================================================ FR-DLM-05: the ladder is a lifecycle
@@ -449,6 +450,99 @@ public sealed class Gate7DeliveryConfirmationTests
     }
 
     [Fact]
+    public async Task A_retried_confirmation_cannot_change_the_command_behind_the_key()
+    {
+        using var db = NewDatabase();
+        await Confirmations(db).ConfirmAsync(Tenant, ShipmentId, "pod-hash", Command(4m), "driver");
+
+        var failure = await Assert.ThrowsAsync<DeliveryConflictException>(() =>
+            Confirmations(db).ConfirmAsync(Tenant, ShipmentId, "pod-hash",
+                Command(4m) with { ReceivedByName = "A different receiver" }, "driver"));
+
+        Assert.Contains("different delivery confirmation command", failure.Message);
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Single(await verify.DeliveryProofs.ToListAsync());
+        Assert.Single(await verify.DeliveryProofLines.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Full_cumulative_acceptance_moves_the_customer_order_to_delivered()
+    {
+        using var db = NewDatabase();
+        await ConfirmAsync(db, accepted: 4m);
+
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Equal(DeliveredStatusId, await verify.Orders.Where(x => x.Id == OrderId)
+            .Select(x => x.StatusId).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Order_moves_to_delivered_only_after_acceptance_across_active_shipments_covers_every_line()
+    {
+        const long secondShipmentId = ShipmentId + 100;
+        const long secondShipmentItemId = ShipmentItemId + 100;
+        using var db = NewDatabase();
+        await using (var arrange = db.ContextFor(Tenant))
+        {
+            (await arrange.ShipmentItems.SingleAsync(x => x.Id == ShipmentItemId)).Quantity = 2m;
+            arrange.Shipments.Add(new Shipment
+            {
+                Id = secondShipmentId, ShipmentNo = $"DN-{secondShipmentId}", OrderId = OrderId,
+                BusinessUnitId = Tenant, StatusId = Tenant + 500, ShipmentDate = Now,
+                DeliveryStatus = DeliveryStatuses.Dispatched, DeliveryStatusChangedBy = "qa",
+                DeliveryStatusChangedOn = Now, CreatedBy = "qa", CreatedOn = Now, IsActive = true
+            });
+            arrange.ShipmentItems.Add(new ShipmentItem
+            {
+                Id = secondShipmentItemId, ShipmentId = secondShipmentId, OrderItemId = OrderItemId,
+                Quantity = 2m, CreatedBy = "qa", CreatedOn = Now, IsActive = true
+            });
+            await arrange.SaveChangesAsync();
+        }
+
+        await Confirmations(db).ConfirmAsync(Tenant, ShipmentId, "pod-part-one",
+            Command(2m), "driver");
+        await using (var afterFirst = db.ContextFor(Tenant))
+            Assert.Equal(Tenant, await afterFirst.Orders.Where(x => x.Id == OrderId)
+                .Select(x => x.StatusId).SingleAsync());
+
+        var secondCommand = Command(2m) with
+        {
+            Lines = [new ConfirmDeliveryLineCommand(secondShipmentItemId, 2m, null, null, null)]
+        };
+        await Confirmations(db).ConfirmAsync(Tenant, secondShipmentId, "pod-part-two",
+            secondCommand, "driver");
+
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Equal(DeliveredStatusId, await verify.Orders.Where(x => x.Id == OrderId)
+            .Select(x => x.StatusId).SingleAsync());
+        Assert.Equal(4m, (await Ledger(db).ForOrderAsync(Tenant, OrderId)).Single().AcceptedQuantity);
+    }
+
+    [Fact]
+    public async Task Missing_delivered_status_rolls_back_the_entire_confirmation()
+    {
+        using var db = NewDatabase();
+        await using (var setup = db.ContextFor(Tenant))
+        {
+            setup.SetupMasters.Remove(await setup.SetupMasters.SingleAsync(x => x.SetupId == DeliveredStatusId));
+            await setup.SaveChangesAsync();
+        }
+
+        var failure = await Assert.ThrowsAsync<DeliveryConflictException>(
+            () => ConfirmAsync(db, accepted: 4m));
+        Assert.Contains("OrderStatus/DELIVERED", failure.Message);
+
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.DeliveryProofs.ToListAsync());
+        Assert.Empty(await verify.DeliveryProofLines.ToListAsync());
+        Assert.Equal(DeliveryStatuses.Dispatched, await verify.Shipments.Where(x => x.Id == ShipmentId)
+            .Select(x => x.DeliveryStatus).SingleAsync());
+        Assert.Equal(Tenant, await verify.Orders.Where(x => x.Id == OrderId)
+            .Select(x => x.StatusId).SingleAsync());
+    }
+
+    [Fact]
     public async Task Evidence_filed_against_another_shipment_cannot_be_stapled_to_this_proof()
     {
         using var db = NewDatabase();
@@ -767,6 +861,11 @@ public sealed class Gate7DeliveryConfirmationTests
         context.SetupMasters.Add(new SetupMaster
         {
             SetupId = tenant, SetupType = "OrderStatus", SetupCode = "CONFIRMED", SetupValue = "CONFIRMED",
+            BusinessUnitId = tenant, IsActive = true, CreatedBy = "qa", CreatedOn = Now
+        });
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = tenant + 2600, SetupType = "OrderStatus", SetupCode = "DELIVERED", SetupValue = "DELIVERED",
             BusinessUnitId = tenant, IsActive = true, CreatedBy = "qa", CreatedOn = Now
         });
         context.SetupMasters.Add(new SetupMaster

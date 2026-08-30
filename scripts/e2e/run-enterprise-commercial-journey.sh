@@ -170,13 +170,22 @@ else
   log "E2E_SKIP_BUILD=1 — using existing build outputs."
 fi
 
-log "Starting the frontend on $FRONTEND_URL."
-(
-  cd "$FRONTEND_DIR"
-  VITE_API_BASE_URL="$BACKEND_URL" npx vite --port "$FRONTEND_PORT" --strictPort --host 127.0.0.1
-) >"$RUN_DIR/frontend.log" 2>&1 &
-FRONTEND_PID=$!
-wait_for_http "$FRONTEND_URL" "Frontend" 90
+start_frontend() {
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$FRONTEND_URL" 2>/dev/null || true)"
+  if [[ -n "$code" && "$code" != "000" ]]; then
+    return 0
+  fi
+  log "Starting the frontend on $FRONTEND_URL."
+  (
+    cd "$FRONTEND_DIR"
+    VITE_API_BASE_URL="$BACKEND_URL" npx vite --port "$FRONTEND_PORT" --strictPort --host 127.0.0.1
+  ) >>"$RUN_DIR/frontend.log" 2>&1 &
+  FRONTEND_PID=$!
+  wait_for_http "$FRONTEND_URL" "Frontend" 90
+}
+
+start_frontend
 
 start_backend() {
   local database="$1" storage_root="$2" phase="$3" apply_migrations="$4"
@@ -223,6 +232,9 @@ load_fixture_environment() {
   export E2E_MANAGER_EMAIL=manager@release01c1.local
   export E2E_MANAGER_PASSWORD="$ACCEPTANCE_PASSWORD"
   export E2E_MANAGER_BUSINESS_UNIT_ID=80101
+  export E2E_FINANCE_EMAIL=finance@release01c1.local
+  export E2E_FINANCE_PASSWORD="$ACCEPTANCE_PASSWORD"
+  export E2E_FINANCE_BUSINESS_UNIT_ID=80101
   export E2E_EDITOR_EMAIL=editor@release01c1.local
   export E2E_EDITOR_PASSWORD="$ACCEPTANCE_PASSWORD"
   export E2E_EDITOR_BUSINESS_UNIT_ID=80101
@@ -316,6 +328,13 @@ run_suite() {
     die "$suite discovered ${discovered:-an unknown number of} tests; expected $expected_count."
   }
 
+  # The backend is deliberately restarted after migrations so the fixture is loaded into a clean
+  # application process. On some shells that process handoff can also reap the sibling Vite
+  # wrapper even though the frontend listener is on a different port. Re-probe here and recover
+  # the disposable frontend before opening a browser; a 273 ms connection-refused result is runner
+  # failure, not product evidence.
+  start_frontend
+
   local -a playwright_args=(test --config "$config" --workers=1 --retries=0)
   if [[ -n "${E2E_TEST_GREP:-}" ]]; then
     playwright_args+=(--grep "$E2E_TEST_GREP")
@@ -354,7 +373,7 @@ run_suite() {
 }
 
 if [[ "$SELECTED_SUITE" == "all" || "$SELECTED_SUITE" == "commercial-v2" ]]; then
-  run_suite commercial-v2 nexora_commercial_v2 playwright.commercial-journey-v2.config.ts 39
+  run_suite commercial-v2 nexora_commercial_v2 playwright.commercial-journey-v2.config.ts 41
 fi
 if [[ "$SELECTED_SUITE" == "all" || "$SELECTED_SUITE" == "core-commercial" ]]; then
   run_suite core-commercial nexora_core_commercial playwright.core-commercial.config.ts 40

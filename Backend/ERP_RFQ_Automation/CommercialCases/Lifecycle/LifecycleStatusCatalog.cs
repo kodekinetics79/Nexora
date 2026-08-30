@@ -71,6 +71,10 @@ public static class LifecycleStatusCatalog
     {
         ("DRAFT", "Draft"),
         ("ORDERED", "Ordered"),
+        ("CONFIRMED", "Confirmed"),
+        ("SHIPPED", "Shipped"),
+        ("DELIVERED", "Delivered"),
+        ("COMPLETED", "Completed"),
         ("CANCELLED", "Cancelled"),
         ("CANCELED", "Canceled")
     };
@@ -128,7 +132,10 @@ public static class LifecycleStatusCatalog
         // filter is a no-op, but a filtered existence check called from a context scoped to a
         // DIFFERENT business unit would answer "absent" for rows that exist and write duplicates.
         var present = (await db.SetupMasters.IgnoreQueryFilters().AsNoTracking()
-                .Where(row => row.BusinessUnitId == businessUnit.Id)
+                // An inactive lifecycle row cannot satisfy a hard runtime dependency. Treat it as
+                // absent so an explicit repair creates a new active governed row without mutating
+                // the tenant's historical reference data.
+                .Where(row => row.BusinessUnitId == businessUnit.Id && row.IsActive != false)
                 .Select(row => new { row.SetupType, row.SetupCode })
                 .ToListAsync(ct))
             .Select(row => Key(row.SetupType, row.SetupCode))
@@ -158,6 +165,7 @@ public static class LifecycleStatusCatalog
             "Lead" => "leadstatus",
             "Rfq" => "rfqstatus",
             "Quote" => "quotestatus",
+            "Order" => "orderstatus",
             _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
         };
         var statuses = await db.SetupMasters.AsNoTracking()

@@ -11,27 +11,22 @@ import {
   MenuItem,
   FormControl,
   InputLabel,
-  useTheme,
   CircularProgress,
 } from '@mui/material';
 import {
   MailOutlined as MailIcon,
   LockOutlined as LockIcon,
-  RocketLaunch as RocketIcon,
-  Description as FileIcon,
-  MonetizationOn as DollarIcon,
-  Storage as DatabaseIcon,
-  LocalShipping as TruckIcon,
   LightMode as SunIcon,
   DarkMode as MoonIcon,
   Visibility,
   VisibilityOff,
+  CheckCircleOutlined as CheckIcon,
+  VerifiedUserOutlined as IntegrityIcon,
+  SettingsOutlined as SettingsIcon,
 } from '@mui/icons-material';
-import { keyframes, css } from '@emotion/react';
 import styled from '@emotion/styled';
 import { useAuth } from '../../context/AuthContext';
 import { useAppTheme } from '../../context/ThemeContext';
-import { contrastTextFor } from '../../utils/contrast';
 import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
 import { Link, useNavigate } from 'react-router-dom';
@@ -42,330 +37,143 @@ import { INBOX_ROOT } from '../../components/layout/navCatalog';
 
 /** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
 const LOGIN_ERROR_ID = 'login-error';
+const visuallyHidden = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  p: 0,
+  m: -1,
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+} as const;
 
-// --- Animations ---
-const gridFloat = keyframes`
-  0% { transform: translateY(0); }
-  100% { transform: translateY(-50px); }
-`;
-
-const scan = keyframes`
-  0% { top: -10%; opacity: 0; }
-  10%, 90% { opacity: 0.5; }
-  100% { top: 110%; opacity: 0; }
-`;
-
-const spin = keyframes`
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-`;
-
-const nodeLoop = (index: number) => keyframes`
-  0%, ${index * 15}% { opacity: 0; transform: scale(0.8); }
-  ${index * 15 + 5}%, 90% { opacity: 1; transform: scale(1); }
-  95%, 100% { opacity: 0; transform: scale(0.8); }
-`;
-
-const pathLoop = (index: number) => keyframes`
-  0%, ${index * 15 + 7}% { opacity: 0; stroke-dashoffset: 200; }
-  ${index * 15 + 12}%, 90% { opacity: 0.7; stroke-dashoffset: 0; }
-  95%, 100% { opacity: 0; stroke-dashoffset: 200; }
-`;
-
-// --- Styled Components ---
-const Container = styled.div`
+const Container = styled.div<{ mode: string }>`
   min-height: 100vh;
   min-height: 100dvh;
   width: 100%;
   box-sizing: border-box;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: 24px;
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: ${(props: any) => props.theme.palette.background.default};
+  background: ${props => props.mode === 'dark' ? '#07111f' : '#f5f7fa'};
   font-family: ${(props: any) => props.theme.typography.fontFamily};
-  transition: background 0.5s ease;
-
-  @media (max-width: 768px) {
-    align-items: stretch;
-    padding: 0;
-  }
+  color-scheme: ${props => props.mode};
 `;
 
-const ScannerLine = styled.div<{ primary: string }>`
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, ${props => props.primary}, transparent);
-  box-shadow: 0 0 15px ${props => props.primary};
-  z-index: 10;
-  animation: ${scan} 4s linear infinite;
-  @media (prefers-reduced-motion: reduce) { animation: none; display: none; }
-`;
-
-const DigitalGrid = styled.div<{ primary: string }>`
-  position: absolute;
-  inset: -100px;
-  background-image: 
-    linear-gradient(${props => props.primary}1a 1px, transparent 1px),
-    linear-gradient(90deg, ${props => props.primary}1a 1px, transparent 1px);
-  background-size: 60px 60px;
-  transform: perspective(1000px) rotateX(60deg);
-  mask-image: radial-gradient(circle at center, black, transparent 80%);
-  animation: ${gridFloat} 15s linear infinite;
-  @media (prefers-reduced-motion: reduce) { animation: none; }
-  z-index: 0;
-  opacity: 0.5;
-`;
-
-const GlassCard = styled.div<{ mode: string }>`
-  width: 1400px;
-  max-width: 95vw;
-  min-height: min(850px, calc(100vh - 48px));
-  min-height: min(850px, calc(100dvh - 48px));
-  background: ${props => props.mode === 'dark' ? 'rgba(10, 15, 28, 0.85)' : 'rgba(255, 255, 255, 0.7)'};
-  backdrop-filter: blur(40px);
-  border-radius: 40px;
-  border: 1px solid ${props => props.mode === 'dark' ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)'};
-  display: flex;
-  overflow: hidden;
-  position: relative;
-  z-index: 10;
-  box-shadow: ${props => props.mode === 'dark' ? '0 50px 120px -30px rgba(0, 0, 0, 0.9)' : '0 50px 120px -30px rgba(13, 71, 161, 0.15)'};
-  transition: all 0.5s ease;
-
-  @media (max-width: 1200px) {
-    width: 100%;
-    max-width: 680px;
-    min-height: 0;
-    flex-direction: column;
-  }
-
-  @media (max-width: 768px) {
-    max-width: none;
-    min-height: 100vh;
-    min-height: 100dvh;
-    border-radius: 0;
-  }
-`;
-
-const VisualArea = styled.div<{ mode: string }>`
-  flex: 1.8;
-  background: ${props => props.mode === 'dark'
-    ? 'linear-gradient(135deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.1) 100%)'
-    : 'linear-gradient(135deg, rgba(241, 245, 249, 0.8) 0%, rgba(255, 255, 255, 0.2) 100%)'};
-  border-right: 1px solid ${props => props.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'};
-  display: flex;
-  flex-direction: column;
-  padding: 48px;
-  position: relative;
-  justify-content: center;
-  align-items: center;
+const LoginShell = styled.div`
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  grid-template-columns: minmax(0, 63%) minmax(420px, 37%);
   overflow: hidden;
 
-  @media (max-width: 1200px) {
-    display: none;
+  @media (max-width: 1100px) {
+    grid-template-columns: 1fr;
+    overflow: visible;
   }
 `;
 
-const FormSection = styled.div`
-  flex: 1;
-  padding: 64px;
+const EvidencePanel = styled.section`
+  min-width: 0;
+  padding: clamp(28px, 3vw, 48px);
+  background: #08172a;
+  color: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #283b58;
+
+  @media (max-width: 1100px) {
+    min-height: 290px;
+    padding: 24px 32px;
+    border-right: 0;
+    border-bottom: 1px solid #283b58;
+  }
+  @media (max-width: 600px) {
+    min-height: 188px;
+    padding: 16px 20px;
+  }
+`;
+
+const FormSection = styled.main<{ mode: string }>`
+  min-width: 0;
+  padding: clamp(32px, 3vw, 52px);
+  background: ${props => props.mode === 'dark' ? '#0f1b2d' : '#f8f8f8'};
+  color: ${props => props.mode === 'dark' ? '#f8fafc' : '#0b172a'};
   display: flex;
   flex-direction: column;
   justify-content: center;
   position: relative;
-  background: transparent;
 
-  @media (max-width: 768px) {
-    padding: 24px;
+  @media (max-width: 1100px) {
+    min-height: calc(100dvh - 290px);
+  }
+
+  @media (max-width: 600px) {
+    min-height: calc(100dvh - 188px);
+    padding: 28px 20px 24px;
+    justify-content: flex-start;
   }
 `;
 
-const RadialWrapper = styled.div`
-  position: relative;
-  width: 580px;
-  height: 580px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 5;
-`;
-
-const SensorRing = styled.div<{ color: string }>`
-  position: absolute;
-  inset: -12px;
-  border: 1px dashed ${props => props.color};
-  border-radius: 50%;
-  opacity: 0.3;
-  animation: ${spin} 15s linear infinite;
-  @media (prefers-reduced-motion: reduce) { animation: none; }
-`;
-
-const NodeBadge = styled.div<{ color: string }>`
-  position: absolute;
-  top: -10px;
-  right: -10px;
-  background: ${props => props.color};
-  color: ${props => contrastTextFor(props.color)};
-  font-size: 8px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-weight: 900;
-  letter-spacing: 1px;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-`;
-
-const CircularStage = styled.div<{ index: number; x: number; y: number; color: string; mode: string }>`
-  position: absolute;
-  width: 110px;
-  height: 110px;
-  background: ${props => props.mode === 'dark' ? 'rgba(30, 41, 59, 1)' : 'rgba(255, 255, 255, 1)'};
-  border: 2px solid ${props => props.color};
-  border-radius: 50%;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  z-index: 20;
-  left: ${props => props.x}px;
-  top: ${props => props.y}px;
-  margin-top: -55px;
-  margin-left: -55px;
-  opacity: 0;
-  box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.3);
-  animation: ${props => css`${nodeLoop(props.index)} 10s infinite ease-in-out`};
-  transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.3s ease;
-
-  &:hover {
-    transform: scale(1.1);
-    box-shadow: 0 20px 40px -15px ${props => props.color}66;
-  }
-  @media (prefers-reduced-motion: reduce) { animation: none; opacity: 1; }
-`;
-
-const ConnectionLine = styled.line<{ index: number; color: string }>`
-  stroke: ${props => props.color};
-  stroke-width: 2;
-  stroke-dasharray: 6 4;
-  opacity: 0;
-  stroke-linecap: round;
-  animation: ${props => css`${pathLoop(props.index)} 10s infinite ease-in-out`};
-  @media (prefers-reduced-motion: reduce) { animation: none; opacity: 0.7; stroke-dashoffset: 0; }
-`;
-
-const SVGOverlay = styled.svg`
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 5;
-`;
-
-const OrbitRing = styled.circle<{ primary: string }>`
-  fill: none;
-  stroke: ${props => props.primary}14;
-  stroke-width: 1;
-  stroke-dasharray: 4 4;
-`;
-
-// --- Custom Form Inputs ---
 const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: any) => ({
   '& .MuiOutlinedInput-root': {
-    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
-    borderRadius: '16px',
-    transition: 'all 0.3s ease-in-out',
-    boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
-    border: '1px solid transparent',
-    '& fieldset': { border: 'none' },
-    '&:hover': {
-      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
-      boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
-      transform: 'translateY(-2px)',
-    },
+    minHeight: 58,
+    backgroundColor: mode === 'dark' ? '#0b172a' : '#ffffff',
+    borderRadius: 8,
+    transition: 'border-color 160ms ease-out, box-shadow 160ms ease-out',
+    '& fieldset': { borderColor: mode === 'dark' ? '#52627a' : '#aeb8c7' },
+    '&:hover fieldset': { borderColor: mode === 'dark' ? '#8fa1b8' : '#65758b' },
     '&.Mui-focused': {
-      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
-      border: `1px solid ${theme.palette.primary.main}80`,
-      boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
-      transform: 'translateY(-2px)',
-    }
+      boxShadow: `0 0 0 3px ${theme.palette.primary.main}24`,
+    },
   },
   '& input': {
+    '&::placeholder': {
+      color: mode === 'dark' ? '#b7c4d6' : '#526174',
+      opacity: 1,
+    },
     '&:-webkit-autofill, &:-webkit-autofill:hover, &:-webkit-autofill:focus, &:-webkit-autofill:active': {
       WebkitBoxShadow: mode === 'dark' ? '0 0 0 30px #131c33 inset !important' : '0 0 0 30px #ffffff inset !important',
       WebkitTextFillColor: mode === 'dark' ? '#ffffff !important' : '#000000 !important',
       transition: 'background-color 5000s ease-in-out 0s',
-      borderRadius: '0px',
+      borderRadius: 0,
     }
   },
   '& .MuiInputLabel-root': {
-    fontWeight: 500,
-    '&.Mui-focused, &.MuiFormLabel-filled': {
-      transform: 'translate(14px, -11px) scale(0.75)',
-      backgroundColor: mode === 'dark' ? '#0a0f1c' : '#ffffff',
-      padding: '0 6px',
-      borderRadius: '4px',
-    }
+    fontWeight: 600,
+    color: mode === 'dark' ? '#b7c4d6' : '#506177',
   }
 }));
 
 const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) => ({
-  backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
-  borderRadius: '16px',
-  transition: 'all 0.3s ease-in-out',
-  boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
-  border: '1px solid transparent',
-  '& fieldset': { border: 'none' },
-  '&:hover': {
-    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
-    boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
-    transform: 'translateY(-2px)',
-  },
+  minHeight: 58,
+  backgroundColor: mode === 'dark' ? '#0b172a' : '#ffffff',
+  borderRadius: 8,
+  transition: 'border-color 160ms ease-out, box-shadow 160ms ease-out',
+  '& fieldset': { borderColor: mode === 'dark' ? '#52627a' : '#aeb8c7' },
+  '&:hover fieldset': { borderColor: mode === 'dark' ? '#8fa1b8' : '#65758b' },
   '&.Mui-focused': {
-    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
-    border: `1px solid ${theme.palette.primary.main}80`,
-    boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
-    transform: 'translateY(-2px)',
+    boxShadow: `0 0 0 3px ${theme.palette.primary.main}24`,
   }
 }));
 
-// --- Data ---
-const industrialFlow = [
-  { key: "DEMAND", title: "Smart Sourcing", icon: <RocketIcon />, color: "#6366f1" },
-  { key: "ANALYZE", title: "AI Validation", icon: <FileIcon />, color: "#0ea5e9" },
-  { key: "OPTIMIZE", title: "Dynamic Costing", icon: <DollarIcon />, color: "#10b981" },
-  { key: "EXECUTE", title: "Global Fulfillment", icon: <DatabaseIcon />, color: "#f59e0b" },
-  { key: "TRACK", title: "Real-time Logistics", icon: <TruckIcon />, color: "#8b5cf6" }
+const evidenceStages = [
+  { title: 'Email captured', date: '29 AUG 2026', time: '09:14' },
+  { title: 'Lead reconciled', date: '29 AUG 2026', time: '09:27' },
+  { title: 'Partial bid approved', date: '29 AUG 2026', time: '11:03' },
+  { title: 'RFQ promoted', date: '29 AUG 2026', time: '14:42' },
+  { title: 'Order fulfilled', date: '29 AUG 2026', time: '16:18' },
+  { title: 'Payment posted', date: '30 AUG 2026', time: '10:31' },
 ];
 
-const SVG_SIZE = 580;
-const CENTER = SVG_SIZE / 2;
-const ORBIT_R = 215;
-const NODE_R = 55;
-
-const getNodeCenter = (index: number) => {
-  const angleDeg = index * 72 - 90;
-  const angleRad = angleDeg * (Math.PI / 180);
-  return {
-    x: CENTER + ORBIT_R * Math.cos(angleRad),
-    y: CENTER + ORBIT_R * Math.sin(angleRad),
-  };
-};
-
-const getEdgePoint = (from: { x: number; y: number }, to: { x: number; y: number }, radius: number) => {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  return {
-    x: from.x + (dx / dist) * radius,
-    y: from.y + (dy / dist) * radius,
-  };
-};
+const ledgerRows = [
+  ['Status', 'Complete', 'Complete', 'Complete', 'Complete', 'Complete', 'Complete'],
+  ['Source document', 'Email', 'CRM Lead', 'BID-2026-0017 (Partial)', 'RFQ-2026-0042', 'SO-2026-0156', 'INV-2026-0312 / PAY-2026-0289'],
+  ['Reference', 'MSG-87321', 'LEAD-009871', 'BID-2026-0017-P1', 'RFQ-2026-0042', 'SO-2026-0156', 'INV-2026-0312 / PAY-2026-0289'],
+  ['Approved lines', '1 of 12', '1 of 12', '3 of 12', '6 of 12', '8 of 12', '8 of 12'],
+  ['Amount (USD)', '—', '—', '38,250.00', '76,500.00', '128,750.00', '128,750.00'],
+  ['By', 'System', 'Sarah Mitchell', 'Daniel Archer', 'Daniel Archer', 'Operations bot', 'Finance bot'],
+  ['Notes', 'Inbound email captured', 'Account matched and validated', 'Partial bid approved', 'RFQ created from bid', 'Order fulfilled and goods shipped', 'Payment received and applied'],
+];
 
 // --- Auth service typing ---
 interface LoginBusinessUnitOption {
@@ -429,8 +237,7 @@ export const landingRouteFor = (
 ): string => LANDING_ROUTE;
 
 const LoginPage: React.FC = () => {
-  const theme = useTheme();
-  const { mode, setMode, primaryColor } = useAppTheme();
+  const { mode, setMode } = useAppTheme();
   const { setToken, setUserData } = useAuth();
   const navigate = useNavigate();
 
@@ -509,9 +316,11 @@ const LoginPage: React.FC = () => {
         // login response — the two could disagree, rendering a UI every API call then rejects.
         isSuperAdmin: me.isSuperAdmin === true,
         isManager: me.isManager === true,
+        hasModuleAuthorityByRank: me.hasModuleAuthorityByRank === true,
         roleId: me.roleId ?? data.roleId ?? undefined,
         businessUnitId: me.businessUnitId ?? data.businessUnitId ?? undefined,
         permissions: me.permissions ?? [],
+        entitlements: me.entitlements ?? [],
       });
       navigate(landingRouteFor(me.isSuperAdmin === true, me.permissions ?? []));
     } catch (err: any) {
@@ -537,158 +346,251 @@ const LoginPage: React.FC = () => {
     setError(null);
   };
 
-  const nodeCenters = industrialFlow.map((_, i) => getNodeCenter(i));
-
-  // StyledTextField strips the outlined fieldset border, so MUI's default
-  // `error` treatment is invisible. Restore a visible invalid state.
-  const errorFieldSx = {
-    '& .MuiOutlinedInput-root.Mui-error': {
-      border: '1px solid',
-      borderColor: 'error.main',
-    },
-  } as const;
-
   return (
-    <Container theme={theme} data-testid="login-viewport">
-      <DigitalGrid primary={primaryColor} />
-      <ScannerLine primary={primaryColor} />
-
-      <GlassCard mode={mode} data-testid="login-card">
-        <VisualArea mode={mode}>
-          {/* Purely decorative animated pipeline diagram — hidden from
-              assistive tech so screen-reader users are not read ~15 orphan
-              labels before reaching the sign-in form (SC 1.1.1). */}
-          <RadialWrapper aria-hidden="true">
-            <SVGOverlay viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
-              <defs>
-                {industrialFlow.map((node, i) => (
-                  <marker
-                    key={`marker-${i}`}
-                    id={`arrow-${i}`}
-                    markerWidth="8"
-                    markerHeight="8"
-                    refX="4"
-                    refY="3"
-                    orient="auto"
-                  >
-                    <path fill={node.color} d="M0,0 L0,6 L7,3 z" style={{ opacity: 0.8 }} />
-                  </marker>
-                ))}
-              </defs>
-
-              <OrbitRing cx={CENTER} cy={CENTER} r={ORBIT_R} primary={primaryColor} />
-
-              {industrialFlow.map((node, i) => {
-                const nextIndex = (i + 1) % industrialFlow.length;
-                const from = nodeCenters[i];
-                const to = nodeCenters[nextIndex];
-                const fromEdge = getEdgePoint(from, to, NODE_R + 4);
-                const toEdge = getEdgePoint(to, from, NODE_R + 14);
-
-                return (
-                  <ConnectionLine
-                    key={`conn-${i}`}
-                    index={i}
-                    x1={fromEdge.x}
-                    y1={fromEdge.y}
-                    x2={toEdge.x}
-                    y2={toEdge.y}
-                    color={node.color}
-                    markerEnd={`url(#arrow-${i})`}
-                  />
-                );
-              })}
-            </SVGOverlay>
-
-            {industrialFlow.map((node, i) => {
-              const pos = nodeCenters[i];
-              return (
-                <CircularStage
-                  key={node.key}
-                  index={i}
-                  x={pos.x}
-                  y={pos.y}
-                  color={node.color}
-                  mode={mode}
-                >
-                  <SensorRing color={node.color} />
-                  <NodeBadge color={node.color}>0{i + 1}</NodeBadge>
-                  <Box sx={{ color: node.color, fontSize: 32, mb: 0.5, display: 'flex' }}>
-                    {node.icon}
-                  </Box>
-                  <Typography variant="caption" sx={{ fontWeight: 800, color: node.color, textTransform: 'uppercase', letterSpacing: 1, fontSize: 10 }}>
-                    {node.key}
-                  </Typography>
-                  <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.primary', opacity: 0.8, fontSize: 9 }}>
-                    {node.title}
-                  </Typography>
-                </CircularStage>
-              );
-            })}
-          </RadialWrapper>
-
+    <Container mode={mode} data-testid="login-viewport">
+      <LoginShell data-testid="login-card">
+        <EvidencePanel aria-label="Nexora evidence-to-cash workflow">
           <Box
-            component="aside"
-            aria-label="Nexora inquiry-to-RFQ workflow"
             sx={{
-              position: 'absolute',
-              left: '50%',
-              top: '50%',
-              transform: 'translate(-50%, -50%)',
-              zIndex: 15,
-              width: 270,
-              px: 2.5,
-              py: 2.25,
-              textAlign: 'center',
-              borderRadius: 4,
-              border: '1px solid',
-              borderColor: 'divider',
-              bgcolor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : 'rgba(255, 255, 255, 0.92)',
-              backdropFilter: 'blur(14px)',
-              boxShadow: mode === 'dark'
-                ? '0 18px 50px -28px rgba(0, 0, 0, 0.95)'
-                : '0 18px 50px -28px rgba(15, 23, 42, 0.35)',
+              '& .MuiTypography-root': { color: '#f8fafc !important' },
+              '& img': { filter: 'brightness(0) invert(1)' },
+              mb: { xs: 1.5, md: 3 },
             }}
           >
-            <Typography component="p" variant="h5" sx={{ fontWeight: 900, lineHeight: 1.15, mb: 1 }}>
-              Email evidence to governed RFQ
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.55 }}>
-              Capture. Reconcile. Decide. Promote. Every approved line stays traceable to its source.
-            </Typography>
+            <Branding fontSize={28} logoSize={38} />
           </Box>
 
-          <Box sx={{ position: 'absolute', top: 50, left: 50, zIndex: 30 }}>
-            <Branding fontSize={28} />
-          </Box>
-        </VisualArea>
+          <Typography
+            component="h2"
+            sx={{
+              maxWidth: 720,
+              fontFamily: '"Cambay", "Source Sans 3", sans-serif',
+              fontSize: { xs: 29, sm: 48, lg: 56 },
+              fontWeight: 700,
+              lineHeight: 1.08,
+              letterSpacing: '-0.025em',
+              color: '#f8fafc',
+              mb: { xs: .5, md: 3.5 },
+            }}
+          >
+            Every commercial decision, connected to its evidence.
+          </Typography>
 
-        <FormSection as="main" id={MAIN_CONTENT_ID} tabIndex={-1}>
-          <Box sx={{ position: 'absolute', top: 40, right: 40, display: 'flex', gap: 2 }}>
+          <Box sx={{ display: { xs: 'none', lg: 'block' } }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, mb: 2 }}>
+              <Typography sx={{ color: '#9fb0c8', fontSize: 14, letterSpacing: '0.13em', textTransform: 'uppercase' }}>
+                Commercial chain-of-custody command ledger
+              </Typography>
+              <Typography sx={{ flexShrink: 0, color: '#b8c9de', fontSize: 12, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
+                Illustrative record
+              </Typography>
+            </Box>
+            <Box
+              aria-label="Illustrative commercial record"
+              sx={{
+                py: 1.25,
+                borderTop: '1px solid #283b58',
+                display: 'grid',
+                gridTemplateColumns: '1fr 1.3fr .8fr 1.1fr 1fr',
+                gap: 2,
+              }}
+            >
+              {[
+                ['Enquiry ID', 'ENQ-2026-DEMO'],
+                ['Account', 'Northbridge Logistics Ltd'],
+                ['Value (USD)', '128,750.00'],
+                ['Created', '29 Aug 2026 · 09:14'],
+                ['Owner', 'Sarah Mitchell'],
+              ].map(([label, value]) => (
+                <Box key={label}>
+                  <Typography sx={{ color: '#9fb0c8', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</Typography>
+                  <Typography
+                    className="tabular-nums"
+                    sx={{
+                      color: '#f8fafc',
+                      fontSize: 16,
+                      fontWeight: 600,
+                      mt: .5,
+                    }}
+                  >
+                    {value}
+                  </Typography>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+
+          <Typography
+            sx={{
+              display: { xs: 'block', lg: 'none' },
+              color: '#b8c9de',
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '.1em',
+              textAlign: 'center',
+              textTransform: 'uppercase',
+              mb: .5,
+            }}
+          >
+            Illustrative workflow · demonstration only
+          </Typography>
+
+          <Box
+            component="ol"
+            aria-label="Governed commercial stages"
+            sx={{
+              listStyle: 'none',
+              p: 0,
+              m: { xs: 'auto 0 0', lg: '8px 0 0' },
+              display: 'grid',
+              gridTemplateColumns: { xs: 'repeat(3, 1fr)', sm: 'repeat(6, 1fr)' },
+              border: { xs: 0, lg: '1px solid #35506f' },
+              borderBottom: { xs: '1px solid #283b58', lg: '1px solid #35506f' },
+            }}
+          >
+            {evidenceStages.map((stage, index) => (
+              <Box
+                component="li"
+                key={stage.title}
+                sx={{
+                  minWidth: 0,
+                  px: { xs: .5, lg: 1.5 },
+                  py: { xs: .5, lg: 3.75 },
+                  textAlign: 'center',
+                  borderRight: index < evidenceStages.length - 1 ? { xs: 0, lg: '1px solid #35506f' } : 0,
+                  position: 'relative',
+                }}
+              >
+                <Typography sx={{ color: '#f8fafc', fontSize: { xs: 10, sm: 11, lg: 13 }, fontWeight: 400, letterSpacing: '.04em', lineHeight: 1.15, minHeight: { lg: 30 }, maxWidth: { lg: 86 }, mx: 'auto' }}>
+                  {stage.title}
+                </Typography>
+                <Typography className="tabular-nums" sx={{ display: { xs: 'none', sm: 'block' }, color: '#9fb0c8', fontSize: 10, mt: .5 }}>
+                  {stage.date}<br />{stage.time}
+                </Typography>
+                <Box sx={{ display: { xs: 'none', lg: 'flex' }, alignItems: 'center', my: 1, '&::before, &::after': { content: '""', height: 2, flex: 1, background: '#20c7b5' } }}>
+                  <Box sx={{ width: 46, height: 46, mx: -.5, border: '2px solid #20c7b5', borderRadius: '50%', display: 'grid', placeItems: 'center', background: '#08172a' }}>
+                    <CheckIcon aria-hidden="true" sx={{ color: '#f8fafc', fontSize: 23 }} />
+                  </Box>
+                </Box>
+                <CheckIcon aria-hidden="true" sx={{ display: { xs: 'inline-flex', lg: 'none' }, color: '#20c7b5', fontSize: 17, mt: .5 }} />
+              </Box>
+            ))}
+          </Box>
+
+          <Box sx={{ display: { xs: 'none', lg: 'block' }, mt: 0 }}>
+            <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+              <Box component="caption" sx={visuallyHidden}>
+                Illustrative commercial chain-of-custody ledger from captured email through payment.
+              </Box>
+              <Box component="thead" sx={visuallyHidden}>
+                <Box component="tr">
+                  <th id="ledger-attribute" scope="col">Attribute</th>
+                  {evidenceStages.map((stage, index) => (
+                    <th id={`ledger-stage-${index}`} scope="col" key={stage.title}>{stage.title}</th>
+                  ))}
+                </Box>
+              </Box>
+              <Box component="tbody">
+                {ledgerRows.map((row) => {
+                  const rowHeaderId = `ledger-row-${row[0].toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+                  return (
+                    <Box component="tr" key={row[0]}>
+                      {row.map((cell, index) => {
+                        const cellStyle = {
+                          padding: '12px 10px',
+                          border: '1px solid #35506f',
+                          color: index === 0 ? '#b2c4dc' : row[0] === 'Status' || (row[0] === 'Approved lines' && index === row.length - 1) || (row[0] === 'Amount (USD)' && index === row.length - 1) ? '#20c7b5' : '#e1e9f3',
+                          fontSize: 11.5,
+                          fontWeight: index === 0 ? 600 : 400,
+                          textAlign: 'left' as const,
+                          overflowWrap: 'anywhere' as const,
+                        };
+
+                        return index === 0 ? (
+                          <th
+                            scope="row"
+                            id={rowHeaderId}
+                            key={`${row[0]}-${index}`}
+                            style={cellStyle}
+                          >
+                            {cell}
+                          </th>
+                        ) : (
+                          <td
+                            headers={`${rowHeaderId} ledger-stage-${index - 1}`}
+                            key={`${row[0]}-${index}`}
+                            style={cellStyle}
+                          >
+                            {cell}
+                          </td>
+                        );
+                      })}
+                    </Box>
+                  );
+                })}
+              </Box>
+            </Box>
+          </Box>
+
+          <Box
+            sx={{
+              display: { xs: 'none', lg: 'flex' },
+              alignItems: 'center',
+              gap: 1.5,
+              mt: 'auto',
+              px: 2,
+              py: 1.75,
+              border: '1px solid #35506f',
+              borderRadius: '4px',
+              color: '#dce5f0',
+            }}
+          >
+            <IntegrityIcon aria-hidden="true" sx={{ color: '#8fa6c3', fontSize: 38 }} />
+            <Box>
+              <Typography sx={{ fontSize: 12, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>Ledger integrity</Typography>
+              <Typography sx={{ color: '#9fb0c8', fontSize: 12 }}>All events are tamper-evident and time-stamped (UTC).</Typography>
+            </Box>
+            <Typography sx={{ ml: 'auto', color: '#b8c9de', fontSize: 12, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
+              Demonstration only
+            </Typography>
+          </Box>
+        </EvidencePanel>
+
+        <FormSection mode={mode} id={MAIN_CONTENT_ID} tabIndex={-1}>
+          <Box sx={{ position: 'absolute', top: { xs: 14, sm: 24 }, right: { xs: 14, sm: 24 } }}>
             <IconButton
               onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}
               aria-label={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+              sx={{ width: 50, height: 50, border: '1px solid', borderColor: mode === 'dark' ? '#52627a' : '#c7ced8', borderRadius: '7px' }}
             >
               {mode === 'dark' ? <SunIcon /> : <MoonIcon />}
             </IconButton>
           </Box>
 
-          <Box sx={{ maxWidth: 400, width: '100%', mx: 'auto' }}>
-            {/* variant keeps the visual scale; component makes it the page's
-                only <h1> so the document has a heading structure (SC 1.3.1). */}
-            <Typography variant="h3" component="h1" sx={{ fontWeight: 900, mb: 1, letterSpacing: '-0.03em' }}>
-              Welcome back
+          <Box sx={{ maxWidth: 480, width: '100%', mx: 'auto', pt: { xs: 4, sm: 0 } }}>
+            <Typography
+              component="h1"
+              sx={{
+                fontFamily: '"Cambay", "Source Sans 3", sans-serif',
+                fontSize: { xs: 36, md: 56 },
+                fontWeight: 700,
+                lineHeight: 1.1,
+                letterSpacing: '-0.025em',
+                mb: 1.5,
+              }}
+            >
+              Sign in to Nexora
             </Typography>
-            <Typography variant="body1" sx={{ color: 'text.secondary', mb: 6 }}>
-              Enter your operational credentials to continue.
+            <Typography variant="body1" sx={{ color: mode === 'dark' ? '#b7c4d6' : '#526174', mb: { xs: 3, sm: 6 }, lineHeight: 1.55, maxWidth: 440, fontSize: { sm: 18 } }}>
+              Access your procurement and order-to-cash workspace with complete chain-of-custody visibility.
             </Typography>
 
-            {notice && <Alert role="status" severity="info" sx={{ mb: 3, borderRadius: 3 }}>{notice}</Alert>}
-
-            <form onSubmit={handleLogin}>
+            <Box component="form" onSubmit={handleLogin}>
+              {notice && <Alert role="status" severity="info" sx={{ mb: 3, borderRadius: 2 }}>{notice}</Alert>}
               {businessUnitOptions ? (
                 <>
-                  <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>
+                  <Alert severity="info" sx={{ mb: 3, borderRadius: 2 }}>
                     Your account belongs to more than one organization. Pick one to continue.
                   </Alert>
                   <FormControl fullWidth sx={{ mb: 4 }}>
@@ -724,11 +626,12 @@ const LoginPage: React.FC = () => {
                     // validation; autoComplete lets password managers and
                     // browser autofill work (SC 1.3.5 Identify Input Purpose).
                     type="email"
+                    placeholder="you@example.com"
                     autoComplete="username"
                     inputMode="email"
-                    label="Email Address"
+                    label="Email address"
                     variant="outlined"
-                    sx={{ mb: 3, ...errorFieldSx }}
+                    sx={{ mb: 3 }}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
@@ -737,11 +640,12 @@ const LoginPage: React.FC = () => {
                       input: {
                         startAdornment: (
                           <InputAdornment position="start">
-                            <MailIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                            <MailIcon sx={{ color: 'text.secondary' }} />
                           </InputAdornment>
                         ),
                       },
                       htmlInput: {
+                        inputMode: 'email',
                         'aria-invalid': Boolean(error),
                         'aria-describedby': error ? LOGIN_ERROR_ID : undefined,
                       },
@@ -757,7 +661,7 @@ const LoginPage: React.FC = () => {
                     label="Password"
                     type={showPassword ? 'text' : 'password'}
                     variant="outlined"
-                    sx={{ mb: 4, ...errorFieldSx }}
+                    sx={{ mb: 4 }}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
@@ -766,7 +670,7 @@ const LoginPage: React.FC = () => {
                       input: {
                         startAdornment: (
                           <InputAdornment position="start">
-                            <LockIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                            <LockIcon sx={{ color: 'text.secondary' }} />
                           </InputAdornment>
                         ),
                         endAdornment: (
@@ -779,6 +683,7 @@ const LoginPage: React.FC = () => {
                               // which icon is drawn (SC 4.1.2).
                               aria-label={showPassword ? 'Hide password' : 'Show password'}
                               aria-pressed={showPassword}
+                              sx={{ width: 44, height: 44 }}
                             >
                               {showPassword ? <VisibilityOff /> : <Visibility />}
                             </IconButton>
@@ -807,7 +712,7 @@ const LoginPage: React.FC = () => {
                       to="/forgot-password"
                       variant="text"
                       size="small"
-                      sx={{ fontWeight: 700, textTransform: 'none' }}
+                      sx={{ color: mode === 'dark' ? '#79b7ff' : '#075dcc', fontWeight: 600, fontSize: 16, textTransform: 'none' }}
                     >
                       Forgot password?
                     </Button>
@@ -818,7 +723,7 @@ const LoginPage: React.FC = () => {
               {/* id lets the fields point at this message via
                   aria-describedby; role="alert" announces it on failure. */}
               {error && (
-                <Alert id={LOGIN_ERROR_ID} role="alert" severity="error" sx={{ mb: 3, borderRadius: 3 }}>
+                <Alert id={LOGIN_ERROR_ID} role="alert" severity="error" sx={{ mb: 3, borderRadius: 2 }}>
                   {error}
                 </Alert>
               )}
@@ -829,17 +734,26 @@ const LoginPage: React.FC = () => {
                 size="large"
                 type="submit"
                 disabled={loading || (businessUnitOptions !== null && selectedBusinessUnitId === '')}
+                aria-busy={loading}
                 sx={{
-                  py: 2,
+                  minHeight: 61,
+                  py: 1.5,
                   fontSize: 16,
-                  boxShadow: `0 12px 30px -10px ${primaryColor}66`,
-                  '&:hover': { transform: 'translateY(-2px)' },
-                  transition: 'all 0.3s ease',
+                  borderRadius: '8px',
+                  background: '#075dcc',
+                  color: '#ffffff',
+                  boxShadow: '0 10px 24px -16px rgba(9, 105, 232, .8)',
+                  transition: 'background-color 160ms ease-out, box-shadow 160ms ease-out',
+                  '&:hover': { background: '#064da9', boxShadow: '0 12px 26px -16px rgba(9, 105, 232, .9)' },
+                  '@media (min-width: 1101px)': { mt: 4 },
                 }}
               >
-                {loading
-                  ? <CircularProgress size={24} color="inherit" />
-                  : businessUnitOptions ? 'CONTINUE' : 'LOGIN'}
+                {loading ? (
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 1.25 }}>
+                    <CircularProgress size={20} color="inherit" aria-hidden="true" />
+                    Signing in…
+                  </Box>
+                ) : businessUnitOptions ? 'Continue' : 'Sign in'}
               </Button>
 
               {businessUnitOptions && (
@@ -853,31 +767,35 @@ const LoginPage: React.FC = () => {
                   Back to sign in
                 </Button>
               )}
-            </form>
+            </Box>
 
             {!businessUnitOptions && (
               <Box
                 component="aside"
                 aria-label="Platform administration sign-in"
-                sx={{ mt: 3, pt: 2.5, borderTop: '1px solid', borderColor: 'divider', textAlign: 'center' }}
+                sx={{
+                  mt: { xs: 2, sm: 7 },
+                  pt: { xs: 2, sm: 2.5 },
+                  borderTop: '1px solid',
+                  borderColor: 'divider',
+                  textAlign: 'center',
+                }}
               >
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75 }}>
-                  Platform Owners use a separate control-plane account for cross-tenant administration.
-                </Typography>
                 <Button
                   component={Link}
                   to="/platform/tenants"
                   variant="text"
                   size="small"
-                  sx={{ fontWeight: 800, textTransform: 'none' }}
+                  startIcon={<SettingsIcon aria-hidden="true" />}
+                  sx={{ minHeight: 44, color: mode === 'dark' ? '#79b7ff' : '#075dcc', fontSize: 17, fontWeight: 600, textTransform: 'none' }}
                 >
-                  Platform Owner? Manage or delete tenants
+                  Platform administration
                 </Button>
               </Box>
             )}
           </Box>
         </FormSection>
-      </GlassCard>
+      </LoginShell>
     </Container>
   );
 };

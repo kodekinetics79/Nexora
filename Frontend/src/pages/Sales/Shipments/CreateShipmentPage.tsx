@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
+import { isAxiosError } from 'axios';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, TextField, Button, Divider, Table,
   TableHead, TableRow, TableCell, TableBody, MenuItem, Stack,
-  Card, CardContent, CircularProgress, Breadcrumbs, Link, Alert
+  Card, CardContent, CircularProgress, Breadcrumbs, Link, Alert, AlertTitle
 } from '@mui/material';
 import {
   Save as SaveIcon,
@@ -19,6 +20,9 @@ import customerService from '../../../api/services/customerService';
 
 import dayjs from 'dayjs';
 import { formatMoney } from '../../../utils/currency';
+import {
+  operationForShipmentRetry, shipmentHistoryIsVerified, type ShipmentCreationOperation,
+} from './shipmentCreationRecovery';
 
 interface FormState {
   orderId: string;
@@ -47,6 +51,9 @@ const serverMessage = (error: unknown): string | null => {
   return typeof message === 'string' && message.trim() ? message : null;
 };
 
+const resultIsUncertain = (error: unknown) =>
+  !isAxiosError(error) || !error.response || error.response.status >= 500;
+
 const CreateShipmentPage: React.FC = () => {
   const { id: paramId } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -54,6 +61,11 @@ const CreateShipmentPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { userData } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
+  // Kept for this form's whole lifetime: a network retry is the same physical despatch command,
+  // so it must carry the same identity. A changed retry is rejected by the server's request hash.
+  const createIdempotencyKey = React.useRef(`shipment-ui-${globalThis.crypto.randomUUID()}`);
+  const [pendingOperation, setPendingOperation] = useState<ShipmentCreationOperation | null>(null);
+  const [uncertainResult, setUncertainResult] = useState(false);
 
   const isEdit = location.pathname.includes('/edit/');
   const isFromOrder = location.pathname.includes('/from-order/');
@@ -133,11 +145,12 @@ const CreateShipmentPage: React.FC = () => {
   // quantity, not the ordered quantity: three despatches of 50 against an order for 100 each
   // looked legal on their own, and the server (which is the only ceiling that counts) refuses
   // them cumulatively. The screen has to offer the same arithmetic or it invites the refusal.
-  const { data: priorShipments } = useQuery({
+  const priorShipmentsQuery = useQuery({
     queryKey: ['shipments-for-order', form.orderId, businessUnitId],
     queryFn: () => shipmentService.getByOrderId(Number(form.orderId), businessUnitId),
     enabled: !!form.orderId,
   });
+  const priorShipments = priorShipmentsQuery.data;
 
   const shippedByLine = React.useMemo(() => {
     const totals = new Map<number, number>();
@@ -168,7 +181,8 @@ const CreateShipmentPage: React.FC = () => {
         complianceOverrideReason: '',
         items: existingShipment.items,
       });
-    } else if (selectedOrder && !isEdit && form.items.length === 0) {
+    } else if (selectedOrder && !isEdit && form.items.length === 0
+      && priorShipmentsQuery.isSuccess) {
       setForm(prev => ({
         ...prev,
         // Internal order notes are never a consignee address. Use the governed Customer master;
@@ -185,27 +199,44 @@ const CreateShipmentPage: React.FC = () => {
         }))
       }));
     }
-  }, [isEdit, existingShipment, selectedOrder, customerShippingAddress, form.items.length, shippedByLine]);
+  }, [isEdit, existingShipment, selectedOrder, customerShippingAddress, form.items.length,
+    shippedByLine, priorShipmentsQuery.isSuccess]);
 
   const mutation = useMutation({
-    mutationFn: (data: CreateShipmentDTO) => 
-      isEdit ? shipmentService.update(Number(shipmentId), data) : shipmentService.create(data),
+    mutationFn: (operation: ShipmentCreationOperation) =>
+      isEdit ? shipmentService.update(Number(shipmentId), operation.command)
+        : shipmentService.create(operation.command, operation.idempotencyKey),
     onSuccess: () => {
+      setUncertainResult(false);
+      setPendingOperation(null);
       queryClient.invalidateQueries({ queryKey: ['shipments'] });
       navigate('/sales/shipments');
+    },
+    onError: (error) => {
+      if (!isEdit && resultIsUncertain(error)) {
+        setUncertainResult(true);
+        return;
+      }
+      setPendingOperation(null);
+      setUncertainResult(false);
+      createIdempotencyKey.current = `shipment-ui-${globalThis.crypto.randomUUID()}`;
     },
   });
 
   // The refusal is rendered verbatim. Before this, a rejected despatch resolved into a generic
   // failure and the operator was left guessing which of over-shipment, quarantined stock or a
   // lapsed certificate had stopped them — three different problems with three different fixes.
-  const submitError = mutation.isError ? serverMessage(mutation.error) : null;
+  const submitError = mutation.isError
+    ? serverMessage(mutation.error) ?? 'The shipment request could not be completed.'
+    : null;
   const needsComplianceOverride =
     !!submitError && submitError.toLowerCase().includes('expired certificate');
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-    setForm(prev => ({ ...prev, [name]: value }));
+    setForm(prev => name === 'orderId'
+      ? { ...prev, orderId: value, shippingAddress: '', items: [] }
+      : { ...prev, [name]: value });
   };
 
   const handleItemQuantityChange = (index: number, value: number) => {
@@ -217,6 +248,8 @@ const CreateShipmentPage: React.FC = () => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.orderId || !form.statusId) return;
+    if (!shipmentHistoryIsVerified(
+      isEdit, priorShipmentsQuery.isSuccess, priorShipmentsQuery.isFetching)) return;
 
     const payload: CreateShipmentDTO = {
       orderId: Number(form.orderId),
@@ -240,8 +273,15 @@ const CreateShipmentPage: React.FC = () => {
       })),
     };
 
-    mutation.mutate(payload);
+    const operation = operationForShipmentRetry(pendingOperation, {
+      command: payload,
+      idempotencyKey: createIdempotencyKey.current,
+    });
+    setPendingOperation(operation);
+    mutation.mutate(operation);
   };
+
+  const operationLocked = mutation.isPending || uncertainResult;
 
   if (isLoadingShipment || (form.orderId && isLoadingOrder)) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}><CircularProgress /></Box>;
@@ -275,12 +315,16 @@ const CreateShipmentPage: React.FC = () => {
             {isEdit ? `Edit Shipment ${existingShipment?.shipmentNo}` : 'New Logistic Shipment'}
           </Typography>
         </Box>
-        <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate(-1)}>Back</Button>
+        <Button variant="outlined" startIcon={<BackIcon />} disabled={operationLocked}
+          title={operationLocked ? 'Resolve the in-flight shipment command before leaving this page.' : undefined}
+          onClick={() => navigate(-1)}>Back</Button>
       </Stack>
 
       <form onSubmit={handleSubmit}>
         <Grid container spacing={3}>
           <Grid size={{ xs: 12, lg: 8 }}>
+            <Box component="fieldset" disabled={operationLocked}
+              sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}>
             <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 3, color: 'primary.main' }}>SHIPMENT DETAILS</Typography>
               
@@ -452,7 +496,28 @@ const CreateShipmentPage: React.FC = () => {
             </Paper>
 
             {submitError && (
-              <Alert severity="error" sx={{ mt: 3 }}>{submitError}</Alert>
+              <Alert severity={uncertainResult ? 'warning' : 'error'} sx={{ mt: 3 }}>
+                {uncertainResult && <AlertTitle>The result is uncertain</AlertTitle>}
+                {uncertainResult
+                  ? 'The request may already have created this shipment. Keep this page open and retry safely with the same command identity; a duplicate shipment will not be created.'
+                  : submitError}
+              </Alert>
+            )}
+
+            {!isEdit && form.orderId && priorShipmentsQuery.isLoading && (
+              <Alert severity="info" icon={<CircularProgress size={18} />} sx={{ mt: 3 }}>
+                Checking earlier shipments before calculating what remains to despatch…
+              </Alert>
+            )}
+            {!isEdit && form.orderId && priorShipmentsQuery.isError && (
+              <Alert severity="error" sx={{ mt: 3 }} action={
+                <Button color="inherit" size="small" onClick={() => void priorShipmentsQuery.refetch()}>
+                  Retry
+                </Button>
+              }>
+                <AlertTitle>Earlier shipments could not be verified</AlertTitle>
+                Shipment quantities are locked because unknown shipment history must never be treated as zero.
+              </Alert>
             )}
 
             <Paper sx={{ mt: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflow: 'hidden' }}>
@@ -491,10 +556,11 @@ const CreateShipmentPage: React.FC = () => {
                           <TableCell align="right">{alreadyShipped}</TableCell>
                           <TableCell align="right" sx={{ fontWeight: 700 }}>{remaining}</TableCell>
                           <TableCell align="right">
-                            <TextField
+                      <TextField
                               type="number"
                               size="small"
                               value={item.quantity}
+                              disabled={operationLocked || priorShipmentsQuery.isFetching || priorShipmentsQuery.isError}
                               onChange={(e) => handleItemQuantityChange(index, Number(e.target.value))}
                               error={overRemaining}
                               // The ceiling is REMAINING, and it is a real ceiling: the number
@@ -529,6 +595,7 @@ const CreateShipmentPage: React.FC = () => {
                 </TableBody>
               </Table>
             </Paper>
+            </Box>
           </Grid>
 
           <Grid size={{ xs: 12, lg: 4 }}>
@@ -556,14 +623,17 @@ const CreateShipmentPage: React.FC = () => {
                       fullWidth
                       size="large"
                       startIcon={<SaveIcon />}
-                      disabled={mutation.isPending}
+                      disabled={mutation.isPending || !shipmentHistoryIsVerified(
+                        isEdit, priorShipmentsQuery.isSuccess, priorShipmentsQuery.isFetching)}
                       sx={{ py: 1.5, fontWeight: 800 }}
                     >
-                      {mutation.isPending ? 'Saving...' : isEdit ? 'Update Shipment' : 'Create Shipment'}
+                      {mutation.isPending ? 'Saving...' : uncertainResult ? 'Retry safely' : isEdit ? 'Update Shipment' : 'Create Shipment'}
                     </Button>
                     <Button
                       variant="outlined"
                       fullWidth
+                      disabled={operationLocked}
+                      title={operationLocked ? 'Resolve the in-flight shipment command before leaving this page.' : undefined}
                       onClick={() => navigate(-1)}
                     >
                       Cancel

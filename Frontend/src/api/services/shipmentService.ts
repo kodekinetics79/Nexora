@@ -34,6 +34,8 @@ export interface ShipmentDTO {
   trackingNumber?: string;
   externalId?: string;
   shippingCost?: number;
+  /** ISO currency code inherited from the governed source order; absent only on legacy/unassigned orders. */
+  currencyCode?: string;
   labelUrl?: string;
   shippingAddress?: string;
   /**
@@ -94,8 +96,10 @@ const shipmentService = {
     return response.data;
   },
 
-  create: async (data: CreateShipmentDTO) => {
-    const response = await axiosInstance.post<ShipmentDTO>('/api/Shipment', data);
+  create: async (data: CreateShipmentDTO, idempotencyKey: string) => {
+    const response = await axiosInstance.post<ShipmentDTO>('/api/Shipment', data, {
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
     return response.data;
   },
 

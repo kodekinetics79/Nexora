@@ -4,6 +4,7 @@ import { createHmac } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import * as XLSX from 'xlsx';
 import { api, apiUrl, jsonOk, loginAs, loginAsOtherTenant, required, requiredNumber } from './support/core-commercial';
+import { loginThroughUi } from './support/login';
 
 const evidenceRoot = process.env.E2E_EVIDENCE_ROOT
   ? path.resolve(process.env.E2E_EVIDENCE_ROOT)
@@ -38,11 +39,58 @@ const nextTotpAfterFixtureEnrollment = async (page: import('@playwright/test').P
 
 type Workbench = {
   nexoraSerial: string;
-  lines: Array<{ id: number; demandLineId?: number | null; partNumber?: string | null; shortfallQuantity: number }>;
+  lines: Array<{
+    id: number;
+    demandLineId?: number | null;
+    productId?: number | null;
+    partNumber?: string | null;
+    shortfallQuantity: number;
+  }>;
   solicitations: Array<{ id: number; supplierId: number; supplierName: string }>;
   offers: Array<{ id: number; rfqItemId: number; supplierName: string; version: number }>;
-  awards: Array<{ id: number; rfqItemId: number; supplierName: string }>;
+  awards: Array<{
+    id: number;
+    rfqItemId: number;
+    supplierId: number;
+    supplierName: string;
+    currencyId: number;
+    status: string;
+    purchaseOrderId?: number | null;
+    version: number;
+  }>;
+  purchaseOrders: SupplierPurchaseOrder[];
   customerQuoteDraft: { lines: Array<{ quoteItemId: number; rfqItemId: number }> } | null;
+};
+
+type SupplierPurchaseOrder = {
+  id: number;
+  rfqId: number;
+  purchaseOrderNumber: string;
+  supplierId: number;
+  supplierName: string;
+  currencyId: number;
+  status: string;
+  version: number;
+  lines: Array<{
+    id: number;
+    rfqItemId: number;
+    productId: number;
+    orderedQuantity: number;
+    receivedQuantity: number;
+    warehouseId: number;
+  }>;
+};
+
+type InboundShipment = {
+  id: number;
+  purchaseOrderId: number;
+  shipmentNumber: string;
+  trackingReference?: string | null;
+  milestone: string;
+  receiptState: string;
+  receiptedQuantity: number;
+  outstandingReceiptQuantity: number;
+  version: number;
 };
 
 type SourcingCase = {
@@ -74,6 +122,75 @@ type ClientPoMatch = {
     customerOrderNumber?: string | null;
   };
   lines: Array<{ matchStatus: string; differences: string[] }>;
+};
+
+type CustomerOrder = {
+  id: number;
+  orderNo: string;
+  customerId: number;
+  statusId: number;
+  status: string;
+  currencyId?: number | null;
+  commercialCaseId?: number | null;
+  nexoraSerial?: string | null;
+  items: Array<{ id: number; productId: number; warehouseId?: number | null; quantity: number }>;
+};
+
+type InventoryAvailability = {
+  inventoryId: number;
+  productId: number;
+  warehouseId?: number | null;
+  onHand: number;
+  reserved: number;
+  available: number;
+};
+
+type StockReservation = {
+  status: string;
+  demandReference: string;
+  quantity: number;
+};
+
+type Shipment = {
+  id: number;
+  shipmentNo: string;
+  orderId: number;
+  orderNo: string;
+  deliveryStatus: string;
+  items: Array<{ id: number; orderItemId: number; quantity: number }>;
+};
+
+type DeliveryProof = {
+  id: number;
+  shipmentId: number;
+  outcome: string;
+  lines: Array<{ shipmentItemId: number; acceptedQuantity: number; refusedQuantity: number }>;
+};
+
+type ReceivableDocument = {
+  id: number;
+  commercialCaseId?: number | null;
+  customerId: number;
+  orderId?: number | null;
+  currencyId?: number | null;
+  documentNumber?: string | null;
+  status: string;
+  documentDate: string;
+  totalAmount: number;
+  allocatedAmount: number;
+  outstandingAmount: number;
+  version: number;
+};
+
+type CustomerPayment = {
+  id: number;
+  receiptNumber: string;
+  bankReference?: string | null;
+  status: string;
+  amount: number;
+  allocatedAmount: number;
+  unappliedAmount: number;
+  journalEntryId?: number | null;
 };
 
 type ProcurementHandoff = {
@@ -131,6 +248,17 @@ const commandHeaders = (key: string) => ({
   'X-Correlation-ID': key,
 });
 
+async function loginAsFinance(page: Parameters<typeof api>[0]): Promise<string> {
+  await loginThroughUi(page, {
+    email: required('E2E_FINANCE_EMAIL'),
+    password: required('E2E_FINANCE_PASSWORD'),
+    businessUnitId: required('E2E_FINANCE_BUSINESS_UNIT_ID'),
+  });
+  const token = await page.evaluate(() => localStorage.getItem('token'));
+  if (!token) throw new Error('Authenticated finance session did not contain an access token.');
+  return token;
+}
+
 async function getWorkbench(page: Parameters<typeof api>[0], token: string): Promise<Workbench> {
   return jsonOk<Workbench>(await api(page, token, 'get', `/api/procurement/rfqs/${rfqId()}/workbench`));
 }
@@ -146,10 +274,22 @@ async function ensureOutOfStockCase(page: Parameters<typeof api>[0], token: stri
 
 async function captureAndProjectOffers(page: Parameters<typeof api>[0], token: string) {
   const sourcingCase = await ensureOutOfStockCase(page, token);
-  const workbench = await getWorkbench(page, token);
-  expect(workbench.solicitations.length).toBeGreaterThanOrEqual(2);
+  let workbench = await getWorkbench(page, token);
+  const governedSupplierNames = ['Atlas Automation Partners', 'Meridian Process Equipment'];
+  if (workbench.solicitations.filter((item) => governedSupplierNames.includes(item.supplierName)).length < 2) {
+    await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
+    for (const supplierName of governedSupplierNames) {
+      const checkbox = page.getByRole('checkbox', { name: `Select ${supplierName}` });
+      if (!(await checkbox.isChecked())) await checkbox.check();
+    }
+    await page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' }).click();
+    await expect(page.getByRole('heading', { name: 'Approve Supplier RFQ Delivery' })).toBeVisible();
+    await page.getByRole('button', { name: 'Approve and Queue' }).click();
+    await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/sourcing`));
+    workbench = await getWorkbench(page, token);
+  }
   const selected = workbench.solicitations
-    .filter((item) => ['Atlas Automation Partners', 'Meridian Process Equipment'].includes(item.supplierName));
+    .filter((item) => governedSupplierNames.includes(item.supplierName));
   expect(selected).toHaveLength(2);
 
   const prices: Record<string, number> = {
@@ -222,6 +362,30 @@ async function captureAndProjectOffers(page: Parameters<typeof api>[0], token: s
     capturedIds.push(supplierQuoteId);
   }
   return capturedIds;
+}
+
+async function ensureAtlasAward(
+  page: Parameters<typeof api>[0], token: string,
+): Promise<Workbench['awards'][number]> {
+  await captureAndProjectOffers(page, token);
+  let workbench = await getWorkbench(page, token);
+  const line = workbench.lines.find((item) => item.partNumber === required('E2E_CORE_OUT_OF_STOCK_PART'))!;
+  let award = workbench.awards.find((item) => item.rfqItemId === line.id
+    && item.supplierName === 'Atlas Automation Partners');
+  if (!award) {
+    const offer = workbench.offers.find((item) => item.supplierName === 'Atlas Automation Partners')!;
+    await jsonOk(await api(page, token, 'post', '/api/procurement/awards', {
+      supplierQuotedItemId: offer.id,
+      quantity: line.shortfallQuantity,
+      expectedQuoteVersion: offer.version,
+      rationale: 'Best eligible landed cost with shorter verified lead time.',
+    }, commandHeaders('commercial-v2-award-atlas')));
+    workbench = await getWorkbench(page, token);
+    award = workbench.awards.find((item) => item.rfqItemId === line.id
+      && item.supplierName === 'Atlas Automation Partners');
+  }
+  expect(award, 'The Atlas supplier offer must become the governed sourcing award.').toBeTruthy();
+  return award!;
 }
 
 async function ensureClientPoAcceptance(
@@ -1127,6 +1291,523 @@ test('39 platform owner console uses authenticated persisted operational data', 
   expect(failures).toEqual([
     expect.stringMatching(/^409 .*\/api\/platform\/tenants\/1\/resume$/),
   ]);
+});
+
+test('40 accepted shipment closes order to cash with replay safety', async ({ page }) => {
+  let token = await loginAs(page, 'manager');
+  const match = await ensureClientPoAcceptance(page, token, 'exact');
+  expect(match.header.customerOrderId).toBeTruthy();
+  const orderId = match.header.customerOrderId!;
+  const order = await jsonOk<CustomerOrder>(await api(page, token, 'get', `/api/Order/${orderId}`));
+  expect(order.items).toHaveLength(1);
+  expect(order.nexoraSerial).toBe(required('E2E_V2_CLIENT_PO_EXACT_NEXORA_SERIAL'));
+
+  const allocation = await jsonOk<{ orderId: number; fullyAllocated: boolean }>(
+    await api(page, token, 'post', `/api/Order/${orderId}/allocate`),
+  );
+  expect(allocation.orderId).toBe(orderId);
+  expect(allocation.fullyAllocated).toBe(true);
+
+  const shipments = await jsonOk<Shipment[]>(await api(page, token, 'get', '/api/Shipment'));
+  let shipment = shipments.find((item) => item.orderId === orderId);
+  const availabilityBeforeShipment = shipment ? null : await jsonOk<InventoryAvailability[]>(
+    await api(page, token, 'get', '/api/inventory-intelligence/availability'),
+  );
+  if (!shipment) {
+    shipment = await jsonOk<Shipment>(await api(page, token, 'post', '/api/Shipment', {
+      orderId,
+      businessUnitId: requiredNumber('E2E_MANAGER_BUSINESS_UNIT_ID'),
+      statusId: requiredNumber('E2E_V2_SHIPMENT_STATUS_ID'),
+      shipmentDate: new Date().toISOString(),
+      estimatedDeliveryDate: new Date(Date.now() + 86_400_000).toISOString(),
+      carrier: 'Nexora Acceptance Carrier',
+      serviceLevel: 'Controlled acceptance',
+      trackingNumber: 'V2-OTC-TRACK-001',
+      externalId: 'commercial-v2-order-to-cash-shipment',
+      shippingAddress: 'ABC Engineering acceptance dock',
+      notes: 'Controlled order-to-cash acceptance shipment.',
+      items: order.items.map((item) => ({ orderItemId: item.id, quantity: item.quantity })),
+    }));
+  }
+  expect(shipment.items).toHaveLength(order.items.length);
+  expect(shipment.deliveryStatus).toBe('DISPATCHED');
+
+  const consumedReservations = await jsonOk<StockReservation[]>(
+    await api(page, token, 'get', '/api/inventory-intelligence/reservations?status=Consumed'),
+  );
+  expect(consumedReservations.some((item) => item.demandReference === `Order ${orderId}`
+    && item.quantity === order.items[0].quantity)).toBe(true);
+  const reconciliation = await jsonOk<{ balanced: boolean; driftCount: number }>(
+    await api(page, token, 'get', '/api/inventory-intelligence/stock/reconciliation?driftOnly=true'),
+  );
+  expect(reconciliation).toEqual(expect.objectContaining({ balanced: true, driftCount: 0 }));
+  if (availabilityBeforeShipment) {
+    const availabilityAfterShipment = await jsonOk<InventoryAvailability[]>(
+      await api(page, token, 'get', '/api/inventory-intelligence/availability'),
+    );
+    for (const item of order.items) {
+      const before = availabilityBeforeShipment.find((row) => row.productId === item.productId
+        && (!item.warehouseId || row.warehouseId === item.warehouseId));
+      const after = availabilityAfterShipment.find((row) => row.inventoryId === before?.inventoryId);
+      expect(before, `Order line ${item.id} must resolve to authoritative stock.`).toBeTruthy();
+      expect(after?.onHand).toBe(before!.onHand - item.quantity);
+      expect(after?.reserved).toBe(before!.reserved - item.quantity);
+    }
+  }
+
+  const duplicateShipment = await api(page, token, 'post', '/api/Shipment', {
+    orderId,
+    businessUnitId: requiredNumber('E2E_MANAGER_BUSINESS_UNIT_ID'),
+    statusId: requiredNumber('E2E_V2_SHIPMENT_STATUS_ID'),
+    shipmentDate: new Date().toISOString(),
+    carrier: 'Nexora Acceptance Carrier',
+    externalId: 'commercial-v2-order-to-cash-shipment-replay',
+    shippingAddress: 'ABC Engineering acceptance dock',
+    items: order.items.map((item) => ({ orderItemId: item.id, quantity: item.quantity })),
+  });
+  expect(duplicateShipment.status()).toBe(409);
+  const shipmentReplayCheck = await jsonOk<Shipment[]>(await api(page, token, 'get', '/api/Shipment'));
+  expect(shipmentReplayCheck.filter((item) => item.orderId === orderId)).toHaveLength(1);
+
+  const confirmationPath = `/api/delivery/shipments/${shipment.id}/confirmation`;
+  const currentConfirmation = await api(page, token, 'get', confirmationPath);
+  let confirmation: DeliveryProof;
+  if (currentConfirmation.status() === 404) {
+    const confirmationCommand = {
+      receivedByName: 'Amira Cole',
+      receivedByContact: 'procurement@abc-engineering.local',
+      receivedByPosition: 'Acceptance Receiving',
+      receivedOn: new Date().toISOString(),
+      signatureEvidenceId: null,
+      stampEvidenceId: null,
+      photoEvidenceId: null,
+      gpsLatitude: null,
+      gpsLongitude: null,
+      gpsAccuracyMeters: null,
+      gpsCapturedOn: null,
+      notes: 'Controlled order-to-cash acceptance proof.',
+      lines: shipment.items.map((item) => ({
+        shipmentItemId: item.id,
+        acceptedQuantity: item.quantity,
+        exceptionReasonCode: null,
+        exceptionNote: null,
+        notes: 'Accepted in full.',
+      })),
+    };
+    confirmation = await jsonOk<DeliveryProof>(await api(
+      page, token, 'post', confirmationPath, confirmationCommand,
+      commandHeaders('commercial-v2-delivery-confirmation'),
+    ));
+    const confirmationReplay = await jsonOk<DeliveryProof>(await api(
+      page, token, 'post', confirmationPath, confirmationCommand,
+      commandHeaders('commercial-v2-delivery-confirmation'),
+    ));
+    expect(confirmationReplay.id).toBe(confirmation.id);
+  } else {
+    confirmation = await jsonOk<DeliveryProof>(currentConfirmation);
+  }
+  expect(confirmation.shipmentId).toBe(shipment.id);
+  expect(confirmation.outcome).toBe('DELIVERED');
+  expect(confirmation.lines.every((line) => line.refusedQuantity === 0)).toBe(true);
+  shipment = await jsonOk<Shipment>(await api(page, token, 'get', `/api/Shipment/${shipment.id}`));
+  expect(shipment.deliveryStatus).toBe('DELIVERED');
+  const deliveredOrder = await jsonOk<CustomerOrder>(await api(page, token, 'get', `/api/Order/${orderId}`));
+  expect(deliveredOrder.status.toUpperCase()).toBe('DELIVERED');
+
+  await page.goto(`/sales/shipments/${shipment.id}`);
+  await expect(page.getByRole('heading', { name: `Shipment ${shipment.shipmentNo}` })).toBeVisible();
+  await expect(page.getByText('Delivered', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(order.orderNo, { exact: true })).toBeVisible();
+
+  const documentsPath = `/api/commercial-finance/documents?customerId=${order.customerId}`;
+  expect((await api(page, token, 'get', documentsPath)).status()).toBe(200);
+  expect((await api(page, token, 'get', `/api/commercial-finance/payments?customerId=${order.customerId}`)).status()).toBe(403);
+  expect((await api(page, token, 'post', '/api/commercial-finance/payments', {
+    customerId: order.customerId,
+    commercialCaseId: order.commercialCaseId ?? null,
+    currencyId: order.currencyId ?? null,
+    paymentDate: '2026-08-29T00:00:00.000Z',
+    amount: 1,
+    method: 'BankTransfer',
+    bankAccountId: requiredNumber('E2E_V2_BANK_ACCOUNT_ID'),
+    bankReference: 'MANAGER-MUST-NOT-POST-CASH',
+    allocations: [],
+  }, commandHeaders('commercial-v2-sales-manager-payment-denied'))).status()).toBe(403);
+  expect((await api(
+    page, token, 'post', `/api/commercial-finance/orders/${orderId}/invoices`, {
+      documentDate: null,
+      dueDate: null,
+      lines: order.items.map((item) => ({ orderItemId: item.id, quantity: item.quantity })),
+    }, commandHeaders('commercial-v2-sales-manager-invoice-denied'),
+  )).status()).toBe(403);
+
+  token = await loginAsFinance(page);
+  let documents = await jsonOk<ReceivableDocument[]>(await api(page, token, 'get', documentsPath));
+  let invoice = documents.find((item) => item.orderId === orderId);
+  if (!invoice) {
+    const invoiceCommand = {
+      documentDate: null,
+      dueDate: null,
+      lines: order.items.map((item) => ({ orderItemId: item.id, quantity: item.quantity })),
+    };
+    invoice = await jsonOk<ReceivableDocument>(await api(
+      page, token, 'post', `/api/commercial-finance/orders/${orderId}/invoices`, invoiceCommand,
+      commandHeaders('commercial-v2-order-invoice'),
+    ));
+    const invoiceReplay = await jsonOk<ReceivableDocument>(await api(
+      page, token, 'post', `/api/commercial-finance/orders/${orderId}/invoices`, invoiceCommand,
+      commandHeaders('commercial-v2-order-invoice'),
+    ));
+    expect(invoiceReplay.id).toBe(invoice.id);
+  }
+  if (invoice.status === 'Draft') {
+    invoice = await jsonOk<ReceivableDocument>(await api(
+      page, token, 'post', `/api/commercial-finance/documents/${invoice.id}/issue`,
+      { expectedVersion: invoice.version },
+    ));
+  }
+  expect(invoice.status).toBe('Issued');
+  expect(invoice.totalAmount).toBeGreaterThan(0);
+
+  const paymentCommand = {
+    customerId: order.customerId,
+    commercialCaseId: order.commercialCaseId ?? null,
+    currencyId: order.currencyId ?? null,
+    // Stable across a Playwright retry or a retained-database rerun: an idempotency key must
+    // describe one immutable command, not the wall clock of whichever retry happened to run.
+    paymentDate: invoice.documentDate,
+    amount: invoice.totalAmount,
+    method: 'BankTransfer',
+    bankAccountId: requiredNumber('E2E_V2_BANK_ACCOUNT_ID'),
+    bankReference: 'COMMERCIAL-V2-CASH-001',
+    allocations: [{ receivableDocumentId: invoice.id, amount: invoice.totalAmount }],
+  };
+  const payment = await jsonOk<CustomerPayment>(await api(
+    page, token, 'post', '/api/commercial-finance/payments', paymentCommand,
+    commandHeaders('commercial-v2-customer-payment'),
+  ));
+  const paymentReplay = await jsonOk<CustomerPayment>(await api(
+    page, token, 'post', '/api/commercial-finance/payments', paymentCommand,
+    commandHeaders('commercial-v2-customer-payment'),
+  ));
+  expect(paymentReplay.id).toBe(payment.id);
+  expect(payment.status).toBe('Posted');
+  expect(payment.allocatedAmount).toBe(payment.amount);
+  expect(payment.unappliedAmount).toBe(0);
+  expect(payment.journalEntryId).toBeGreaterThan(0);
+
+  invoice = await jsonOk<ReceivableDocument>(await api(
+    page, token, 'get', `/api/commercial-finance/documents/${invoice.id}`,
+  ));
+  expect(invoice.outstandingAmount).toBe(0);
+  documents = await jsonOk<ReceivableDocument[]>(await api(page, token, 'get', documentsPath));
+  expect(documents.filter((item) => item.orderId === orderId)).toHaveLength(1);
+  const openItems = await jsonOk<Array<{ documentId: number }>>(
+    await api(page, token, 'get', '/api/commercial-finance/ar/open-items'),
+  );
+  expect(openItems.some((item) => item.documentId === invoice.id)).toBe(false);
+  const payments = await jsonOk<CustomerPayment[]>(await api(
+    page, token, 'get', `/api/commercial-finance/payments?customerId=${order.customerId}`,
+  ));
+  expect(payments.filter((item) => item.id === payment.id)).toHaveLength(1);
+
+  await page.goto(`/sales/finance?documentId=${invoice.id}`);
+  await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible();
+  await expect(page.getByText(invoice.documentNumber!, { exact: true })).toBeVisible();
+  const invoiceRow = page.getByRole('row').filter({ hasText: invoice.documentNumber! });
+  await expect(invoiceRow).toContainText('0.00');
+  await page.getByRole('tab', { name: /Payments/ }).click();
+  const paymentRow = page.getByRole('row').filter({ hasText: payment.receiptNumber });
+  await expect(paymentRow).toContainText('Posted');
+  await expect(paymentRow).toContainText('0.00');
+  await fs.mkdir(evidenceDir, { recursive: true });
+  await page.screenshot({ path: path.join(evidenceDir, 'order-to-cash-settled.png'), fullPage: true });
+});
+
+test('41 sourced demand crosses supplier PO, inbound receipt, inventory, delivery, and cash', async ({ page }) => {
+  let token = await loginAs(page, 'manager');
+  const award = await ensureAtlasAward(page, token);
+  let workbench = await getWorkbench(page, token);
+  const sourcedLine = workbench.lines.find((item) => item.partNumber === required('E2E_CORE_OUT_OF_STOCK_PART'))!;
+  expect(sourcedLine.productId, 'The sourced demand line must retain its authoritative product identity.').toBeTruthy();
+  expect(award?.status).toMatch(/APPROVED/);
+
+  let supplierPo = workbench.purchaseOrders.find((item) => item.id === award.purchaseOrderId);
+  if (!supplierPo) {
+    const created = await jsonOk<{ id: number }>(await api(page, token, 'post', '/api/procurement/purchase-orders', {
+      rfqId: rfqId(),
+      supplierId: award.supplierId,
+      currencyId: award.currencyId,
+      warehouseId: requiredNumber('E2E_CORE_PRIMARY_WAREHOUSE_ID'),
+      expectedOn: '2099-12-31',
+      awardIds: [award.id],
+      incoterm: 'DAP',
+      portOfLoading: 'Supplier dock',
+      portOfDischarge: 'Acceptance warehouse',
+    }, commandHeaders('commercial-v2-sourced-supplier-po')));
+    workbench = await getWorkbench(page, token);
+    supplierPo = workbench.purchaseOrders.find((item) => item.id === created.id);
+  }
+  expect(supplierPo, 'The approved sourcing award must produce one governed Supplier PO.').toBeTruthy();
+
+  if (supplierPo!.status === 'DRAFT') {
+    // The sourcing award was approved by the manager. A distinct authorized editor approves the
+    // Supplier PO so the acceptance journey proves segregation of duties rather than bypassing it.
+    token = await loginAs(page, 'editor');
+    await jsonOk(await api(page, token, 'post', `/api/procurement/purchase-orders/${supplierPo!.id}/approve`, {
+      expectedVersion: supplierPo!.version,
+    }, commandHeaders('commercial-v2-sourced-supplier-po-approval')));
+    token = await loginAs(page, 'manager');
+    supplierPo = (await getWorkbench(page, token)).purchaseOrders.find((item) => item.id === supplierPo!.id)!;
+  }
+
+  const poSummary = (await jsonOk<Array<{ id: number; nexoraSerial?: string | null }>>(await api(
+    page, token, 'get', `/api/procurement/purchase-orders?search=${supplierPo!.purchaseOrderNumber}&limit=10`,
+  ))).find((item) => item.id === supplierPo!.id)!;
+  expect(poSummary.nexoraSerial).toBe(required('E2E_CORE_NEXORA_SERIAL'));
+  expect(supplierPo!.lines).toContainEqual(expect.objectContaining({
+    rfqItemId: sourcedLine.id,
+    productId: sourcedLine.productId,
+  }));
+  // Captured when the event actually occurs. Adding an artificial second to CreatedOn can put the
+  // evidence in the future on a fast run, which the domain correctly rejects.
+  const supplierDispatchTime = new Date().toISOString();
+  if (supplierPo!.status === 'APPROVED') {
+    await jsonOk(await api(page, token, 'post', `/api/procurement/purchase-orders/${supplierPo!.id}/issue`, {
+      expectedVersion: supplierPo!.version,
+      deliveryEvidenceReference: 'provider-receipt:commercial-v2-supplier-po-controlled-release',
+      deliveryEvidenceSha256: '8'.repeat(64),
+      deliveredOn: supplierDispatchTime,
+    }, commandHeaders('commercial-v2-sourced-supplier-po-issue')));
+    supplierPo = (await getWorkbench(page, token)).purchaseOrders.find((item) => item.id === supplierPo!.id)!;
+  }
+  expect(supplierPo!.status).toMatch(/SENT|ISSUED|ACKNOWLEDGED|IN_PRODUCTION|SHIPPED|PARTIALLY_RECEIVED|RECEIVED/);
+
+  let inbound = (await jsonOk<InboundShipment[]>(await api(
+    page, token, 'get', `/api/inbound-shipments/purchase-orders/${supplierPo!.id}`,
+  ))).find((item) => item.trackingReference === 'V2-INBOUND-SOURCED-001');
+  if (!inbound) {
+    const inboundCommand = {
+      purchaseOrderId: supplierPo!.id,
+      lines: supplierPo!.lines.map((line) => ({
+        purchaseOrderLineId: line.id,
+        quantity: line.orderedQuantity - line.receivedQuantity,
+      })),
+      carrierName: 'Nexora Acceptance Inbound',
+      trackingReference: 'V2-INBOUND-SOURCED-001',
+      etaDate: '2099-12-30',
+      readyAtFactoryOn: new Date().toISOString().slice(0, 10),
+    };
+    inbound = await jsonOk<InboundShipment>(await api(page, token, 'post', '/api/inbound-shipments', inboundCommand,
+      commandHeaders('commercial-v2-sourced-inbound-shipment')));
+    const inboundReplay = await jsonOk<InboundShipment>(await api(
+      page, token, 'post', '/api/inbound-shipments', inboundCommand,
+      commandHeaders('commercial-v2-sourced-inbound-shipment'),
+    ));
+    expect(inboundReplay.id).toBe(inbound.id);
+  }
+
+  const availabilityBeforeReceipt = supplierPo!.status === 'RECEIVED' ? null : await jsonOk<InventoryAvailability[]>(
+    await api(page, token, 'get', '/api/inventory-intelligence/availability'),
+  );
+  if (supplierPo!.status !== 'RECEIVED') {
+    supplierPo = (await getWorkbench(page, token)).purchaseOrders.find((item) => item.id === supplierPo!.id)!;
+    const receiptCommand = {
+      purchaseOrderId: supplierPo!.id,
+      warehouseId: supplierPo!.lines[0].warehouseId,
+      receiptNumber: 'V2-GR-SOURCED-001',
+      receivedOn: new Date().toISOString(),
+      expectedPurchaseOrderVersion: supplierPo!.version,
+      lines: supplierPo!.lines.map((line) => ({
+        purchaseOrderLineId: line.id,
+        quantity: line.orderedQuantity - line.receivedQuantity,
+      })),
+    };
+    const receipt = await jsonOk<{ id: number; purchaseOrderStatus: string; replayed: boolean }>(await api(
+      page, token, 'post', '/api/procurement/goods-receipts', receiptCommand,
+      commandHeaders('commercial-v2-sourced-goods-receipt'),
+    ));
+    expect(receipt.purchaseOrderStatus).toBe('RECEIVED');
+    const receiptReplay = await jsonOk<{ id: number; replayed: boolean }>(await api(
+      page, token, 'post', '/api/procurement/goods-receipts', receiptCommand,
+      commandHeaders('commercial-v2-sourced-goods-receipt'),
+    ));
+    expect(receiptReplay.id).toBe(receipt.id);
+    expect(receiptReplay.replayed).toBe(true);
+  }
+  inbound = (await jsonOk<InboundShipment[]>(await api(
+    page, token, 'get', `/api/inbound-shipments/purchase-orders/${supplierPo!.id}`,
+  ))).find((item) => item.id === inbound.id)!;
+  expect(inbound.milestone).toBe('RECEIVED_AT_WAREHOUSE');
+  expect(inbound.receiptState).toBe('RECEIPTED');
+  expect(inbound.outstandingReceiptQuantity).toBe(0);
+  const availabilityAfterReceipt = await jsonOk<InventoryAvailability[]>(
+    await api(page, token, 'get', '/api/inventory-intelligence/availability'),
+  );
+  const receivedInventory = availabilityAfterReceipt.find((row) => row.productId === supplierPo!.lines[0].productId
+    && row.warehouseId === supplierPo!.lines[0].warehouseId);
+  expect(receivedInventory, 'Goods receipt must materialize in authoritative inventory.').toBeTruthy();
+  if (availabilityBeforeReceipt) {
+    const before = availabilityBeforeReceipt.find((row) => row.inventoryId === receivedInventory!.inventoryId);
+    expect(receivedInventory!.onHand).toBe((before?.onHand ?? 0) + supplierPo!.lines[0].orderedQuantity);
+  }
+
+  const orders = await jsonOk<CustomerOrder[]>(await api(page, token, 'get', '/api/Order'));
+  const sourcedOrderLineId = requiredNumber('E2E_V2_SOURCED_CUSTOMER_ORDER_LINE_ID');
+  const sourcedOrder = orders.find((item) => item.items.some((line) => line.id === sourcedOrderLineId))!;
+  expect(sourcedOrder?.commercialCaseId).toBeTruthy();
+  expect(sourcedOrder.nexoraSerial).toBe(required('E2E_CORE_NEXORA_SERIAL'));
+  expect(sourcedOrder.items.find((item) => item.id === sourcedOrderLineId)?.productId)
+    .toBe(supplierPo!.lines[0].productId);
+  const allocation = await jsonOk<{ fullyAllocated: boolean }>(await api(
+    page, token, 'post', `/api/Order/${sourcedOrder.id}/allocate`,
+  ));
+  expect(allocation.fullyAllocated).toBe(true);
+
+  let outbound = (await jsonOk<Shipment[]>(await api(page, token, 'get', '/api/Shipment')))
+    .find((item) => item.orderId === sourcedOrder.id);
+  const outboundAlreadyExisted = Boolean(outbound);
+  if (!outbound) {
+    const outboundCommand = {
+      orderId: sourcedOrder.id,
+      businessUnitId: requiredNumber('E2E_MANAGER_BUSINESS_UNIT_ID'),
+      statusId: requiredNumber('E2E_V2_SHIPMENT_STATUS_ID'),
+      shipmentDate: new Date().toISOString(),
+      carrier: 'Nexora Acceptance Outbound',
+      trackingNumber: 'V2-OUTBOUND-SOURCED-001',
+      externalId: 'commercial-v2-sourced-outbound-shipment',
+      shippingAddress: 'ABC Engineering acceptance dock',
+      items: sourcedOrder.items.map((item) => ({ orderItemId: item.id, quantity: item.quantity })),
+    };
+    outbound = await jsonOk<Shipment>(await api(page, token, 'post', '/api/Shipment', outboundCommand,
+      commandHeaders('commercial-v2-sourced-outbound-shipment')));
+    const outboundReplay = await jsonOk<Shipment>(await api(
+      page, token, 'post', '/api/Shipment', outboundCommand,
+      commandHeaders('commercial-v2-sourced-outbound-shipment'),
+    ));
+    expect(outboundReplay.id).toBe(outbound.id);
+  }
+  const availabilityAfterDespatch = await jsonOk<InventoryAvailability[]>(
+    await api(page, token, 'get', '/api/inventory-intelligence/availability'),
+  );
+  const despatchedInventory = availabilityAfterDespatch.find((row) => row.inventoryId === receivedInventory!.inventoryId);
+  if (!outboundAlreadyExisted) {
+    expect(despatchedInventory?.onHand).toBe(receivedInventory!.onHand - sourcedOrder.items[0].quantity);
+  }
+  const consumed = await jsonOk<StockReservation[]>(await api(
+    page, token, 'get', '/api/inventory-intelligence/reservations?status=Consumed',
+  ));
+  expect(consumed.some((item) => item.demandReference === `Order ${sourcedOrder.id}`
+    && item.quantity === sourcedOrder.items[0].quantity)).toBe(true);
+  expect(await jsonOk(await api(
+    page, token, 'get', '/api/inventory-intelligence/stock/reconciliation?driftOnly=true',
+  ))).toEqual(expect.objectContaining({ balanced: true, driftCount: 0 }));
+  const podCommand = {
+    receivedByName: 'Amira Cole',
+    receivedByContact: 'procurement@abc-engineering.local',
+    receivedByPosition: 'Acceptance Receiving',
+    receivedOn: new Date().toISOString(),
+    notes: 'Sourced material accepted in full.',
+    lines: outbound.items.map((item) => ({ shipmentItemId: item.id, acceptedQuantity: item.quantity,
+      exceptionReasonCode: null, exceptionNote: null, notes: 'Accepted in full.' })),
+  };
+  const existingPod = await api(page, token, 'get', `/api/delivery/shipments/${outbound.id}/confirmation`);
+  if (existingPod.status() === 404) {
+    const pod = await jsonOk<DeliveryProof>(await api(
+      page, token, 'post', `/api/delivery/shipments/${outbound.id}/confirmation`, podCommand,
+      commandHeaders('commercial-v2-sourced-pod')));
+    const podReplay = await jsonOk<DeliveryProof>(await api(
+      page, token, 'post', `/api/delivery/shipments/${outbound.id}/confirmation`, podCommand,
+      commandHeaders('commercial-v2-sourced-pod')));
+    expect(podReplay.id).toBe(pod.id);
+  }
+  expect((await jsonOk<CustomerOrder>(await api(page, token, 'get', `/api/Order/${sourcedOrder.id}`)))
+    .status.toUpperCase()).toBe('DELIVERED');
+
+  token = await loginAsFinance(page);
+  const documentPath = `/api/commercial-finance/documents?customerId=${sourcedOrder.customerId}`;
+  let invoice = (await jsonOk<ReceivableDocument[]>(await api(page, token, 'get', documentPath)))
+    .find((item) => item.orderId === sourcedOrder.id);
+  if (!invoice) {
+    const invoiceCommand = {
+        documentDate: supplierDispatchTime,
+        dueDate: '2099-12-31T00:00:00.000Z',
+        lines: sourcedOrder.items.map((item) => ({ orderItemId: item.id, quantity: item.quantity })),
+    };
+    invoice = await jsonOk<ReceivableDocument>(await api(
+      page, token, 'post', `/api/commercial-finance/orders/${sourcedOrder.id}/invoices`, invoiceCommand,
+      commandHeaders('commercial-v2-sourced-invoice'),
+    ));
+    const invoiceReplay = await jsonOk<ReceivableDocument>(await api(
+      page, token, 'post', `/api/commercial-finance/orders/${sourcedOrder.id}/invoices`, invoiceCommand,
+      commandHeaders('commercial-v2-sourced-invoice'),
+    ));
+    expect(invoiceReplay.id).toBe(invoice.id);
+  }
+  if (invoice.status === 'Draft') {
+    invoice = await jsonOk<ReceivableDocument>(await api(
+      page, token, 'post', `/api/commercial-finance/documents/${invoice.id}/issue`, { expectedVersion: invoice.version },
+    ));
+  }
+  let payment: CustomerPayment;
+  if (invoice.outstandingAmount > 0) {
+    // Exercise the same governed cash-capture workbench a finance user sees in a pilot. Test 40
+    // proves the underlying keyed replay; this verifies bank-account selection and allocation are
+    // actually wired through the client journey rather than only callable by an API test.
+    await page.goto(`/sales/finance?documentId=${invoice.id}`);
+    await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible();
+    await page.getByRole('button', { name: `Record payment for ${invoice.documentNumber}` }).click();
+    const paymentDialog = page.getByRole('dialog', { name: 'Record payment' });
+    await expect(paymentDialog.getByRole('combobox', { name: 'Deposit bank account' })).toHaveText(/Acceptance operating bank/);
+    await paymentDialog.getByLabel('Bank reference').fill('COMMERCIAL-V2-SOURCED-CASH-001');
+    const posted = page.waitForResponse((response) => response.request().method() === 'POST'
+      && response.url().endsWith('/api/commercial-finance/payments'));
+    await paymentDialog.getByRole('button', { name: 'Post payment' }).click();
+    const paymentResponse = await posted;
+    const paymentRequest = paymentResponse.request();
+    expect(paymentRequest.postDataJSON()).toEqual(expect.objectContaining({
+      bankAccountId: requiredNumber('E2E_V2_BANK_ACCOUNT_ID'),
+      bankReference: 'COMMERCIAL-V2-SOURCED-CASH-001',
+      allocations: [{ receivableDocumentId: invoice.id, amount: invoice.outstandingAmount }],
+    }));
+    expect(paymentRequest.headers()['idempotency-key']).toBeTruthy();
+    payment = await jsonOk<CustomerPayment>(paymentResponse);
+    await expect(page.getByText('Payment posted and allocated')).toBeVisible();
+  } else {
+    const priorPayments = await jsonOk<CustomerPayment[]>(await api(
+      page, token, 'get', `/api/commercial-finance/payments?customerId=${sourcedOrder.customerId}`,
+    ));
+    payment = priorPayments.find((item) => item.bankReference === 'COMMERCIAL-V2-SOURCED-CASH-001')!;
+    expect(payment, 'A settled retained run must retain its governed cash receipt.').toBeTruthy();
+  }
+  expect(payment.journalEntryId).toBeGreaterThan(0);
+  invoice = await jsonOk<ReceivableDocument>(await api(
+    page, token, 'get', `/api/commercial-finance/documents/${invoice.id}`,
+  ));
+  expect(invoice.outstandingAmount).toBe(0);
+
+  // Respect persona boundaries in the visible evidence: finance owns cash, while the manager
+  // has the shipment/supplier visibility required to inspect physical fulfilment.
+  token = await loginAs(page, 'manager');
+  await page.goto('/suppliers/purchase-orders');
+  const supplierPoRow = page.getByRole('row').filter({ hasText: supplierPo!.purchaseOrderNumber });
+  await expect(supplierPoRow).toBeVisible();
+  await expect(supplierPoRow.getByText('RECEIVED', { exact: true })).toBeVisible();
+  await page.goto(`/sales/shipments/${outbound.id}`);
+  await expect(page.getByText('Delivered', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('PROOF OF DELIVERY', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Received by/)).toContainText('Amira Cole');
+  token = await loginAsFinance(page);
+  await page.goto(`/sales/finance?documentId=${invoice.id}`);
+  const invoiceRow = page.getByRole('row').filter({ hasText: invoice.documentNumber! });
+  await expect(invoiceRow).toBeVisible();
+  await expect(invoiceRow).toContainText('0.00');
+  await page.getByRole('tab', { name: /Payments/ }).click();
+  const paymentRow = page.getByRole('row').filter({ hasText: payment.receiptNumber });
+  await expect(paymentRow).toContainText('Posted');
+  await expect(paymentRow).toContainText('0.00');
+  await fs.mkdir(evidenceDir, { recursive: true });
+  await page.screenshot({ path: path.join(evidenceDir, 'sourced-order-to-cash-settled.png'), fullPage: true });
 });
 
 test.afterEach(({ page }, testInfo) => {

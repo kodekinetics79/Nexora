@@ -13,9 +13,9 @@ export async function loginThroughUi(page: Page, credentials: LoginCredentials):
   // accessible name + role instead (getByLabel with exact:true would miss the
   // input, whose <label> text carries MUI's required asterisk).
   await page.getByRole('textbox', { name: 'Password', exact: true }).fill(credentials.password);
-  await page.getByRole('button', { name: 'LOGIN' }).click();
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
-  const continueButton = page.getByRole('button', { name: 'CONTINUE' });
+  const continueButton = page.getByRole('button', { name: 'Continue', exact: true });
   if (await continueButton.isVisible({ timeout: 2_000 }).catch(() => false)) {
     if (!credentials.businessUnitId) {
       throw new Error('Login requires an organization selection; provide the matching *_BUSINESS_UNIT_ID variable.');

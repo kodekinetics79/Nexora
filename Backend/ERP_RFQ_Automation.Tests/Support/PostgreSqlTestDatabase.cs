@@ -1,7 +1,10 @@
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Npgsql;
+using System.Security.Claims;
 using Testcontainers.PostgreSql;
 
 namespace ERP_RFQ_Automation.Tests.Support;
@@ -18,6 +21,8 @@ public sealed class PostgreSqlIntegrationCollection : ICollectionFixture<Postgre
 /// </summary>
 public sealed class PostgreSqlTestDatabase : IAsyncLifetime
 {
+    public const string AuditActorSecret = "postgres-audit-actor-secret-at-least-32-bytes";
+
     private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:16-alpine")
         .WithDatabase("nexora_tests")
         .WithUsername("nexora")
@@ -47,6 +52,12 @@ public sealed class PostgreSqlTestDatabase : IAsyncLifetime
 
         await using var context = ContextFor(null);
         await context.Database.MigrateAsync();
+        await context.Database.ExecuteSqlRawAsync("""
+            INSERT INTO public."FinanceProviderSecrets" ("Name", "Secret", "UpdatedOn")
+            VALUES ('AuditActor', {0}, now())
+            ON CONFLICT ("Name") DO UPDATE
+            SET "Secret" = EXCLUDED."Secret", "UpdatedOn" = EXCLUDED."UpdatedOn"
+            """, AuditActorSecret);
     }
 
     public ErpRfqAutomationContext ContextFor(long? businessUnitId)
@@ -67,6 +78,36 @@ public sealed class PostgreSqlTestDatabase : IAsyncLifetime
         var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
             .UseNpgsql(_rlsConnectionString)
             .AddInterceptors(new TenantRlsCommandInterceptor(tenant))
+            .EnableDetailedErrors()
+            .Options;
+        return new ErpRfqAutomationContext(options, tenant);
+    }
+
+    /// <summary>
+    /// A tenant application context with the same signed actor envelope used by production HTTP
+    /// commands. The actor is explicit because one integration test often models several
+    /// independent requests; request parameters never establish database tenant authority.
+    /// </summary>
+    public ErpRfqAutomationContext TenantApplicationContext(long businessUnitId, string actor)
+    {
+        var tenant = new StubTenant(businessUnitId);
+        var http = new HttpContextAccessor
+        {
+            HttpContext = new DefaultHttpContext
+            {
+                User = new ClaimsPrincipal(new ClaimsIdentity(
+                    [new Claim(ClaimTypes.NameIdentifier, actor)], "PostgreSqlIntegration"))
+            }
+        };
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["CommercialFinance:AuditActorSecret"] = AuditActorSecret
+            })
+            .Build();
+        var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(_rlsConnectionString)
+            .AddInterceptors(new TenantRlsCommandInterceptor(tenant, http, configuration))
             .EnableDetailedErrors()
             .Options;
         return new ErpRfqAutomationContext(options, tenant);

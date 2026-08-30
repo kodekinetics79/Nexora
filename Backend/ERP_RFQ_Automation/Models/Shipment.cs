@@ -67,6 +67,12 @@ public partial class Shipment
 
     public string? ExternalId { get; set; }
 
+    /// <summary>Tenant-scoped command identity used to return the same despatch on retry.</summary>
+    public string? IdempotencyKey { get; set; }
+
+    /// <summary>SHA-256 of the normalized create command; prevents a key from changing meaning.</summary>
+    public string? RequestHash { get; set; }
+
     public decimal? ShippingCost { get; set; }
 
     public string? LabelUrl { get; set; }

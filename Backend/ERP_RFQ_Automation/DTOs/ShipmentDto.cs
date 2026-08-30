@@ -73,6 +73,8 @@ namespace ERP_RFQ_Automation.DTOs
         public string? TrackingNumber { get; set; }
         public string? ExternalId { get; set; }
         public decimal? ShippingCost { get; set; }
+        /// <summary>ISO currency code inherited from the source order; null when that order is unassigned.</summary>
+        public string? CurrencyCode { get; set; }
         public string? LabelUrl { get; set; }
         public string? ShippingAddress { get; set; }
 

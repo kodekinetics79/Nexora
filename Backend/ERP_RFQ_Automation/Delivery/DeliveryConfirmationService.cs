@@ -1,6 +1,11 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Npgsql;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Delivery;
 
@@ -86,12 +91,15 @@ public sealed class DeliveryConfirmationService(
                 "A delivery confirmation must state what was accepted on every line.");
 
         ValidateGps(command);
+        var requestHash = HashConfirmation(command);
 
         var strategy = _db.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async () =>
+        try
         {
-            _db.ChangeTracker.Clear();
-            await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+            return await strategy.ExecuteAsync(async () =>
+            {
+                _db.ChangeTracker.Clear();
+                await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
 
             // Replay before anything else: a driver on a flaky connection retries, and a second POD
             // against one consignment would double every accepted unit on it.
@@ -103,6 +111,9 @@ public sealed class DeliveryConfirmationService(
                 if (replay.ShipmentId != shipmentId)
                     throw new DeliveryConflictException(
                         "That idempotency key was already used for a different shipment.");
+                if (!string.Equals(replay.RequestHash, requestHash, StringComparison.Ordinal))
+                    throw new DeliveryConflictException(
+                        "That idempotency key was already used for a different delivery confirmation command.");
                 await transaction.CommitAsync(cancellationToken);
                 return await ProjectAsync(businessUnitId, replay.ShipmentId, cancellationToken)
                        ?? throw new DeliveryConflictException("The recorded proof could not be read back.");
@@ -112,7 +123,7 @@ public sealed class DeliveryConfirmationService(
                 .SingleOrDefaultAsync(s => s.BusinessUnitId == businessUnitId && s.Id == shipmentId,
                     cancellationToken)
                 ?? throw new DeliveryValidationException("Shipment was not found in this tenant.");
-            if (!shipment.IsActive)
+            if (shipment.IsActive == false)
                 throw new DeliveryConflictException("A withdrawn shipment cannot be confirmed received.");
             if (!DeliveryStatuses.Confirmable.Contains(shipment.DeliveryStatus))
                 throw new DeliveryConflictException(
@@ -186,6 +197,7 @@ public sealed class DeliveryConfirmationService(
                 CommercialCaseId = shipment.CommercialCaseId,
                 NexoraSerial = shipment.NexoraSerial,
                 IdempotencyKey = key,
+                RequestHash = requestHash,
                 RecordedBy = actor.Trim(),
                 RecordedOn = now,
                 Version = 1
@@ -257,6 +269,8 @@ public sealed class DeliveryConfirmationService(
             });
 
             await _db.SaveChangesAsync(cancellationToken);
+            await MarkOrderDeliveredIfCompleteAsync(
+                businessUnitId, manifest[0].OrderId, actor.Trim(), cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
             _log.LogInformation(
@@ -264,9 +278,142 @@ public sealed class DeliveryConfirmationService(
                 + "by {Actor}; received by {ReceivedBy}.",
                 outcome, shipment.Id, businessUnitId, actor, receivedByName);
 
-            return await ProjectAsync(businessUnitId, shipment.Id, cancellationToken)
-                   ?? throw new DeliveryConflictException("The recorded proof could not be read back.");
+                return await ProjectAsync(businessUnitId, shipment.Id, cancellationToken)
+                       ?? throw new DeliveryConflictException("The recorded proof could not be read back.");
+            });
+        }
+        catch (DbUpdateException exception) when (IsDeliveryProofReplayConflict(exception))
+        {
+            // The pre-insert replay checks make ordinary retries cheap, but they cannot serialize
+            // two requests that both observe "no proof" before either inserts. PostgreSQL makes
+            // the two tenant-scoped unique indexes the arbiter. Once the losing transaction has
+            // rolled back, detach its attempted proof/lines/status and interpret the committed
+            // winner exactly as the normal replay path does. A storage race must never escape as
+            // a provider-shaped 500, and a key or shipment whose meaning differs must never be
+            // accepted merely because it lost the race.
+            _db.ChangeTracker.Clear();
+            return await RecoverConcurrentReplayAsync(
+                businessUnitId, shipmentId, key, requestHash, cancellationToken);
+        }
+    }
+
+    private async Task<DeliveryProofView> RecoverConcurrentReplayAsync(
+        long businessUnitId, long shipmentId, string idempotencyKey, string requestHash,
+        CancellationToken cancellationToken)
+    {
+        var contenders = await _db.DeliveryProofs.AsNoTracking()
+            .Where(p => p.BusinessUnitId == businessUnitId
+                        && (p.IdempotencyKey == idempotencyKey || p.ShipmentId == shipmentId))
+            .ToListAsync(cancellationToken);
+
+        var keyWinner = contenders.SingleOrDefault(p => p.IdempotencyKey == idempotencyKey);
+        if (keyWinner is not null && keyWinner.ShipmentId != shipmentId)
+            throw new DeliveryConflictException(
+                "That idempotency key was already used for a different shipment.");
+
+        var shipmentWinner = contenders.SingleOrDefault(p => p.ShipmentId == shipmentId);
+        var winner = keyWinner ?? shipmentWinner;
+        if (winner is null)
+            throw new DeliveryConflictException(
+                "Another delivery confirmation completed concurrently; refresh and retry.");
+        if (!string.Equals(winner.RequestHash, requestHash, StringComparison.Ordinal))
+            throw new DeliveryConflictException(
+                "This shipment was confirmed concurrently with a different delivery confirmation command.");
+
+        return await ProjectAsync(businessUnitId, winner.ShipmentId, cancellationToken)
+               ?? throw new DeliveryConflictException("The recorded proof could not be read back.");
+    }
+
+    private static bool IsDeliveryProofReplayConflict(DbUpdateException exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException postgres
+                && postgres.SqlState == PostgresErrorCodes.UniqueViolation
+                && postgres.ConstraintName is "UX_delivery_proofs_BU_Shipment"
+                    or "UX_delivery_proofs_BU_IdempotencyKey")
+                return true;
+
+            // The portable domain lane uses SQLite. It reports the indexed columns instead of the
+            // configured index name, so keep this narrowly scoped to delivery_proofs and the two
+            // exact replay identities rather than treating every unique failure as a replay.
+            if (current.Message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+                && current.Message.Contains("delivery_proofs.BusinessUnitId", StringComparison.OrdinalIgnoreCase)
+                && (current.Message.Contains("delivery_proofs.ShipmentId", StringComparison.OrdinalIgnoreCase)
+                    || current.Message.Contains("delivery_proofs.IdempotencyKey", StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+
+        return false;
+    }
+
+    private async Task MarkOrderDeliveredIfCompleteAsync(
+        long businessUnitId, long orderId, string actor, CancellationToken cancellationToken)
+    {
+        var order = await _db.Orders.SingleOrDefaultAsync(
+            x => x.BusinessUnitId == businessUnitId && x.Id == orderId, cancellationToken);
+        if (order is null || !order.IsActive) return;
+
+        var ordered = await _db.Set<OrderItem>().AsNoTracking()
+            .Where(x => x.OrderId == orderId && x.IsActive)
+            .Select(x => new { x.Id, x.Quantity })
+            .ToListAsync(cancellationToken);
+        if (ordered.Count == 0) return;
+
+        var accepted = await (
+                from line in _db.DeliveryProofLines.AsNoTracking()
+                join shipment in _db.Shipments.AsNoTracking() on line.ShipmentId equals shipment.Id
+                where line.BusinessUnitId == businessUnitId && line.OrderId == orderId
+                      && shipment.BusinessUnitId == businessUnitId && shipment.IsActive != false
+                group line by line.OrderItemId into lines
+                select new { OrderItemId = lines.Key, Quantity = lines.Sum(x => x.AcceptedQuantity) })
+            .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity, cancellationToken);
+        if (!ordered.All(x => accepted.GetValueOrDefault(x.Id) >= x.Quantity)) return;
+
+        long deliveredStatusId;
+        try
+        {
+            deliveredStatusId = await LifecycleStatusCatalog.ResolveIdAsync(
+                _db, businessUnitId, "Order", "DELIVERED", cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            throw new DeliveryConflictException(
+                "OrderStatus/DELIVERED is not configured for this tenant. The delivery confirmation was not recorded; repair the tenant lifecycle baseline and retry.");
+        }
+
+        order.StatusId = deliveredStatusId;
+        order.ModifiedBy = actor;
+        order.ModifiedOn = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static string HashConfirmation(ConfirmDeliveryCommand command)
+    {
+        var canonical = JsonSerializer.Serialize(new
+        {
+            ReceivedByName = command.ReceivedByName?.Trim(),
+            ReceivedByContact = command.ReceivedByContact?.Trim(),
+            ReceivedByPosition = command.ReceivedByPosition?.Trim(),
+            command.ReceivedOn,
+            command.SignatureEvidenceId,
+            command.StampEvidenceId,
+            command.PhotoEvidenceId,
+            command.GpsLatitude,
+            command.GpsLongitude,
+            command.GpsAccuracyMeters,
+            command.GpsCapturedOn,
+            Notes = command.Notes?.Trim(),
+            Lines = command.Lines.OrderBy(x => x.ShipmentItemId).Select(x => new
+            {
+                x.ShipmentItemId,
+                x.AcceptedQuantity,
+                ExceptionReasonCode = x.ExceptionReasonCode?.Trim().ToUpperInvariant(),
+                ExceptionNote = x.ExceptionNote?.Trim(),
+                Notes = x.Notes?.Trim()
+            })
         });
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
 
     public Task<DeliveryProofView?> GetAsync(

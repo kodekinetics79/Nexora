@@ -48,7 +48,7 @@ public sealed record ReceivableDocumentDto(
 public sealed record CustomerPaymentDto(
     long Id, long CustomerId, long? CommercialCaseId, long? CurrencyId, string? CurrencyCode, string ReceiptNumber,
     string Status, DateTime PaymentDate, decimal Amount, decimal AllocatedAmount,
-    decimal UnappliedAmount, long Version, long? BankAccountId = null, long? JournalEntryId = null,
+    decimal UnappliedAmount, long Version, string? BankReference = null, long? BankAccountId = null, long? JournalEntryId = null,
     long? ReversalJournalEntryId = null, string AccountingIntegrationStatus = "LegacyUnlinked");
 public sealed record ArOpenItemDto(
     long DocumentId, string DocumentNumber, string DocumentType, long CustomerId, long? CommercialCaseId,

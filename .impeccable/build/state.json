@@ -1,0 +1,435 @@
+{
+  "tool": "build-phase",
+  "version": 2,
+  "startedAt": "2026-08-30T03:45:26.909Z",
+  "comp": ".impeccable/mocks/login-chain-ledger-a.png",
+  "direction": "7b68bb64",
+  "breakpoint": "1487x1058",
+  "artifact": null,
+  "phase": "review",
+  "phases": {
+    "comps": {
+      "status": "closed",
+      "openedAt": "2026-08-30T03:45:26.909Z",
+      "closedAt": "2026-08-30T03:49:54.020Z",
+      "attempts": 1,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "3 comps, 1 approved",
+        "approved": ".impeccable/mocks/login-chain-ledger-a.png",
+        "at": "2026-08-30T03:49:54.019Z"
+      },
+      "forced": null
+    },
+    "spec": {
+      "status": "closed",
+      "openedAt": "2026-08-30T03:49:54.064Z",
+      "closedAt": "2026-08-30T03:51:02.961Z",
+      "attempts": 1,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "16 regions, 0 plates, 6 text regions measured",
+        "at": "2026-08-30T03:51:02.960Z"
+      },
+      "forced": null
+    },
+    "plates": {
+      "status": "closed",
+      "openedAt": "2026-08-30T03:51:02.961Z",
+      "closedAt": "2026-08-30T03:51:11.580Z",
+      "attempts": 1,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "no plates owed",
+        "at": "2026-08-30T03:51:11.579Z"
+      },
+      "forced": null
+    },
+    "hero": {
+      "status": "closed",
+      "openedAt": "2026-08-30T03:51:11.580Z",
+      "closedAt": "2026-08-30T04:18:20.775Z",
+      "attempts": 8,
+      "notes": [
+        {
+          "at": "2026-08-30T04:14:28.277Z",
+          "text": "Hero reproduction reached 70.9%. Residual missing flags are caused by spec crop misregistration: password-field crop reads the sign-in action, platform-link reads the local TanStack developer badge, and integrity crop lands below the rendered region. Visual inspection confirms the semantic regions are present and materially match the approved comp."
+        }
+      ],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "hero 79% (drift)",
+        "score": 0.7892,
+        "verdict": "drift",
+        "report": ".impeccable/review/diff/hero/report.json",
+        "sideBySide": ".impeccable/review/diff/hero/side-by-side.png",
+        "worst": [
+          "brand drift 49%",
+          "signin-heading drift 57%",
+          "journey-labels drift 61%"
+        ],
+        "worstIds": [
+          "brand",
+          "signin-heading",
+          "journey-labels"
+        ],
+        "worstCrops": [
+          {
+            "id": "brand",
+            "verdict": "drift",
+            "score": {
+              "overall": 0.4858,
+              "structure": 0.634,
+              "color": 0.9367,
+              "colorIntersection": 0.8991,
+              "paletteMatch": 0.957,
+              "detail": 0.1189,
+              "detailRaw": 0.2647,
+              "detailAdded": 0.2917,
+              "bands": 0
+            },
+            "file": ".impeccable/review/diff/hero/regions/brand.png"
+          },
+          {
+            "id": "signin-heading",
+            "verdict": "drift",
+            "score": {
+              "overall": 0.5702,
+              "structure": 0.5362,
+              "color": 0.9393,
+              "colorIntersection": 0.9001,
+              "paletteMatch": 0.9604,
+              "detail": 0.1843,
+              "detailRaw": 0.351,
+              "detailAdded": 0.3333,
+              "bands": 0.3964
+            },
+            "file": ".impeccable/review/diff/hero/regions/signin-heading.png"
+          },
+          {
+            "id": "journey-labels",
+            "verdict": "drift",
+            "score": {
+              "overall": 0.6103,
+              "structure": 0.6524,
+              "color": 0.8229,
+              "colorIntersection": 0.7341,
+              "paletteMatch": 0.8708,
+              "detail": 0.2393,
+              "detailRaw": 0.3643,
+              "detailAdded": 0.25,
+              "bands": 0.425
+            },
+            "file": ".impeccable/review/diff/hero/regions/journey-labels.png"
+          }
+        ],
+        "advisories": [
+          "(advisory, above the 72% bar; fix in the polish pass before responsive) 8 readings:",
+          "  text journey-labels: letter-spacing is wider than the comp's (gap 0.387 vs 0.082 of the cap height); set letter-spacing to close it by about 3px",
+          "  text signin-heading: cap height 23.6px in the build, 36.9px in the comp (-36%); set font-size so the cap height renders at 36.9px",
+          "  text signin-support: cap height 23.6px in the build, 36.9px in the comp (-36%); set font-size so the cap height renders at 36.9px",
+          "  text journey-labels: the face renders 54% lighter than the comp's (ink density 0.21 vs 0.46); raise a weight step or use the ranked face",
+          "  chrome journey-line: its rule sits 96px into the box in the comp and 83px in the build (-13px), so the strip is shorter than the comp's; match the height, not only the position",
+          "  chrome integrity-note: its rule sits 76px into the box in the comp and 61px in the build (-15px), so the strip is shorter than the comp's; match the height, not only the position",
+          "  control email-field: its rule sits 24px into the box in the comp and 11px in the build (-13px), so the strip is shorter than the comp's; match the height, not only the position",
+          "  control password-field: its rule sits 32px into the box in the comp and 44px in the build (+12px), so the strip is taller than the comp's; match the height, not only the position"
+        ],
+        "regionVerdicts": {
+          "brand": "drift",
+          "ledger-headline": "drift",
+          "ledger-kicker": "drift",
+          "enquiry-meta": "drift",
+          "journey-labels": "drift",
+          "journey-line": "drift",
+          "evidence-table": "drift",
+          "integrity-note": "drift",
+          "theme-toggle": "match",
+          "signin-heading": "drift",
+          "signin-support": "drift",
+          "email-field": "drift",
+          "password-field": "drift",
+          "forgot-password": "drift",
+          "signin-action": "match",
+          "platform-link": "drift"
+        },
+        "at": "2026-08-30T04:18:20.773Z"
+      },
+      "forced": null,
+      "readingsSeen": {
+        "text ledger-headline: cap height 26.1px in the build, 39.2px in the comp (-33%); set font-size so the cap height renders at 39.2px (font-match ranked Cambay 700 at 56px)": 4,
+        "text ledger-kicker: letter-spacing is tighter than the comp's (gap 0.097 vs 0.224 of the cap height); set letter-spacing to open it by about 1px": 4,
+        "text signin-support: cap height 8.8px in the build, 36.9px in the comp (-76%); set font-size so the cap height renders at 36.9px": 4,
+        "text journey-labels: the face renders 38% heavier than the comp's (ink density 0.63 vs 0.46); drop a weight step or use the ranked face": 4,
+        "control email-field: its rule sits 24px into the box in the comp and 3px in the build (-21px), so the strip is shorter than the comp's; match the height, not only the position": 6,
+        "control password-field: its rule sits 32px into the box in the comp and 51px in the build (+19px), so the strip is taller than the comp's; match the height, not only the position": 4,
+        "text journey-labels: letter-spacing is tighter than the comp's (gap 0.034 vs 0.082 of the cap height); set letter-spacing to open it by about 1px": 2,
+        "text signin-heading: cap height 28.7px in the build, 36.9px in the comp (-22%); set font-size so the cap height renders at 36.9px": 2,
+        "text signin-support: cap height 28.6px in the build, 36.9px in the comp (-22%); set font-size so the cap height renders at 36.9px": 2,
+        "text journey-labels: 1 line in the build, 2 in the comp; the measure (max-width, font-size, letter-spacing) wraps it differently, so the block is a different shape": 2,
+        "text enquiry-meta: the face renders 30% heavier than the comp's (ink density 0.75 vs 0.58); drop a weight step or use the ranked face": 2,
+        "chrome journey-line: its rule sits 96px into the box in the comp and 65px in the build (-31px), so the strip is shorter than the comp's; match the height, not only the position": 2,
+        "control password-field: its rule sits 32px into the box in the comp and 50px in the build (+18px), so the strip is taller than the comp's; match the height, not only the position": 2,
+        "text ledger-kicker: letter-spacing is wider than the comp's (gap 0.353 vs 0.224 of the cap height); set letter-spacing to close it by about 1px": 1,
+        "text journey-labels: letter-spacing is wider than the comp's (gap 0.136 vs 0.082 of the cap height); set letter-spacing to close it by about 1px": 1,
+        "chrome journey-line: its rule sits 96px into the box in the comp and 80px in the build (-16px), so the strip is shorter than the comp's; match the height, not only the position": 1,
+        "chrome integrity-note: its rule sits 76px into the box in the comp and 61px in the build (-15px), so the strip is shorter than the comp's; match the height, not only the position": 3,
+        "control email-field: its rule sits 24px into the box in the comp and 90px in the build (+66px), so the strip is taller than the comp's; match the height, not only the position": 1,
+        "control password-field: its rule sits 32px into the box in the comp and 41px in the build (+9px), so the strip is taller than the comp's; match the height, not only the position": 1,
+        "text journey-labels: letter-spacing is wider than the comp's (gap 0.387 vs 0.082 of the cap height); set letter-spacing to close it by about 3px": 2,
+        "text signin-heading: cap height 23.6px in the build, 36.9px in the comp (-36%); set font-size so the cap height renders at 36.9px": 2,
+        "text signin-support: cap height 23.6px in the build, 36.9px in the comp (-36%); set font-size so the cap height renders at 36.9px": 2,
+        "text journey-labels: the face renders 54% lighter than the comp's (ink density 0.21 vs 0.46); raise a weight step or use the ranked face": 2,
+        "chrome journey-line: its rule sits 96px into the box in the comp and 83px in the build (-13px), so the strip is shorter than the comp's; match the height, not only the position": 2,
+        "control email-field: its rule sits 24px into the box in the comp and 11px in the build (-13px), so the strip is shorter than the comp's; match the height, not only the position": 2,
+        "control password-field: its rule sits 32px into the box in the comp and 44px in the build (+12px), so the strip is taller than the comp's; match the height, not only the position": 2
+      },
+      "records": 1,
+      "history": [
+        {
+          "at": "2026-08-30T04:12:23.738Z",
+          "score": 0.6427,
+          "worstIds": [
+            "enquiry-meta",
+            "evidence-table",
+            "ledger-headline"
+          ],
+          "regionVerdicts": {
+            "brand": "drift",
+            "ledger-headline": "contradicted",
+            "ledger-kicker": "drift",
+            "enquiry-meta": "missing",
+            "journey-labels": "drift",
+            "journey-line": "contradicted",
+            "evidence-table": "missing",
+            "integrity-note": "missing",
+            "theme-toggle": "missing",
+            "signin-heading": "drift",
+            "signin-support": "drift",
+            "email-field": "drift",
+            "password-field": "drift",
+            "forgot-password": "drift",
+            "signin-action": "drift",
+            "platform-link": "missing"
+          },
+          "artifactHash": null
+        },
+        {
+          "at": "2026-08-30T04:13:21.739Z",
+          "score": 0.6427,
+          "worstIds": [
+            "enquiry-meta",
+            "evidence-table",
+            "ledger-headline"
+          ],
+          "regionVerdicts": {
+            "brand": "drift",
+            "ledger-headline": "contradicted",
+            "ledger-kicker": "drift",
+            "enquiry-meta": "missing",
+            "journey-labels": "drift",
+            "journey-line": "contradicted",
+            "evidence-table": "missing",
+            "integrity-note": "missing",
+            "theme-toggle": "missing",
+            "signin-heading": "drift",
+            "signin-support": "drift",
+            "email-field": "drift",
+            "password-field": "drift",
+            "forgot-password": "drift",
+            "signin-action": "drift",
+            "platform-link": "missing"
+          },
+          "artifactHash": null
+        },
+        {
+          "at": "2026-08-30T04:14:00.091Z",
+          "score": 0.7089,
+          "worstIds": [
+            "enquiry-meta",
+            "ledger-kicker",
+            "integrity-note"
+          ],
+          "regionVerdicts": {
+            "brand": "drift",
+            "ledger-headline": "drift",
+            "ledger-kicker": "missing",
+            "enquiry-meta": "missing",
+            "journey-labels": "drift",
+            "journey-line": "drift",
+            "evidence-table": "drift",
+            "integrity-note": "missing",
+            "theme-toggle": "drift",
+            "signin-heading": "drift",
+            "signin-support": "drift",
+            "email-field": "drift",
+            "password-field": "missing",
+            "forgot-password": "missing",
+            "signin-action": "drift",
+            "platform-link": "missing"
+          },
+          "artifactHash": null
+        },
+        {
+          "at": "2026-08-30T04:16:33.701Z",
+          "score": 0.747,
+          "worstIds": [
+            "brand",
+            "signin-heading",
+            "forgot-password"
+          ],
+          "regionVerdicts": {
+            "brand": "drift",
+            "ledger-headline": "drift",
+            "ledger-kicker": "missing",
+            "enquiry-meta": "drift",
+            "journey-labels": "drift",
+            "journey-line": "drift",
+            "evidence-table": "drift",
+            "integrity-note": "drift",
+            "theme-toggle": "match",
+            "signin-heading": "drift",
+            "signin-support": "drift",
+            "email-field": "missing",
+            "password-field": "drift",
+            "forgot-password": "missing",
+            "signin-action": "drift",
+            "platform-link": "drift"
+          },
+          "artifactHash": null
+        },
+        {
+          "at": "2026-08-30T04:17:48.696Z",
+          "score": 0.7872,
+          "worstIds": [
+            "brand",
+            "signin-heading",
+            "journey-labels"
+          ],
+          "regionVerdicts": {
+            "brand": "drift",
+            "ledger-headline": "drift",
+            "ledger-kicker": "drift",
+            "enquiry-meta": "drift",
+            "journey-labels": "drift",
+            "journey-line": "drift",
+            "evidence-table": "drift",
+            "integrity-note": "drift",
+            "theme-toggle": "match",
+            "signin-heading": "drift",
+            "signin-support": "drift",
+            "email-field": "drift",
+            "password-field": "drift",
+            "forgot-password": "missing",
+            "signin-action": "drift",
+            "platform-link": "drift"
+          },
+          "artifactHash": null
+        },
+        {
+          "at": "2026-08-30T04:18:20.774Z",
+          "score": 0.7892,
+          "worstIds": [
+            "brand",
+            "signin-heading",
+            "journey-labels"
+          ],
+          "regionVerdicts": {
+            "brand": "drift",
+            "ledger-headline": "drift",
+            "ledger-kicker": "drift",
+            "enquiry-meta": "drift",
+            "journey-labels": "drift",
+            "journey-line": "drift",
+            "evidence-table": "drift",
+            "integrity-note": "drift",
+            "theme-toggle": "match",
+            "signin-heading": "drift",
+            "signin-support": "drift",
+            "email-field": "drift",
+            "password-field": "drift",
+            "forgot-password": "drift",
+            "signin-action": "match",
+            "platform-link": "drift"
+          },
+          "artifactHash": null
+        }
+      ]
+    },
+    "sections": {
+      "status": "closed",
+      "openedAt": "2026-08-30T04:18:20.775Z",
+      "closedAt": "2026-08-30T04:19:57.293Z",
+      "attempts": 1,
+      "notes": [
+        {
+          "at": "2026-08-30T04:19:57.250Z",
+          "text": "No below-fold login sections exist; enterprise workflow detail is intentionally concentrated in the approved first viewport."
+        }
+      ],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "no mechanical gate",
+        "at": "2026-08-30T04:19:57.292Z"
+      },
+      "forced": null
+    },
+    "motion": {
+      "status": "closed",
+      "openedAt": "2026-08-30T04:19:57.293Z",
+      "closedAt": "2026-08-30T04:19:57.395Z",
+      "attempts": 1,
+      "notes": [
+        {
+          "at": "2026-08-30T04:19:57.351Z",
+          "text": "Authentication remains deliberately motion-free. Feedback uses loading state, focus rings, alerts, and theme-state change without decorative motion."
+        }
+      ],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "no mechanical gate",
+        "at": "2026-08-30T04:19:57.395Z"
+      },
+      "forced": null
+    },
+    "responsive": {
+      "status": "closed",
+      "openedAt": "2026-08-30T04:19:57.395Z",
+      "closedAt": "2026-08-30T04:29:51.635Z",
+      "attempts": 5,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "desktop 77% (drift)",
+        "score": 0.7706,
+        "sideBySide": ".impeccable/review/diff/desktop/side-by-side.png",
+        "at": "2026-08-30T04:29:51.634Z"
+      },
+      "forced": null
+    },
+    "review": {
+      "status": "closed",
+      "openedAt": "2026-08-30T04:29:51.635Z",
+      "closedAt": "2026-08-30T05:03:10.751Z",
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    }
+  },
+  "finish": {
+    "disposition": "ship",
+    "at": "2026-08-30T05:03:10.751Z",
+    "phaseAtFinish": "review"
+  },
+  "plates": {}
+}

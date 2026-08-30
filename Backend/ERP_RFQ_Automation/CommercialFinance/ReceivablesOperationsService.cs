@@ -1577,6 +1577,11 @@ public sealed class ReceivablesOperationsService : IReceivablesOperationsService
 
     private async Task<long> AllocateNumberAsync(long businessUnitId, string documentType, int fiscalYear)
     {
+        if (_context.Database.IsNpgsql())
+            return await _context.Database.SqlQueryRaw<long>(
+                "SELECT public.nexora_allocate_legal_document_number({0}, {1}, {2}) AS \"Value\"",
+                businessUnitId, documentType, fiscalYear).SingleAsync();
+
         var counter = await _context.LegalDocumentCounters.SingleOrDefaultAsync(x =>
             x.BusinessUnitId == businessUnitId && x.DocumentType == documentType && x.FiscalYear == fiscalYear);
         if (counter is null)

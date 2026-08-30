@@ -74,7 +74,12 @@ export default function AccountsReceivablePage() {
   const targetDocumentId = Number(searchParams.get('documentId')) || null;
   const [tab, setTab] = useState<ArTab>(targetDocumentId ? 'documents' : 'open');
   const [selected, setSelected] = useState<ArOpenItem | null>(null);
+  // The operator chooses a tenant-local accounting date. Once submitted, this date and the
+  // idempotency key freeze together: an uncertain retry must replay the same financial command,
+  // not silently replace the date with the browser's new current time.
   const [paymentOperation, setPaymentOperation] = useState<{ idempotencyKey: string; paymentDate: string } | null>(null);
+  const [paymentSubmitted, setPaymentSubmitted] = useState(false);
+  const [bankAccountId, setBankAccountId] = useState<number | ''>('');
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState('BankTransfer');
   const [reference, setReference] = useState('');
@@ -120,6 +125,7 @@ export default function AccountsReceivablePage() {
   const canCreateAdjustments = hasPermission('Receivable Adjustments', 'create');
   const canApproveAdjustments = hasPermission('Receivable Adjustments', 'edit');
   const canRecordPayment = hasPermission('Customer Payments', 'create');
+  const canViewBankAccounts = hasPermission('Bank Accounts');
   const canViewPayments = hasPermission('Customer Payments');
   const canReversePayment = hasPermission('Customer Payments', 'edit');
   const canViewWriteOffs = hasPermission('Receivable Write-offs');
@@ -135,6 +141,11 @@ export default function AccountsReceivablePage() {
     queryKey: ['customer-payments'],
     queryFn: () => commercialFinanceService.getPayments(),
     enabled: canViewPayments,
+  });
+  const bankAccounts = useQuery({
+    queryKey: ['active-bank-accounts'],
+    queryFn: () => commercialFinanceService.getBankAccounts(),
+    enabled: canRecordPayment && canViewBankAccounts,
   });
   const writeOffs = useQuery({
     queryKey: ['receivable-write-offs'],
@@ -239,7 +250,8 @@ export default function AccountsReceivablePage() {
       customerId: selected!.customerId,
       commercialCaseId: selected!.commercialCaseId,
       currencyId: selected!.currencyId,
-      paymentDate: paymentOperation!.paymentDate,
+      bankAccountId: Number(bankAccountId),
+      paymentDate: dayjs(paymentOperation!.paymentDate).startOf('day').toISOString(),
       amount: Number(amount),
       method,
       bankReference: reference || undefined,
@@ -247,9 +259,24 @@ export default function AccountsReceivablePage() {
     }, paymentOperation!.idempotencyKey),
     onSuccess: () => {
       enqueueSnackbar('Payment posted and allocated', { variant: 'success' });
-      setSelected(null); setPaymentOperation(null); setAmount(''); setReference(''); refresh();
+      setSelected(null); setPaymentOperation(null); setPaymentSubmitted(false); setBankAccountId(''); setAmount(''); setReference(''); refresh();
     },
-    onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? 'Payment could not be posted', { variant: 'error' }),
+    onError: (error: any) => {
+      const status = error.response?.status;
+      const resultIsUncertain = !status || status >= 500;
+      if (!resultIsUncertain) {
+        setPaymentSubmitted(false);
+        setPaymentOperation(current => current
+          ? { ...current, idempotencyKey: crypto.randomUUID() }
+          : null);
+      }
+      enqueueSnackbar(
+        error.response?.data?.detail ?? (resultIsUncertain
+          ? 'The payment result is uncertain. Retry will use the same operation key and unchanged payment details.'
+          : 'Payment could not be posted.'),
+        { variant: 'error' },
+      );
+    },
   });
 
   const reversePayment = useMutation({
@@ -281,7 +308,10 @@ export default function AccountsReceivablePage() {
     onError: (error: any) => {
       const uncertain = !error.response?.status || error.response.status >= 500;
       refreshAfterConflict(error);
-      if (!uncertain) setWriteOffSubmitted(false);
+      if (!uncertain) {
+        setWriteOffSubmitted(false);
+        setWriteOffOperationKey(crypto.randomUUID());
+      }
       enqueueSnackbar(error.response?.data?.detail ?? (uncertain
         ? 'The result is uncertain. Retry will use the same operation key.'
         : 'Write-off draft could not be created.'), { variant: 'error' });
@@ -307,7 +337,10 @@ export default function AccountsReceivablePage() {
     onError: (error: any) => {
       const uncertain = !error.response?.status || error.response.status >= 500;
       refreshAfterConflict(error);
-      if (!uncertain) setRefundSubmitted(false);
+      if (!uncertain) {
+        setRefundSubmitted(false);
+        setRefundOperationKey(crypto.randomUUID());
+      }
       enqueueSnackbar(error.response?.data?.detail ?? (uncertain
         ? 'The result is uncertain. Retry will use the same operation key.'
         : 'Refund draft could not be created.'), { variant: 'error' });
@@ -395,14 +428,34 @@ export default function AccountsReceivablePage() {
     ? roundMoney(adjustingInvoice.outstandingAmount + (adjustmentType === 'CreditNote' ? -adjustmentTotal : adjustmentTotal))
     : 0;
 
+  const eligibleBankAccounts = useMemo(() => (bankAccounts.data ?? []).filter(account =>
+    account.status === 'Active' && (!selected?.currencyId || account.currencyId === selected.currencyId)),
+  [bankAccounts.data, selected?.currencyId]);
+
+  useEffect(() => {
+    if (!selected || paymentSubmitted || bankAccountId !== '' || eligibleBankAccounts.length !== 1) return;
+    setBankAccountId(eligibleBankAccounts[0].id);
+  }, [bankAccountId, eligibleBankAccounts, paymentSubmitted, selected]);
+
   const openPaymentDialog = (item: ArOpenItem) => {
+    payment.reset();
     setSelected(item);
     setAmount(String(item.outstandingAmount));
-    setPaymentOperation({ idempotencyKey: crypto.randomUUID(), paymentDate: new Date().toISOString() });
+    setReference('');
+    setBankAccountId('');
+    setPaymentSubmitted(false);
+    setPaymentOperation({ idempotencyKey: crypto.randomUUID(), paymentDate: dayjs().format('YYYY-MM-DD') });
   };
   const closePaymentDialog = () => {
-    if (payment.isPending) return;
-    setSelected(null); setPaymentOperation(null); setAmount(''); setReference('');
+    // An uncertain response may already have committed. Keep this exact command available for a
+    // keyed replay instead of letting the operator abandon it and unknowingly create a new one.
+    if (payment.isPending || paymentSubmitted) return;
+    setSelected(null); setPaymentOperation(null); setPaymentSubmitted(false); setBankAccountId(''); setAmount(''); setReference('');
+  };
+
+  const submitPayment = () => {
+    setPaymentSubmitted(true);
+    payment.mutate();
   };
   const closeReversalDialog = () => {
     if (reversePayment.isPending) return;
@@ -424,7 +477,9 @@ export default function AccountsReceivablePage() {
     setAdjustmentSubmitted(false);
   };
   const closeAdjustmentDialog = () => {
-    if (createAdjustment.isPending) return;
+    // `adjustmentSubmitted` remains true only when the result is uncertain. The server may already
+    // have committed, so closing here would discard the only key capable of a safe replay.
+    if (createAdjustment.isPending || adjustmentSubmitted) return;
     setAdjustingInvoice(null);
   };
   const submitAdjustment = () => {
@@ -441,7 +496,7 @@ export default function AccountsReceivablePage() {
     setWriteOffOperationKey(crypto.randomUUID()); setWriteOffSubmitted(false);
   };
   const closeWriteOffDialog = () => {
-    if (createWriteOff.isPending) return;
+    if (createWriteOff.isPending || writeOffSubmitted) return;
     setWritingOff(null); setWriteOffSubmitted(false);
   };
   const openRefundDialog = (item: CustomerPayment) => {
@@ -454,7 +509,7 @@ export default function AccountsReceivablePage() {
     setRefundOperationKey(crypto.randomUUID()); setRefundSubmitted(false);
   };
   const closeRefundDialog = () => {
-    if (createRefund.isPending) return;
+    if (createRefund.isPending || refundSubmitted) return;
     setRefunding(null); setRefundSubmitted(false);
   };
   const openExceptionAction = (action: ExceptionAction) => {
@@ -527,8 +582,8 @@ export default function AccountsReceivablePage() {
                 <TableCell align="right">{money(item.originalAmount)}</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 800 }}>{money(item.outstandingAmount)}</TableCell>
                 <TableCell align="center"><Stack direction="row" spacing={0.5} sx={{ justifyContent: 'center' }}>
-                  {canRecordPayment && <Tooltip title="Record payment"><IconButton size="small" onClick={() => openPaymentDialog(item)}><CreditCard size={18} /></IconButton></Tooltip>}
-                  {canCreateWriteOffs && ['Invoice', 'DebitNote'].includes(item.documentType) && <Tooltip title="Create write-off"><IconButton size="small" onClick={() => openWriteOffDialog(item)}><FileMinus2 size={18} /></IconButton></Tooltip>}
+                  {canRecordPayment && <Tooltip title="Record payment"><IconButton aria-label={`Record payment for ${item.documentNumber}`} size="small" onClick={() => openPaymentDialog(item)}><CreditCard size={18} /></IconButton></Tooltip>}
+                  {canCreateWriteOffs && ['Invoice', 'DebitNote'].includes(item.documentType) && <Tooltip title="Create write-off"><IconButton aria-label={`Create write-off for ${item.documentNumber}`} size="small" onClick={() => openWriteOffDialog(item)}><FileMinus2 size={18} /></IconButton></Tooltip>}
                 </Stack></TableCell>
               </TableRow>
             ))}{!openItems.data?.length && <TableRow><TableCell colSpan={8} align="center" sx={{ py: 6 }}>No open receivables.</TableCell></TableRow>}</TableBody>
@@ -558,6 +613,22 @@ export default function AccountsReceivablePage() {
                 <TableCell align="right">{money(document.totalAmount)}</TableCell>
                 <TableCell align="right">{money(document.outstandingAmount)}</TableCell>
                 <TableCell align="center">
+                  {canRecordPayment && document.status === 'Issued' && document.outstandingAmount > 0 &&
+                    <Tooltip title="Record payment"><IconButton aria-label={`Record payment for ${document.documentNumber}`} size="small" onClick={() => openPaymentDialog({
+                      documentId: document.id,
+                      documentNumber: document.documentNumber ?? `Document #${document.id}`,
+                      documentType: document.documentType,
+                      customerId: document.customerId,
+                      commercialCaseId: document.commercialCaseId,
+                      currencyId: document.currencyId,
+                      currencyCode: document.currencyCode,
+                      documentDate: document.documentDate,
+                      dueDate: document.dueDate,
+                      originalAmount: document.totalAmount,
+                      outstandingAmount: document.outstandingAmount,
+                      daysPastDue: Math.max(0, dayjs().startOf('day').diff(dayjs(document.dueDate).startOf('day'), 'day')),
+                      agingBucket: 'Current',
+                    })}><CreditCard size={18} /></IconButton></Tooltip>}
                   {((document.documentType === 'Invoice' && canEditReceivables) || (document.documentType !== 'Invoice' && canApproveAdjustments)) && document.status === 'Draft' && <Stack direction="row" spacing={0.5} sx={{ justifyContent: 'center' }}>
                     <Tooltip title={`Issue ${documentTypeLabel(document.documentType)}`}><span><IconButton size="small" disabled={issue.isPending || cancelDocument.isPending} onClick={() => issue.mutate(document)}><FileCheck2 size={18} /></IconButton></span></Tooltip>
                     <Tooltip title={`Cancel ${documentTypeLabel(document.documentType)} draft`}><span><IconButton size="small" color="error" disabled={issue.isPending || cancelDocument.isPending} onClick={() => setCancelling(document)}><Ban size={18} /></IconButton></span></Tooltip>
@@ -583,7 +654,7 @@ export default function AccountsReceivablePage() {
                 <TableCell align="right">{money(item.allocatedAmount)}</TableCell>
                 <TableCell align="right">{money(item.unappliedAmount)}</TableCell>
                 <TableCell align="center"><Stack direction="row" spacing={0.5} sx={{ justifyContent: 'center' }}>
-                  {canCreateRefunds && item.status === 'Posted' && item.unappliedAmount > 0 && <Tooltip title="Create customer refund"><IconButton size="small" onClick={() => openRefundDialog(item)}><ReceiptText size={18} /></IconButton></Tooltip>}
+                  {canCreateRefunds && item.status === 'Posted' && item.unappliedAmount > 0 && <Tooltip title="Create customer refund"><IconButton aria-label={`Create customer refund from ${item.receiptNumber}`} size="small" onClick={() => openRefundDialog(item)}><ReceiptText size={18} /></IconButton></Tooltip>}
                   {canReversePayment && item.status === 'Posted' && <Tooltip title="Reverse payment"><span><IconButton size="small" disabled={reversePayment.isPending} onClick={() => setReversing(item)}><RotateCcw size={18} /></IconButton></span></Tooltip>}
                 </Stack></TableCell>
               </TableRow>
@@ -718,7 +789,7 @@ export default function AccountsReceivablePage() {
           </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
-          <Button disabled={createAdjustment.isPending} onClick={closeAdjustmentDialog}>Cancel</Button>
+          <Button disabled={createAdjustment.isPending || adjustmentSubmitted} onClick={closeAdjustmentDialog}>Cancel</Button>
           <Button
             variant="contained"
             disabled={createAdjustment.isPending || !adjustmentReasonCode || !adjustmentReason.trim() || !selectedAdjustmentLines.length || adjustmentHasInvalidQuantity || adjustmentTotal <= 0}
@@ -734,12 +805,49 @@ export default function AccountsReceivablePage() {
         <DialogContent sx={{ pt: 2 }}>
           <Stack spacing={2}>
             <TextField label="Invoice" value={selected?.documentNumber ?? ''} disabled />
-            <TextField label="Amount" type="number" value={amount} onChange={event => setAmount(event.target.value)} slotProps={{ htmlInput: { min: 0.01, max: selected?.outstandingAmount, step: 0.01 } }} />
-            <TextField select label="Method" value={method} onChange={event => setMethod(event.target.value)}><MenuItem value="BankTransfer">Bank transfer</MenuItem><MenuItem value="Card">Card</MenuItem><MenuItem value="Cheque">Cheque</MenuItem><MenuItem value="Cash">Cash</MenuItem></TextField>
-            <TextField label="Bank reference" value={reference} onChange={event => setReference(event.target.value)} />
+            {!canViewBankAccounts && <Alert severity="error">Bank Accounts view permission is required to select the governed deposit account.</Alert>}
+            {canViewBankAccounts && bankAccounts.isLoading && <Alert icon={<CircularProgress size={18} />} severity="info">Loading authorized bank accounts...</Alert>}
+            {canViewBankAccounts && bankAccounts.isError && <Alert severity="error" action={<Button size="small" onClick={() => void bankAccounts.refetch()}>Retry</Button>}>Authorized bank accounts could not be loaded.</Alert>}
+            {canViewBankAccounts && !bankAccounts.isLoading && !bankAccounts.isError && eligibleBankAccounts.length === 0 && <Alert severity="warning">No active governed bank account matches this receivable currency. Configure one before posting cash.</Alert>}
+            {canViewBankAccounts && eligibleBankAccounts.length > 0 && (
+              <TextField
+                select
+                required
+                label="Deposit bank account"
+                value={bankAccountId}
+                disabled={paymentSubmitted}
+                onChange={event => setBankAccountId(Number(event.target.value))}
+                helperText="Only active accounts you are authorized to view are listed."
+              >
+                {eligibleBankAccounts.map(account => (
+                  <MenuItem key={account.id} value={account.id}>
+                    {account.name} · {account.institutionName} · {account.maskedAccountNumber}
+                  </MenuItem>
+                ))}
+              </TextField>
+            )}
+            {paymentSubmitted && payment.isError && <Alert severity="warning">Retry safely with the same operation key and unchanged payment details. A duplicate receipt will not be created.</Alert>}
+            <TextField
+              required
+              type="date"
+              label="Payment date"
+              value={paymentOperation?.paymentDate ?? ''}
+              disabled={paymentSubmitted}
+              onChange={event => setPaymentOperation(current => current
+                ? { ...current, paymentDate: event.target.value }
+                : current)}
+              helperText="Recorded as the selected local accounting date."
+              slotProps={{
+                inputLabel: { shrink: true },
+                htmlInput: { 'aria-label': 'Payment date' },
+              }}
+            />
+            <TextField label="Amount" type="number" value={amount} disabled={paymentSubmitted} onChange={event => setAmount(event.target.value)} slotProps={{ htmlInput: { min: 0.01, max: selected?.outstandingAmount, step: 0.01 } }} />
+            <TextField select label="Method" value={method} disabled={paymentSubmitted} onChange={event => setMethod(event.target.value)}><MenuItem value="BankTransfer">Bank transfer</MenuItem><MenuItem value="Card">Card</MenuItem><MenuItem value="Cheque">Cheque</MenuItem><MenuItem value="Cash">Cash</MenuItem></TextField>
+            <TextField label="Bank reference" value={reference} disabled={paymentSubmitted} onChange={event => setReference(event.target.value)} />
           </Stack>
         </DialogContent>
-        <DialogActions><Button onClick={closePaymentDialog}>Cancel</Button><Button variant="contained" disabled={payment.isPending || !paymentOperation || Number(amount) <= 0 || Number(amount) > (selected?.outstandingAmount ?? 0)} onClick={() => payment.mutate()}>Post payment</Button></DialogActions>
+        <DialogActions><Button disabled={payment.isPending || paymentSubmitted} onClick={closePaymentDialog}>Cancel</Button><Button variant="contained" disabled={payment.isPending || !paymentOperation?.paymentDate || bankAccountId === '' || Number(amount) <= 0 || Number(amount) > (selected?.outstandingAmount ?? 0)} onClick={submitPayment}>{paymentSubmitted && payment.isError ? 'Retry safely' : 'Post payment'}</Button></DialogActions>
       </Dialog>
 
       <Dialog open={Boolean(reversing)} onClose={closeReversalDialog} fullWidth maxWidth="xs">
@@ -785,7 +893,7 @@ export default function AccountsReceivablePage() {
             <Box sx={{ borderBlock: '1px solid', borderColor: 'divider', p: 1.5 }}><Typography variant="caption" color="text.secondary">Projected document balance</Typography><Typography variant="h6" color={writeOffProjected < 0 ? 'error.main' : 'text.primary'} sx={{ fontWeight: 800 }}>{money(writeOffProjected)}</Typography></Box>
           </Stack>
         </DialogContent>
-        <DialogActions sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider' }}><Button disabled={createWriteOff.isPending} onClick={closeWriteOffDialog}>Cancel</Button><Button variant="contained" disabled={createWriteOff.isPending || writeOffEligibility.isFetching || !writeOffAmountValid || !writeOffDate || writeOffReason.trim().length < 20} onClick={() => { setWriteOffSubmitted(true); createWriteOff.mutate(); }}>{writeOffSubmitted && createWriteOff.isError ? 'Retry safely' : 'Create draft'}</Button></DialogActions>
+        <DialogActions sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider' }}><Button disabled={createWriteOff.isPending || writeOffSubmitted} onClick={closeWriteOffDialog}>Cancel</Button><Button variant="contained" disabled={createWriteOff.isPending || writeOffEligibility.isFetching || !writeOffAmountValid || !writeOffDate || writeOffReason.trim().length < 20} onClick={() => { setWriteOffSubmitted(true); createWriteOff.mutate(); }}>{writeOffSubmitted && createWriteOff.isError ? 'Retry safely' : 'Create draft'}</Button></DialogActions>
       </Dialog>
 
       <Dialog open={Boolean(refunding)} onClose={closeRefundDialog} fullWidth maxWidth="sm">
@@ -812,7 +920,7 @@ export default function AccountsReceivablePage() {
             <Box sx={{ borderBlock: '1px solid', borderColor: 'divider', p: 1.5 }}><Typography variant="caption" color="text.secondary">Projected refundable balance</Typography><Typography variant="h6" color={refundProjected < 0 ? 'error.main' : 'text.primary'} sx={{ fontWeight: 800 }}>{money(refundProjected)}</Typography></Box>
           </Stack>
         </DialogContent>
-        <DialogActions sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider' }}><Button disabled={createRefund.isPending} onClick={closeRefundDialog}>Cancel</Button><Button variant="contained" disabled={createRefund.isPending || refundEligibility.isFetching || !refundAmountValid || !refundDate || !/^token:[A-Za-z0-9_-]{8,180}$/.test(refundDestination.trim()) || !refundDestinationVerified || refundReason.trim().length < 20} onClick={() => { setRefundSubmitted(true); createRefund.mutate(); }}>{refundSubmitted && createRefund.isError ? 'Retry safely' : 'Create draft'}</Button></DialogActions>
+        <DialogActions sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider' }}><Button disabled={createRefund.isPending || refundSubmitted} onClick={closeRefundDialog}>Cancel</Button><Button variant="contained" disabled={createRefund.isPending || refundEligibility.isFetching || !refundAmountValid || !refundDate || !/^token:[A-Za-z0-9_-]{8,180}$/.test(refundDestination.trim()) || !refundDestinationVerified || refundReason.trim().length < 20} onClick={() => { setRefundSubmitted(true); createRefund.mutate(); }}>{refundSubmitted && createRefund.isError ? 'Retry safely' : 'Create draft'}</Button></DialogActions>
       </Dialog>
 
       <Dialog open={Boolean(exceptionAction)} onClose={() => !transitionException.isPending && setExceptionAction(null)} fullWidth maxWidth="xs">

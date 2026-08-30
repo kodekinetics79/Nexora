@@ -8426,6 +8426,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
 
+                    b.Property<string>("RequestHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("NexoraSerial")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
@@ -16473,6 +16477,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("ExternalID");
 
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
                     b.Property<bool>("IsActive")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
@@ -16503,6 +16511,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("RawResponse")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("RequestHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<string>("ServiceLevel")
                         .HasMaxLength(100)
@@ -16544,6 +16556,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("BusinessUnitId", "DeliveryStatus")
                         .HasDatabaseName("IX_Shipments_BU_DeliveryStatus");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Shipments_BU_IdempotencyKey")
+                        .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
                     b.ToTable("Shipments", t =>
                         {
