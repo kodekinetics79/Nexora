@@ -10,6 +10,12 @@ namespace ERP_RFQ_Automation.Platform.Provisioning;
 /// </summary>
 public static class ProvisioningIssueClassifications
 {
+    /// <summary>No failure is recorded: execution is queued, running, or complete. Activation is evaluated separately.</summary>
+    public const string NoFailure = "NO_FAILURE";
+
+    /// <summary>An operator cancelled execution. This is not an input error or a retryable failure.</summary>
+    public const string Cancelled = "CANCELLED";
+
     /// <summary>
     /// Something in the submitted request has to change: an address somebody else now owns, a
     /// workspace slug that has been taken, a plan that no longer exists. Nobody can fix this by
@@ -33,8 +39,8 @@ public static class ProvisioningIssueClassifications
 
     /// <summary>
     /// An unclassified, non-terminal failure. Retrying is the correct first move. This is the
-    /// default precisely because the alternatives all make a claim, and a wrong claim about who
-    /// has to act is worse than an honest "try it again and tell us if it persists".
+    /// fallback for an actual failure, never for healthy progress or completion. Recovery action
+    /// availability and safety are evaluated separately.
     /// </summary>
     public const string RetryableSystemFailure = "RETRYABLE_SYSTEM_FAILURE";
 }

@@ -114,6 +114,50 @@ beforeEach(() => {
 });
 
 describe('provisioning diagnostics', () => {
+  it.each([
+    ['Succeeded', 'NO_FAILURE', 'Provisioning complete'],
+    ['Succeeded', 'RETRYABLE_SYSTEM_FAILURE', 'Provisioning complete'],
+    ['Running', 'NO_FAILURE', 'Provisioning in progress'],
+    ['Pending', 'NO_FAILURE', 'Provisioning queued'],
+    ['Cancelled', 'CANCELLED', 'Provisioning cancelled'],
+  ] as const)('explains %s with classification %s without recommending retry', async (status, classification, title) => {
+    vi.spyOn(platformApi, 'getTenantProvisioningDiagnostics').mockResolvedValue(diagnostics({
+      status, classification, currentStep: null, failedStep: null, failureCode: null,
+      failureReason: null, missingPrerequisite: null, steps: [],
+      classificationDetail: 'The execution journal has been evaluated.',
+      recoveryActions: [{ action: 'resume', step: null, available: false, safe: false,
+        detail: 'No recovery action is available for this execution.' }],
+    }));
+    renderTab();
+    expect(await screen.findAllByText(title)).not.toHaveLength(0);
+    expect(screen.queryByText('Retryable system failure')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retrying is the correct first move/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText('The execution journal has been evaluated.')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Resume provisioning' })).toBeDisabled();
+    // Completion of provisioning is not completion of activation.
+    expect(screen.getByText('Production blockers')).toBeInTheDocument();
+    expect(screen.getAllByText('identity.legal-customer').length).toBeGreaterThan(0);
+  });
+
+  it('does not invent safe retry advice for an unknown server classification', async () => {
+    vi.spyOn(platformApi, 'getTenantProvisioningDiagnostics').mockResolvedValue(diagnostics({
+      classification: 'FUTURE_CLASSIFICATION' as TenantProvisioningDiagnostics['classification'],
+    }));
+    renderTab();
+    expect(await screen.findByText('Review required')).toBeInTheDocument();
+    expect(screen.queryByText(/Retrying is the correct first move/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/not expected to help/i)).toBeInTheDocument();
+  });
+
+  it('keeps genuine retryable failures and their recovery guidance visible', async () => {
+    vi.spyOn(platformApi, 'getTenantProvisioningDiagnostics').mockResolvedValue(diagnostics({
+      classification: 'RETRYABLE_SYSTEM_FAILURE',
+    }));
+    renderTab();
+    expect(await screen.findByText('Retryable system failure')).toBeInTheDocument();
+    expect(screen.getByText(/Retrying is the correct first move/i)).toBeInTheDocument();
+  });
+
   it('names the failed step, the reason, the classification and the missing prerequisite', async () => {
     vi.spyOn(platformApi, 'getTenantProvisioningDiagnostics').mockResolvedValue(diagnostics());
 

@@ -1187,6 +1187,10 @@ export interface SubmitProvisioningResult {
 
 /** Whose problem this is — the only question that decides who has to act. */
 export type ProvisioningIssueClassification =
+  /** Execution is queued, running, or complete without a provisioning failure. */
+  | 'NO_FAILURE'
+  /** An operator cancelled execution; it cannot be resumed. */
+  | 'CANCELLED'
   /** The submitted request has to change. No retry helps. */
   | 'CUSTOMER_INPUT'
   /** This deployment is wired wrong: a missing grant, a worker that is switched off. */
