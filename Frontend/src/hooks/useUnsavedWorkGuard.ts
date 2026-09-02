@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { setUnsavedWork } from './unsavedWorkRegistry';
 
 /**
  * Keeps a half-finished form from evaporating.
@@ -48,6 +49,11 @@ interface Options<T> {
   enabled: boolean;
   /** Milliseconds to wait after the last change before writing the draft. */
   debounceMs?: number;
+  /**
+   * The question the rail asks before an in-app navigation leaves this form dirty. Omit to keep
+   * the guard to refresh/tab-close only (a form whose own buttons handle every exit).
+   */
+  leaveMessage?: string;
 }
 
 const serialise = (value: unknown): string => {
@@ -63,6 +69,7 @@ export function useUnsavedWorkGuard<T>({
   value,
   enabled,
   debounceMs = 800,
+  leaveMessage,
 }: Options<T>): UnsavedWorkGuard<T> {
   // State, not a ref. A ref does not re-render, so `markSaved` would leave `isDirty` stale until
   // something else happened to render — the form would keep claiming unsaved work immediately
@@ -138,6 +145,13 @@ export function useUnsavedWorkGuard<T>({
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [isDirty]);
+
+  // In-app navigation (the rail, the tabs) — the router never fires beforeunload for those.
+  useEffect(() => {
+    if (!leaveMessage || !storageKey) return;
+    setUnsavedWork(storageKey, isDirty ? leaveMessage : null);
+    return () => setUnsavedWork(storageKey, null);
+  }, [isDirty, leaveMessage, storageKey]);
 
   const markSaved = useCallback((saved: T) => {
     setBaseline(serialise(saved));

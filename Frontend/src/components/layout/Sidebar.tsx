@@ -20,6 +20,7 @@ import {
   FiberManualRecord as BulletIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
+import { confirmLeavingUnsavedWork } from '../../hooks/unsavedWorkRegistry';
 import {
   ADVANCED_GROUPS,
   ALL_SCREENS_ENTRY,
@@ -125,6 +126,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
 
   const navigateTo = (path: string) => {
+    // A half-priced quote must not evaporate on a rail click. Same question, same wording, as
+    // the form's own Cancel button; nothing is asked when nothing is dirty.
+    if (!confirmLeavingUnsavedWork()) return;
     navigate(path);
     onNavigate?.();
   };
