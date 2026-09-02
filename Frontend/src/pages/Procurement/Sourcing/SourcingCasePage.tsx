@@ -24,6 +24,7 @@ import {
   TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { ArrowBack, Refresh, Send } from "@mui/icons-material";
@@ -101,11 +102,18 @@ function SourcingCasePage() {
     hasPermission("RFQ Management", "edit") &&
     hasPermission("Supplier History", "create") &&
     !outreachAlreadySent;
-  const canRefreshCandidates =
-    hasPermission("Supplier History", "edit") &&
-    !["OUTREACH_READY", "OUTREACH_SENT", "RESPONSES_PARTIAL", "RESPONSES_COMPLETE",
-      "COMPARISON_READY", "NEGOTIATION", "AWARD_REVIEW", "SUPPLIER_SELECTED",
-      "CUSTOMER_QUOTE_READY", "CLOSED", "CANCELLED"].includes(query.data?.status ?? "");
+  const candidatesFrozen = ["OUTREACH_READY", "OUTREACH_SENT", "RESPONSES_PARTIAL", "RESPONSES_COMPLETE",
+    "COMPARISON_READY", "NEGOTIATION", "AWARD_REVIEW", "SUPPLIER_SELECTED",
+    "CUSTOMER_QUOTE_READY", "CLOSED", "CANCELLED"].includes(query.data?.status ?? "");
+  const canRefreshCandidates = hasPermission("Supplier History", "edit") && !candidatesFrozen;
+  // Same wording pattern as the "cannot prepare Supplier RFQs" notice below: a disabled control
+  // says which of its two gates is shut, so the reader knows whether to ask for a permission or
+  // simply that the step has passed.
+  const whyNoRefresh = !hasPermission("Supplier History", "edit")
+    ? "Your role can review candidates but cannot refresh them."
+    : candidatesFrozen
+      ? "Candidates are fixed once a Supplier RFQ has been prepared for this case."
+      : null;
 
   const refreshCandidates = useMutation({
     mutationFn: (limit: CandidateLimit) =>
@@ -256,9 +264,15 @@ function SourcingCasePage() {
           <ToggleButtonGroup exclusive size="small" value={candidateLimit} onChange={changeLimit} aria-label="Supplier candidate count">
             {[10, 20, 50].map((limit) => <ToggleButton key={limit} value={limit} aria-label={`Show ${limit} Supplier candidates`}>{limit}</ToggleButton>)}
           </ToggleButtonGroup>
-          <Button startIcon={<Refresh />} onClick={() => refreshCandidates.mutate(candidateLimit)} disabled={!canRefreshCandidates || refreshCandidates.isPending}>
-            Refresh candidates
-          </Button>
+          <Tooltip title={whyNoRefresh ?? ""}>
+            {/* Focusable only while disabled, so a keyboard user can reach the reason (same
+                treatment as the mailbox-check button on the leads list). */}
+            <span tabIndex={canRefreshCandidates ? undefined : 0}>
+              <Button startIcon={<Refresh />} onClick={() => refreshCandidates.mutate(candidateLimit)} disabled={!canRefreshCandidates || refreshCandidates.isPending}>
+                Refresh candidates
+              </Button>
+            </span>
+          </Tooltip>
         </Stack>
       </Stack>
 
