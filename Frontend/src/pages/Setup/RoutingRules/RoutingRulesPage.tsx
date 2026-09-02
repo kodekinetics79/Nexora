@@ -25,6 +25,7 @@ import { categoryService } from '../../../api/services/categoryService';
 import businessUnitService from '../../../api/services/businessUnitService';
 import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
 import { useAuth } from '../../../context/AuthContext';
+import { presentableErrorMessage } from '../../../utils/apiErrors';
 
 /**
  * Master-data screen for FR-RFQ-07: which sales engineer an incoming RFQ is routed to.
@@ -254,6 +255,29 @@ const RoutingRulesPage: React.FC = () => {
     enabled: ruleOpen && selectedScope?.keySource === 'branch',
   });
 
+  /**
+   * The fallback owner. Both endpoints existed with no caller, so the only way to set "who gets
+   * an inquiry nobody has a rule for" was a database edit — and the sentence above the page
+   * ("waits in the unassigned queue for a manager") was the only statement of the default.
+   */
+  const canSetDefaultOwner =
+    (userData.isManager === true || userData.isSuperAdmin === true) && hasPermission('Leads', 'edit');
+  const defaultOwnerQuery = useQuery({
+    queryKey: ['routing-rules', 'default-owner'],
+    queryFn: () => commercialRoutingService.getDefaultOwner(),
+  });
+  const setDefaultOwner = useMutation({
+    mutationFn: (userId: number | null) => commercialRoutingService.setDefaultOwner(userId),
+    onSuccess: (result) => {
+      queryClient.setQueryData(['routing-rules', 'default-owner'], result);
+      queryClient.invalidateQueries({ queryKey: ['lead-owner-options'] });
+      toast.success(result.defaultOwnerUserId
+        ? `Inquiries no rule claims will go to ${result.name ?? 'the chosen person'}.`
+        : 'Fallback owner cleared. Unrouted inquiries will wait for a manager.');
+    },
+    onError: (error: unknown) => toast.error(presentableErrorMessage(error, 'The fallback owner was not changed.')),
+  });
+
   const userName = React.useCallback((id?: number | null) => {
     if (!id) return '—';
     const match = (usersQuery.data?.items ?? []).find((user) => user.id === id);
@@ -366,6 +390,63 @@ const RoutingRulesPage: React.FC = () => {
             />
           ))}
         </Stack>
+      </Paper>
+
+      <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider', mb: 3 }}>
+        <Typography sx={{ fontWeight: 800, mb: 0.5 }}>If no rule matches</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 820 }}>
+          When an inquiry arrives and no rule below claims it, Nexora gives it to this person.
+          Leave it empty and unrouted inquiries wait in the Unassigned list for a manager to hand out.
+        </Typography>
+        {defaultOwnerQuery.isError && (
+          <ApiErrorNotice
+            error={defaultOwnerQuery.error}
+            fallbackMessage="The fallback owner could not be loaded."
+            onRetry={() => void defaultOwnerQuery.refetch()}
+          />
+        )}
+        {defaultOwnerQuery.isLoading && <CircularProgress size={22} aria-label="Loading fallback owner" />}
+        {defaultOwnerQuery.isSuccess && (canSetDefaultOwner ? (
+          <Stack spacing={1} sx={{ maxWidth: 520 }}>
+            <TextField
+              select
+              label="Fallback owner"
+              value={defaultOwnerQuery.data.defaultOwnerUserId ?? ''}
+              onChange={(event) => setDefaultOwner.mutate(event.target.value === '' ? null : Number(event.target.value))}
+              disabled={setDefaultOwner.isPending || usersQuery.isLoading}
+              helperText={usersQuery.isError
+                ? 'The list of people could not be loaded. Refresh to try again.'
+                : setDefaultOwner.isPending ? 'Saving…' : 'Saved as soon as you choose.'}
+            >
+              <MenuItem value="">Nobody — wait for a manager</MenuItem>
+              {owners.map((user) => (
+                <MenuItem key={user.id} value={user.id}>
+                  {`${user.firstName} ${user.lastName}`.trim() || user.email}
+                </MenuItem>
+              ))}
+            </TextField>
+            {/* The server's own verdict: a chosen person routing will not actually use (no rep
+                profile, inactive) is worse than nobody, because the manager believes it is handled. */}
+            {defaultOwnerQuery.data.defaultOwnerUserId != null && !defaultOwnerQuery.data.isEligible && (
+              <Alert severity="warning">{defaultOwnerQuery.data.eligibilityReason}</Alert>
+            )}
+          </Stack>
+        ) : (
+          <Stack spacing={0.5}>
+            <Typography sx={{ fontWeight: 700 }}>
+              {defaultOwnerQuery.data.defaultOwnerUserId != null
+                ? `${defaultOwnerQuery.data.name ?? userName(defaultOwnerQuery.data.defaultOwnerUserId)}`
+                : 'Nobody — unrouted inquiries wait for a manager'}
+            </Typography>
+            {defaultOwnerQuery.data.defaultOwnerUserId != null && !defaultOwnerQuery.data.isEligible && (
+              <Typography variant="body2" color="warning.main">{defaultOwnerQuery.data.eligibilityReason}</Typography>
+            )}
+            {/* A read-only control prints why. */}
+            <Typography variant="caption" color="text.secondary">
+              Only a manager with Can Edit on Leads can change the fallback owner. Ask your administrator if it needs to change.
+            </Typography>
+          </Stack>
+        ))}
       </Paper>
 
       <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider', mb: 3 }}>

@@ -140,6 +140,21 @@ export interface RoutingOwnerOption {
   eligibilityReason: string;
 }
 
+/**
+ * The tenant's fallback lead owner — "when Nexora cannot work out who owns an inquiry, give it
+ * to ___" — with the server's own verdict on whether routing will actually use that person.
+ * GET/PUT /api/commercial-routing/default-owner (CommercialRoutingController).
+ */
+export interface DefaultLeadOwnerDTO {
+  defaultOwnerUserId: number | null;
+  name: string | null;
+  email: string | null;
+  isEligible: boolean;
+  eligibilityReason: string;
+  setByUserId: number | null;
+  setOn: string | null;
+}
+
 export const LEAD_OWNERSHIP_ACTION = {
   Assign: 0,
   Unassign: 1,
@@ -228,6 +243,14 @@ const commercialRoutingService = {
 
   getOwnerOptions: async (): Promise<RoutingOwnerOption[]> =>
     (await axiosInstance.get<RoutingOwnerOption[]>(`${root}/owner-options`)).data,
+
+  /** Leads:View — the answer explains where a rep's inquiries came from. */
+  getDefaultOwner: async (): Promise<DefaultLeadOwnerDTO> =>
+    (await axiosInstance.get<DefaultLeadOwnerDTO>(`${root}/default-owner`)).data,
+
+  /** Manager-only + Leads:Edit. `null` clears the fallback. */
+  setDefaultOwner: async (defaultOwnerUserId: number | null): Promise<DefaultLeadOwnerDTO> =>
+    (await axiosInstance.put<DefaultLeadOwnerDTO>(`${root}/default-owner`, { defaultOwnerUserId })).data,
 
   changeLeadOwner: async (leadId: number, body: ChangeLeadOwnerRequest): Promise<LeadOwnershipResponse> =>
     (await axiosInstance.put<LeadOwnershipResponse>(`${root}/leads/${leadId}/owner`, body)).data,
