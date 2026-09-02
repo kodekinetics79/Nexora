@@ -4,7 +4,11 @@ using ERP_RFQ_Automation.DTOs.UserDTO;
 using ERP_RFQ_Automation.DTOs.UserGroup;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Entitlements;
+using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Platform.Onboarding;
+using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Security;
 using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
@@ -25,6 +29,8 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IEntitlementService? _entitlements;
         private readonly IRolePermissionRepository? _rolePermissions;
         private readonly IIamAuditWriter? _audit;
+        private readonly ITenantAdminInvitationService? _invitations;
+        private readonly ErpRfqAutomationContext? _context;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50 };
 
         /// <summary>
@@ -37,7 +43,9 @@ namespace ERP_RFQ_Automation.Controllers
             IRoleGate roleGate,
             IEntitlementService? entitlements = null,
             IRolePermissionRepository? rolePermissions = null,
-            IIamAuditWriter? audit = null)
+            IIamAuditWriter? audit = null,
+            ITenantAdminInvitationService? invitations = null,
+            ErpRfqAutomationContext? context = null)
         {
             _repository = repository;
             _environment = environment;
@@ -45,6 +53,8 @@ namespace ERP_RFQ_Automation.Controllers
             _entitlements = entitlements;
             _rolePermissions = rolePermissions;
             _audit = audit;
+            _invitations = invitations;
+            _context = context;
         }
 
         // GET: api/User?pageNumber=1&pageSize=10&id=1&userName=john&email=john@example.com&roleId=1&region=US&isActive=true&businessUnitId=1
@@ -256,15 +266,68 @@ namespace ERP_RFQ_Automation.Controllers
                 request.Buid = claimBUId;
                 if (!await CanManageRoleAsync(request.RoleId, claimBUId)) return Forbid();
 
-                // Plan seat entitlement (P0): creating an ACTIVE user consumes a seat.
-                if (request.IsActive != false && await SeatLimitDenialAsync(claimBUId) is { } seatDenial)
+                // ---- activation method ------------------------------------------------------
+                // "invite" (default): the person receives a single-use, expiring link and
+                // chooses their own password; the account holds no usable credential until then.
+                // "password": the administrator types one — the pre-existing path, kept behind
+                // an explicit choice. A password with no method means "password" so older
+                // clients keep working unchanged.
+                var activation = (request.Activation ?? (string.IsNullOrEmpty(request.Password)
+                        ? TenantUserActivationMethods.Invite
+                        : TenantUserActivationMethods.Password))
+                    .Trim().ToLowerInvariant();
+                if (activation is not (TenantUserActivationMethods.Invite or TenantUserActivationMethods.Password))
+                    return BadRequest($"activation '{request.Activation}' is not recognised; use 'invite' or 'password'.");
+                var invited = activation == TenantUserActivationMethods.Invite;
+                if (!invited && string.IsNullOrEmpty(request.Password))
+                    return BadRequest("A password is required when activation is 'password'.");
+
+                long? tenantId = null;
+                string? tenantName = null;
+                if (invited)
+                {
+                    if (_invitations is null || _context is null)
+                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                            "Invitations are not available; set a password instead.");
+
+                    // The invitation is keyed by platform tenant. Projected to the columns the
+                    // tenant role is granted on platform."Tenants" (Id, PrimaryBusinessUnitId,
+                    // Status, PlanId) — reading the row whole is answered with 42501 in
+                    // production and passes silently on SQLite.
+                    tenantId = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+                        .Where(t => t.PrimaryBusinessUnitId == claimBUId)
+                        .Select(t => (long?)t.Id)
+                        .FirstOrDefaultAsync(HttpContext.RequestAborted);
+                    if (tenantId is null)
+                        return Conflict("This workspace is not registered as a tenant, so it cannot send " +
+                                        "activation links. Set a password instead.");
+
+                    // The company name on the invitation comes from the tenant-plane business unit,
+                    // which this role can read; platform."Tenants"."Name" is not granted to it.
+                    tenantName = await _context.BusinessUnits.AsNoTracking()
+                        .Where(b => b.Id == claimBUId)
+                        .Select(b => b.BusinessUnitName)
+                        .FirstOrDefaultAsync(HttpContext.RequestAborted);
+                }
+
+                // Plan seat entitlement (P0): creating an ACTIVE user consumes a seat. An invited
+                // account is dormant and consumes none yet, but redemption flips it active with
+                // no entitlement check of its own — an anonymous request holding a token — so
+                // this is the only moment the plan can be consulted. Same rule as the console.
+                if ((invited || request.IsActive != false) && await SeatLimitDenialAsync(claimBUId) is { } seatDenial)
                     return seatDenial;
 
                 // Hoisted deliberately: BCrypt mints a fresh random salt per call, so hashing
                 // inside the retriable delegate would burn a ~100ms KDF and change the stored
                 // hash on every attempt. The password is the same either way.
-                var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+                //
+                // On the invite path NOBODY holds a credential for this account: the column is
+                // non-nullable, so it takes the hash of a discarded random value — unusable by
+                // construction, because no plaintext for it exists anywhere.
+                var passwordHash = BCrypt.Net.BCrypt.HashPassword(
+                    invited ? Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N") : request.Password!);
                 var createdBy = ActorContext.From(User).Stamp;
+                var now = DateTime.UtcNow;
 
                 // The audit row and the user row commit together or not at all. The user's Id is
                 // only assigned by the INSERT, so the audit write has to follow it — the explicit
@@ -282,6 +345,7 @@ namespace ERP_RFQ_Automation.Controllers
                 // per attempt has no prior tracked state. Everything non-transactional — the image
                 // write and the KDF above — stays outside so it happens exactly once.
                 User? user = null;
+                IssuedTenantAdminInvitation? issued = null;
                 await ExecuteAtomicAsync(async () =>
                 {
                     user = new User
@@ -299,12 +363,17 @@ namespace ERP_RFQ_Automation.Controllers
                         ManagerId = request.ManagerId,
                         Buid = request.Buid,
                         UserGroupId = request.UserGroupId,
-                        IsActive = request.IsActive ?? true,
+                        // An invited account is dormant until the link is redeemed: it holds no
+                        // usable credential, and an account nobody can sign into must not occupy
+                        // a billable seat while the invitation is in flight — the seats meter
+                        // reads exactly this flag and this stamp.
+                        IsActive = invited ? false : request.IsActive ?? true,
+                        DeactivatedAtUtc = invited ? now : null,
                         // RC-7: server-derived. `User.Identity?.Name` was always null (the tenant
                         // JWT never set NameClaimType), so the client-supplied request.CreatedBy
                         // always won.
                         CreatedBy = createdBy,
-                        CreatedOn = DateTime.UtcNow
+                        CreatedOn = now
                     };
 
                     await _repository.AddAsync(user);
@@ -314,8 +383,40 @@ namespace ERP_RFQ_Automation.Controllers
                         user.RoleId,
                         user.TeamId,
                         user.UserGroupId,
-                        user.IsActive
+                        user.IsActive,
+                        Activation = activation
                     });
+
+                    if (invited)
+                    {
+                        // The invitation row lives in the platform schema, which the tenant role
+                        // holds no grant on. The block below executes exactly this INSERT as the
+                        // platform role, inside the SAME transaction as the user row, so a create
+                        // that rolls back cannot leave a live activation link behind.
+                        //
+                        // Fail closed on the one way the block can be misused: the platform role
+                        // is BYPASSRLS, and a tenant-plane entity left dirty here would be flushed
+                        // by IssueAsync's SaveChanges without a policy check. Everything above has
+                        // already been saved; this asserts that stays true under future edits.
+                        if (_context!.ChangeTracker.HasChanges())
+                            throw new InvalidOperationException(
+                                "User creation reached the invitation with unsaved tenant-plane changes; " +
+                                "they would be written under the platform role.");
+
+                        using (PlatformPlaneExecution.Enter())
+                        {
+                            issued = await _invitations!.IssueAsync(_context, new TenantAdminInvitationRequest
+                            {
+                                TenantId = tenantId!.Value,
+                                UserId = user.Id,
+                                Email = user.Email,
+                                RecipientName = user.FirstName,
+                                TenantName = string.IsNullOrWhiteSpace(tenantName) ? "your organisation" : tenantName!,
+                                IssuedBy = createdBy,
+                                SenderBusinessUnitId = claimBUId
+                            }, HttpContext.RequestAborted);
+                        }
+                    }
                 });
 
                 // Non-null on every path where the transaction committed; the throw is unreachable
@@ -324,7 +425,21 @@ namespace ERP_RFQ_Automation.Controllers
                 var created = user ?? throw new InvalidOperationException(
                     "User creation committed without producing an entity.");
 
+                // The email goes AFTER the commit: a sent email cannot be rolled back, and a live
+                // activation link for an account that does not exist is worse than none. Never
+                // throws; a mail outage is reported in the response and fixed by resending.
+                bool? dispatched = null;
+                if (issued is not null)
+                {
+                    // A refusal is already logged by the invitation service; the response carries
+                    // it so the screen can say "created, but the email did not go" and offer resend.
+                    dispatched = await _invitations!.SendInvitationEmailAsync(issued, HttpContext.RequestAborted);
+                }
+
                 var response = MapToResponse(created);
+                response.ActivationMethod = activation;
+                response.InvitationEmailDispatched = dispatched;
+                response.InvitationExpiresAtUtc = issued?.ExpiresAtUtc;
                 return CreatedAtAction(nameof(GetById), new { id = created.Id, businessUnitId = created.Buid }, response);
             }
             catch (ArgumentException ex)
@@ -536,6 +651,69 @@ namespace ERP_RFQ_Automation.Controllers
             catch (Exception ex)
             {
                 return this.ServerError(ex, "Error changing password.");
+            }
+        }
+
+        // POST: api/User/{id}/resend-invitation
+        /// <summary>
+        /// Issues a fresh activation link for an invited account that has not yet been activated,
+        /// revoking any earlier one first, and emails it. The remedy for "the email never arrived".
+        /// </summary>
+        [HttpPost("{id}/resend-invitation")]
+        [RequireModulePermission("Users", PermissionAction.Create)]
+        public async Task<ActionResult> ResendInvitation(long id)
+        {
+            try
+            {
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (claimBUId <= 0) return Forbid();
+                if (_invitations is null || _context is null)
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable, "Invitations are not available.");
+
+                var existing = await _repository.GetByIdAsync(id, claimBUId);
+                if (!await CanManageRoleAsync(existing.RoleId, claimBUId)) return Forbid();
+                if (existing.IsActive == true)
+                    return Conflict("This account is already active; there is nothing to resend.");
+
+                var tenantId = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+                    .Where(t => t.PrimaryBusinessUnitId == claimBUId)
+                    .Select(t => (long?)t.Id)
+                    .FirstOrDefaultAsync(HttpContext.RequestAborted);
+                if (tenantId is null)
+                    return Conflict("This workspace is not registered as a tenant, so it cannot send activation links.");
+
+                var actor = ActorContext.From(User).Stamp;
+                IssuedTenantAdminInvitation? issued;
+                // Platform-plane region: ReissueAsync supersedes and re-mints in the invitations
+                // table. Its one tenant-plane read (the target user, checked against the tenant's
+                // primary unit) is a filter on an id this caller already proved it may manage.
+                using (PlatformPlaneExecution.Enter())
+                {
+                    issued = await _invitations.ReissueAsync(tenantId.Value, id, actor, HttpContext.RequestAborted);
+                }
+                if (issued is null) return NotFound("No invitation can be issued for this account.");
+
+                var dispatched = await _invitations.SendInvitationEmailAsync(
+                    issued with { SenderBusinessUnitId = claimBUId }, HttpContext.RequestAborted);
+                await AuditAsync(IamAuditActions.UserUpdated, id, existing.Email,
+                    after: new { InvitationReissued = true, EmailDispatched = dispatched });
+
+                return Ok(new
+                {
+                    emailDispatched = dispatched,
+                    expiresAtUtc = issued.ExpiresAtUtc,
+                    message = dispatched
+                        ? $"A new activation link was sent to {existing.Email}."
+                        : "A new activation link was issued but the email provider did not accept it. Check outbound email and resend."
+                });
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return this.ServerError(ex, "Error resending the invitation.");
             }
         }
 

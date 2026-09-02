@@ -57,7 +57,7 @@ UserController.Create
   │          → 409 if the business unit is not a tenant's primary unit
   │          tenantName = BusinessUnit.BusinessUnitName                                (tenant-plane, granted)
   │          hash = BCrypt(random 64 hex)   IsActive=false   DeactivatedAtUtc=now
-  ├─ password: ActivationPasswordPolicy.Validate(...)  (same floor as activation: 12 chars)
+  ├─ password: unchanged (the pre-existing path; no new floor — see decisions)
   ├─ ExecuteAtomicAsync
   │     repository.AddAsync(user)  → SaveChanges (tenant role, RLS)
   │     audit UserCreated           (tenant role)
@@ -75,16 +75,15 @@ UserController.Create
   `RedeemAsync` runs as the identity role, which already holds SELECT/UPDATE on the table.
 * `POST /api/User/{id}/resend-invitation` (`Users:Create`) → `ReissueAsync` under the
   platform-plane block, then send. Without it a failed first send strands the colleague.
-* Deactivating a user (`DELETE /api/User/{id}`) revokes any live invitation
-  (`RevokeOutstandingForUserAsync`) so a deactivation cannot be undone by an old link —
-  the invariant the platform path already keeps (`TenantUsersController.cs:391`).
+* `DELETE /api/User/{id}` is a hard delete (`UserRepository.DeleteAsync` removes the row);
+  `RedeemAsync` already answers `Invalid` for an invitation whose user no longer exists, so
+  no revocation step is needed on that path.
 * Seat entitlement is checked at invite time (the account is dormant but redemption has no
   gate), mirroring the console.
 * Response: `UserResponseDTO` + `activationMethod`, `invitationEmailDispatched`,
   `invitationExpiresAtUtc`.
 * Frontend `UsersPage`: "Send invitation" is the default; "Set a password instead" is a
-  secondary text button that reveals the password field; client floor raised to 12 to match
-  the server.
+  secondary text button that reveals the password field.
 
 ## What could go wrong
 
@@ -121,8 +120,14 @@ Rollback = revert.
 
 ## Product-owner decisions to confirm
 
-1. The password path now enforces the same 12-character floor as activation.
+1. The password path is left as it was (no minimum-length floor on `POST /api/User`); the
+   activation flow's 12-character floor applies only to the link. Aligning the two is a
+   separate, deliberate change because existing harnesses create users with 8-character
+   passwords.
 2. Tenant-side invites use the tenant's own verified sender when one exists (item A), so
    the activation email arrives from the company address, not from Nexora.
 3. Business units that are not a tenant's primary unit cannot invite (409) — they keep
    the password path.
+4. `POST /api/User/{id}/resend-invitation` runs `ReissueAsync` under the platform-plane
+   block, which also reads the target user row under the bypass role (filtered by the
+   tenant's own primary unit, which the caller has already proved it manages).
