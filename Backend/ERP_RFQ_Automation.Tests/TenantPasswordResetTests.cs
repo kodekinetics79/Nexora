@@ -795,4 +795,28 @@ public sealed class TenantPasswordResetTests
     {
         public override DateTimeOffset GetUtcNow() => new(utcNow, TimeSpan.Zero);
     }
+
+    /// <summary>
+    /// docs/design/token-revocation.md: a completed reset must end every session minted under
+    /// the old credential, which is what rotating the stamp does. Runs as nexora_identity_app in
+    /// production; the column grant for that is asserted on the PostgreSQL lane
+    /// (UserSecurityStampMigrationPostgreSqlTests).
+    /// </summary>
+    [Fact]
+    public async Task Completing_a_reset_rotates_the_token_revocation_stamp()
+    {
+        using var db = new TestDb();
+        var (_, user) = await SeedAsync(db, "reset-stamp", "stamp@customer.example");
+        var before = user.SecurityStamp;
+        var token = await RequestAndReadTokenAsync(db, user.Email);
+        Assert.NotNull(token);
+
+        await using (var context = db.ContextFor(null))
+            Assert.Equal(PasswordResetStatus.Completed,
+                (await Service(context).CompleteAsync(token, GoodPassword, null)).Status);
+
+        await using var verify = db.ContextFor(null);
+        var updated = await verify.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == user.Id);
+        Assert.NotEqual(before, updated.SecurityStamp);
+    }
 }

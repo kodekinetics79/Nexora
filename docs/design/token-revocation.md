@@ -66,9 +66,12 @@ only covers one of the three events; `LastLogin` is written on login, not on rev
      flip it afterwards (see rollout). A missing claim is not a forgery — signatures still
      bind it — so this trades at most one hour of the old behaviour for a clean deploy;
    - otherwise: push the tenant scope from the `businessUnitId` claim
-     (`ITenantScopeAccessor.Push`) — `HttpContext.User` is not yet assigned during
-     `OnTokenValidated`, so `HttpTenantContext` cannot see the claim and the RLS interceptor
-     would run `nexora_tenant_app` with no GUC and read zero rows — then load
+     (`ITenantScopeAccessor.Push`) and do the read in a **dedicated DI scope**.
+     `HttpContext.User` is not yet assigned during `OnTokenValidated`; `HttpTenantContext` and
+     `TenantRlsCommandInterceptor` are request-scoped and capture the tenant at construction,
+     so resolving the request's DbContext here would freeze the whole request at "no tenant"
+     (found the hard way: 17 authenticated HTTP tests went 403). The validator is a singleton
+     holding `IServiceScopeFactory`; the request's scope is never touched. Then load
      `{IsActive, RoleId, SecurityStamp}` for `sub` under that scope, and reject unless
      `IsActive == true`, the stamp matches, and `roleId` matches (the role compare is
      belt-and-braces; rotation already covers it);

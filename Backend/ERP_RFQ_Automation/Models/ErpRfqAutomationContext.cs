@@ -1757,6 +1757,10 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasColumnName("Password_Hash");
             entity.Property(e => e.Region).HasMaxLength(100);
             entity.Property(e => e.RoleId).HasColumnName("RoleID");
+            // Token revocation handle (docs/design/token-revocation.md). NOT NULL; backfilled per
+            // row by 20260902120000_UserSecurityStamp; nexora_identity_app holds UPDATE on it so
+            // password reset and activation can rotate it.
+            entity.Property(e => e.SecurityStamp).HasMaxLength(64).IsRequired();
             entity.Property(e => e.TeamId).HasColumnName("TeamID");
             entity.Property(e => e.Timezone).HasMaxLength(50);
             entity.Property(e => e.UserGroupId).HasColumnName("UserGroupID");

@@ -258,6 +258,9 @@ namespace ERP_RFQ_Automation.Repositories
                 new Claim(JwtRegisteredClaimNames.Name, string.IsNullOrWhiteSpace(userName) ? user.Email : userName),
                 new Claim("roleId", user.RoleId?.ToString() ?? "none"),
                 new Claim("businessUnitId", user.Buid?.ToString() ?? "none"), // Include BusinessUnitId in token
+                // Revocation handle: TenantSessionValidator refuses the token on its next request
+                // once the account's stamp has been rotated (deactivate, role change, password).
+                new Claim(ERP_RFQ_Automation.Security.SecurityStamps.ClaimType, user.SecurityStamp),
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };
 

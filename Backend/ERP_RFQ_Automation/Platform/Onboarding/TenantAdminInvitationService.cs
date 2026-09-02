@@ -332,6 +332,8 @@ public sealed class TenantAdminInvitationService : ITenantAdminInvitationService
                 .Where(u => u.Id == accountId)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(u => u.PasswordHash, passwordHash)
+                    // New credential ⇒ new revocation handle (docs/design/token-revocation.md).
+                    .SetProperty(u => u.SecurityStamp, ERP_RFQ_Automation.Security.SecurityStamps.NewStamp())
                     .SetProperty(u => u.IsActive, (bool?)true)
                     .SetProperty(u => u.DeactivatedAtUtc, (DateTime?)null)
                     .SetProperty(u => u.ModifiedOn, (DateTime?)now)

@@ -721,4 +721,23 @@ public sealed class TenantActivationInvitationTests
     {
         public override DateTimeOffset GetUtcNow() => new(utcNow, TimeSpan.Zero);
     }
+
+    /// <summary>docs/design/token-revocation.md: activation sets a new credential, so the
+    /// revocation handle moves with it.</summary>
+    [Fact]
+    public async Task Redeeming_an_invitation_rotates_the_token_revocation_stamp()
+    {
+        using var db = new TestDb();
+        var (tenant, admin) = await SeedTenantWithAdminAsync(db, "activation-stamp", "stamp@customer.example");
+        var before = admin.SecurityStamp;
+        var issued = await IssueAsync(db, tenant, admin);
+
+        await using (var redeemContext = db.ContextFor(null))
+            Assert.Equal(TenantActivationStatus.Activated,
+                (await Service(redeemContext).RedeemAsync(issued.Token, GoodPassword, null)).Status);
+
+        await using var verify = db.ContextFor(null);
+        var activated = await verify.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == admin.Id);
+        Assert.NotEqual(before, activated.SecurityStamp);
+    }
 }
