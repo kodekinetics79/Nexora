@@ -108,45 +108,11 @@ namespace ERP_RFQ_Automation.Notifications.Providers
 
         private MimeMessage BuildMimeMessage(EmailMessage message, string messageId)
         {
-            var mime = new MimeMessage { MessageId = messageId, Subject = message.Subject };
-
-            mime.From.Add(message.From is not null
-                ? Address(message.From)
-                : new MailboxAddress(_options.FromName ?? string.Empty, _options.FromAddress));
-
-            foreach (var to in message.To) mime.To.Add(Address(to));
-            foreach (var cc in message.Cc) mime.Cc.Add(Address(cc));
-            foreach (var bcc in message.Bcc) mime.Bcc.Add(Address(bcc));
-
-            var replyTo = message.ReplyTo
-                ?? (string.IsNullOrWhiteSpace(_options.ReplyToAddress)
-                    ? null
-                    : new EmailAddress(_options.ReplyToAddress!));
-            if (replyTo is not null) mime.ReplyTo.Add(Address(replyTo));
-
-            var builder = new BodyBuilder();
-            if (!string.IsNullOrWhiteSpace(message.HtmlBody)) builder.HtmlBody = message.HtmlBody;
-            if (!string.IsNullOrWhiteSpace(message.TextBody)) builder.TextBody = message.TextBody;
-
-            // A body-less message is still a valid send (a bare subject line), but MimeKit needs
-            // something to build; an empty text part keeps the message well-formed.
-            if (string.IsNullOrWhiteSpace(builder.HtmlBody) && string.IsNullOrWhiteSpace(builder.TextBody))
-                builder.TextBody = string.Empty;
-
-            foreach (var attachment in message.Attachments)
-                builder.Attachments.Add(
-                    attachment.FileName, attachment.Content, ContentType.Parse(attachment.ContentType));
-
-            mime.Body = builder.ToMessageBody();
-            return mime;
+            var from = message.From ?? new EmailAddress(_options.FromAddress, _options.FromName ?? string.Empty);
+            var defaultReplyTo = string.IsNullOrWhiteSpace(_options.ReplyToAddress)
+                ? null
+                : new EmailAddress(_options.ReplyToAddress!);
+            return MimeMessageComposer.Compose(message, messageId, from, defaultReplyTo);
         }
-
-        /// <summary>
-        /// MimeKit parses a display name and address together; the two are kept apart here because
-        /// a display name containing a comma or an angle bracket would otherwise be read as extra
-        /// recipients.
-        /// </summary>
-        private static MailboxAddress Address(EmailAddress address)
-            => new(address.DisplayName ?? string.Empty, address.Address);
     }
 }

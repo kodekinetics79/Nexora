@@ -60,6 +60,10 @@ public sealed class QuoteDeliverySender(IQuoteService quotes, IEmailSender email
             HtmlBody = request.Body,
             BusinessUnitId = request.BusinessUnitId.ToString(),
             TenantId = request.BusinessUnitId.ToString(),
+            // The quote leaves from the VERIFIED sender of the tenant that owns it: the tenant's
+            // own active SMTP mailbox when one exists, the platform address otherwise (issue #54).
+            // Resolved by IOutboundSenderResolver, the same authority the mailbox screen reads.
+            OwningBusinessUnitId = request.BusinessUnitId,
             // The transport's verified From identity remains authoritative. A tenant's company
             // address is a Reply-To only; promoting arbitrary profile text to SMTP From would
             // break SPF/DMARC and let one tenant impersonate another domain.

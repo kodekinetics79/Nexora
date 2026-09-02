@@ -114,7 +114,7 @@ const MailboxPage: React.FC = () => {
   // The API already refuses these (403), but offering a control that always fails is its own
   // defect — the operator cannot tell "not allowed" from "broken". Read-only users get a
   // read-only screen. This mirrors the exact actions the controller gates.
-  const { hasPermission } = useAuth();
+  const { hasPermission, userData } = useAuth();
   const canCreate = hasPermission('Email & SMTP', 'create');
   const canEdit = hasPermission('Email & SMTP', 'edit');
   const canDelete = hasPermission('Email & SMTP', 'delete');
@@ -163,6 +163,17 @@ const MailboxPage: React.FC = () => {
     onSuccess: setProbe,
     onError: (error: any) =>
       toast.error(error?.response?.data?.message ?? error?.response?.data ?? 'The test could not be run'),
+  });
+
+  const sendTestMutation = useMutation({
+    mutationFn: (mailboxId: number) => mailboxService.sendTest(mailboxId, userData.email ?? ''),
+    onSuccess: (result) => {
+      if (result.succeeded && result.transmitted) toast.success(result.message);
+      else if (result.succeeded) toast(result.message);
+      else toast.error(result.message);
+    },
+    onError: (error: any) =>
+      toast.error(error?.response?.data?.message ?? error?.response?.data ?? 'The test message could not be sent'),
   });
 
   const saveMutation = useMutation({
@@ -269,6 +280,20 @@ const MailboxPage: React.FC = () => {
             color={HEALTH_COLOUR[mailbox.healthState] ?? 'default'}
             sx={{ fontWeight: 700 }}
           />
+          {canEdit && mailbox.protocol === 'SMTP' && mailbox.isActive && (
+            <Tooltip title={`Send a test message from this mailbox to ${userData.email ?? 'your address'}`}>
+              <span>
+                <IconButton
+                  size="small"
+                  aria-label="Send test message"
+                  onClick={() => sendTestMutation.mutate(mailbox.id)}
+                  disabled={sendTestMutation.isPending || !userData.email}
+                >
+                  <SmtpIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
           {canEdit && (
             <Tooltip title="Edit">
               <IconButton size="small" onClick={() => openEdit(mailbox)}><EditIcon fontSize="small" /></IconButton>
@@ -358,10 +383,21 @@ const MailboxPage: React.FC = () => {
         >
           <AlertTitle sx={{ fontWeight: 800 }}>
             {outbound.canSendToCustomers
-              ? 'Outbound email is live'
+              ? (outbound.senderOrigin === 'tenant'
+                ? 'Outbound email is live — sending from your own mailbox'
+                : 'Outbound email is live — sending from the platform address')
               : 'Outbound email is contained'}
           </AlertTitle>
           {outbound.summary}
+          {outbound.canSendToCustomers && outbound.senderAddress && (
+            <Typography variant="body2" sx={{ mt: 0.5 }}>
+              Sender: <strong>{outbound.senderName ? `${outbound.senderName} <${outbound.senderAddress}>` : outbound.senderAddress}</strong>
+              {outbound.senderHost && <> · via {outbound.senderHost}</>}
+              {outbound.containmentMode && outbound.containmentMode !== 'Live' && (
+                <> · containment: {outbound.containmentMode}</>
+              )}
+            </Typography>
+          )}
           {outbound.hasAmbiguousOutbound && (
             <Typography variant="body2" sx={{ mt: 0.5, fontWeight: 700 }}>
               Only the oldest active SMTP mailbox is actually used. Deactivate the others so the

@@ -245,6 +245,44 @@ public sealed record OutboundMailStatusDTO
 
     /// <summary>Same ambiguity on the inbound side: several active IMAP rows are each polled.</summary>
     public int ActiveImapCount { get; init; }
+
+    // ---- the sender the code will actually use (issue #54) --------------------------------
+    //
+    // Read from IOutboundSenderResolver, the SAME authority the quote sender and the supplier
+    // RFQ worker consult, so this screen can no longer say "quotes WILL be delivered through X"
+    // while the send path does something else.
+
+    /// <summary>"tenant" (this tenant's own mailbox), "platform" (the operator's stored
+    /// configuration) or "configuration" (deployment settings, nothing stored).</summary>
+    public string SenderOrigin { get; init; } = string.Empty;
+
+    /// <summary>The From address customers and suppliers will see.</summary>
+    public string SenderAddress { get; init; } = string.Empty;
+
+    public string SenderName { get; init; } = string.Empty;
+
+    /// <summary>The SMTP host that will be dialled, or null for an HTTP provider / console.</summary>
+    public string? SenderHost { get; init; }
+
+    /// <summary>The mailbox row that sends, when <see cref="SenderOrigin"/> is "tenant".</summary>
+    public long? SenderMailboxId { get; init; }
+
+    public string? SenderMailboxName { get; init; }
+
+    /// <summary>"Live", or the platform containment mode (Redirect / AllowListOnly / DraftOnly)
+    /// that will intercept every send, tenant mailbox or not.</summary>
+    public string ContainmentMode { get; init; } = "Live";
+}
+
+/// <summary>Body of <c>POST /api/Mailbox/{id}/send-test</c>.</summary>
+public sealed class MailboxSendTestRequestDTO
+{
+    /// <summary>Where to send. Must be the signed-in user's own address or the mailbox's own
+    /// address: this endpoint proves a channel works, it is not a relay.</summary>
+    [System.ComponentModel.DataAnnotations.Required]
+    [System.ComponentModel.DataAnnotations.EmailAddress]
+    [System.ComponentModel.DataAnnotations.StringLength(320)]
+    public string Recipient { get; set; } = null!;
 }
 
 public sealed record MailboxPresetDTO(

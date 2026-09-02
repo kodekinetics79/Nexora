@@ -96,6 +96,33 @@ export interface OutboundMailStatus {
   summary: string;
   hasAmbiguousOutbound: boolean;
   activeImapCount: number;
+  /**
+   * The sender the send path will ACTUALLY use, read from the same authority the quote sender
+   * and the supplier-RFQ worker consult (issue #54). "tenant" = this tenant's own SMTP mailbox;
+   * "platform" / "configuration" = the platform address, because no tenant mailbox is active.
+   */
+  senderOrigin: 'tenant' | 'platform' | 'configuration' | 'unknown';
+  senderAddress: string;
+  senderName: string;
+  senderHost: string | null;
+  senderMailboxId: number | null;
+  senderMailboxName: string | null;
+  /** "Live", or the platform containment mode that intercepts every send. */
+  containmentMode: string;
+}
+
+/** Result of `POST /api/Mailbox/{id}/send-test`: one real message through that mailbox. */
+export interface MailboxSendTestResult {
+  succeeded: boolean;
+  transmitted: boolean;
+  kind: string;
+  message: string;
+  provider: string;
+  outboundGuardMode: string;
+  intendedRecipient: string;
+  effectiveRecipient: string;
+  acceptanceReference: string | null;
+  elapsedMs: number;
 }
 
 export interface MailboxPreset {
@@ -139,6 +166,16 @@ const mailboxService = {
 
   getOutboundStatus: async (): Promise<OutboundMailStatus> => {
     const { data } = await axiosInstance.get('/api/Mailbox/outbound-status');
+    return data;
+  },
+
+  /**
+   * Sends one real message through the given SMTP mailbox, built exactly as a live quote send
+   * would be. The server only accepts the signed-in user's own address or the mailbox's own
+   * address as the recipient.
+   */
+  sendTest: async (id: number, recipient: string): Promise<MailboxSendTestResult> => {
+    const { data } = await axiosInstance.post(`/api/Mailbox/${id}/send-test`, { recipient });
     return data;
   },
 

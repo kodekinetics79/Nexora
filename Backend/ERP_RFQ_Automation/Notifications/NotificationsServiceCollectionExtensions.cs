@@ -81,6 +81,11 @@ namespace ERP_RFQ_Automation.Notifications
             services.TryAddSingleton<IOutboundEmailHealth, OutboundEmailHealth>();
             services.TryAddSingleton<OutboundEmailTransportResolver>();
             services.TryAddSingleton<OutboundEmailProbe>();
+            // Per-tenant sender authority (issue #54). The tenant transport is the SAME
+            // IOutboundSmtpTransport the mailbox screen's test and SmtpController use; TryAdd so
+            // the host's own registration (Program.cs) wins when present.
+            services.TryAddSingleton<Security.IOutboundSmtpTransport, Security.MailKitOutboundSmtpTransport>();
+            services.TryAddSingleton<IOutboundSenderResolver, OutboundSenderResolver>();
             services.TryAddSingleton<IEmailSender, RuntimeConfiguredEmailSender>();
 
             // Replaces the options manager for this one options type, so every existing consumer of
