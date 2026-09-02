@@ -73,6 +73,10 @@ const labelFromQueryKey = (query: { queryKey: readonly unknown[]; meta?: unknown
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : null;
 };
 
+/** The route the failing read belongs to; a stable id per screen for the toast below. */
+const screenKey = (): string =>
+  typeof window !== 'undefined' && window.location?.pathname ? window.location.pathname : 'unknown';
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -90,12 +94,17 @@ export const queryClient = new QueryClient({
       const detail = presentableErrorMessage(
         error,
         'The server did not return a result. Nothing is missing from your data — this screen could not read it.',
+        'list',
       );
 
-      // A stable id per view collapses an outage that fails five queries on one screen into one
-      // message, and collapses a retrying query into one message rather than a stack.
+      // One toast per SCREEN, not per query. The id used to be the query key's head, which
+      // collapsed retries of one query but let a screen that reads five endpoints stack five red
+      // toasts beside its own inline panels. Keyed on the route, a second failure on the same
+      // screen replaces the first message instead of joining it; a screen that renders its own
+      // failure UI still opts out with `meta.silenceGlobalError`, and a screen that renders
+      // nothing still gets exactly one toast — the floor this backstop exists to keep.
       toast.error(label ? `Couldn't load ${label}. ${detail}` : detail, {
-        id: `query-error:${String(Array.isArray(query.queryKey) ? query.queryKey[0] : 'unknown')}`,
+        id: `query-error:${screenKey()}`,
         duration: 6000,
       });
     },

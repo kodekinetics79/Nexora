@@ -135,6 +135,12 @@ const TECHNICAL_MARKERS: RegExp[] = [
   /\bStackTrace\b|\bInnerException\b/i,
   /\b[a-z0-9.-]+:\d{2,5}\b/i, // host:port
   /\bhttps?:\/\/\S+/i, // URLs / hostnames
+  // Route noise. A 404 body of "GET /api/Lead/needs-review" is a path, not a sentence, and it
+  // was rendered as the headline of six red panels on the Inbox. Any API path, any HTTP verb
+  // followed by a path, and any ":port/" fragment is detail for support, never product copy.
+  /\/api\//i, // API paths
+  /\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\/\S*/, // "GET /some/path"
+  /:\d+\//, // ":5000/..." — a port followed by a path
   /[A-Za-z]:\\|\/(?:var|usr|home|opt|etc)\//, // filesystem paths
   /\b(?:SELECT|INSERT|UPDATE|DELETE)\b\s+.*\b(?:FROM|INTO|SET)\b/i, // SQL
   /\b(?:ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|ERR_[A-Z_]+)\b/, // transport codes
@@ -302,7 +308,24 @@ interface StatusCopy {
   allowServerText: boolean;
 }
 
-const statusCopy = (status: number): StatusCopy => {
+/**
+ * What the caller was doing when the request failed. It changes the wording of a 404 only: on a
+ * record it means "this record is gone", which is honest; on a list it can only mean the list
+ * itself could not be fetched (a list has no identity to be missing), and "Not found" there
+ * reads to a rep as "your work is not found".
+ */
+export type ApiErrorContext = 'list' | 'record';
+
+const statusCopy = (status: number, context: ApiErrorContext = 'record'): StatusCopy => {
+  if (status === 404 && context === 'list') {
+    return {
+      title: 'This list could not be loaded',
+      message: 'The service did not return this list. Try again in a moment; if it keeps happening, tell support which screen you were on.',
+      severity: 'warning',
+      isRetryable: true,
+      allowServerText: false,
+    };
+  }
   if (status === 400) {
     return {
       title: 'That request could not be accepted',
@@ -487,7 +510,7 @@ const buildTechnicalDetail = (
  */
 export const toPresentableError = (
   error: unknown,
-  options?: { fallbackMessage?: string; fallbackTitle?: string },
+  options?: { fallbackMessage?: string; fallbackTitle?: string; context?: ApiErrorContext },
 ): PresentableError => {
   const shape = readAxiosLike(error);
   const isCanceled =
@@ -556,7 +579,7 @@ export const toPresentableError = (
     };
   }
 
-  const copy = statusCopy(shape.status);
+  const copy = statusCopy(shape.status, options?.context);
   // `validationMessage` and `serverText` only ever return already-gated, presentation-ready text.
   const validation = validationMessage(shape.data);
   const candidate = validation ?? serverText(shape.data);
@@ -584,7 +607,8 @@ export const toPresentableError = (
 export const presentableErrorMessage = (
   error: unknown,
   fallbackMessage?: string,
-): string => toPresentableError(error, { fallbackMessage }).message;
+  context?: ApiErrorContext,
+): string => toPresentableError(error, { fallbackMessage, context }).message;
 
 /** The text the support disclosure copies to the clipboard. */
 export const supportDetailText = (presented: PresentableError): string =>

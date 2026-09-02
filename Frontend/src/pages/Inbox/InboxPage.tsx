@@ -313,6 +313,7 @@ const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResul
         <Box sx={{ p: 2 }}>
           <ApiErrorNotice
             error={query.error}
+            context="list"
             fallbackMessage={definition.errorFallback}
             onRetry={() => void query.refetch()}
           />

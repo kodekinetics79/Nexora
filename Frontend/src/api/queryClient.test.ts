@@ -78,7 +78,8 @@ describe('global query failure reporting', () => {
 
     const ids = toastError.mock.calls.map((call) => call[1]?.id);
     expect(new Set(ids).size).toBe(1);
-    expect(ids[0]).toBe('query-error:shipments');
+    // Keyed on the screen (route), not the query key — see the per-screen tests below.
+    expect(ids[0]).toBe('query-error:/');
   });
 
   it('stays quiet on 401, because the axios interceptor owns the redirect to /login', async () => {
@@ -178,5 +179,31 @@ describe('global write failure reporting', () => {
       .catch(() => {});
 
     expect(toastError).not.toHaveBeenCalled();
+  });
+});
+
+describe('one toast per screen, not per query', () => {
+  it('collapses failures of different queries on the same route into one toast id', async () => {
+    // A screen that reads five endpoints used to stack five red toasts beside its own inline
+    // panels. Two keys, one route, one toast.
+    for (const key of [['inbox', 'needs-review'], ['inbox', 'blocked'], ['lead-decision-summaries']]) {
+      await queryClient
+        .fetchQuery({ queryKey: key, queryFn: () => Promise.reject(axiosError(404, 'GET /api/Lead/needs-review')), retry: false })
+        .catch(() => {});
+    }
+
+    const ids = new Set(toastError.mock.calls.map((call) => call[1]?.id));
+    expect(ids.size).toBe(1);
+  });
+
+  it('never puts an API path in the toast', async () => {
+    await queryClient
+      .fetchQuery({ queryKey: ['inbox', 'needs-review'], queryFn: () => Promise.reject(axiosError(404, 'GET /api/Lead/needs-review')), retry: false })
+      .catch(() => {});
+
+    const message = toastError.mock.calls[0][0] as string;
+    expect(message).not.toContain('/api/');
+    // Nor the record-404 wording: a list has no identity to be "no longer existing".
+    expect(message).not.toContain('no longer exists');
   });
 });
