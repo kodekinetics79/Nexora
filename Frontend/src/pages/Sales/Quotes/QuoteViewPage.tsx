@@ -16,11 +16,13 @@ import {
   EmojiEvents as OutcomeIcon,
   MarkEmailRead as RespondedIcon,
   ContentCopy as ReviseIcon,
-  EventRepeat as ExtendValidityIcon
+  EventRepeat as ExtendValidityIcon,
+  NotificationsActive as FollowUpIcon
 } from '@mui/icons-material';
 import quoteService, { type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import ExtendValidityDialog from './ExtendValidityDialog';
+import FollowUpDialog from './FollowUpDialog';
 import PriceConfirmationDialog from './PriceConfirmationDialog';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards';
@@ -98,6 +100,7 @@ const QuoteViewPage: React.FC = () => {
   const [emailOpen, setEmailOpen] = React.useState(false);
   // R7: extending the validity of a quote that is already with the customer.
   const [extendValidityOpen, setExtendValidityOpen] = React.useState(false);
+  const [followUpOpen, setFollowUpOpen] = React.useState(false);
   const [priceConfirmOpen, setPriceConfirmOpen] = React.useState(false);
   const [pendingRecipient, setPendingRecipient] = React.useState('');
   const [holdInfo, setHoldInfo] = React.useState<string | null>(null);
@@ -420,6 +423,22 @@ const QuoteViewPage: React.FC = () => {
             </Tooltip>
           )}
 
+          {/* A follow-up the rep sets by hand. Delivery creates one automatically when a quote is
+              sent; anything promised in a phone call afterwards had nowhere to go. */}
+          {hasPermission('Quotations', 'edit') && (
+            // describeChild: the title is a description, not the button's name.
+            <Tooltip title="Set a reminder for yourself about this quote. It appears on your Follow-ups list." describeChild>
+              <Button
+                variant="outlined"
+                startIcon={<FollowUpIcon />}
+                onClick={() => setFollowUpOpen(true)}
+                sx={{ borderRadius: 2 }}
+              >
+                Follow up on this quote
+              </Button>
+            </Tooltip>
+          )}
+
           {hasPermission('Quotations', 'edit') && revisionInfo?.canRevise && (
             <Tooltip title="Create a new draft revision of this quote (the original stays untouched)">
               <Button
@@ -634,6 +653,13 @@ const QuoteViewPage: React.FC = () => {
         quoteId={Number(id)}
         quoteNo={quote.quoteNo}
         invalidateKeys={[['quote-detail', id], ['quotes']]}
+      />
+
+      <FollowUpDialog
+        open={followUpOpen}
+        onClose={() => setFollowUpOpen(false)}
+        quoteId={Number(id)}
+        quoteNo={quote.quoteNo}
       />
 
       <ExtendValidityDialog

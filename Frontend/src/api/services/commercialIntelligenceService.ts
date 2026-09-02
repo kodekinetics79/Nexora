@@ -738,6 +738,16 @@ const commercialIntelligenceService = {
   },
   getFollowUps: async (params: ListParams = {}): Promise<FollowUpDTO[]> =>
     (await axiosInstance.get<FollowUpDTO[]>(`${commercialRoot}/follow-ups`, { params })).data,
+  /**
+   * A follow-up the rep sets deliberately on one quote — "call them Thursday about the price".
+   * POST /api/commercial-intelligence/follow-ups (Quotations: Edit). Assigned to the caller; the
+   * reason is what the Follow-ups list shows in its Reason column (80 characters).
+   */
+  createFollowUp: async (
+    body: { quoteId: number; dueAt: string; reason: string },
+    idempotencyKey: string,
+  ): Promise<{ id: number; quoteId: number; dueAt: string; reason: string; status: string; version: number }> =>
+    (await axiosInstance.post(`${commercialRoot}/follow-ups`, body, { headers: { 'Idempotency-Key': idempotencyKey } })).data,
   completeFollowUp: async (id: number, expectedVersion: number, idempotencyKey: string): Promise<void> => {
     await axiosInstance.post(`${commercialRoot}/follow-ups/${id}/complete`, { expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } });
   },

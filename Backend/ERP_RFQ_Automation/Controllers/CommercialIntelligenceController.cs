@@ -567,6 +567,64 @@ public sealed class CommercialIntelligenceController(
             daysSinceContact = quote?.SentOn == null ? (int?)null : Math.Max(0, (DateTime.UtcNow.Date - quote.SentOn.Value.Date).Days), version = x.Version }; }));
     }
 
+    /// <summary>
+    /// A follow-up the rep sets deliberately on one quote — "call them Thursday about the price".
+    ///
+    /// <para><c>CreateFollowUpAsync</c> existed with no HTTP endpoint: the only follow-ups in the
+    /// product were the ones quote delivery created on its own. This is the smallest honest door:
+    /// the caller is the assignee, the quote must belong to the caller's tenant, and the reason is
+    /// stored in the follow-up's purpose field — the column the Follow-ups list already renders as
+    /// "Reason" — so no schema changes. The 80-character bound is that column's.</para>
+    /// </summary>
+    [HttpPost("follow-ups")]
+    [RequireModulePermission("Quotations", PermissionAction.Edit)]
+    public async Task<ActionResult> CreateFollowUp(CreateQuoteFollowUpRequest request, CancellationToken ct)
+    {
+        var tenant = TenantId();
+        var userId = UserId();
+        if (!userId.HasValue) return Forbid();
+        if (request.QuoteId <= 0) return BadRequest(new { error = "A quote is required." });
+        var reason = (request.Reason ?? string.Empty).Trim();
+        if (reason.Length == 0) return BadRequest(new { error = "Say what the follow-up is for." });
+        if (reason.Length > 80) return BadRequest(new { error = "The reason must be 80 characters or fewer." });
+
+        var quote = await db.Quotes.AsNoTracking()
+            .Where(q => q.BusinessUnitId == tenant && q.Id == request.QuoteId)
+            .Select(q => new { q.Id, q.CustomerId })
+            .SingleOrDefaultAsync(ct);
+        if (quote is null) return NotFound(new { error = "The quote was not found in this business unit." });
+
+        // The service insists on a UTC instant. A value without an offset is taken as UTC rather
+        // than as the server's local time, which is the one reading that is stable across hosts.
+        var dueAt = request.DueAt.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(request.DueAt, DateTimeKind.Utc)
+            : request.DueAt.ToUniversalTime();
+
+        // The correlation id is part of what the service compares on an idempotent replay, so it
+        // must be the same on the retry as on the first attempt: derived from the key, never from
+        // the per-request trace identifier.
+        var idempotencyKey = IdempotencyKey();
+        var correlationId = idempotencyKey.Length <= 100 ? idempotencyKey : idempotencyKey[..100];
+
+        try
+        {
+            var task = await sales.CreateFollowUpAsync(tenant, new CreateFollowUpTaskCommand(
+                userId.Value, "Quote", quote.Id,
+                quote.CustomerId is > 0 ? quote.CustomerId : null,
+                dueAt, 2, reason,
+                User.FindFirst(ClaimTypes.Email)?.Value ?? userId.Value.ToString(),
+                correlationId, idempotencyKey), ct);
+            return CreatedAtAction(nameof(FollowUps), new { sourceId = task.Id }, new
+            {
+                task.Id, quoteId = task.AggregateId, dueAt = task.DueAtUtc, reason = task.PurposeCode,
+                status = task.Status.ToString(), version = task.Version,
+            });
+        }
+        catch (SalesNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (SalesConflictException ex) { return Conflict(new { error = ex.Message }); }
+        catch (SalesValidationException ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
     [HttpPost("follow-ups/{id:long}/complete")]
     [RequireModulePermission("Quotations", PermissionAction.Edit)]
     public async Task<ActionResult> CompleteFollowUp(long id, CompleteFollowUpRequest request, CancellationToken ct)
@@ -796,6 +854,7 @@ public sealed class CommercialIntelligenceController(
 public sealed record AssignAccountRequest(long OwnerUserId, long ExpectedVersion, string? Reason = null);
 public sealed record AssignRoutingRequest(long OwnerUserId, long ExpectedVersion, string? Reason = null);
 public sealed record CompleteFollowUpRequest(long ExpectedVersion);
+public sealed record CreateQuoteFollowUpRequest(long QuoteId, DateTime DueAt, string? Reason);
 public sealed record RepSummary(long UserId, string Name, string? Email, string? RoleName, int ActiveLeads,
     int OverdueLeads, int OpenRfqs, int DraftQuotes, int FollowUpsDue, IReadOnlyList<CurrencyPipelineGroup> PipelineGroups);
 public sealed record CurrencyPipelineGroup(long? CurrencyId, string? CurrencyCode, int QuoteCount,
