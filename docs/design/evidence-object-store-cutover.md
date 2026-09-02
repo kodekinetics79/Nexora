@@ -121,15 +121,21 @@ watched-folder intake and the write probe still need a writable root), remove th
 block, redeploy. `LocalFileStorage` (`IFileStorage.cs:58-99`) then boots without the mount
 check. `StorageCapacityHealthCheck` starts reporting `/tmp`, which is honest.
 
-### 5. `USER app` in the Dockerfile
+### 5. Non-root runtime in the Dockerfile, gated by a build arg
 
-`mcr.microsoft.com/dotnet/aspnet:8.0` ships user `app` (uid 1654). Adding `USER app` is safe
+`mcr.microsoft.com/dotnet/aspnet:8.0` ships user `app` (uid 1654). Running as `app` is safe
 only when every path the process writes is writable by uid 1654: `/app/wwwroot` (image
 uploads; created and chowned in the image), `/tmp`, and the storage root. A Render disk is
 mounted root-owned at runtime, so with the disk still attached the startup write probe fails
-and the container will not boot. The Dockerfile change therefore ships with the comment
-"safe only once the disk is gone or the mount is writable by app" and the chown of
-`/var/data/nexora` in the image (inert under a mount, correct without one).
+and the container will not boot — and because every merge to `main` auto-deploys
+(`autoDeployTrigger: checksPass`), an unconditional `USER app` would turn a merge into an
+outage rather than a loud-but-safe refusal. The Dockerfile therefore declares
+`ARG NEXORA_RUNTIME_USER=root` in the runtime stage and ends with
+`USER ${NEXORA_RUNTIME_USER}`; the mkdir/chown of `/app/wwwroot`, `/var/data/nexora` and
+`/tmp/nexora` is unconditional (inert under a mount, correct without one). The cutover is
+`docker build --build-arg NEXORA_RUNTIME_USER=app` — on Render, a dashboard Docker build arg —
+set only after step 4 of the rollout below. The default image is byte-for-byte today's
+runtime posture.
 
 ### 6. `render.yaml` reconciliation
 
@@ -179,6 +185,7 @@ safe defaults.
 3. Render: `EvidenceStorage__LegacyMigration__Enabled=true`, restart, read the report; repeat
    until `Migrated=0, Verified=N`. Set the key back to false.
 4. `Storage__EnforcePersistentMount=false`, `Storage__RootPath=/tmp/nexora/uploads`, remove
-   the disk. Only now is `USER app` safe.
+   the disk. Only now set the Render build arg `NEXORA_RUNTIME_USER=app`; until then the image
+   runs as root exactly as before.
 5. Rollback of 2: set the flag false. Rollback of 4: re-attach the disk — its contents were
    never deleted by this stream (the job copies; it does not remove).

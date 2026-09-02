@@ -132,7 +132,12 @@ services:
     #      "LEGACY EVIDENCE MIGRATION" log line, repeat until drained=True, set false
     #   3. Storage__EnforcePersistentMount=false, Storage__RootPath=/tmp/nexora/uploads,
     #      delete this `disk:` block and the Storage__RequiredMountPath key, redeploy
-    #   4. only then is the Dockerfile's `USER app` safe to ship.
+    #   4. only then switch the runtime user: the Dockerfile defaults to root and flips
+    #      to `app` (uid 1654) ONLY with `docker build --build-arg NEXORA_RUNTIME_USER=app`
+    #      — set it as a Docker build arg in the Render dashboard (Settings -> Build &
+    #      Deploy -> Docker Build Args). It is a build arg and not a bare `USER app`
+    #      because every merge auto-deploys: under a root-owned mount the write probe
+    #      fails and the container will not boot.
     # Render preserves ONLY paths under mountPath across deploys and restarts.
     disk:
       name: nexora-evidence
