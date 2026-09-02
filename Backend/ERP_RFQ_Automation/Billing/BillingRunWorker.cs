@@ -54,18 +54,28 @@ public sealed class BillingRunWorker : BackgroundService
     private readonly IOptionsMonitor<BillingRunOptions> _options;
     private readonly IBackgroundWorkerHeartbeats? _heartbeats;
     private readonly ILogger<BillingRunWorker> _log;
+    private readonly TimeProvider _clock;
     private readonly string _workerId;
 
+    /// <param name="clock">
+    /// The clock the sweep derives its current and prior periods from. Defaults to the system
+    /// clock; a test pins it so the prior period it finalizes has cleared
+    /// <c>BillingStatementService.FinalizeSettleLag</c> on every calendar day rather than on all
+    /// but the first two of each month. The finalize gate itself still reads the real clock — the
+    /// product rule is not injectable, only the sweep's notion of "which month is it".
+    /// </param>
     public BillingRunWorker(
         IServiceScopeFactory scopeFactory,
         IOptionsMonitor<BillingRunOptions> options,
         ILogger<BillingRunWorker> log,
-        IBackgroundWorkerHeartbeats? heartbeats = null)
+        IBackgroundWorkerHeartbeats? heartbeats = null,
+        TimeProvider? clock = null)
     {
         _scopeFactory = scopeFactory;
         _options = options;
         _log = log;
         _heartbeats = heartbeats;
+        _clock = clock ?? TimeProvider.System;
         _workerId = $"{Environment.MachineName}:{Environment.ProcessId}";
 
         // Registered in the CONSTRUCTOR so a worker that faults before it ever reaches its
@@ -146,7 +156,7 @@ public sealed class BillingRunWorker : BackgroundService
     /// </summary>
     internal async Task<BillingRunSummary> SweepOnceAsync(CancellationToken ct)
     {
-        var nowUtc = DateTime.UtcNow;
+        var nowUtc = _clock.GetUtcNow().UtcDateTime;
         var currentPeriod = BillingPeriod.Containing(nowUtc);
         var priorPeriod = BillingPeriod.Containing(currentPeriod.StartUtc.AddDays(-1));
 
