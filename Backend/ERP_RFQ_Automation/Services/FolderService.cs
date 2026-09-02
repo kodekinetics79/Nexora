@@ -222,7 +222,9 @@ namespace ERP_RFQ_Automation.Services
             var filePaths = Directory.GetFiles(folder);
             if (!filePaths.Any())
             {
-                _logger.LogInformation("No files found in {Label} folder.", leadSourceLabel);
+                // Debug: this is the steady state of an idle folder, reached every sweep for every
+                // source, and at Information it was three lines a minute saying nothing had happened.
+                _logger.LogDebug("No files found in {Label} folder.", leadSourceLabel);
                 return;
             }
 
