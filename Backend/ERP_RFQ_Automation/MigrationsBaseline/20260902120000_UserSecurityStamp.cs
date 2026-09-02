@@ -14,8 +14,9 @@ namespace ERP_RFQ_Automation.Migrations;
 /// distinct stamp rather than one shared value. The default is KEPT: the application supplies its
 /// own stamp on every write it makes (<c>User.SecurityStamp</c> initialiser), but a row inserted
 /// by raw SQL — ops scripts, fixtures, a future seeder — must not fail with 23502 and must not
-/// share a stamp with another row either. <c>gen_random_bytes</c> is pgcrypto, which the baseline
-/// creates (01_schema_and_extensions.sql).</para>
+/// share a stamp with another row either. <c>gen_random_uuid()</c> is built into PostgreSQL 13+ —
+/// deliberately not pgcrypto's <c>gen_random_bytes</c>: one test database path applies this
+/// migration without the extension, and a future environment may too.</para>
 ///
 /// <para>Grants. <c>nexora_tenant_app</c> and <c>nexora_pipeline_app</c> hold table-level UPDATE on
 /// "Users" and need nothing. <c>nexora_identity_app</c> — the role the anonymous password-reset
@@ -33,7 +34,7 @@ public sealed class UserSecurityStamp : Migration
         migrationBuilder.Sql("""
             ALTER TABLE public."Users"
                 ADD COLUMN IF NOT EXISTS "SecurityStamp" character varying(64) NOT NULL
-                DEFAULT encode(gen_random_bytes(16), 'hex');
+                DEFAULT replace(gen_random_uuid()::text, '-', '');
             """);
 
         migrationBuilder.Sql("""

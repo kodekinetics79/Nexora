@@ -41,9 +41,10 @@ only covers one of the three events; `LastLogin` is written on login, not on rev
    changes whenever the account's authority changes. CLR default `SecurityStamps.NewStamp()`
    on the entity, so every existing `new User { ... }` (controllers, provisioning, seeders,
    tests) gets a stamp without being edited. Migration `20260902120000_UserSecurityStamp`
-   (the ONE migration for this stream): `ADD COLUMN ... DEFAULT encode(gen_random_bytes(16),
-   'hex')` (volatile default ⇒ PostgreSQL evaluates it per row, so every existing user gets a
-   distinct stamp), the default **kept** so a raw-SQL insert that omits the column (ops
+   (the ONE migration for this stream): `ADD COLUMN ... DEFAULT replace(gen_random_uuid()::text,
+   '-', '')` (built into PostgreSQL 13+, no pgcrypto — one test database path applies migrations
+   without the extension; volatile default ⇒ PostgreSQL evaluates it per row, so every existing
+   user gets a distinct stamp), the default **kept** so a raw-SQL insert that omits the column (ops
    scripts, fixtures, three existing guard tests) succeeds with its own stamp — the first cut
    dropped it and those inserts failed with 23502 — then `GRANT UPDATE("SecurityStamp") ON
    "Users" TO nexora_identity_app` guarded by role existence like every other grant migration.

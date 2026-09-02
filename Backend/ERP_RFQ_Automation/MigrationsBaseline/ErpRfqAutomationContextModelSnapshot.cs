@@ -17347,7 +17347,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")
-                        .HasDefaultValueSql("encode(gen_random_bytes(16), 'hex')");
+                        .HasDefaultValueSql("replace(gen_random_uuid()::text, '-', '')");
 
                     b.Property<long?>("TeamId")
                         .HasColumnType("bigint")

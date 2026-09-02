@@ -1761,9 +1761,10 @@ public partial class ErpRfqAutomationContext : DbContext
             // row by 20260902120000_UserSecurityStamp; nexora_identity_app holds UPDATE on it so
             // password reset and activation can rotate it.
             // The database default is for raw-SQL inserts only (never evaluated on the portable
-            // SQLite lane, where the entity initialiser always supplies the value).
+            // SQLite lane, where the entity initialiser always supplies the value). Built-in
+            // gen_random_uuid(), not pgcrypto: not every database path has the extension.
             entity.Property(e => e.SecurityStamp).HasMaxLength(64).IsRequired()
-                .HasDefaultValueSql("encode(gen_random_bytes(16), 'hex')");
+                .HasDefaultValueSql("replace(gen_random_uuid()::text, '-', '')");
             entity.Property(e => e.TeamId).HasColumnName("TeamID");
             entity.Property(e => e.Timezone).HasMaxLength(50);
             entity.Property(e => e.UserGroupId).HasColumnName("UserGroupID");
