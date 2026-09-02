@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
@@ -12,11 +13,16 @@ namespace ERP_RFQ_Automation.Controllers
     public class ProductUploaderController : ControllerBase
     {
         private readonly ProductUploaderService _productUploaderService;
+        private readonly IFileInspectionService _fileInspection;
         private readonly ILogger<ProductUploaderController> _logger;
 
-        public ProductUploaderController(ProductUploaderService productUploaderService, ILogger<ProductUploaderController> logger)
+        public ProductUploaderController(
+            ProductUploaderService productUploaderService,
+            IFileInspectionService fileInspection,
+            ILogger<ProductUploaderController> logger)
         {
             _productUploaderService = productUploaderService;
+            _fileInspection = fileInspection;
             _logger = logger;
         }
 
@@ -43,6 +49,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("upload-template")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Products", PermissionAction.Create)]
         public async Task<IActionResult> UploadTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
@@ -58,7 +65,13 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
-                using var stream = file.OpenReadStream();
+                // Inspected BEFORE parsing (signature, archive safety, malware verdict), and refused
+                // with the shared problem shape when inspection says no or cannot answer.
+                await using var inspected = await UploadInspectionGate.InspectAsync(
+                    _fileInspection, file, HttpContext.RequestAborted);
+                if (!inspected.IsCleared)
+                    return UploadInspectionGate.Refuse(this, inspected.Inspection, "Product import file rejected");
+                var stream = inspected.Content;
                 var result = await _productUploaderService.UploadTemplateAsync(stream, targetBUId, createdBy);
 
                 if (!result.Success)

@@ -55,6 +55,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// <param name="businessUnitId">The BusinessUnitId for the lead.</param>
         /// <returns>The ID of the created Lead.</returns>
         [HttpPost("upload")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> UploadFiles(List<IFormFile> files, [FromForm] long? businessUnitId = null)
         {
@@ -124,6 +125,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// Uploads a specialized RFQ Excel file and creates an RFQ.
         /// </summary>
         [HttpPost("upload-rfq-excel")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> UploadCustomerRfqExcel(IFormFile file, [FromForm] long? businessUnitId = null, [FromForm] string? createdBy = null)
         {

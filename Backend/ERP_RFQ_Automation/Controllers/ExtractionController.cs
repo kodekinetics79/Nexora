@@ -51,6 +51,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// per file. Returns 202 Accepted with the shared batch id and a per-file outcome.
         /// </summary>
         [HttpPost("upload")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequestSizeLimit(MaxBytesPerBatch)]
         [RequestFormLimits(MultipartBodyLengthLimit = MaxBytesPerBatch)]
         // Uploading documents creates leads — same gate as the manual-upload lead pages.

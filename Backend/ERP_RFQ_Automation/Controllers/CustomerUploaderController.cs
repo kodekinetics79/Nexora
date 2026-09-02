@@ -53,6 +53,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("upload-template")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Customers", PermissionAction.Create)]
         [RequireModulePermission("Customers", PermissionAction.Edit)]
         public async Task<IActionResult> UploadTemplate(IFormFile file, CancellationToken cancellationToken)

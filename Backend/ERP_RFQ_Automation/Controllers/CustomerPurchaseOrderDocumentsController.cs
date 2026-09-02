@@ -30,6 +30,7 @@ public sealed class CustomerPurchaseOrderDocumentsController(
     /// document says, for a human to confirm. Nothing is persisted as a commercial record here.
     /// </summary>
     [HttpPost("document-extractions")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
     [RequireModulePermission("Customer Awards", PermissionAction.Create)]
     [RequestSizeLimit(CustomerPurchaseOrderDocumentService.MaximumDocumentBytes)]
     public async Task<IActionResult> Extract(IFormFile? file)

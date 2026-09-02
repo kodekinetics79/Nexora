@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
@@ -12,13 +13,16 @@ namespace ERP_RFQ_Automation.Controllers
     public class ProductCategoryUploaderController : ControllerBase
     {
         private readonly ProductCategoryUploaderService _service;
+        private readonly IFileInspectionService _fileInspection;
         private readonly ILogger<ProductCategoryUploaderController> _logger;
 
         public ProductCategoryUploaderController(
             ProductCategoryUploaderService service,
+            IFileInspectionService fileInspection,
             ILogger<ProductCategoryUploaderController> logger)
         {
             _service = service;
+            _fileInspection = fileInspection;
             _logger = logger;
         }
 
@@ -49,6 +53,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("category/upload-template")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Product Categories", PermissionAction.Create)]
         public async Task<IActionResult> UploadCategoryTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
@@ -64,7 +69,13 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
-                using var stream = file.OpenReadStream();
+                // Inspected BEFORE parsing (signature, archive safety, malware verdict), and refused
+                // with the shared problem shape when inspection says no or cannot answer.
+                await using var inspected = await UploadInspectionGate.InspectAsync(
+                    _fileInspection, file, HttpContext.RequestAborted);
+                if (!inspected.IsCleared)
+                    return UploadInspectionGate.Refuse(this, inspected.Inspection, "Category import file rejected");
+                var stream = inspected.Content;
                 var result = await _service.UploadCategoryTemplateAsync(stream, targetBUId, createdBy);
 
                 if (!result.Success)
@@ -132,6 +143,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("sub-category/upload-template")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Product Categories", PermissionAction.Create)]
         public async Task<IActionResult> UploadSubCategoryTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
@@ -147,7 +159,13 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
-                using var stream = file.OpenReadStream();
+                // Inspected BEFORE parsing (signature, archive safety, malware verdict), and refused
+                // with the shared problem shape when inspection says no or cannot answer.
+                await using var inspected = await UploadInspectionGate.InspectAsync(
+                    _fileInspection, file, HttpContext.RequestAborted);
+                if (!inspected.IsCleared)
+                    return UploadInspectionGate.Refuse(this, inspected.Inspection, "Sub-category import file rejected");
+                var stream = inspected.Content;
                 var result = await _service.UploadSubCategoryTemplateAsync(stream, targetBUId, createdBy);
 
                 if (!result.Success)

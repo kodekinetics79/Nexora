@@ -353,6 +353,9 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Module(usersModuleId, "Users"),
             Module(quotationsModuleId, "Quotations"),
             Module(suppliersModuleId, "Suppliers"));
+        // Seeded by the migration baseline like Supplier Negotiation above, so it is read, not inserted.
+        var bankStatementImportModuleId = await db.Modules.Where(x =>
+            x.ModuleName == "Bank Statement Import").Select(x => x.Id).SingleAsync();
 
         db.SetupMasters.AddRange(
             Role(AllowedRole, TenantA, "Release 01B Reader"),
@@ -385,7 +388,9 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.RolePermissions.AddRange(
             Permission(85_018, AllowedRole, suppliersModuleId, TenantA,
                 canCreate: true, canEdit: true, canDelete: true),
-            Permission(85_019, SupplierHistoryViewerRole, suppliersModuleId, TenantA));
+            Permission(85_019, SupplierHistoryViewerRole, suppliersModuleId, TenantA),
+            // The treasury statement import door, for UploadDoorsAuthenticatedHttpTests.
+            Permission(85_020, AllowedRole, bankStatementImportModuleId, TenantA, canCreate: true));
 
         db.Users.AddRange(
             User(GrowthRepUser, TenantA, AllowedRole, "Rep", "growth-rep@nexora.invalid"),

@@ -178,6 +178,7 @@ namespace ERP_RFQ_Automation.Controllers
             });
 
         [HttpPost("upload-leads-folder")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequestSizeLimit(200L * 1024 * 1024)]
         [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> UploadLeadsToFolder(
