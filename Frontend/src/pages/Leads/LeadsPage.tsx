@@ -348,6 +348,25 @@ const LeadsPage: React.FC = () => {
   });
 
   /**
+   * Whether this business unit has ANY live inquiry, independent of every filter on screen.
+   *
+   * The grid opens narrowed (a manager sees "Unassigned", a rep sees "Mine"), so with zero leads
+   * in the tenant the first thing a rep read was "Every inquiry here already has an owner" — a
+   * filtered-to-zero sentence describing a list that had nothing to filter. True zero and
+   * filtered-to-zero must never read the same, and only an unfiltered count can tell them apart.
+   * One row is enough: only `totalCount` is read. Failure is silent here because the main query
+   * reports its own failures and this one only decides which empty-state copy is honest.
+   */
+  const totalQuery = useQuery({
+    queryKey: ['leads-total'],
+    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: 1, view: 'open' }),
+    meta: { silenceGlobalError: true },
+  });
+  const isTrueZero = totalQuery.data?.totalCount === 0;
+  const canUploadDocuments = hasPermission('Leads', 'create');
+  const canConnectMailbox = hasPermission('Email & SMTP');
+
+  /**
    * The top-of-funnel grid shipped MUI's bare "No rows" — the string a rep reads on day one when
    * the mailbox has not yet been configured, and the same string they read when a search matched
    * nothing. Neither reading tells them what to do, and one of the two is a setup problem they can
@@ -355,21 +374,44 @@ const LeadsPage: React.FC = () => {
    */
   const noRowsOverlay = useMemo(() => gridEmptyOverlay({
     title: 'No inquiries yet',
-    message: 'Enquiries arrive on their own once a mailbox is connected — or you can read documents in from your machine right now.',
+    message: 'Inquiries arrive on their own once a mailbox is connected — or you can upload a customer document from your machine right now.',
     action: (
-      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
-        <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
-          Upload a document
-        </Button>
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, alignItems: 'center' }}>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {canUploadDocuments && (
+            <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
+              Upload a document
+            </Button>
+          )}
+          {canConnectMailbox && (
+            <Button variant="outlined" startIcon={<InboxIcon />} onClick={() => navigate('/setup/mailboxes')} sx={{ fontWeight: 700 }}>
+              Connect the mailbox
+            </Button>
+          )}
+        </Box>
+        {/* A button the reader cannot use is a dead end; the reason and the person to ask are the
+            next best thing. */}
+        {!canConnectMailbox && (
+          <Typography variant="caption" color="text.secondary">
+            Ask your administrator to connect a mailbox under Setup &gt; Email Inboxes.
+          </Typography>
+        )}
+        {!canUploadDocuments && (
+          <Typography variant="caption" color="text.secondary">
+            Uploading documents needs Can Create on Leads. Ask your administrator.
+          </Typography>
+        )}
         {/* An empty grid is also what a BROKEN intake looks like. Inbound Mail is the only screen
-            that can tell the user which of the two they are looking at, so it must be reachable
+            that can tell the reader which of the two they are looking at, so it stays reachable
             from here rather than only from the sidebar. */}
-        <Button variant="outlined" startIcon={<InboxIcon />} onClick={() => navigate('/procurement/leads/inbound-mail')} sx={{ fontWeight: 700 }}>
-          Open Inbound Mail
-        </Button>
+        <Link component="button" type="button" underline="hover" onClick={() => navigate('/procurement/leads/inbound-mail')} sx={{ fontWeight: 700 }}>
+          Already connected? Open Inbound Mail
+        </Link>
       </Box>
     ),
-    filtered: filtersActive,
+    // Only a filter can empty a list that has something in it. With nothing in the tenant, the
+    // narrowed opening view must not claim "every inquiry already has an owner".
+    filtered: filtersActive && !isTrueZero,
     // The list now OPENS on a working set, so "nothing here" most often means "nothing of
     // yours", not "nothing at all" — and the two must never read the same. Each says which
     // filter emptied it and offers the one button that widens it by a single step.
@@ -405,7 +447,7 @@ const LeadsPage: React.FC = () => {
         </Button>
       </Box>
     ),
-  }), [filtersActive, clearFilters, navigate, ownerView]);
+  }), [filtersActive, isTrueZero, canUploadDocuments, canConnectMailbox, clearFilters, navigate, ownerView]);
 
   const rows = useMemo(() => data?.items ?? [], [data]);
 
@@ -426,7 +468,7 @@ const LeadsPage: React.FC = () => {
   /** Only stated once we actually know — never inferred from a list that has not loaded. */
   const whyICannotTakeLeads = canEditLeads && !ownerOptions.isLoading && !ownerOptions.isError && !iCanTakeLeads
     ? (myOwnerOption?.eligibilityReason?.trim()
-      || 'You do not have a Sales Rep profile yet, so leads cannot be routed to you. Ask an administrator to add one under Sales > Rep directory.')
+      || 'You do not have a Sales Rep profile yet, so leads cannot be routed to you. Ask an administrator to add one under Team & exceptions > Sales reps.')
     : null;
 
   /**
@@ -1148,7 +1190,19 @@ const LeadsPage: React.FC = () => {
               ? 'You can assign inquiries to other people, but not to yourself yet.'
               : 'You cannot pick up inquiries yet.'}
           </Typography>
-          <Typography variant="body2">{whyICannotTakeLeads}</Typography>
+          <Typography variant="body2">
+            {whyICannotTakeLeads}
+            {/* The rep directory is a manager screen; a link a reader cannot open is a dead end,
+                so only a manager gets the shortcut and everyone else gets the menu path. */}
+            {isManager && (
+              <>
+                {' '}
+                <Link component="button" type="button" underline="hover" onClick={() => navigate('/sales/reps')} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
+                  Open Sales reps
+                </Link>
+              </>
+            )}
+          </Typography>
         </Alert>
       )}
 

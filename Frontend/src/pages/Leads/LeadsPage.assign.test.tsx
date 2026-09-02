@@ -160,8 +160,15 @@ const asManager = () => {
   authUser.roleName = 'Sales Manager';
 };
 
+/**
+ * The view the GRID last asked for. The page also reads a pageSize-1 unfiltered total to tell a
+ * truly empty tenant from a filtered-to-zero list; that read is not the grid's and is skipped.
+ */
 const lastListView = (): unknown =>
-  (getAll.mock.calls.at(-1)?.[0] as { view?: unknown } | undefined)?.view;
+  (getAll.mock.calls
+    .map((call) => call[0] as { view?: unknown; pageSize?: number })
+    .filter((params) => params.pageSize !== 1)
+    .at(-1))?.view;
 
 describe('LeadsPage — assigning a lead from the list', () => {
   beforeAll(() => {
@@ -434,7 +441,11 @@ describe('LeadsPage — assigning a lead from the list', () => {
   });
 
   it('saysWhichFilterEmptiedTheList_andOffersTheNextStepAsAButton', async () => {
-    getAll.mockResolvedValue(page([]));
+    // The tenant HAS inquiries (the unfiltered pageSize-1 count says 3); the page just has none
+    // for this reader. With a true zero the page would say "No inquiries yet" instead.
+    getAll.mockImplementation((params: { pageSize?: number }) => Promise.resolve(
+      params.pageSize === 1 ? { ...page([]), totalCount: 3 } : page([]),
+    ));
     renderPage();
 
     // The default working set is the reader's own, so "no rows" here means "none of yours".
