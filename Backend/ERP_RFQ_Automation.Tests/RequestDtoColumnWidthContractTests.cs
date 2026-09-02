@@ -297,6 +297,7 @@ public sealed class RequestDtoColumnWidthContractTests
     private static readonly IReadOnlyList<(string Dto, string Reason)> NotBackedByOneEntity =
     [
         ("MailboxTestRequestDTO", "Writes nothing — it opens a connection with the supplied settings and discards them."),
+        ("MailboxSendTestRequestDTO", "Writes nothing — the recipient becomes a To header on one test message and the audit row records only the outcome."),
         ("RolePermissionBulkApplyRequestDTO", "Reason reaches the database only through IamAuditWriter, which calls Truncate(entry.Reason, 512) before assigning it, so the cap cannot overflow the column."),
     ];
 
