@@ -216,6 +216,26 @@ public sealed class UploadInspectionGateTests
             "These file-accepting actions are not on the upload rate-limit policy:\n  " + string.Join("\n  ", unlimited));
     }
 
+    /// <summary>
+    /// The lead-folder door accepted 200 MB per request while inspection reads at most 25 MB —
+    /// eight times what could ever be accepted, buffered and then refused. It now states the same
+    /// ceiling as the other single-document doors and as the inspection limit.
+    /// </summary>
+    [Fact]
+    public void The_lead_folder_upload_door_accepts_no_more_than_the_inspection_limit()
+    {
+        var action = typeof(EmailController).GetMethod(nameof(EmailController.UploadLeadsToFolder))!;
+        var limit = action.CustomAttributes.Single(x => x.AttributeType == typeof(RequestSizeLimitAttribute));
+        var bytes = Convert.ToInt64(limit.ConstructorArguments.Single().Value);
+
+        Assert.Equal(25L * 1024 * 1024, bytes);
+        Assert.Equal(DocumentInspectionOptions.DefaultMaximumFileBytes, bytes);
+
+        var supplierQuoteDoor = typeof(SupplierQuoteInboxController).GetMethod(nameof(SupplierQuoteInboxController.Upload))!
+            .CustomAttributes.Single(x => x.AttributeType == typeof(RequestSizeLimitAttribute));
+        Assert.Equal(bytes, Convert.ToInt64(supplierQuoteDoor.ConstructorArguments.Single().Value));
+    }
+
     private static bool AcceptsFile(ParameterInfo parameter)
     {
         var type = parameter.ParameterType;
