@@ -21,7 +21,7 @@ import { SETUP_ENTRIES } from '../Setup/setupCatalog';
  * that put Users and Integration Hub in the navigation twice before Setup Master absorbed them.
  */
 const AllScreensPage: React.FC = () => {
-  const { hasPermission } = useAuth();
+  const { hasPermission, hasEntitlement } = useAuth();
   // These chips mirror the real rail. Showing RFQs, Quotes or Setup here when the same role cannot
   // see them in navigation turns the directory into a collection of Access Denied links.
   const visiblePrimaryNav = useMemo(
@@ -39,7 +39,7 @@ const AllScreensPage: React.FC = () => {
       title="Screen directory"
       intro="Everything Nexora can do that is not part of the daily quote-building path. Each screen here is a full destination with its own address — this page is a directory, not a copy."
       idPrefix="advanced"
-      groups={ADVANCED_GROUPS as { key: string; title: string; caption: string; entries: NavEntry[] }[]}
+      groups={ADVANCED_GROUPS.filter((group) => !group.entitlement || hasEntitlement(group.entitlement)) as { key: string; title: string; caption: string; entries: NavEntry[] }[]}
       searchPlaceholder="Search screens — try “invoice”, “stock ageing”, “copilot”"
       searchAriaLabel="Search all screens"
       availableLabel={(count) => `${count} screens you can open`}

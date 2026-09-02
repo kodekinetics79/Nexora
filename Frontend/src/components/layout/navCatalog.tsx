@@ -109,6 +109,13 @@ export interface NavGroup {
   /** Why these screens sit together — the question this group answers. */
   caption: string;
   entries: NavEntry[];
+  /**
+   * A tenant entitlement key the whole group needs (`useAuth().hasEntitlement`). Module
+   * permissions say what a ROLE may open; an entitlement says what the TENANT has bought. A group
+   * of optional assistants gated only on Dashboard/Quotations permissions is visible to every
+   * sales role of every tenant, whether or not the tenant has the capability.
+   */
+  entitlement?: string;
 }
 
 /** One of the tabs a primary destination offers. Exactly one level, never nested. */
@@ -717,6 +724,9 @@ export const ADVANCED_GROUPS: NavGroup[] = [
     key: 'tools',
     title: 'Assistants & tools',
     caption: 'Optional help. Nothing here is required to complete a quote.',
+    // Copilot, its approvals and activity, and commercial memory are the AI capability; a tenant
+    // without it must not see a rail group that leads nowhere.
+    entitlement: 'capability.ai',
     entries: [
       {
         key: 'copilot-chat',
