@@ -160,11 +160,12 @@ public static class ActivationControlRemediationCatalog
             ActivationRemediationActions.TenantProfileIdentity,
             "Record the tax identity",
             ActivationRemediationAuthorities.TenantAdmin,
-            "The tax number is part of the audited profile edit. The base currency is NOT: it is the base "
-            + "every stored conversion and ledger balance was computed against and is fixed at "
-            + "provisioning, so a tenant that is not on USD has to be re-provisioned rather than relabelled. "
-            + "The other way past this control is an explicit Internal or Partner billing treatment, which "
-            + "is a commercial decision and lives on Commercial."),
+            "The tax number is part of the audited profile edit. The billing currency is the platform's "
+            + "(USD, carried on the pinned rate card) and is independent of the tenant's own base currency, "
+            + "which is the base its quotes and ledger are kept in and is fixed at provisioning. A tenant "
+            + "quoting in SAR bills in USD without being re-provisioned. The other way past this control is "
+            + "an explicit Internal or Partner billing treatment, which is a commercial decision and lives "
+            + "on Commercial."),
 
         ["commercial.rate-card"] = Remedy(
             ActivationRemediationSurfaces.TenantCommercial,
@@ -172,7 +173,7 @@ public static class ActivationControlRemediationCatalog
             "Pin a rate card",
             ActivationRemediationAuthorities.Billing,
             "Pins the price list this tenant's statements are computed against. Only a card that is "
-            + "active, in the tenant's base currency, effective today and carrying at least one priced "
+            + "active, in the platform billing currency (USD), effective today and carrying at least one priced "
             + "meter satisfies the control — creating or repricing a card is a different act and stays "
             + "on the Billing page."),
 

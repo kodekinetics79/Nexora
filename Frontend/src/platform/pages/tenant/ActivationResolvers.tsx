@@ -1,3 +1,4 @@
+import { BILLABLE_CURRENCY } from '../../components/provisionValidation';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, AlertTitle, MenuItem, TextField, Typography } from '@mui/material';
@@ -168,7 +169,7 @@ function ProfileIdentityResolver({ tenant, onClose, onResolved }: OpenResolverPr
             helperText="The customer's own contact address, not the operator's."
             onChange={(event) => setContactEmail(event.target.value)} />
           <TextField fullWidth label="Tax number" value={taxNumber}
-            helperText="Also satisfies the tax half of billing.currency-tax. The base currency is fixed at provisioning and is not editable anywhere."
+            helperText="Also satisfies the tax half of billing.currency-tax. Billing is in USD via the pinned rate card; the tenant's own base currency is fixed at provisioning and is not editable anywhere."
             onChange={(event) => setTaxNumber(event.target.value)} />
         </Stack>
       }
@@ -325,7 +326,9 @@ function RateCardPinResolver({ tenant, onClose, onResolved }: OpenResolverProps)
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
   const [rateCardId, setRateCardId] = useState('');
-  const currency = tenant.baseCurrencyCode ?? 'USD';
+  // Billing currency, not the tenant's functional currency: rate cards are USD-only and
+  // activation compares the card to the platform billing currency, so a SAR tenant pins a USD card.
+  const currency = BILLABLE_CURRENCY;
 
   const cardsQuery = useQuery({
     queryKey: platformKeys.rateCards(),

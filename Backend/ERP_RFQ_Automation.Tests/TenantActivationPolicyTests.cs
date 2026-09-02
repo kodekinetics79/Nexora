@@ -14,6 +14,99 @@ namespace ERP_RFQ_Automation.Tests;
 
 public sealed class TenantActivationPolicyTests
 {
+    /// <summary>
+    /// Billing currency versus functional currency. A Saudi client quotes in SAR
+    /// (<c>Tenant.BaseCurrencyCode</c>, seeded as its base <c>Currency</c> row) and is billed by
+    /// Nexora in USD (the platform constant carried on the pinned rate card). Activation used to
+    /// compare the FUNCTIONAL column to "USD", so such a client could never activate as Production.
+    /// </summary>
+    [Fact]
+    public async Task A_tenant_quoting_in_SAR_and_billed_in_USD_passes_the_currency_and_rate_card_controls()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        var (tenantId, _) = await SeedBillableTenantAsync(db, functionalCurrency: "SAR", cardCurrency: "USD");
+
+        var decision = await Evaluate(db, tenantId);
+
+        var currencyTax = decision.Controls.Single(x => x.Code == "billing.currency-tax");
+        var rateCard = decision.Controls.Single(x => x.Code == "commercial.rate-card");
+        Assert.True(currencyTax.Satisfied, currencyTax.Detail);
+        Assert.True(rateCard.Satisfied, rateCard.Detail);
+        Assert.DoesNotContain("billing.currency-tax", decision.BlockingControls);
+        Assert.DoesNotContain("commercial.rate-card", decision.BlockingControls);
+    }
+
+    [Fact]
+    public async Task A_rate_card_outside_the_platform_billing_currency_still_blocks_regardless_of_the_tenants_own_currency()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        var (tenantId, _) = await SeedBillableTenantAsync(db, functionalCurrency: "AED", cardCurrency: "AED");
+
+        var decision = await Evaluate(db, tenantId);
+
+        Assert.False(decision.Controls.Single(x => x.Code == "billing.currency-tax").Satisfied);
+        Assert.False(decision.Controls.Single(x => x.Code == "commercial.rate-card").Satisfied);
+    }
+
+    [Fact]
+    public async Task The_tenants_functional_currency_is_never_read_by_the_billing_controls()
+    {
+        // The same tenant, every functional currency: the verdict on the two billing controls
+        // depends on the rate card and the tax identity alone.
+        foreach (var functional in new[] { "USD", "SAR", "AED", "EUR" })
+        {
+            using var database = new TestDb();
+            await using var db = database.ContextFor(null);
+            var (tenantId, _) = await SeedBillableTenantAsync(db, functional, cardCurrency: "USD");
+
+            var decision = await Evaluate(db, tenantId);
+
+            Assert.True(decision.Controls.Single(x => x.Code == "billing.currency-tax").Satisfied, functional);
+            Assert.True(decision.Controls.Single(x => x.Code == "commercial.rate-card").Satisfied, functional);
+        }
+    }
+
+    private static async Task<TenantActivationDecision> Evaluate(ErpRfqAutomationContext db, long tenantId)
+    {
+        var access = new TenantAccessService(db, new MemoryCache(new MemoryCacheOptions()),
+            NullLogger<TenantAccessService>.Instance);
+        var decision = await new TenantActivationPolicyService(db, new NoopAudit(), access).EvaluateAsync(tenantId);
+        return decision!;
+    }
+
+    /// <summary>A billable tenant with a tax number and a pinned, effective, priced rate card.</summary>
+    private static async Task<(long TenantId, long RateCardId)> SeedBillableTenantAsync(
+        ErpRfqAutomationContext db, string functionalCurrency, string cardCurrency)
+    {
+        Seed.EnsureBusinessUnit(db, 1_991);
+        var plan = new Plan
+        {
+            Id = 1_992, Code = "bounded", Name = "Bounded", IsActive = true,
+            MaxSeats = 5, MaxDocsPerMonth = 100, MaxConcurrentExtractionJobs = 2, Weight = 1,
+            Features = "{}"
+        };
+        db.Set<Plan>().Add(plan);
+        var card = new ERP_RFQ_Automation.Billing.RateCard
+        {
+            Id = 1_994, Code = "standard-2026", Currency = cardCurrency, IsActive = true,
+            EffectiveFromUtc = DateTime.UtcNow.AddDays(-30), EffectiveToUtc = null, CreatedBy = "tests",
+            Lines = { new ERP_RFQ_Automation.Billing.RateCardLine { MeterKey = "seats", IncludedQuantity = 0, UnitPrice = 25m, Unit = "seat" } }
+        };
+        db.Set<ERP_RFQ_Automation.Billing.RateCard>().Add(card);
+        db.Set<Tenant>().Add(new Tenant
+        {
+            Id = 1_993, Name = "Noor & Sons", Slug = "noor-sons",
+            Status = TenantStatus.Provisioning, PlanId = plan.Id, RateCardId = card.Id,
+            PrimaryBusinessUnitId = 1_991, CreatedOn = DateTime.UtcNow,
+            BaseCurrencyCode = functionalCurrency, TaxNumber = "300012345600003",
+            BillingMode = TenantBillingMode.Billable
+        });
+        await db.SaveChangesAsync();
+        return (1_993, card.Id);
+    }
+
     [Fact]
     public async Task Decision_is_structured_versioned_and_fails_closed_for_missing_controls()
     {

@@ -95,7 +95,13 @@ public class Tenant
     // Seeded into the tenant's own reference data so its first user is not asked to build a
     // currency list and a UOM list before they can raise anything.
 
-    /// <summary>ISO-4217 code of the tenant's base trading currency, e.g. "SAR", "USD".</summary>
+    /// <summary>
+    /// ISO-4217 code of the tenant's FUNCTIONAL currency — the base its quotes, ledger and FX
+    /// conversions are kept in, e.g. "SAR", "USD". Seeded as the tenant's base <c>Currency</c> row.
+    /// NOT the billing currency: Nexora bills every tenant in
+    /// <see cref="Billing.PlatformBillingCurrency"/> (USD, carried on the pinned rate card), and
+    /// activation compares the rate card to that constant, never to this column.
+    /// </summary>
     public string? BaseCurrencyCode { get; set; }
 
     /// <summary>IANA time zone id, e.g. "Asia/Riyadh". Deadlines and SLA clocks read this.</summary>

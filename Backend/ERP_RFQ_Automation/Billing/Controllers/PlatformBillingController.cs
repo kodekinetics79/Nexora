@@ -606,11 +606,11 @@ public class PlatformBillingController : ControllerBase
                 return BadRequest(new { error = $"Rate card {rateCardId} does not exist." });
             // Caught here rather than at compute: a non-USD pin produces a tenant whose
             // statements 409 every month until somebody reads the billing run's logs.
-            if (!string.Equals(card.Currency, "USD", StringComparison.OrdinalIgnoreCase))
+            if (!PlatformBillingCurrency.Matches(card.Currency))
                 return BadRequest(new
                 {
                     error = $"Rate card {card.Id} ('{card.Code}') is denominated in '{card.Currency}'; v1 billing is " +
-                            "USD-only and a tenant pinned to it could never produce a statement."
+                            $"{PlatformBillingCurrency.Code}-only and a tenant pinned to it could never produce a statement."
                 });
             var now = DateTime.UtcNow;
             if (!card.IsActive || card.EffectiveFromUtc > now || card.EffectiveToUtc is { } end && end <= now)
@@ -952,8 +952,8 @@ public class PlatformBillingController : ControllerBase
         // rate card would mix currencies on a single statement. Rejected here
         // (400) for create AND update; compute additionally 409s on any legacy
         // non-USD card. Multi-currency support is deferred (see LEDGER).
-        if (!string.Equals(currency.Trim(), "USD", StringComparison.OrdinalIgnoreCase))
-            return "v1 billing is USD-only: rate card currency must be 'USD'.";
+        if (!PlatformBillingCurrency.Matches(currency))
+            return $"v1 billing is {PlatformBillingCurrency.Code}-only: rate card currency must be '{PlatformBillingCurrency.Code}'.";
         if (lines is null || lines.Count == 0)
             return "At least one rate card line is required.";
         if (lines.Any(l => string.IsNullOrWhiteSpace(l.MeterKey) || string.IsNullOrWhiteSpace(l.Unit)))

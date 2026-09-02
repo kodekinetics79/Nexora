@@ -138,22 +138,16 @@ describe('revenue guardrails', () => {
 
 describe('base currency', () => {
   /**
-   * The wizard shipped a 'SAR' default, and every tenant created with it was PERMANENTLY
-   * unactivatable: `commercial.rate-card` requires the pinned card's currency to equal the
-   * tenant's, rate cards are refused in anything but USD ("v1 billing is USD-only"), and
-   * BaseCurrencyCode is written once at provisioning with no update endpoint. The control is not
-   * deferrable, so no deployment profile rescued it either. The operator saw only "A pinned,
-   * effective rate card with at least one priced meter is required" — which sends them to build
-   * rate cards that can never match.
-   *
-   * Refused at the wizard because that is the last moment it is still fixable.
+   * The tenant's base currency is its FUNCTIONAL currency — what it quotes in. Billing is in
+   * BILLABLE_CURRENCY via the pinned rate card, and activation compares the card to that constant,
+   * so a SAR tenant activates against a USD card. The wizard therefore accepts any ISO code and
+   * defaults to SAR for a KSA-first product.
    */
-  it('refuses a currency the tenant could never be activated on', () => {
-    const errors = validateStep(STEP_COMMERCIAL, fullDraft({ baseCurrencyCode: 'SAR' }));
-    expect(errors.baseCurrencyCode).toBeTruthy();
-    // The message has to say WHY, or it reads as an arbitrary restriction and gets worked around.
-    expect(errors.baseCurrencyCode).toMatch(/never be changed/i);
-    expect(errors.baseCurrencyCode).toMatch(/cannot be activated/i);
+  it('accepts a functional currency other than the billing currency', () => {
+    expect(validateStep(STEP_COMMERCIAL, fullDraft({ baseCurrencyCode: 'SAR' })).baseCurrencyCode)
+      .toBeUndefined();
+    expect(validateStep(STEP_COMMERCIAL, fullDraft({ baseCurrencyCode: 'aed' })).baseCurrencyCode)
+      .toBeUndefined();
   });
 
   it('accepts the billable currency in either case', () => {
@@ -296,12 +290,9 @@ describe('draft save and resume', () => {
     expect(sparse.name).toBe('Acme Trading');
     expect(sparse.slug).toBe('');
     expect(sparse.billingMode).toBe('Billable');
-    // The currency default went 'USD' -> 'SAR' (KSA-first) -> 'USD' again, and the middle step
-    // was a serious defect rather than a preference: a SAR tenant can never be pinned to a rate
-    // card, because rate cards are USD-only and BaseCurrencyCode has no update path — so it could
-    // never be activated in any deployment profile. `locale` keeps the KSA default; it is a
-    // display convention and carries none of that.
-    expect(sparse.baseCurrencyCode).toBe('USD');
+    // The FUNCTIONAL currency defaults to SAR (KSA-first). Safe now that activation compares the
+    // pinned rate card to the platform billing currency instead of to this column.
+    expect(sparse.baseCurrencyCode).toBe('SAR');
     expect(sparse.locale).toBe('en-SA');
     expect(sparse.adminActivation).toBe('invite');
   });
