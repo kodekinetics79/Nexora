@@ -1,10 +1,10 @@
 import React from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link as RouterLink } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, Stack, Button, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Divider, CircularProgress, IconButton, Card, CardContent, Tooltip, Alert
+  Divider, CircularProgress, IconButton, Card, CardContent, Tooltip, Alert, Link
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -235,6 +235,24 @@ const QuoteViewPage: React.FC = () => {
   const isUnpricedDraft = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT'
     && !quote.currencyId
     && quote.quoteItems.every((item) => Number(item.unitPrice || 0) === 0);
+  // Why "Send to customer" is disabled, printed beside the button so the rep can act on it
+  // instead of raising a ticket. Order matters: a stale revision must be reviewed before either
+  // of the other two is worth fixing; a draft with no prices cannot have tax; a priced draft
+  // whose lines carry no derived tax is blocked by one setting a manager can change in Setup.
+  //
+  // The tax gate used to live only in the Financial Summary as a warning ("cannot be sent")
+  // while this button stayed enabled — the server refused the send later with a toast, and the
+  // rep had been told two things at once.
+  const sendBlockedReason: { text: string; link?: { label: string; to: string } } | null = quote.revisionImpact
+    ? { text: 'Review the customer revision before sending.' }
+    : isUnpricedDraft
+      ? { text: 'Add prices to the quote lines before sending.' }
+      : totals.hasUnderivedTax
+        ? {
+            text: 'Set the VAT rate in Setup > Commercial Policy before sending.',
+            link: { label: 'Open Commercial Policy', to: '/setup/commercial-policy' },
+          }
+        : null;
   const revisionImpactPresentation = quote.revisionImpact === 'INVENTORY_REVALIDATION_REQUIRED'
     ? {
         title: 'Inventory Revalidation Required',
@@ -352,16 +370,34 @@ const QuoteViewPage: React.FC = () => {
           */}
           {hasPermission('Quotations', 'edit')
             && quote.statusValue?.toUpperCase() !== 'ORDERED'
-            && (isDraftQuote || quote.statusValue === 'Sent') && <Button
-            variant={isDraftQuote ? 'contained' : 'outlined'}
-            startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
-            disabled={isUnpricedDraft || Boolean(quote.revisionImpact)}
-            title={quote.revisionImpact ? 'Review the customer revision before sending.' : undefined}
-            onClick={() => setEmailOpen(true)}
-            sx={{ borderRadius: 2 }}
-          >
-            {isDraftQuote ? 'Send to customer' : 'Send again'}
-          </Button>}
+            && (isDraftQuote || quote.statusValue === 'Sent') && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, minWidth: 0, maxWidth: '100%' }}>
+              <Button
+                variant={isDraftQuote ? 'contained' : 'outlined'}
+                startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
+                disabled={sendBlockedReason !== null}
+                title={sendBlockedReason?.text}
+                onClick={() => setEmailOpen(true)}
+                sx={{ borderRadius: 2 }}
+              >
+                {isDraftQuote ? 'Send to customer' : 'Send again'}
+              </Button>
+              {/* A disabled control that will not say why becomes a support call. */}
+              {sendBlockedReason && (
+                <Typography variant="caption" color="text.secondary" sx={{ maxWidth: 260 }}>
+                  {sendBlockedReason.text}
+                  {sendBlockedReason.link && (
+                    <>
+                      {' '}
+                      <Link component={RouterLink} to={sendBlockedReason.link.to} underline="hover" sx={{ fontWeight: 700 }}>
+                        {sendBlockedReason.link.label}
+                      </Link>
+                    </>
+                  )}
+                </Typography>
+              )}
+            </Box>
+          )}
 
           {/*
             R7: the buyer's most common request — "can you hold your price for another two
@@ -576,7 +612,7 @@ const QuoteViewPage: React.FC = () => {
                 {/* The two rows the panel had no way to show, and without which the numbers on it
                     could not be added up: the base the tax is charged on, and the tax. Same three
                     lines, same order, as the printed quote. */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Total excluding VAT</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pending' : formatMoney(totals.netExcludingTax, quote.currencyCode)}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Total excluding VAT</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pending' : totals.hasUnderivedTax ? '—' : formatMoney(totals.netExcludingTax, quote.currencyCode)}</Typography></Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
                   <Typography color={totals.hasUnderivedTax ? 'warning.main' : 'text.secondary'}>{vatLabel}</Typography>
                   <Typography sx={{ fontWeight: 700 }} color={totals.hasUnderivedTax ? 'warning.main' : undefined}>
