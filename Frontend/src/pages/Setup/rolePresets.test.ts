@@ -107,11 +107,14 @@ describe('drift from a preset', () => {
   it('reports a grant ADDED on a module the preset leaves empty', () => {
     // The direction that quietly WIDENS a role. Reporting only removals would hide exactly the
     // change an administrator most needs to see.
+    // "Customer Payments" rather than "Accounts Receivable": the representative preset now READS
+    // receivables (the rail gates Receivables on it), so a module it genuinely leaves empty is the
+    // honest example.
     const rows = matching();
-    rows.set('accounts receivable', { canView: true, canCreate: true, canEdit: true, canDelete: true });
+    rows.set('customer payments', { canView: true, canCreate: true, canEdit: true, canDelete: true });
 
     const drift = driftFromPreset(rep, rows);
-    expect(drift.map((item) => item.module)).toEqual(['Accounts Receivable']);
+    expect(drift.map((item) => item.module)).toEqual(['Customer Payments']);
   });
 
   it('ignores modules that grant nothing', () => {
