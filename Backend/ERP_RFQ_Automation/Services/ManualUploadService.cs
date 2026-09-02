@@ -34,6 +34,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly ILogger<ManualUploadService> _logger;
         private readonly ILLMService _llmService;
         private readonly string _attachmentPath;
+        private readonly ILegacyDocumentStore _legacyDocuments;
         private readonly string _tessDataPath;
         
         // Token limiting constants (same as EmailService)
@@ -68,8 +69,11 @@ namespace ERP_RFQ_Automation.Services
             IFileStorage storage,
             ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity,
             ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService customerResolution,
-            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null,
+            ILegacyDocumentStore? legacyDocuments = null)
         {
+            _legacyDocuments = legacyDocuments
+                ?? new LegacyDocumentStore(storage, new LocalEvidenceObjectStorage(storage), configuration);
             _customerResolution = customerResolution;
             // Required, not optional-with-null: an optional collaborator is always supplied in
             // production and always absent in tests, which is exactly how a step that must always
@@ -418,7 +422,7 @@ namespace ERP_RFQ_Automation.Services
                     switch (reconciliation.Classification)
                     {
                         case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.New:
-                            await SaveAttachmentsAsync(files, reconciliation.LeadId);
+                            await SaveAttachmentsAsync(files, reconciliation.LeadId, businessUnitId);
                             dummyIngest.ParseStatus = "NeedsReview";
                             await _context.SaveChangesAsync();
                             await transaction.CommitAsync();
@@ -428,7 +432,7 @@ namespace ERP_RFQ_Automation.Services
                         case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.Revision:
                             // FR-RFQ-05: the canonical lead was versioned; the uploaded file is
                             // attached to it as the amendment's evidence.
-                            await SaveAttachmentsAsync(files, reconciliation.LeadId);
+                            await SaveAttachmentsAsync(files, reconciliation.LeadId, businessUnitId);
                             dummyIngest.ParseStatus = "NeedsReview";
                             await _context.SaveChangesAsync();
                             await transaction.CommitAsync();
@@ -601,7 +605,7 @@ namespace ERP_RFQ_Automation.Services
             _ => false
         };
 
-        private async Task SaveAttachmentsAsync(List<Microsoft.AspNetCore.Http.IFormFile> files, long leadId)
+        private async Task SaveAttachmentsAsync(List<Microsoft.AspNetCore.Http.IFormFile> files, long leadId, long businessUnitId)
         {
             const long maxBytes = 25 * 1024 * 1024; // 25 MB limit
 
@@ -633,26 +637,29 @@ namespace ERP_RFQ_Automation.Services
 
                 var safeName = SanitizeFileName(file.FileName);
                 var fileName = $"{leadId}_{Guid.NewGuid()}_{safeName}";
-                var relativePath = Path.Combine("Uploads", "Manual_Attachments", fileName);
-                var physicalPath = Path.Combine(_attachmentPath, fileName);
 
                 try
                 {
-                    // Write to disk only if size is acceptable
-                    await using var fileStream = File.Create(physicalPath);
-                    await file.CopyToAsync(fileStream);
-                    await fileStream.FlushAsync();
-                    var size = fileStream.Length;
+                    byte[] bytes;
+                    using (var buffer = new MemoryStream())
+                    {
+                        await file.CopyToAsync(buffer);
+                        bytes = buffer.ToArray();
+                    }
+                    // Disk or object store — one switch for all four doors (ILegacyDocumentStore).
+                    var stored = await _legacyDocuments.StoreAttachmentAsync(
+                        businessUnitId, LegacyDocumentFolders.ManualAttachments, fileName, bytes);
 
                     _context.Attachments.Add(new Attachment
                     {
                         ParentType = "Lead",
                         ParentId = leadId,
                         FileName = safeName,
-                        FilePath = relativePath,
+                        FilePath = stored.FilePath,
                         MimeType = file.ContentType,
-                        FileSize = size,
+                        FileSize = stored.ByteSize,
                         ContentType = file.ContentType?.Split('/')[0],
+                        ContentSha256 = stored.ContentSha256,
                         CreatedOn = DateTime.UtcNow,
                         UploadedDate = DateTime.UtcNow
                     });
@@ -660,11 +667,6 @@ namespace ERP_RFQ_Automation.Services
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to save file: {File}", safeName);
-                    // Clean up file if it was created
-                    if (File.Exists(physicalPath))
-                    {
-                        try { File.Delete(physicalPath); } catch { /* Ignore cleanup errors */ }
-                    }
                 }
             }
 

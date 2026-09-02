@@ -39,6 +39,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly string _processedFolderPath;
         private readonly string _attachmentPath;
         private readonly IFileStorage _storage;
+        private readonly ILegacyDocumentStore _legacyDocuments;
         private const long MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25 MB
 
         private readonly ERP_RFQ_Automation.Extraction.IDocumentIngestion? _ingestion;
@@ -49,7 +50,8 @@ namespace ERP_RFQ_Automation.Services
             ILogger<FolderService> logger,
             ILLMService llmService,
             IFileStorage storage,
-            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null,
+            ILegacyDocumentStore? legacyDocuments = null)
         {
             _context = context;
             _env = env;
@@ -57,6 +59,8 @@ namespace ERP_RFQ_Automation.Services
             _llmService = llmService;
             _ingestion = ingestion;
             _storage = storage;
+            _legacyDocuments = legacyDocuments
+                ?? new LegacyDocumentStore(storage, new LocalEvidenceObjectStorage(storage), routeToObjectStore: false);
             _sharedFolderPath = storage.GetPath("Shared_Leads_Folder");
             _secFolderPath = storage.GetPath("SEC_Leads_Folder");
             _aramcoFolderPath = storage.GetPath("Aramco_Leads_Folder");
@@ -579,52 +583,50 @@ namespace ERP_RFQ_Automation.Services
             return string.Join("", texts);
         }
 
+        /// <summary>
+        /// Persists watched-folder attachments through <see cref="ILegacyDocumentStore"/> (disk
+        /// or object store on one switch). NOTE: no caller remains in this class since the watched
+        /// folder was rerouted through the unified document queue; converted with the other
+        /// three doors so the switch is complete, not because it is reached today.
+        /// </summary>
         private async Task SaveAttachmentsAsync(List<(string FileName, MemoryStream Stream, string Extension, string OriginalPath)> files, long leadId)
         {
-            var attachmentTasks = new List<Task>();
+            var businessUnitId = await _context.Leads.IgnoreQueryFilters()
+                .Where(l => l.Id == leadId).Select(l => l.BusinessUnitId).SingleAsync();
 
             foreach (var item in files)
             {
-                var safeName    = SanitizeFileName(item.FileName);
-                var fileName    = $"{leadId}_{Guid.NewGuid()}_{safeName}";
-                var relativePath = Path.Combine("Uploads", "Leads_Folder_Attachments", fileName);
-                var physicalPath = Path.Combine(_attachmentPath, fileName);
-
-                attachmentTasks.Add(Task.Run(async () =>
+                var safeName = SanitizeFileName(item.FileName);
+                var fileName = $"{leadId}_{Guid.NewGuid()}_{safeName}";
+                try
                 {
-                    try
-                    {
-                        item.Stream.Position = 0;
-                        var bytes = item.Stream.ToArray();
-                        await File.WriteAllBytesAsync(physicalPath, bytes);
+                    item.Stream.Position = 0;
+                    var bytes = item.Stream.ToArray();
+                    var stored = await _legacyDocuments.StoreAttachmentAsync(
+                        businessUnitId, LegacyDocumentFolders.WatchedFolderAttachments, fileName, bytes);
 
-                        _context.Attachments.Add(new Attachment
-                        {
-                            ParentType   = "Lead",
-                            ParentId     = leadId,
-                            FileName     = safeName,
-                            FilePath     = relativePath,
-                            MimeType     = GetMimeType(item.Extension),
-                            FileSize     = bytes.Length,
-                            ContentType  = GetContentType(item.Extension),
-                            CreatedOn    = DateTime.UtcNow,
-                            UploadedDate = DateTime.UtcNow
-                        });
-
-                        var processedPath = Path.Combine(_processedFolderPath, item.FileName);
-                        File.Move(item.OriginalPath, processedPath, true);
-                    }
-                    catch (Exception ex)
+                    _context.Attachments.Add(new Attachment
                     {
-                        _logger.LogWarning(ex, "Failed to save/move attachment: {FileName}", safeName);
-                        if (File.Exists(physicalPath)) File.Delete(physicalPath);
-                    }
-                }));
+                        ParentType   = "Lead",
+                        ParentId     = leadId,
+                        FileName     = safeName,
+                        FilePath     = stored.FilePath,
+                        MimeType     = GetMimeType(item.Extension),
+                        FileSize     = stored.ByteSize,
+                        ContentType  = GetContentType(item.Extension),
+                        ContentSha256 = stored.ContentSha256,
+                        CreatedOn    = DateTime.UtcNow,
+                        UploadedDate = DateTime.UtcNow
+                    });
+
+                    var processedPath = Path.Combine(_processedFolderPath, item.FileName);
+                    File.Move(item.OriginalPath, processedPath, true);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to save/move attachment: {FileName}", safeName);
+                }
             }
-
-            await Task.WhenAll(attachmentTasks);
-            if (files.Any())
-                await _context.SaveChangesAsync();
         }
 
         private string BuildHeaderRemarks(LeadExtractionResult ai, string extracted)

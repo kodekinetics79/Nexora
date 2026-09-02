@@ -401,7 +401,8 @@ public sealed class CanonicalIntakeRecordService : ICanonicalIntakeRecordService
                 References: ParseJsonStringArray(ingest.ReferencesJson),
                 ReceivedOn: ingest.CreatedOn,
                 RawEmailAvailable: !string.IsNullOrWhiteSpace(ingest.RawEmailPath)
-                    && File.Exists(ingest.RawEmailPath),
+                    && (ERP_RFQ_Automation.Infrastructure.Storage.EvidenceObjectUris.IsObjectUri(ingest.RawEmailPath)
+                        || File.Exists(ingest.RawEmailPath)),
                 ParseStatus: ingest.ParseStatus),
             Classification: classification,
             Message: new IntakeMessageMetadata(

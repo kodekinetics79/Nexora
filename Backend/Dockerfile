@@ -176,6 +176,22 @@ RUN set -eux; L=/usr/lib/x86_64-linux-gnu; mkdir -p /app/x64; \
     ln -sf "$L/liblept.so.5"      /app/x64/libleptonica-1.82.0.so; \
     ln -sf "$L/libdl.so.2"        "$L/libdl.so"; \
     test -e /app/x64/libtesseract50.so && test -e /app/x64/libleptonica-1.82.0.so
+# NON-ROOT RUNTIME. mcr.microsoft.com/dotnet/aspnet:8.0 ships user `app` (uid 1654). The process
+# owns nothing it does not need to: /app is root-owned and read-only to it, except the two
+# directories it genuinely writes — /app/wwwroot (user and product images, written under
+# WebRootPath by UserController/ProductRepository, never served: UseStaticFiles is deliberately
+# absent) and, while a local storage root still exists, the evidence root under /var/data.
+#
+# SAFE ONLY ONCE THE RENDER DISK IS GONE OR THE MOUNT IS WRITABLE BY `app`. A Render persistent
+# disk is mounted at runtime, root-owned, OVER whatever this image put at /var/data — so the chown
+# below is inert under a mount, LocalFileStorage's startup write probe fails with EACCES, and the
+# container refuses to boot. That is the correct outcome (loud), but it means the order is: run
+# the legacy evidence migration, turn Storage__EnforcePersistentMount off, point Storage__RootPath
+# at /tmp/nexora/uploads, detach the disk, THEN deploy this line. See
+# docs/design/evidence-object-store-cutover.md §5 and render.yaml.
+RUN mkdir -p /app/wwwroot /var/data/nexora/uploads /tmp/nexora/uploads \
+    && chown -R app:app /app/wwwroot /var/data/nexora /tmp/nexora
+USER app
 # Containers listen on 8080 by convention; the host maps it to 443/80.
 ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production

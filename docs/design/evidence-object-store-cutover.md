@@ -55,20 +55,30 @@ itself (`FolderService` polls `Tenants/{bu}/Watched`, never provisioned in produ
 - `IsObjectUri(string)` — `scheme://` (s3, test-evidence) or a key under `Evidence/`.
 
 **Key scheme.** `Evidence/tenants/{bu}/{zone}/sha256/{xx}/{sha}.{ext}` — the existing
-`LocalEvidenceObjectStorage.BuildKey`. One new zone, **`attachments`**, is added to the
+`LocalEvidenceObjectStorage.BuildKey`. One new zone, **`legacy`**, is added to the
 whitelist in `ValidateIdentity` (`IEvidenceObjectStorage.cs:412-433`), for the same reason
 `raw-mail` was: the retention purge swaps `/quarantine/` ↔ `/cleared/`
 (`Retention/EvidenceRetentionEligibility.cs:101-115`) and deletes both, and a lead
 attachment is a compatibility copy that is NOT inspected — writing uninspected bytes into
 `cleared` would be a lie, into `quarantine` would let a document purge delete the copy the
-lead screen still lists. `attachments` matches neither swap arm. The tenant purge sweeps by
-prefix `Evidence/tenants/{bu}/` (`TenantStoragePurge`) and therefore covers it.
+lead screen still lists. `legacy` matches neither swap arm. (Named `legacy` rather than
+`attachments` because the same zone also receives the seven pre-ledger extraction inputs
+under `Extraction/`, which are not attachments either.) The tenant purge sweeps by prefix
+`Evidence/tenants/{bu}/` (`TenantStoragePurge`) and therefore covers it.
 
 ### 2. Callers
 
 - The four writers call the component; the writers' cleanup-on-failure branches
   (`File.Delete`) become no-ops for object writes (the object is immutable and
   content-addressed; an orphan is impossible because the row is written after the object).
+  Finding while converting: `FolderService.SaveAttachmentsAsync` has **no caller** — the
+  watched folder was rerouted through the unified document queue and the legacy write is
+  dead code. Converted anyway so the switch is complete; noted so nobody expects it to run.
+- Per-document retention purge (`LegacyAttachmentPurgeResolver`) cannot delete an
+  object-store attachment copy: `Attachments` records no object version and a versioned
+  bucket reclaims nothing without one. Such rows are reported `OBJECT_STORE_COPY` and left
+  to the tenant purge's prefix sweep (all versions). A version column is a follow-up
+  migration, not this stream's one.
 - `FileController.DownloadAttachment`: a new branch, before the legacy fallback — if the row
   carries a digest AND its path is an object URI, serve through `_evidenceStorage`
   regardless of parent type (parent authorisation still runs first). This is the branch the
@@ -95,8 +105,10 @@ Scope, per row, idempotent and re-runnable:
 | `EmailIngests.RawEmailPath` disk path, `BytesPurgedOn IS NULL` (the tombstone trigger from `20260824140000` refuses a path on a purged row) | absolute path if inside the root, else `SOURCE_MISSING` | sha256 | zone `raw-mail` | `RawEmailPath = StorageUri` |
 | `ExtractionJobs.StoragePath` under the root (the `local` evidence objects) | path | sha256 **must equal** `ContentHash` and the bound `source_documents.content_hash`, else refuse | same zone and key as on disk | `StoragePath = StorageUri` only. `source_documents.object_bucket/key/version` stay `local`: the `nexora_protect_source_document_identity` trigger (`Sql/02_functions.sql:3301-3306`) freezes them once Cleared. Reported as a follow-up needing a governed relocation migration; this stream authors no second migration. |
 
-Already-migrated rows (object URI + digest) are re-opened with `OpenVerifiedReadAsync` and
-counted `VERIFIED`, so a second run proves the objects still hash. Missing files
+Already-migrated `Attachments` and `EmailIngests` rows (object URI + digest) are re-opened
+with `OpenVerifiedReadAsync` and counted `VERIFIED`, so a second run proves the objects still
+hash; `ExtractionJobs` rows already on a URI are skipped (the extraction pipeline verifies
+them on every read). Missing files
 (`/app/Uploads/...`, `D:\Sites\...`, the laptop path) are reported `SOURCE_MISSING` and the
 row is left exactly as it was — their bytes are already gone and this job must not pretend
 otherwise. The report (counts per outcome, first 50 refusals) is logged at Warning.

@@ -126,6 +126,15 @@ namespace ERP_RFQ_Automation.Services
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly string _attachmentPath;
         private readonly string _rawEmailPath;
+        private readonly ILegacyDocumentStore _legacyDocuments;
+
+        /// <summary>Best-effort removal of a DISK copy after a failed ingest write. An object-store
+        /// copy is immutable and content-addressed, so there is nothing to undo.</summary>
+        private static void DiscardDiskCopy(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || EvidenceObjectUris.IsObjectUri(path)) return;
+            try { if (File.Exists(path)) File.Delete(path); } catch { /* best-effort cleanup */ }
+        }
         private readonly string _tessDataPath;
         // Configuration constants
         private const double MIN_CONFIDENCE_THRESHOLD = 0.3; // Minimum AI confidence to accept
@@ -216,8 +225,13 @@ namespace ERP_RFQ_Automation.Services
             IEmailPollerHealth? pollerHealth = null,
             ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? workGate = null,
             ITenantScopeAccessor? tenantScope = null,
-            ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate? mailboxWorkGate = null)
+            ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate? mailboxWorkGate = null,
+            ILegacyDocumentStore? legacyDocuments = null)
         {
+            // Disk today, object store when EvidenceStorage:RouteLegacyWritersToObjectStore is on;
+            // the default here reproduces the historical disk writer exactly.
+            _legacyDocuments = legacyDocuments
+                ?? new LegacyDocumentStore(storage, new LocalEvidenceObjectStorage(storage), configuration);
             _tenantScope = tenantScope;
             _context = context;
             _env = env;
@@ -1258,11 +1272,21 @@ namespace ERP_RFQ_Automation.Services
 
                 // Local raw mail remains a compatibility copy. Canonical acknowledgement is
                 // based on the immutable evidence object written by EmailInquiryCaptureService.
-                var rawPath = Path.Combine(_rawEmailPath, $"{Guid.NewGuid()}.eml");
+                // Through ILegacyDocumentStore: disk (historical) or the same raw-mail object
+                // the capture service writes, depending on one deployment-wide switch.
+                string? rawPath = null;
                 try
                 {
-                    message.WriteTo(rawPath);
+                    using var rawBuffer = new MemoryStream();
+                    await message.WriteToAsync(rawBuffer, cancellationToken);
+                    rawPath = (await _legacyDocuments.StoreRawMailAsync(
+                        config.BusinessUnitId, rawBuffer.ToArray(), cancellationToken)).FilePath;
                     ingest.RawEmailPath = rawPath;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    DiscardDiskCopy(rawPath);
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -1280,7 +1304,7 @@ namespace ERP_RFQ_Automation.Services
                     // A concurrent attempt inserted the checkpoint. Reload that winner and run
                     // the same handled/resume decision instead of treating existence as success.
                     _logger.LogWarning("Concurrent ingest checkpoint detected for {MessageId}; reloading it.", messageId);
-                    try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
+                    DiscardDiskCopy(rawPath);
                     context.ChangeTracker.Clear();
                     return await ProcessSingleEmailAsync(
                         message, config, context, llmService, intake, tally,
@@ -1288,13 +1312,13 @@ namespace ERP_RFQ_Automation.Services
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
+                    DiscardDiskCopy(rawPath);
                     throw;
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to persist EmailIngest for {MessageId}. Will retry next cycle.", messageId);
-                    try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
+                    DiscardDiskCopy(rawPath);
                     return false;
                 }
             }
@@ -1505,7 +1529,7 @@ namespace ERP_RFQ_Automation.Services
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    if (string.IsNullOrWhiteSpace(ingest.RawEmailPath) || !File.Exists(ingest.RawEmailPath))
+                    if (!await _legacyDocuments.ExistsAsync(ingest.RawEmailPath, cancellationToken))
                     {
                         ingest.ParseStatus = STATUS_RAW_MESSAGE_LOST;
                         ingest.ParsedAt = DateTime.UtcNow;
@@ -1597,7 +1621,7 @@ namespace ERP_RFQ_Automation.Services
                     }
 
                     MimeMessage message;
-                    await using (var stream = File.OpenRead(ingest.RawEmailPath))
+                    await using (var stream = await _legacyDocuments.OpenAsync(ingest.RawEmailPath!, null, cancellationToken))
                     {
                         message = await MimeMessage.LoadAsync(stream, cancellationToken);
                     }
@@ -2168,7 +2192,7 @@ namespace ERP_RFQ_Automation.Services
                     // Save attachments. Anything storage refuses is appended to the SAME durable
                     // skip record, so the ingest carries one complete list.
                     var storageSkips = await SaveAttachmentsAsync(
-                        message, lead.Id, context, cancellationToken);
+                        message, lead.Id, config.BusinessUnitId, context, cancellationToken);
                     if (storageSkips.Count > 0)
                     {
                         skippedAttachments.AddRange(storageSkips);
@@ -2706,7 +2730,7 @@ namespace ERP_RFQ_Automation.Services
         /// to exist between the mailbox and the lead.
         /// </summary>
         private async Task<IReadOnlyList<string>> SaveAttachmentsAsync(MimeMessage message, long leadId,
-            ErpRfqAutomationContext context, CancellationToken cancellationToken = default)
+            long businessUnitId, ErpRfqAutomationContext context, CancellationToken cancellationToken = default)
         {
             var skipped = new List<string>();
             void RecordSkipped(string fileName, string reason)
@@ -2748,31 +2772,27 @@ namespace ERP_RFQ_Automation.Services
 
                 var safeName = SanitizeFileName(part.FileName);
                 var fileName = $"{leadId}_{Guid.NewGuid()}_{safeName}";
-                var relativePath = Path.Combine("Uploads", "RFQ_Attachments", fileName);
-                var physicalPath = Path.Combine(_attachmentPath, fileName);
 
                 try
                 {
-                    // Check file size BEFORE writing to disk (security fix)
-                    long size = 0;
+                    // Size is checked BEFORE anything is stored (security fix, kept).
+                    byte[] bytes;
                     using (var tempStream = new MemoryStream())
                     {
                         await part.Content.DecodeToAsync(tempStream, cancellationToken);
-                        size = tempStream.Length;
-                        
-                        if (size > MAX_ATTACHMENT_SIZE)
+                        if (tempStream.Length > MAX_ATTACHMENT_SIZE)
                         {
                             RecordSkipped(safeName,
-                                $"exceeds the {MAX_ATTACHMENT_SIZE / (1024 * 1024)} MB size limit ({size} bytes)");
+                                $"exceeds the {MAX_ATTACHMENT_SIZE / (1024 * 1024)} MB size limit ({tempStream.Length} bytes)");
                             continue; // Skip this attachment
                         }
-                        
-                        // Write to disk only if size is acceptable
-                        tempStream.Position = 0;
-                        await using var fileStream = File.Create(physicalPath);
-                        await tempStream.CopyToAsync(fileStream, cancellationToken);
-                        await fileStream.FlushAsync(cancellationToken);
+                        bytes = tempStream.ToArray();
                     }
+
+                    // Disk or object store — one switch for all four doors. The digest is
+                    // recorded either way (FR-RFQ-08), which the disk writer never did.
+                    var stored = await _legacyDocuments.StoreAttachmentAsync(
+                        businessUnitId, LegacyDocumentFolders.EmailAttachments, fileName, bytes, cancellationToken);
 
                     // Add to database (thread-safe since we're sequential now)
                     context.Attachments.Add(new Attachment
@@ -2780,31 +2800,23 @@ namespace ERP_RFQ_Automation.Services
                         ParentType = "Lead",
                         ParentId = leadId,
                         FileName = safeName,
-                        FilePath = relativePath,
+                        FilePath = stored.FilePath,
                         MimeType = part.ContentType?.MimeType,
-                        FileSize = size,
+                        FileSize = stored.ByteSize,
                         ContentType = part.ContentType?.MediaType,
+                        ContentSha256 = stored.ContentSha256,
                         CreatedOn = DateTime.UtcNow,
                         UploadedDate = DateTime.UtcNow
                     });
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    if (File.Exists(physicalPath))
-                    {
-                        try { File.Delete(physicalPath); } catch { /* best-effort cleanup */ }
-                    }
                     throw;
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to save attachment: {File}", safeName);
                     RecordSkipped(safeName, $"could not be stored: {ex.GetType().Name}");
-                    // Clean up file if it was created
-                    if (File.Exists(physicalPath))
-                    {
-                        try { File.Delete(physicalPath); } catch { /* Ignore cleanup errors */ }
-                    }
                 }
             }
 

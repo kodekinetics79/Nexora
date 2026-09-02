@@ -191,6 +191,11 @@ public sealed class TenantDataControlService(
     {
         if (string.IsNullOrWhiteSpace(candidate.RawEmailPath))
             return 0;
+        // An object-store copy is the SAME object the assembly's RawEvidenceUri names (identical
+        // bytes, identical content-addressed key), governed by the assembly evidence purge; this
+        // path only ever measured and deleted the disk compatibility copy.
+        if (EvidenceObjectUris.IsObjectUri(candidate.RawEmailPath))
+            return 0;
         try
         {
             var path = files.ResolvePath(candidate.RawEmailPath);
@@ -718,7 +723,7 @@ public sealed class TenantDataControlService(
             await tx.CommitAsync(ct);
         });
 
-        if (string.IsNullOrWhiteSpace(storedPath))
+        if (string.IsNullOrWhiteSpace(storedPath) || EvidenceObjectUris.IsObjectUri(storedPath))
             return 0;
 
         try

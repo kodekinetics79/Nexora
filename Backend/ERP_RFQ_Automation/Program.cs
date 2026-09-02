@@ -160,6 +160,12 @@ if (ERP_RFQ_Automation.Security.MailEndpointPolicy.EnableLoopbackForLocalDevelop
 }
 
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
+// The four legacy document doors write through ONE component whose target is ONE switch
+// (EvidenceStorage:RouteLegacyWritersToObjectStore, default false = today's disk behaviour), and
+// the one-off disk->object migration job behind its own switch. docs/design/evidence-object-store-cutover.md
+builder.Services.AddSingleton<ILegacyDocumentStore, LegacyDocumentStore>();
+builder.Services.AddScoped<LegacyEvidenceMigrationJob>();
+builder.Services.AddHostedService<LegacyEvidenceMigrationHostedService>();
 builder.Services.Configure<S3EvidenceStorageOptions>(
     builder.Configuration.GetSection(S3EvidenceStorageOptions.SectionName));
 builder.Services.Configure<MalwareVerdictPolicyOptions>(
