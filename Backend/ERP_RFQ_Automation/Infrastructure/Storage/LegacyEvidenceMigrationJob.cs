@@ -20,6 +20,16 @@ public enum LegacyMigrationOutcome
 
 public sealed record LegacyMigrationEntry(string Table, long Id, LegacyMigrationOutcome Outcome, string Detail);
 
+/// <summary>
+/// Optional narrowing of a run. Production sweeps everything (<see cref="Everything"/>); a caller
+/// that owns only some rows — a test on a shared database, an operator re-driving one tenant —
+/// names the business unit and nothing outside it is read, written or reported.
+/// </summary>
+public sealed record LegacyMigrationScope(long? BusinessUnitId)
+{
+    public static readonly LegacyMigrationScope Everything = new((long?)null);
+}
+
 public sealed record LegacyMigrationReport(IReadOnlyList<LegacyMigrationEntry> Entries)
 {
     public int Count(LegacyMigrationOutcome outcome) => Entries.Count(e => e.Outcome == outcome);
@@ -70,16 +80,19 @@ public sealed class LegacyEvidenceMigrationJob
         _logger = logger;
     }
 
-    public async Task<LegacyMigrationReport> RunAsync(CancellationToken ct = default)
+    public Task<LegacyMigrationReport> RunAsync(CancellationToken ct = default)
+        => RunAsync(LegacyMigrationScope.Everything, ct);
+
+    public async Task<LegacyMigrationReport> RunAsync(LegacyMigrationScope scope, CancellationToken ct = default)
     {
         if (!_evidence.IsDurable)
             throw new InvalidOperationException(
                 "Refusing to migrate legacy documents into a non-durable evidence store: the target must be S3-compatible.");
 
         var entries = new List<LegacyMigrationEntry>();
-        await MigrateAttachmentsAsync(entries, ct);
-        await MigrateRawMailAsync(entries, ct);
-        await MigrateExtractionJobsAsync(entries, ct);
+        await MigrateAttachmentsAsync(entries, scope, ct);
+        await MigrateRawMailAsync(entries, scope, ct);
+        await MigrateExtractionJobsAsync(entries, scope, ct);
         var report = new LegacyMigrationReport(entries);
         _logger.LogWarning(
             "LEGACY EVIDENCE MIGRATION: migrated={Migrated} verified={Verified} sourceMissing={Missing} "
@@ -92,16 +105,19 @@ public sealed class LegacyEvidenceMigrationJob
 
     // ------------------------------------------------------------------ Attachments
 
-    private async Task MigrateAttachmentsAsync(List<LegacyMigrationEntry> entries, CancellationToken ct)
+    private async Task MigrateAttachmentsAsync(List<LegacyMigrationEntry> entries, LegacyMigrationScope scope, CancellationToken ct)
     {
         long lastId = 0;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             _db.ChangeTracker.Clear();
-            var page = await _db.Attachments
-                .Where(a => a.Id > lastId && a.ParentType == "Lead" && !a.FilePath.StartsWith(TombstonePrefix))
-                .OrderBy(a => a.Id).Take(PageSize).ToListAsync(ct);
+            var query = _db.Attachments
+                .Where(a => a.Id > lastId && a.ParentType == "Lead" && !a.FilePath.StartsWith(TombstonePrefix));
+            if (scope.BusinessUnitId is { } scopedBu)
+                query = query.Where(a => _db.Leads.IgnoreQueryFilters()
+                    .Any(l => l.Id == a.ParentId && l.BusinessUnitId == scopedBu));
+            var page = await query.OrderBy(a => a.Id).Take(PageSize).ToListAsync(ct);
             if (page.Count == 0) break;
             lastId = page[^1].Id;
 
@@ -162,7 +178,7 @@ public sealed class LegacyEvidenceMigrationJob
 
     // ------------------------------------------------------------------ EmailIngests.RawEmailPath
 
-    private async Task MigrateRawMailAsync(List<LegacyMigrationEntry> entries, CancellationToken ct)
+    private async Task MigrateRawMailAsync(List<LegacyMigrationEntry> entries, LegacyMigrationScope scope, CancellationToken ct)
     {
         long lastId = 0;
         while (true)
@@ -171,8 +187,11 @@ public sealed class LegacyEvidenceMigrationJob
             _db.ChangeTracker.Clear();
             // BytesPurgedOn: the tombstone trigger (20260824140000) refuses a RawEmailPath on a
             // purged row, and a purged message has no bytes to copy anyway.
-            var page = await _db.EmailIngests
-                .Where(e => e.Id > lastId && e.RawEmailPath != null && e.BytesPurgedOn == null)
+            var query = _db.EmailIngests
+                .Where(e => e.Id > lastId && e.RawEmailPath != null && e.BytesPurgedOn == null);
+            if (scope.BusinessUnitId is { } scopedBu)
+                query = query.Where(e => e.EmailConfiguration.BusinessUnitId == scopedBu);
+            var page = await query
                 .OrderBy(e => e.Id).Take(PageSize)
                 .Select(e => new { e.Id, e.RawEmailPath, e.EmailConfiguration.BusinessUnitId })
                 .ToListAsync(ct);
@@ -213,16 +232,18 @@ public sealed class LegacyEvidenceMigrationJob
 
     // ------------------------------------------------------------------ ExtractionJobs.StoragePath
 
-    private async Task MigrateExtractionJobsAsync(List<LegacyMigrationEntry> entries, CancellationToken ct)
+    private async Task MigrateExtractionJobsAsync(List<LegacyMigrationEntry> entries, LegacyMigrationScope scope, CancellationToken ct)
     {
         long lastId = 0;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             _db.ChangeTracker.Clear();
-            var page = await _db.Set<ExtractionJob>().IgnoreQueryFilters()
-                .Where(j => j.Id > lastId && !j.StoragePath.Contains("://"))
-                .OrderBy(j => j.Id).Take(PageSize).ToListAsync(ct);
+            var query = _db.Set<ExtractionJob>().IgnoreQueryFilters()
+                .Where(j => j.Id > lastId && !j.StoragePath.Contains("://"));
+            if (scope.BusinessUnitId is { } scopedBu)
+                query = query.Where(j => j.BusinessUnitId == scopedBu);
+            var page = await query.OrderBy(j => j.Id).Take(PageSize).ToListAsync(ct);
             if (page.Count == 0) break;
             lastId = page[^1].Id;
 

@@ -77,12 +77,29 @@ public sealed class UserSecurityStampMigrationPostgreSqlTests
         await using (var column = connection.CreateCommand())
         {
             column.CommandText = """
-                SELECT is_nullable = 'NO' AND column_default IS NULL AND character_maximum_length = 64
+                SELECT is_nullable = 'NO' AND column_default IS NOT NULL AND character_maximum_length = 64
                 FROM information_schema.columns
                 WHERE table_schema = 'public' AND table_name = 'Users' AND column_name = 'SecurityStamp';
                 """;
             Assert.True((bool)(await column.ExecuteScalarAsync())!,
-                "SecurityStamp must be NOT NULL varchar(64) with the backfill default dropped.");
+                "SecurityStamp must be NOT NULL varchar(64) and KEEP a per-row default.");
+        }
+
+        // A raw-SQL insert that omits the column — an ops script, a fixture, a seeder — must
+        // succeed and must get its OWN stamp. The first cut dropped the default after the
+        // backfill and three guard tests that insert users by SQL failed with 23502.
+        await using (var raw = connection.CreateCommand())
+        {
+            raw.CommandText = """
+                INSERT INTO public."Users" ("FirstName", "LastName", "Email", "Password_Hash", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn")
+                VALUES ('C', 'Three', 'stamp-c@nexora.invalid', 'x', 'n/a', 9601, true, 'raw-sql', now()),
+                       ('D', 'Four', 'stamp-d@nexora.invalid', 'x', 'n/a', 9601, true, 'raw-sql', now());
+                SELECT count(*) = 4 AND count(DISTINCT "SecurityStamp") = 4
+                   AND bool_and(length("SecurityStamp") = 32)
+                FROM public."Users";
+                """;
+            Assert.True((bool)(await raw.ExecuteScalarAsync())!,
+                "A raw insert without SecurityStamp must succeed and receive a distinct 32-char stamp.");
         }
 
         await using (var grant = connection.CreateCommand())
@@ -111,7 +128,7 @@ public sealed class UserSecurityStampMigrationPostgreSqlTests
             gone.CommandText = """
                 SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns
                                    WHERE table_name = 'Users' AND column_name = 'SecurityStamp')
-                   AND (SELECT count(*) FROM public."Users") = 2;
+                   AND (SELECT count(*) FROM public."Users") = 4;
                 """;
             Assert.True((bool)(await gone.ExecuteScalarAsync())!);
         }

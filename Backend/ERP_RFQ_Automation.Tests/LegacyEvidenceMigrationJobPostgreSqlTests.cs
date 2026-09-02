@@ -24,6 +24,12 @@ public sealed class LegacyEvidenceMigrationJobPostgreSqlTests : IDisposable
     private const long Tenant = 7_710_001;
     private const long LeadId = 7_710_101;
     private const long MailboxId = 7_710_201;
+    // A neighbour on the SHARED container. The run is scoped to Tenant, so this row — and every
+    // other class's fixture rows — must be neither read nor rewritten. The full-suite run that
+    // swept 13 files instead of 2 is what this seed reproduces in isolation.
+    private const long OtherTenant = 7_710_002;
+    private const long OtherLeadId = 7_710_102;
+    private static readonly LegacyMigrationScope Scope = new(Tenant);
     private readonly PostgreSqlTestDatabase _database;
     private readonly string _root = Path.Combine(Path.GetTempPath(), "nexora-legacy-migration", Guid.NewGuid().ToString("N"));
 
@@ -49,12 +55,17 @@ public sealed class LegacyEvidenceMigrationJobPostgreSqlTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(rawPath)!);
         await File.WriteAllBytesAsync(rawPath, Encoding.UTF8.GetBytes("From: a@b\r\n\r\nraw"));
 
-        long attMail, attManual, attEvidence, attLost, attTombstone, ingestOk, ingestLostHost, jobOk, jobMismatch, jobLost;
+        Write("RFQ_Attachments", "neighbour.pdf", "another tenant's bytes, out of scope");
+        long attMail, attManual, attEvidence, attLost, attTombstone, ingestOk, ingestLostHost, jobOk, jobMismatch, jobLost, attNeighbour;
         await using (var ctx = _database.ContextFor(null))
         {
             Seed.Lead(ctx, LeadId, Tenant);
+            Seed.Lead(ctx, OtherLeadId, OtherTenant);
             Seed.EmailConfig(ctx, MailboxId, Tenant);
             await ctx.SaveChangesAsync();
+            var neighbour = Row(@"Uploads\RFQ_Attachments\neighbour.pdf", "neighbour.pdf");
+            neighbour.ParentId = OtherLeadId;
+            ctx.Attachments.Add(neighbour);
 
             Attachment a1 = Row(@"Uploads\RFQ_Attachments\394_b339_WhatsApp_Image.jpeg", "394_b339_WhatsApp_Image.jpeg"),
                        a2 = Row(@"Uploads\Manual_Attachments\337_687f_RFQ#6000218024.pdf", "337_687f_RFQ#6000218024.pdf"),
@@ -73,6 +84,7 @@ public sealed class LegacyEvidenceMigrationJobPostgreSqlTests : IDisposable
             ctx.AddRange(j1, j2, j3);
             await ctx.SaveChangesAsync();
             (attMail, attManual, attEvidence, attLost, attTombstone) = (a1.Id, a2.Id, a3.Id, a4.Id, a5.Id);
+            attNeighbour = neighbour.Id;
             (ingestOk, ingestLostHost) = (i1.Id, i2.Id);
             (jobOk, jobMismatch, jobLost) = (j1.Id, j2.Id, j3.Id);
         }
@@ -80,7 +92,7 @@ public sealed class LegacyEvidenceMigrationJobPostgreSqlTests : IDisposable
         // ---- first run ---------------------------------------------------------------------------
         LegacyMigrationReport first;
         await using (var ctx = _database.ContextFor(null))
-            first = await new LegacyEvidenceMigrationJob(ctx, files, evidence, NullLogger<LegacyEvidenceMigrationJob>.Instance).RunAsync();
+            first = await new LegacyEvidenceMigrationJob(ctx, files, evidence, NullLogger<LegacyEvidenceMigrationJob>.Instance).RunAsync(Scope);
 
         Assert.Equal(5, first.Migrated);      // two door copies, the evidence-key attachment, the raw mail, the job
         Assert.Equal(1, first.HashMismatch);  // j2
@@ -101,6 +113,9 @@ public sealed class LegacyEvidenceMigrationJobPostgreSqlTests : IDisposable
             Assert.Equal("Uploads/Extraction/lost-on-the-old-container.pdf", rows[attLost].FilePath);
             Assert.Null(rows[attLost].ContentSha256);
             Assert.Equal("purged:source-document/1", rows[attTombstone].FilePath);
+            var outOfScope = await ctx.Attachments.SingleAsync(a => a.Id == attNeighbour);
+            Assert.Equal(@"Uploads\RFQ_Attachments\neighbour.pdf", outOfScope.FilePath);
+            Assert.Null(outOfScope.ContentSha256);
 
             var ingests = await ctx.EmailIngests.IgnoreQueryFilters().Where(e => e.EmailConfigurationId == MailboxId).ToDictionaryAsync(e => e.Id);
             Assert.StartsWith("test-evidence://", ingests[ingestOk].RawEmailPath);
@@ -120,7 +135,7 @@ public sealed class LegacyEvidenceMigrationJobPostgreSqlTests : IDisposable
         var writesAfterFirst = evidence.WriteCalls;
         LegacyMigrationReport second;
         await using (var ctx = _database.ContextFor(null))
-            second = await new LegacyEvidenceMigrationJob(ctx, files, evidence, NullLogger<LegacyEvidenceMigrationJob>.Instance).RunAsync();
+            second = await new LegacyEvidenceMigrationJob(ctx, files, evidence, NullLogger<LegacyEvidenceMigrationJob>.Instance).RunAsync(Scope);
 
         Assert.Equal(0, second.Migrated);
         Assert.Equal(4, second.Verified); // three attachment objects + the raw mail re-read against their digests
@@ -134,7 +149,7 @@ public sealed class LegacyEvidenceMigrationJobPostgreSqlTests : IDisposable
         evidence.Tamper(InMemoryEvidenceStorage.UriFor(Tenant, "legacy", Sha(mailBytes), ".jpeg"), Encoding.UTF8.GetBytes("bit rot"));
         await using (var ctx = _database.ContextFor(null))
         {
-            var third = await new LegacyEvidenceMigrationJob(ctx, files, evidence, NullLogger<LegacyEvidenceMigrationJob>.Instance).RunAsync();
+            var third = await new LegacyEvidenceMigrationJob(ctx, files, evidence, NullLogger<LegacyEvidenceMigrationJob>.Instance).RunAsync(Scope);
             Assert.Equal(3, third.Verified);
             Assert.Equal(2, third.Refused);
         }

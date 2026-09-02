@@ -11,8 +11,11 @@ namespace ERP_RFQ_Automation.Migrations;
 /// <para>Adds <c>"Users"."SecurityStamp"</c>, the opaque per-account value every tenant JWT now
 /// carries and <c>TenantSessionValidator</c> re-checks on each request. The column is added with a
 /// VOLATILE default so PostgreSQL evaluates it once per existing row — every current user gets a
-/// distinct stamp rather than one shared value — and the default is dropped immediately after,
-/// because from then on the application supplies the value (<c>User.SecurityStamp</c> initialiser).</para>
+/// distinct stamp rather than one shared value. The default is KEPT: the application supplies its
+/// own stamp on every write it makes (<c>User.SecurityStamp</c> initialiser), but a row inserted
+/// by raw SQL — ops scripts, fixtures, a future seeder — must not fail with 23502 and must not
+/// share a stamp with another row either. <c>gen_random_bytes</c> is pgcrypto, which the baseline
+/// creates (01_schema_and_extensions.sql).</para>
 ///
 /// <para>Grants. <c>nexora_tenant_app</c> and <c>nexora_pipeline_app</c> hold table-level UPDATE on
 /// "Users" and need nothing. <c>nexora_identity_app</c> — the role the anonymous password-reset
@@ -30,8 +33,7 @@ public sealed class UserSecurityStamp : Migration
         migrationBuilder.Sql("""
             ALTER TABLE public."Users"
                 ADD COLUMN IF NOT EXISTS "SecurityStamp" character varying(64) NOT NULL
-                DEFAULT replace(gen_random_uuid()::text, '-', '');
-            ALTER TABLE public."Users" ALTER COLUMN "SecurityStamp" DROP DEFAULT;
+                DEFAULT encode(gen_random_bytes(16), 'hex');
             """);
 
         migrationBuilder.Sql("""

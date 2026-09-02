@@ -1760,7 +1760,10 @@ public partial class ErpRfqAutomationContext : DbContext
             // Token revocation handle (docs/design/token-revocation.md). NOT NULL; backfilled per
             // row by 20260902120000_UserSecurityStamp; nexora_identity_app holds UPDATE on it so
             // password reset and activation can rotate it.
-            entity.Property(e => e.SecurityStamp).HasMaxLength(64).IsRequired();
+            // The database default is for raw-SQL inserts only (never evaluated on the portable
+            // SQLite lane, where the entity initialiser always supplies the value).
+            entity.Property(e => e.SecurityStamp).HasMaxLength(64).IsRequired()
+                .HasDefaultValueSql("encode(gen_random_bytes(16), 'hex')");
             entity.Property(e => e.TeamId).HasColumnName("TeamID");
             entity.Property(e => e.Timezone).HasMaxLength(50);
             entity.Property(e => e.UserGroupId).HasColumnName("UserGroupID");
