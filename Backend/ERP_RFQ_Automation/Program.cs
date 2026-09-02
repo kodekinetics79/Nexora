@@ -433,7 +433,6 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ILocalRelated
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ILeadLineCommercialResolutionService, ERP_RFQ_Automation.Inventory.Commercial.LeadLineCommercialResolutionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ICommercialLineResolutionApplicationService, ERP_RFQ_Automation.Inventory.Commercial.CommercialLineResolutionApplicationService>();
 builder.Services.AddScoped<ILifecycleApplicationService, LifecycleApplicationService>();
-builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddCommercialFinanceOutboxDispatcher(builder.Configuration);
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
 builder.Services.AddScoped<ICustomFieldApplicationService, CustomFieldApplicationService>();

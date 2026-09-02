@@ -31,6 +31,13 @@ public sealed class CommercialLifecycleEvent
     public LifecycleOutboxMessage OutboxMessage { get; set; } = null!;
 }
 
+/// <summary>
+/// RETIRED, table kept. Nothing writes this since 2026-09-02 and nothing ever read it: the
+/// dispatcher its lease/dead-letter columns were shaped for was never built, and 71 rows sat
+/// pending in production with AttemptCount 0 (docs/design/lifecycle-outbox.md). The entity and
+/// mapping stay so the EF model matches the snapshot without a migration; the next schema
+/// squash drops <c>lifecycle_outbox_messages</c> and this class with it.
+/// </summary>
 public sealed class LifecycleOutboxMessage
 {
     public long Id { get; set; }

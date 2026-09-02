@@ -226,7 +226,9 @@ public sealed class RfqTenantRoleCreatePostgreSqlTests
             var promotedEvent = await tenant.CommercialLifecycleEvents.AsNoTracking()
                 .SingleAsync(x => x.AggregateType == "Lead" && x.AggregateId == leadId
                     && x.EventType == "PromotedToRfq");
-            Assert.True(await tenant.LifecycleOutboxMessages.AsNoTracking()
+            // The promotion event is the record; the retired outbox gets no row
+            // (docs/design/lifecycle-outbox.md).
+            Assert.False(await tenant.LifecycleOutboxMessages.AsNoTracking()
                 .AnyAsync(x => x.LifecycleEventId == promotedEvent.Id));
         }
 
