@@ -372,7 +372,10 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Permission(85_008, AllowedRole, usersModuleId, TenantA),
             Permission(85_009, AllowedRole, supplierNegotiationModuleId, TenantA, canEdit: true),
             Permission(85_010, SupplierHistoryViewerRole, supplierHistoryModuleId, TenantA),
-            Permission(85_011, AllowedRole, quotationsModuleId, TenantA),
+            // Create as well as view: the quote back-fill door is gated on Quotations Create, and
+            // a fixture role that could never pass that gate would make the 403 assertion in
+            // QuoteBackfillAuthenticatedHttpTests indistinguishable from the gate being absent.
+            Permission(85_011, AllowedRole, quotationsModuleId, TenantA, canCreate: true),
             Permission(85_012, GrowthManagerRole, leadsModuleId, TenantA, canEdit: true),
             Permission(85_013, GrowthManagerRole, customersModuleId, TenantA),
             Permission(85_014, GrowthManagerRole, rfqManagementModuleId, TenantA),

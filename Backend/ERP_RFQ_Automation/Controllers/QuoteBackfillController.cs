@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -29,7 +30,12 @@ public sealed class QuoteBackfillController : ControllerBase
     }
 
     /// <summary>Carries in ONE quote entered by a person.</summary>
+    // The same module gate as every other quote-creating action in QuoteController: a
+    // back-filled quote IS a quote, so the role that may not raise one may not carry one in
+    // either. [Authorize] plus the plan entitlement only proved the tenant is allowed quotes at
+    // all, which let any authenticated user of the tenant write to its pipeline.
     [HttpPost]
+    [RequireModulePermission("Quotations", PermissionAction.Create)]
     public async Task<IActionResult> Backfill([FromBody] QuoteBackfillRequest request, CancellationToken ct)
     {
         var businessUnitId = TenantId();
