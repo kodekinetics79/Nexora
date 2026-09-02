@@ -573,8 +573,18 @@ namespace ERP_RFQ_Automation.Controllers
                 .SingleOrDefaultAsync(x => x.Id == orderId && x.BusinessUnitId == businessUnitId && x.IsActive);
         }
 
-        private async Task<bool> IsAuthorizedShipmentStatusAsync(long businessUnitId, long statusId)
-            => statusId > 0 && await _context.SetupMasters.AsNoTracking().AnyAsync(status =>
+        private Task<bool> IsAuthorizedShipmentStatusAsync(long businessUnitId, long statusId)
+            => IsActiveShipmentStatusAsync(_context, businessUnitId, statusId);
+
+        /// <summary>
+        /// The one predicate every shipment mutation gates its status on: an ACTIVE
+        /// <c>ShipmentStatus</c> row belonging to THIS business unit. Static and internal so the
+        /// tenant-baseline tests can prove a freshly provisioned tenant satisfies exactly this
+        /// query rather than a paraphrase of it.
+        /// </summary>
+        internal static async Task<bool> IsActiveShipmentStatusAsync(
+            ErpRfqAutomationContext context, long businessUnitId, long statusId)
+            => statusId > 0 && await context.SetupMasters.AsNoTracking().AnyAsync(status =>
                 status.SetupId == statusId && status.BusinessUnitId == businessUnitId && status.IsActive != false
                 && status.SetupType.ToLower().Replace(" ", "") == "shipmentstatus");
 

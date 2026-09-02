@@ -492,6 +492,11 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Testing.TenantDataReset>(
 // service so it runs after any startup migration has applied, and so a slow or failing database
 // delays reconciliation rather than the whole boot.
 builder.Services.AddHostedService<ModuleCatalogStartupService>();
+// Gives every EXISTING business unit the Setup_Master reference lists a new one is provisioned
+// with (ShipmentStatus, PaymentMethod, LeadRejectedReason, RFQType, QuoteOutcomeReason). Adds a
+// list only where the tenant has none; never edits a row. Guarded by
+// TenantBaseline:ReconcileReferenceListsOnStartup (default true).
+builder.Services.AddHostedService<ERP_RFQ_Automation.Platform.Services.TenantReferenceListStartupReconciler>();
 builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, TenantOwnerRoleHandler>();
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, ModulePermissionPolicyProvider>();
