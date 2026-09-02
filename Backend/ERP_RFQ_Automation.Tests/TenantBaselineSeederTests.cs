@@ -333,11 +333,15 @@ public sealed class TenantBaselineSeederTests
         // Not delete: a quote is the evidence behind a commercial commitment.
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Quotations", "candelete", Bu));
 
-        // Read-only on the supply side, and completely absent from finance and administration —
-        // a module with no row at all is denied outright for anything below Admin rank.
+        // Read-only on the supply side, and absent from finance and administration except for the
+        // two reads the rail gates Fulfilment and Receivables on — a module with no row at all is
+        // denied outright for anything below Admin rank.
         Assert.True(await repository.CheckPermissionAsync(role.SetupId, "Suppliers", "canview", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Suppliers", "canedit", Bu));
-        Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Accounts Receivable", "canview", Bu));
+        Assert.True(await repository.CheckPermissionAsync(role.SetupId, "Shipments", "canview", Bu));
+        Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Shipments", "cancreate", Bu));
+        Assert.True(await repository.CheckPermissionAsync(role.SetupId, "Accounts Receivable", "canview", Bu));
+        Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Accounts Receivable", "cancreate", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Customer Payments", "cancreate", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Users", "canview", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Roles & Permissions", "canedit", Bu));

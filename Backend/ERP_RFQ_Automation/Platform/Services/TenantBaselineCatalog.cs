@@ -321,7 +321,14 @@ public static class TenantBaselineCatalog
                 // accepted order is a commitment to the customer, and changing it after the fact
                 // is the manager's call.
                 ReadAdd("Orders"),
+
+                // The rail shows Fulfilment only to a role that can view "Shipments" and
+                // Receivables only to one that can view "Accounts Receivable" (navCatalog.tsx).
+                // A representative who has just raised an order needs to see it despatched and
+                // needs to know whether the customer is on stop before quoting them again; both
+                // are reads. Nothing here lets them create a shipment or move money.
                 Read("Shipments"),
+                Read("Accounts Receivable"),
 
                 Work("Customers"),
                 Read("Customer Awards"),

@@ -163,14 +163,15 @@ public sealed class TenantBaselineRoleTemplateTests
                 $"{code} holds write on {string.Join(", ", offending)}.");
         }
 
-        // The sales representative may not so much as READ the finance or administration surface;
-        // the manager is allowed the three read-only receivable views that tell them whether a
-        // customer is safe to quote, and the user list that lead assignment picks from.
+        // The sales representative reads exactly one finance surface — the receivable position
+        // that says whether a customer is on stop — and none of administration; the manager is
+        // allowed the three read-only receivable views that tell them whether a customer is safe
+        // to quote, and the user list that lead assignment picks from.
         var representativeReads = Role("SALES_REP").Grants
             .Where(grant => financeAndAdministration.Contains(grant.Module))
             .Select(grant => grant.Module)
             .ToList();
-        Assert.Empty(representativeReads);
+        Assert.Equal(["Accounts Receivable"], representativeReads);
 
         var managerReads = Role("SALES_MANAGER").Grants
             .Where(grant => financeAndAdministration.Contains(grant.Module))
@@ -180,6 +181,30 @@ public sealed class TenantBaselineRoleTemplateTests
         Assert.Equal(
             ["Accounts Receivable", "Collection Controls", "Customer Statements", "Users"],
             managerReads);
+    }
+
+    /// <summary>
+    /// The rail renders Fulfilment only to a role that can VIEW "Shipments" and Receivables only
+    /// to one that can VIEW "Accounts Receivable" (Frontend navCatalog.tsx). A sales desk whose
+    /// starter roles lacked either grant saw an order it had just raised vanish at despatch and
+    /// could not tell whether the customer it was about to quote was on stop. Both are reads; the
+    /// write side stays where it was.
+    /// </summary>
+    [Theory]
+    [InlineData("SALES_REP")]
+    [InlineData("SALES_MANAGER")]
+    public void The_sales_desk_can_see_fulfilment_and_receivables_in_the_rail(string code)
+    {
+        var grants = Role(code).Grants.ToDictionary(grant => grant.Module, StringComparer.Ordinal);
+
+        Assert.True(grants.TryGetValue("Shipments", out var shipments) && shipments.CanView,
+            $"{code} cannot view Shipments, so Fulfilment is missing from its rail.");
+        Assert.True(grants.TryGetValue("Accounts Receivable", out var receivables) && receivables.CanView,
+            $"{code} cannot view Accounts Receivable, so Receivables is missing from its rail.");
+
+        // Seeing a receivable is not the same authority as raising, adjusting or writing one off.
+        Assert.False(receivables!.CanCreate || receivables.CanEdit || receivables.CanDelete,
+            $"{code} holds write on Accounts Receivable.");
     }
 
     [Fact]
