@@ -15,6 +15,12 @@ namespace ERP_RFQ_Automation.Tests;
 /// <para>The shape mirrors the live fleet on 2026-09-02: business unit 1 held every list, 7 and 8
 /// held none of the five, and nothing ever re-checked. One unit here is bare; the other already
 /// carries a ShipmentStatus list of its own making, which the reconciler must leave alone.</para>
+///
+/// <para>The run is SCOPED to the two units this class owns. The container is shared by every
+/// class in the collection and other classes leave business units behind by design (a finalized
+/// billing statement pins its tenant's unit forever), so an unscoped sweep would count and write
+/// into whatever fixture ran before — which is exactly how this test passed alone and failed in
+/// the full suite.</para>
 /// </summary>
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class TenantReferenceListReconcilerPostgreSqlTests
@@ -86,11 +92,55 @@ public sealed class TenantReferenceListReconcilerPostgreSqlTests
         }
     }
 
+    /// <summary>
+    /// The race the per-unit advisory lock exists for: a provisioning transaction that has ALREADY
+    /// written a unit's lists but not yet committed, while the startup sweep reaches the same unit.
+    /// The sweep must wait for the commit and then find nothing to do — never write a second copy.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_sweep_racing_an_uncommitted_provision_of_the_same_unit_waits_and_writes_nothing()
+    {
+        await CleanupAsync();
+        try
+        {
+            await SeedAsync();
+
+            // Provisioning: seed inside an open transaction and hold it.
+            await using var provisioning = _database.ContextFor(null);
+            await using var provisioningTransaction = await provisioning.Database.BeginTransactionAsync();
+            var provisioner = new TenantBaselineSeeder(provisioning, NullLogger<TenantBaselineSeeder>.Instance);
+            var provisioned = await provisioner.ReconcileReferenceListsAsync(BareUnit, "provisioning");
+            Assert.Equal(TenantBaselineCatalog.ReferenceLists.Sum(list => list.Entries.Count), provisioned);
+
+            // The sweep starts while that transaction is still open. It must block on the lock.
+            var sweep = Task.Run(RunAsync);
+            var finishedEarly = await Task.WhenAny(sweep, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.NotSame(sweep, finishedEarly);
+
+            await provisioningTransaction.CommitAsync();
+            var result = await sweep.WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.Equal(0, result.Failures);
+            await using var verify = _database.ContextFor(null);
+            var rows = await verify.SetupMasters.IgnoreQueryFilters().AsNoTracking()
+                .Where(row => row.BusinessUnitId == BareUnit).ToListAsync();
+            Assert.Empty(rows.GroupBy(row => (row.SetupType, row.SetupCode)).Where(group => group.Count() > 1));
+            Assert.All(rows.Where(row => TenantBaselineCatalog.ReferenceLists.Any(list => list.SetupType == row.SetupType)),
+                row => Assert.Equal("provisioning", row.CreatedBy));
+        }
+        finally
+        {
+            await CleanupAsync();
+        }
+    }
+
     private async Task<TenantReferenceListReconciliation> RunAsync()
     {
         await using var db = _database.ContextFor(null);
         var seeder = new TenantBaselineSeeder(db, NullLogger<TenantBaselineSeeder>.Instance);
-        return await TenantReferenceListReconciler.RunAsync(db, seeder, NullLogger.Instance);
+        return await TenantReferenceListReconciler.RunAsync(
+            db, seeder, NullLogger.Instance, businessUnitIds: [BareUnit, ShapedUnit]);
     }
 
     private async Task SeedAsync()

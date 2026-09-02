@@ -188,6 +188,7 @@ public sealed class TenantBaselineSeeder(
         var countries = await EnsureCountryAsync(businessUnitId, profile.CountryCode, seededBy, now, ct);
         var discountTypes = await EnsureDiscountTypesAsync(businessUnitId, seededBy, now, ct);
         var lifecycleStatuses = await EnsureLifecycleStatusesAsync(businessUnit, seededBy, now, ct);
+        await LockReferenceListsAsync(businessUnitId, ct);
         var referenceRows = await EnsureReferenceListsAsync(businessUnitId, seededBy, now, ct);
         var (leadReferenceSeeded, leadReferencePrefix) =
             await EnsureLeadReferenceConfigurationAsync(businessUnit, now, ct);
@@ -511,10 +512,31 @@ public sealed class TenantBaselineSeeder(
             throw new InvalidOperationException(
                 $"Business unit {businessUnitId} does not exist; its reference lists cannot be reconciled.");
 
+        await LockReferenceListsAsync(businessUnitId, ct);
         var created = await EnsureReferenceListsAsync(businessUnitId, seededBy, DateTime.UtcNow, ct);
         if (created > 0)
             await context.SaveChangesAsync(ct);
         return created;
+    }
+
+    /// <summary>
+    /// Serialises every writer of one business unit's reference lists: provisioning (inside its
+    /// own transaction) and the startup reconciler (one transaction per unit) both take this
+    /// before their check-then-insert, so whichever is second re-reads after the first commits
+    /// and finds the lists present. Setup_Master has no unique index on (unit, type, code), so
+    /// without it a boot-time sweep racing a fresh provision could write a list twice.
+    ///
+    /// <para>PostgreSQL only, and only inside a transaction: a transaction-scoped advisory lock
+    /// taken in autocommit is released at the end of its own statement and protects nothing, so
+    /// outside a transaction the call is skipped rather than pretending. The SQLite test lane
+    /// never runs two hosts against one file.</para>
+    /// </summary>
+    private async Task LockReferenceListsAsync(long businessUnitId, CancellationToken ct)
+    {
+        if (!context.Database.IsNpgsql() || context.Database.CurrentTransaction is null)
+            return;
+        await context.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock(hashtextextended({"nexora:reference-lists:" + businessUnitId}, 0))", ct);
     }
 
     /// <summary>

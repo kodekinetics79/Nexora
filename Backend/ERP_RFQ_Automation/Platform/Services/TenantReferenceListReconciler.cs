@@ -23,11 +23,14 @@ public sealed record TenantReferenceListReconciliation(
 /// the tenant has no row of that type at all and never edits, reactivates or deletes anything. A
 /// second run is a no-op, and a tenant that has shaped a list keeps its shape.</para>
 ///
-/// <para><b>Concurrency.</b> Two instances booting together would both find the same list absent
-/// and both insert it; Setup_Master carries no unique index that would stop the second. On
-/// PostgreSQL the pass therefore runs under a transaction-scoped advisory lock, so the second
-/// instance waits, re-reads, and finds nothing to do. On any other provider (the SQLite test lane)
-/// the lock is skipped; nothing there runs two hosts against one file.</para>
+/// <para><b>Concurrency.</b> Each business unit is reconciled in its own short transaction, and
+/// on PostgreSQL that transaction holds the per-unit advisory lock
+/// <see cref="TenantBaselineSeeder"/> takes for the same unit — so two nodes booting together,
+/// or a boot-time sweep racing the provisioning of a brand-new tenant, serialise on that unit
+/// and the second one re-reads and finds nothing to do. Setup_Master carries no unique index that
+/// would otherwise stop the duplicate. One unit per transaction rather than the whole fleet in
+/// one: a fleet-wide transaction would hold every unit's lock for the length of the sweep and
+/// block provisioning for its duration.</para>
 /// </summary>
 public static class TenantReferenceListReconciler
 {
@@ -35,61 +38,63 @@ public static class TenantReferenceListReconciler
     /// provisioned or customer-added one.</summary>
     public const string Actor = "startup:tenant-reference-lists:v1";
 
-    /// <summary>A fixed key for <c>pg_advisory_xact_lock</c>; chosen once, shared by every node.</summary>
-    private const long AdvisoryLockKey = 0x4E58_5245_464C_5354; // "NXREFLST"
-
+    /// <param name="businessUnitIds">
+    /// The units to sweep, or null for every business unit in the database (what the startup
+    /// service passes). A test passes the units it owns, so its counts describe its own fixture
+    /// rather than whatever else shares the database.
+    /// </param>
     public static async Task<TenantReferenceListReconciliation> RunAsync(
-        ErpRfqAutomationContext db, ITenantBaselineSeeder seeder, ILogger logger, CancellationToken ct = default)
+        ErpRfqAutomationContext db, ITenantBaselineSeeder seeder, ILogger logger,
+        IReadOnlyCollection<long>? businessUnitIds = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(db);
         ArgumentNullException.ThrowIfNull(seeder);
         ArgumentNullException.ThrowIfNull(logger);
 
+        var query = db.BusinessUnits.IgnoreQueryFilters().AsNoTracking();
+        if (businessUnitIds is not null)
+            query = query.Where(unit => businessUnitIds.Contains(unit.Id));
+        var targets = await query.OrderBy(unit => unit.Id).Select(unit => unit.Id).ToListAsync(ct);
+
+        int completed = 0, rows = 0, failures = 0;
         var strategy = db.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async () =>
+        foreach (var businessUnitId in targets)
         {
-            await using var transaction = await db.Database.BeginTransactionAsync(ct);
-            if (db.Database.IsNpgsql())
-                await db.Database.ExecuteSqlRawAsync(
-                    $"SELECT pg_advisory_xact_lock({AdvisoryLockKey});", ct);
-
-            var businessUnitIds = await db.BusinessUnits.IgnoreQueryFilters().AsNoTracking()
-                .OrderBy(unit => unit.Id)
-                .Select(unit => unit.Id)
-                .ToListAsync(ct);
-
-            int completed = 0, rows = 0, failures = 0;
-            foreach (var businessUnitId in businessUnitIds)
+            ct.ThrowIfCancellationRequested();
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                try
+                var created = await strategy.ExecuteAsync(async () =>
                 {
-                    var created = await seeder.ReconcileReferenceListsAsync(businessUnitId, Actor, ct);
-                    if (created > 0)
-                    {
-                        completed++;
-                        rows += created;
-                        logger.LogInformation(
-                            "Reference lists reconciled for business unit {BusinessUnitId}: {Rows} row(s) added.",
-                            businessUnitId, created);
-                    }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    // One tenant's failure must not cost the others their lists, and the change
-                    // tracker must not carry that tenant's half-built rows into the next tenant's
-                    // save.
-                    failures++;
                     db.ChangeTracker.Clear();
-                    logger.LogError(ex,
-                        "Reference list reconciliation failed for business unit {BusinessUnitId}; continuing.",
-                        businessUnitId);
+                    await using var transaction = await db.Database.BeginTransactionAsync(ct);
+                    // The seeder takes the per-unit advisory lock inside this transaction.
+                    var written = await seeder.ReconcileReferenceListsAsync(businessUnitId, Actor, ct);
+                    await transaction.CommitAsync(ct);
+                    return written;
+                });
+                if (created > 0)
+                {
+                    completed++;
+                    rows += created;
+                    logger.LogInformation(
+                        "Reference lists reconciled for business unit {BusinessUnitId}: {Rows} row(s) added.",
+                        businessUnitId, created);
                 }
             }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // One tenant's failure must not cost the others their lists, and the change
+                // tracker must not carry that tenant's half-built rows into the next tenant's
+                // save.
+                failures++;
+                db.ChangeTracker.Clear();
+                logger.LogError(ex,
+                    "Reference list reconciliation failed for business unit {BusinessUnitId}; continuing.",
+                    businessUnitId);
+            }
+        }
 
-            await transaction.CommitAsync(ct);
-            return new TenantReferenceListReconciliation(businessUnitIds.Count, completed, rows, failures);
-        });
+        return new TenantReferenceListReconciliation(targets.Count, completed, rows, failures);
     }
 }
 
@@ -124,7 +129,7 @@ public sealed class TenantReferenceListStartupReconciler(
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
             var seeder = scope.ServiceProvider.GetRequiredService<ITenantBaselineSeeder>();
-            var result = await TenantReferenceListReconciler.RunAsync(db, seeder, logger, cancellationToken);
+            var result = await TenantReferenceListReconciler.RunAsync(db, seeder, logger, ct: cancellationToken);
             logger.LogInformation(
                 "Tenant reference lists reconciled: {Swept} business unit(s) swept, {Completed} completed with "
                 + "{Rows} row(s) added, {Failures} failure(s).",
