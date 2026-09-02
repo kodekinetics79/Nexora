@@ -240,6 +240,19 @@ const LeadsPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [leadSource, setLeadSource] = useState('all');
   const [ownerView, setOwnerView] = useState<OwnerView>(() => defaultOwnerView(myUserId, isManager));
+  /**
+   * "All inquiries" used to send NO queue view, and the server's default for no view is the
+   * untriaged inbox (`LeadStatusId == null`, LeadRepository.GetLeadListAsync). Any lifecycle
+   * transition stamps a status, so the list called "All" dropped every inquiry the moment
+   * someone advanced it — a rep who qualified a lead on Monday could not find it on Tuesday.
+   *
+   * The default is now the server's "open" view: everything still live, untriaged or not. The
+   * old behaviour survives as a filter the reader switches on, named for what it shows.
+   */
+  const [untriagedOnly, setUntriagedOnly] = useState(false);
+  // A view carried on the URL (a dashboard tile, the Revisions tab) is a queue of its own and
+  // wins outright; the toggle only applies to the plain list.
+  const queueView = view ?? (untriagedOnly ? undefined : 'open');
   // Column layout and row density are settings, not the day's work. They stay one click away
   // rather than sitting on the default path beside the filters a salesperson actually uses.
   const [displayOpen, setDisplayOpen] = useState(false);
@@ -284,7 +297,7 @@ const LeadsPage: React.FC = () => {
   // Everything that can narrow this list. `view` is included because it is a filter the reader
   // did not type: arriving from a dashboard tile can empty the grid with nothing on screen
   // explaining it, which is exactly the "no data" / "filtered to zero" confusion below.
-  const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view) || ownerView !== 'all';
+  const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view) || ownerView !== 'all' || untriagedOnly;
   // useCallback, not a bare closure: the no-rows overlay below is memoised because DataGrid
   // takes a component TYPE, and a fresh function identity each render would rebuild that type
   // and remount the overlay under the user.
@@ -292,6 +305,7 @@ const LeadsPage: React.FC = () => {
     setSearch('');
     setLeadSource('all');
     setOwnerView('all');
+    setUntriagedOnly(false);
     setPaginationModel((current) => ({ ...current, page: 0 }));
     if (view) {
       // Drop only the view/state keys; anything else on the URL belongs to someone else.
@@ -333,7 +347,7 @@ const LeadsPage: React.FC = () => {
     ),
   });
 
-  const requestedView = composeLeadsView(view, ownerView, myUserId);
+  const requestedView = composeLeadsView(queueView, ownerView, myUserId);
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['leads', paginationModel, search, leadSource, requestedView],
@@ -419,14 +433,23 @@ const LeadsPage: React.FC = () => {
       ? 'Nothing is assigned to you'
       : ownerView === 'unassigned'
         ? 'Every inquiry here already has an owner'
-        : 'No inquiries match these filters',
+        : untriagedOnly
+          ? 'Nothing is waiting to be looked at'
+          : 'No inquiries match these filters',
     filteredMessage: ownerView === 'mine'
       ? 'No inquiry in this list carries your name right now. The ones nobody has picked up are one click away.'
       : ownerView === 'unassigned'
         ? 'Nothing in this list is waiting to be picked up. Everything already belongs to somebody.'
-        : 'Nothing matches the search and filters currently applied. Clearing them shows every inquiry this business unit has.',
+        : untriagedOnly
+          ? 'Every inquiry has already been opened by someone. The ones in progress are one click away.'
+          : 'Nothing matches the search and filters currently applied. Clearing them shows every inquiry this business unit has.',
     filteredAction: (
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+        {untriagedOnly && ownerView === 'all' && (
+          <Button variant="contained" onClick={() => setUntriagedOnly(false)} sx={{ fontWeight: 700 }}>
+            Show inquiries in progress
+          </Button>
+        )}
         {ownerView === 'mine' && (
           <Button variant="contained" onClick={() => setOwnerView('unassigned')} sx={{ fontWeight: 700 }}>
             Show unassigned inquiries
@@ -447,7 +470,7 @@ const LeadsPage: React.FC = () => {
         </Button>
       </Box>
     ),
-  }), [filtersActive, isTrueZero, canUploadDocuments, canConnectMailbox, clearFilters, navigate, ownerView]);
+  }), [filtersActive, isTrueZero, canUploadDocuments, canConnectMailbox, clearFilters, navigate, ownerView, untriagedOnly]);
 
   const rows = useMemo(() => data?.items ?? [], [data]);
 
@@ -1137,6 +1160,28 @@ const LeadsPage: React.FC = () => {
           <ToggleButton value="mine" aria-label="Mine" disabled={myUserId == null}>Mine</ToggleButton>
           <ToggleButton value="all" aria-label="Everyone">Everyone</ToggleButton>
         </ToggleButtonGroup>
+        {/* The old "All inquiries" — only what nobody has opened yet — as an opt-in filter. Hidden
+            when the URL already names a queue (Revisions, a dashboard tile): those are lists of
+            their own and the toggle would silently narrow them. */}
+        {!view && (
+          <Tooltip title={untriagedOnly
+            ? 'Showing only inquiries nobody has opened yet. Turn off to include the ones already in progress.'
+            : 'Show only inquiries nobody has opened yet.'}>
+            <ToggleButton
+              size="small"
+              value="untriaged"
+              selected={untriagedOnly}
+              onChange={() => {
+                setUntriagedOnly((current) => !current);
+                setPaginationModel((current) => ({ ...current, page: 0 }));
+              }}
+              aria-label="Untriaged only"
+              sx={{ textTransform: 'none', fontWeight: 700 }}
+            >
+              Untriaged only
+            </ToggleButton>
+          </Tooltip>
+        )}
         {/* A disabled control that will not say why becomes a support call. */}
         {myUserId == null && (
           <Typography variant="caption" sx={{ color: 'text.secondary', maxWidth: 220 }}>

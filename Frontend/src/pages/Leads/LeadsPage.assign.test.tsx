@@ -399,14 +399,15 @@ describe('LeadsPage — assigning a lead from the list', () => {
 
   it('opensOnTheReadersOwnWork_notOnEveryRowEverRecorded', async () => {
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe(`mine:${ME}`));
+    // 'open' is the default queue (everything still live), composed with the owner filter.
+    await waitFor(() => expect(lastListView()).toBe(`open,mine:${ME}`));
   });
 
   it('opensOnTheUnclaimedPile_forAManager', async () => {
     authUser.isManager = true;
     authUser.roleName = 'Sales Manager';
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe('unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
   });
 
   it('opensOnEverything_whenTheSessionCannotNameTheReader', async () => {
@@ -414,7 +415,7 @@ describe('LeadsPage — assigning a lead from the list', () => {
     // for is worse than no filter.
     authUser.id = undefined;
     renderPage();
-    await waitFor(() => expect(lastListView()).toBeUndefined());
+    await waitFor(() => expect(lastListView()).toBe('open'));
   });
 
   it('narrowsToUnassignedAndBackToEveryone_fromOneControl', async () => {
@@ -422,13 +423,13 @@ describe('LeadsPage — assigning a lead from the list', () => {
     await screen.findByText('Tariq Al-Harbi');
 
     click(screen.getByRole('button', { name: /^unassigned$/i }));
-    await waitFor(() => expect(lastListView()).toBe('unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
     // MEASURED: finding the unclaimed pile from the leads list costs one click. Before this it
     // could not be done on this screen at all.
     expect(clickCount).toBe(1);
 
     fireEvent.click(screen.getByRole('button', { name: /^everyone$/i }));
-    await waitFor(() => expect(lastListView()).toBeUndefined());
+    await waitFor(() => expect(lastListView()).toBe('open'));
   });
 
   it('narrowsTheQueueItIsOn_ratherThanReplacingIt', async () => {
@@ -453,10 +454,10 @@ describe('LeadsPage — assigning a lead from the list', () => {
     fireEvent.click(screen.getByRole('button', { name: /show unassigned inquiries/i }));
 
     expect(await screen.findByText(/every inquiry here already has an owner/i)).toBeInTheDocument();
-    await waitFor(() => expect(lastListView()).toBe('unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
 
     fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
-    await waitFor(() => expect(lastListView()).toBeUndefined());
+    await waitFor(() => expect(lastListView()).toBe('open'));
     expect(await screen.findByText(/no inquiries yet/i)).toBeInTheDocument();
   });
 
