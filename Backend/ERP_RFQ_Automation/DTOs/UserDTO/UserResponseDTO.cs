@@ -27,5 +27,16 @@ namespace ERP_RFQ_Automation.DTOs.UserDTO
         public DateTime CreatedOn { get; set; }
         public string? ModifiedBy { get; set; }
         public DateTime? ModifiedOn { get; set; }
+
+        // ---- set only on the response to POST /api/User ------------------------------------
+
+        /// <summary>"invite" or "password".</summary>
+        public string? ActivationMethod { get; set; }
+
+        /// <summary>True when the email provider accepted the invitation. False means the link
+        /// is valid but nobody has it yet; resend once mail delivery is working.</summary>
+        public bool? InvitationEmailDispatched { get; set; }
+
+        public DateTime? InvitationExpiresAtUtc { get; set; }
     }
 }

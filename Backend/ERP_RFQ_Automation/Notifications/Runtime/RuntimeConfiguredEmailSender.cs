@@ -27,34 +27,49 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
         private readonly IOutboundEmailHealth _health;
         private readonly ILogger<RuntimeConfiguredEmailSender> _log;
         private readonly TimeProvider _time;
+        private readonly IOutboundSenderResolver? _senders;
 
+        /// <param name="senders">The per-tenant sender authority (issue #54). Optional so the
+        /// platform-only harnesses keep compiling; in the composed application it is always
+        /// registered, and a message with <see cref="EmailMessage.OwningBusinessUnitId"/> set is
+        /// sent from that tenant's mailbox when it has one.</param>
         public RuntimeConfiguredEmailSender(
             OutboundEmailTransportResolver resolver,
             IOutboundEmailHealth health,
             ILogger<RuntimeConfiguredEmailSender> log,
-            TimeProvider? timeProvider = null)
+            TimeProvider? timeProvider = null,
+            IOutboundSenderResolver? senders = null)
         {
             _resolver = resolver;
             _health = health;
             _log = log;
             _time = timeProvider ?? TimeProvider.System;
+            _senders = senders;
         }
 
         public async Task<EmailDeliveryReceipt?> SendAsync(EmailMessage message, CancellationToken ct = default)
         {
             ArgumentNullException.ThrowIfNull(message);
-            var transport = await _resolver.ResolveAsync(ct).ConfigureAwait(false);
+            var sender = await ResolveSenderAsync(message.OwningBusinessUnitId, ct).ConfigureAwait(false);
+
+            // The resolved identity, per send. This is the line an operator reads when a customer
+            // asks "which address did my quote go out from?" — it must name the mailbox, not the
+            // provider.
+            _log.LogInformation(
+                "[Notifications] Sending \"{Subject}\" for BU {BusinessUnitId}: from={From} origin={Origin} provider={Provider} host={Host} mailbox={MailboxId}",
+                message.Subject, message.OwningBusinessUnitId?.ToString() ?? "-", sender.FromAddress, sender.Origin,
+                sender.Provider, sender.Host ?? "-", sender.MailboxId?.ToString() ?? "-");
 
             try
             {
-                var receipt = await transport.Sender.SendAsync(message, ct).ConfigureAwait(false);
+                var receipt = await sender.Sender.SendAsync(message, ct).ConfigureAwait(false);
 
                 // Success is recorded only when something was actually transmitted. A console send
                 // and a DraftOnly withholding both return null having moved no bytes, and marking
                 // either as a healthy send would reproduce the exact defect this module was rebuilt
                 // to remove: a green surface over a channel that delivers nothing.
-                if (transport.Settings.TransmitsMail && transport.Settings.GuardMode != OutboundEmailMode.DraftOnly)
-                    _health.RecordSuccess(transport.Settings.NormalizedProvider, _time.GetUtcNow());
+                if (sender.TransmitsMail && sender.GuardMode != OutboundEmailMode.DraftOnly)
+                    _health.RecordSuccess(sender.Provider, _time.GetUtcNow());
 
                 return receipt;
             }
@@ -67,11 +82,32 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                 // an engineer can read it, and never to the API, where an operator would be shown
                 // an unbounded string from a third party.
                 _log.LogError(exception,
-                    "[Notifications] Outbound send failed via {Provider}: {Kind}. {Guidance}",
-                    transport.Settings.NormalizedProvider, failure.Kind, failure.Message);
+                    "[Notifications] Outbound send failed via {Provider} ({Origin}, from {From}): {Kind}. {Guidance}",
+                    sender.Provider, sender.Origin, sender.FromAddress, failure.Kind, failure.Message);
 
                 throw;
             }
+        }
+
+        private async Task<ResolvedOutboundSender> ResolveSenderAsync(long? owningBusinessUnitId, CancellationToken ct)
+        {
+            if (_senders is not null)
+                return await _senders.ResolveAsync(owningBusinessUnitId, ct).ConfigureAwait(false);
+
+            // No tenant authority registered: platform-only, exactly the pre-#54 behaviour.
+            var transport = await _resolver.ResolveAsync(ct).ConfigureAwait(false);
+            return new ResolvedOutboundSender(
+                transport.Settings.Origin == OutboundEmailSettingsOrigin.Platform
+                    ? OutboundSenderOrigin.Platform
+                    : OutboundSenderOrigin.Configuration,
+                transport.Sender,
+                transport.Settings.NormalizedProvider,
+                transport.Settings.TransmitsMail,
+                transport.Settings.GuardMode,
+                transport.Settings.FromAddress,
+                transport.Settings.FromName,
+                transport.Settings.NormalizedProvider == "smtp" ? transport.Settings.SmtpHost : null,
+                null, null, transport.Settings);
         }
     }
 }

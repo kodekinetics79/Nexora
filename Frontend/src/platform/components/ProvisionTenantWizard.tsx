@@ -792,8 +792,8 @@ export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Pr
                       required
                       error={Boolean(errorFor('baseCurrencyCode'))}
                       helperText={errorFor('baseCurrencyCode')
-                        ?? `The currency the tenant quotes, reports and is invoiced in. v1 billing is `
-                          + `${BILLABLE_CURRENCY}-only, and this cannot be changed after provisioning.`}
+                        ?? `The currency the tenant quotes and keeps its ledger in (SAR for a Saudi client). `
+                          + `Nexora bills the tenant in ${BILLABLE_CURRENCY} regardless. Cannot be changed after provisioning.`}
                     />
                   )}
                 />

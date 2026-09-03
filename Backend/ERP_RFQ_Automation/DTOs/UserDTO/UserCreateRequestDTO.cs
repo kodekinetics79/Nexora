@@ -17,8 +17,19 @@ namespace ERP_RFQ_Automation.DTOs.UserDTO
         [Required, EmailAddress]
         public string Email { get; set; } = null!;
 
-        [Required]
-        public string Password { get; set; } = null!;
+        /// <summary>
+        /// Required only when <see cref="Activation"/> is "password". The default path sends an
+        /// activation link and mints no credential at all — an administrator who types a
+        /// colleague's password holds a working credential for somebody else's account.
+        /// </summary>
+        public string? Password { get; set; }
+
+        /// <summary>
+        /// "invite" or "password". Omitted: "password" when a password was supplied (wire
+        /// compatibility with older clients), "invite" otherwise.
+        /// </summary>
+        [StringLength(16)]
+        public string? Activation { get; set; }
 
         public string? ImageUrl { get; set; }
 

@@ -515,8 +515,8 @@ public class TenantsController : ControllerBase
             var now = DateTime.UtcNow;
             if (card.EffectiveFromUtc > now || card.EffectiveToUtc is { } end && end <= now)
                 return BadRequest(new { error = $"Rate card '{card.Code}' is not effective now and cannot be pinned." });
-            if (!string.Equals(card.Currency, "USD", StringComparison.OrdinalIgnoreCase))
-                return BadRequest(new { error = $"Rate card '{card.Code}' is denominated in '{card.Currency}'; v1 billing is USD-only." });
+            if (!Billing.PlatformBillingCurrency.Matches(card.Currency))
+                return BadRequest(new { error = $"Rate card '{card.Code}' is denominated in '{card.Currency}'; v1 billing is {Billing.PlatformBillingCurrency.Code}-only." });
             rateCardCode = card.Code;
         }
 

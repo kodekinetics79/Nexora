@@ -104,6 +104,12 @@ const UsersPage: React.FC = () => {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [createPassword, setCreatePassword] = useState('');
+  /**
+   * How a NEW account gets its first credential. "invite" (default) emails a single-use,
+   * expiring activation link and the person chooses their own password — the administrator
+   * never holds it. "password" is the older path, kept behind an explicit choice.
+   */
+  const [activation, setActivation] = useState<'invite' | 'password'>('invite');
 
   // Queries
   const { data: users, isLoading: loadingUsers, isError: usersError, error: usersErrorValue, refetch: refetchUsers } = useQuery({
@@ -156,9 +162,24 @@ const UsersPage: React.FC = () => {
   // Mutations
   const saveMutation = useMutation({
     mutationFn: (data: FormData) => selectedRecord ? userService.update(selectedRecord.id, data) : userService.create(data),
-    onSuccess: () => {
+    onSuccess: (created: any) => {
       queryClient.invalidateQueries({ queryKey: ['users'] });
-      enqueueSnackbar(selectedRecord ? t('user_updated') || 'User updated successfully' : t('user_created') || 'User created successfully', { variant: 'success' });
+      if (selectedRecord) {
+        enqueueSnackbar(t('user_updated') || 'User updated successfully', { variant: 'success' });
+      } else if (created?.activationMethod === 'invite') {
+        // The account exists either way; what differs is whether the person can act on it yet.
+        if (created.invitationEmailDispatched) {
+          enqueueSnackbar(`Invitation sent to ${created.email}. It is valid for 72 hours.`, { variant: 'success' });
+        } else {
+          enqueueSnackbar(
+            `${created.email} was added, but the invitation email was not accepted by the mail provider. `
+              + 'Check outbound email on the Mailboxes screen, then resend the invitation.',
+            { variant: 'warning', autoHideDuration: 10000 },
+          );
+        }
+      } else {
+        enqueueSnackbar(t('user_created') || 'User created successfully', { variant: 'success' });
+      }
       setIsModalOpen(false);
       resetForm();
     },
@@ -194,6 +215,7 @@ const UsersPage: React.FC = () => {
     setSelectedImage(null);
     setImagePreview(null);
     setCreatePassword('');
+    setActivation('invite');
   };
 
   const handleEdit = (record: UserDTO) => {
@@ -219,6 +241,7 @@ const UsersPage: React.FC = () => {
    */
   const createPasswordError = (): string | null => {
     if (selectedRecord) return null;
+    if (activation === 'invite') return null;
     if (!createPassword) return 'A password is required to create a user.';
     if (createPassword.length < MIN_PASSWORD_LENGTH) {
       return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
@@ -253,8 +276,12 @@ const UsersPage: React.FC = () => {
     data.append('IsActive', (formData.isActive ?? true).toString());
 
     if (selectedImage) data.append('ImageFile', selectedImage);
-    // No `|| 'Welcome@123'` fallback: `isFormIncomplete` guarantees a real password is present.
-    if (!selectedRecord) data.append('Password', createPassword);
+    if (!selectedRecord) {
+      data.append('Activation', activation);
+      // No `|| 'Welcome@123'` fallback: `isFormIncomplete` guarantees a real password is present
+      // whenever one is being set at all.
+      if (activation === 'password') data.append('Password', createPassword);
+    }
 
     saveMutation.mutate(data);
   };
@@ -471,7 +498,21 @@ const UsersPage: React.FC = () => {
                 <Grid size={{ xs: 12 }}>
                   <TextField fullWidth label={(t('email_address') || 'Email Address')} type="email" value={formData.email || ''} onChange={(e) => setFormData({ ...formData, email: e.target.value })} required />
                 </Grid>
-                {!selectedRecord && (
+                {!selectedRecord && activation === 'invite' && (
+                  <Grid size={{ xs: 12 }}>
+                    <Alert severity="info" sx={{ borderRadius: 2 }}>
+                      <strong>Send invitation.</strong> {formData.email?.trim() ? formData.email.trim() : 'This person'} will
+                      receive an activation link, valid for 72 hours, and choose their own password. Nobody else
+                      ever sees it.
+                      <Box sx={{ mt: 0.5 }}>
+                        <Button size="small" onClick={() => setActivation('password')}>
+                          Set a password instead
+                        </Button>
+                      </Box>
+                    </Alert>
+                  </Grid>
+                )}
+                {!selectedRecord && activation === 'password' && (
                   <Grid size={{ xs: 12 }}>
                     <TextField
                       fullWidth
@@ -487,6 +528,9 @@ const UsersPage: React.FC = () => {
                         (t('password_helper') || `At least ${MIN_PASSWORD_LENGTH} characters. Share it with the user through a secure channel.`)
                       }
                     />
+                    <Button size="small" sx={{ mt: 0.5 }} onClick={() => { setActivation('invite'); setCreatePassword(''); }}>
+                      Send an invitation instead
+                    </Button>
                   </Grid>
                 )}
               </Grid>

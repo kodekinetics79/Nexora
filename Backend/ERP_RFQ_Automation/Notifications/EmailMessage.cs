@@ -87,6 +87,23 @@ namespace ERP_RFQ_Automation.Notifications
         /// <summary>Business-unit identifier for logging / correlation.</summary>
         public string? BusinessUnitId { get; set; }
 
+        /// <summary>
+        /// The tenant whose VERIFIED outbound sender this message must leave from, or null for
+        /// system mail (password resets, platform-issued invitations) that leaves from the
+        /// platform address.
+        ///
+        /// <para>Deliberately a separate field from <see cref="BusinessUnitId"/>. That one is
+        /// documented as "never affects delivery" and every caller wrote it on that basis; making
+        /// it silently choose the sender would change the meaning of a correlation id under
+        /// every existing call site. A caller that forgets to set this one gets the platform
+        /// sender, which is the safe direction — never another tenant's mailbox.</para>
+        ///
+        /// <para>Resolved by <c>IOutboundSenderResolver</c>: the tenant's active SMTP row in
+        /// <c>Email_Configurations</c> when it has one, the platform configuration otherwise.
+        /// Issue #54.</para>
+        /// </summary>
+        public long? OwningBusinessUnitId { get; set; }
+
         public EmailMessage AddTo(string address, string? displayName = null)
         {
             if (!string.IsNullOrWhiteSpace(address))

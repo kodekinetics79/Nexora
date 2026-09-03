@@ -126,11 +126,36 @@ describe('UsersPage', () => {
     expect(await screen.findByRole('button', { name: /add user/i })).toBeDisabled();
   });
 
-  it('passwordFieldIsRequired_andHasNoDefaultValue', async () => {
+  it('invitesByDefault_andSendsNoPassword', async () => {
+    // The default path mints no credential: the person receives an activation link and chooses
+    // their own password. The administrator never types one, so none can leak through them.
     renderPage();
     const dialog = await openCreateDialog();
 
-    const password = within(dialog).getByLabelText(/password/i);
+    expect(within(dialog).queryByLabelText(/^password/i)).not.toBeInTheDocument();
+    expect(dialog.textContent).toMatch(/send invitation/i);
+    expect(within(dialog).getByRole('button', { name: /set a password instead/i })).toBeInTheDocument();
+
+    fireEvent.change(within(dialog).getByLabelText(/first name/i), { target: { value: 'Bryan' } });
+    fireEvent.change(within(dialog).getByLabelText(/last name/i), { target: { value: 'Evrest' } });
+    fireEvent.change(within(dialog).getByLabelText(/email address/i), { target: { value: 'bryan@nexora.test' } });
+    fireEvent.mouseDown(within(dialog).getByRole('combobox', { name: /role/i }));
+    fireEvent.click(await screen.findByRole('option', { name: 'Super Admin' }));
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /create user/i }));
+
+    await waitFor(() => expect(createUser).toHaveBeenCalledTimes(1));
+    const sent = createUser.mock.calls[0][0] as FormData;
+    expect(sent.get('Activation')).toBe('invite');
+    expect(sent.get('Password')).toBeNull();
+  });
+
+  it('passwordFieldIsRequired_andHasNoDefaultValue', async () => {
+    renderPage();
+    const dialog = await openCreateDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: /set a password instead/i }));
+
+    const password = within(dialog).getByLabelText(/^password/i);
     // No pre-filled value and, critically, no helper text advertising a shared default credential.
     expect(password).toHaveValue('');
     expect(password).toBeRequired();
@@ -143,11 +168,12 @@ describe('UsersPage', () => {
   it('doesNotSendADefaultPassword_whenCreatingAUser', async () => {
     renderPage();
     const dialog = await openCreateDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: /set a password instead/i }));
 
     fireEvent.change(within(dialog).getByLabelText(/first name/i), { target: { value: 'Bryan' } });
     fireEvent.change(within(dialog).getByLabelText(/last name/i), { target: { value: 'Evrest' } });
     fireEvent.change(within(dialog).getByLabelText(/email address/i), { target: { value: 'bryan@nexora.test' } });
-    fireEvent.change(within(dialog).getByLabelText(/password/i), { target: { value: 'a-real-password' } });
+    fireEvent.change(within(dialog).getByLabelText(/^password/i), { target: { value: 'a-real-password' } });
 
     fireEvent.mouseDown(within(dialog).getByRole('combobox', { name: /role/i }));
     fireEvent.click(await screen.findByRole('option', { name: 'Super Admin' }));
@@ -156,6 +182,7 @@ describe('UsersPage', () => {
 
     await waitFor(() => expect(createUser).toHaveBeenCalledTimes(1));
     const sent = createUser.mock.calls[0][0] as FormData;
+    expect(sent.get('Activation')).toBe('password');
     expect(sent.get('Password')).toBe('a-real-password');
     expect(sent.get('Password')).not.toBe('Welcome@123');
     // Provenance is server-derived; the client must not claim it.

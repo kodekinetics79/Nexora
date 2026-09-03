@@ -483,6 +483,11 @@ builder.Services.AddScoped<
     ERP_RFQ_Automation.MasterData.MasterDataChangeHistoryReader>();
 builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
 builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
+// Per-tenant outbound sender (issue #54): the tenant plane supplies the seam Notifications
+// declares, so quotes and supplier RFQs leave from the tenant's own active SMTP mailbox and
+// fall back to the platform sender only when the tenant has none.
+builder.Services.AddScoped<ERP_RFQ_Automation.Notifications.Runtime.ITenantOutboundSenderSource,
+    ERP_RFQ_Automation.Mailbox.TenantOutboundSenderSource>();
 // Stateless — every call carries its own settings — so a singleton is correct.
 builder.Services.AddSingleton<IMailboxConnectionProbe, MailboxConnectionProbe>();
 // The provider catalogue and the one connection test both planes share. After the probe, which it

@@ -77,17 +77,27 @@ public sealed class TenantActivationPolicyService(
              && Has(tenant.BillingAddress) && tenant.PaymentTermsDays is > 0,
             "Billing recipient, billing address and positive payment terms must be recorded.", $"tenant:{tenant.Id}:billing");
 
-        Add("billing.currency-tax", string.Equals(tenant.BaseCurrencyCode, "USD", StringComparison.OrdinalIgnoreCase)
-             && (Has(tenant.TaxNumber) || tenant.BillingMode is TenantBillingMode.Internal or TenantBillingMode.Partner),
-            "The supported USD billing currency and tax identity or an explicit non-billable treatment must be recorded.",
-            $"tenant:{tenant.Id}:tax");
-
+        // BILLING currency versus FUNCTIONAL currency. Nexora bills in PlatformBillingCurrency
+        // (USD, a platform constant carried on the rate card); the tenant quotes and keeps its
+        // ledger in Tenant.BaseCurrencyCode (SAR for a Saudi client), which is seeded into its own
+        // Currency table. This control used to compare the FUNCTIONAL column to "USD", which made
+        // every non-USD client unactivatable as Production. The billing currency in force for a
+        // tenant is its pinned rate card's currency — or the platform constant while none is
+        // pinned, in which case there is nothing to disagree with and commercial.rate-card
+        // reports the missing pin on its own.
         RateCard? card = null;
         if (tenant.RateCardId is long cardId)
             card = await db.Set<RateCard>().AsNoTracking().Include(x => x.Lines)
                 .SingleOrDefaultAsync(x => x.Id == cardId, ct);
+        var billingCurrencySupported = card is null || Billing.PlatformBillingCurrency.Matches(card.Currency);
+
+        Add("billing.currency-tax", billingCurrencySupported
+             && (Has(tenant.TaxNumber) || tenant.BillingMode is TenantBillingMode.Internal or TenantBillingMode.Partner),
+            $"Billing in the supported {Billing.PlatformBillingCurrency.Code} currency and a tax identity or an explicit non-billable treatment must be recorded.",
+            $"tenant:{tenant.Id}:tax");
+
         Add("commercial.rate-card", card is { IsActive: true }
-             && string.Equals(card.Currency, tenant.BaseCurrencyCode, StringComparison.OrdinalIgnoreCase)
+             && Billing.PlatformBillingCurrency.Matches(card.Currency)
              && card.EffectiveFromUtc <= now
              && (card.EffectiveToUtc is null || card.EffectiveToUtc > now) && card.Lines.Count > 0,
             "A pinned, effective rate card with at least one priced meter is required.",

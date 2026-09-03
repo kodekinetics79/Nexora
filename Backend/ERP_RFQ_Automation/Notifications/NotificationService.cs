@@ -177,6 +177,10 @@ namespace ERP_RFQ_Automation.Notifications
                     TextBody = rendered.TextBody,
                     TenantId = request.TenantId,
                     BusinessUnitId = request.BusinessUnitId,
+                    // The tenant that owns this notification sends it from its own verified
+                    // mailbox when it has one (issue #54). Parsed, not assumed: a request with no
+                    // parseable business unit is system mail and leaves from the platform address.
+                    OwningBusinessUnitId = OwningBusinessUnit(request.BusinessUnitId),
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
@@ -225,6 +229,10 @@ namespace ERP_RFQ_Automation.Notifications
                     TextBody = rendered.TextBody,
                     TenantId = request.TenantId,
                     BusinessUnitId = request.BusinessUnitId,
+                    // The tenant that owns this notification sends it from its own verified
+                    // mailbox when it has one (issue #54). Parsed, not assumed: a request with no
+                    // parseable business unit is system mail and leaves from the platform address.
+                    OwningBusinessUnitId = OwningBusinessUnit(request.BusinessUnitId),
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
@@ -250,6 +258,9 @@ namespace ERP_RFQ_Automation.Notifications
                 return new NotificationDispatchReceipt(false, null, null, null);
             }
         }
+
+        private static long? OwningBusinessUnit(string? businessUnitId) =>
+            long.TryParse(businessUnitId, out var id) && id > 0 ? id : null;
 
         /// <summary>
         /// Builds an absolute CTA URL. Absolute inputs pass through unchanged; a

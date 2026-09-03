@@ -109,7 +109,8 @@ public sealed class TenantAdminInvitationService : ITenantAdminInvitationService
             TenantName = request.TenantName,
             ExpiresAtUtc = invitation.ExpiresAtUtc,
             Token = token,
-            ActivationUrl = BuildActivationUrl(token)
+            ActivationUrl = BuildActivationUrl(token),
+            SenderBusinessUnitId = request.SenderBusinessUnitId
         };
     }
 
@@ -155,11 +156,19 @@ public sealed class TenantAdminInvitationService : ITenantAdminInvitationService
             // operator answer "did we actually send it?" without reading provider logs — on a
             // console-provider deployment (the default) the answer is always "no, it was logged".
             var sentAt = UtcNow();
-            await _db.Set<TenantAdminInvitation>()
-                .Where(i => i.Id == issued.InvitationId)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(i => i.LastSentAtUtc, (DateTime?)sentAt)
-                    .SetProperty(i => i.SendCount, i => i.SendCount + 1), ct);
+            // Platform-plane statement. A TENANT administrator inviting a colleague reaches this
+            // as nexora_tenant_app, which holds no grant on platform."TenantAdminInvitations";
+            // the block switches this one UPDATE to the pipeline role (see
+            // PlatformPlaneExecution). On the platform plane it is already that role, and the
+            // block changes nothing.
+            using (MultiTenancy.PlatformPlaneExecution.Enter())
+            {
+                await _db.Set<TenantAdminInvitation>()
+                    .Where(i => i.Id == issued.InvitationId)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(i => i.LastSentAtUtc, (DateTime?)sentAt)
+                        .SetProperty(i => i.SendCount, i => i.SendCount + 1), ct);
+            }
 
             _logger.LogInformation(
                 "Dispatched activation invitation {InvitationId} for tenant {TenantId} via {Provider}.",
@@ -215,7 +224,11 @@ public sealed class TenantAdminInvitationService : ITenantAdminInvitationService
             Subject = text.Subject,
             HtmlBody = html.HtmlBody,
             TextBody = text.TextBody,
-            TenantId = issued.TenantId.ToString()
+            TenantId = issued.TenantId.ToString(),
+            // A colleague invited by their own administrator hears from the company's verified
+            // mailbox when it has one; a founding administrator provisioned from the platform
+            // hears from Nexora. Null here is the platform address (issue #54).
+            OwningBusinessUnitId = issued.SenderBusinessUnitId
         };
         message.AddTo(issued.Email, issued.RecipientName);
         return message;

@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Email;
 using ERP_RFQ_Automation.Mailbox;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Notifications.Runtime;
 using ERP_RFQ_Automation.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -46,7 +47,9 @@ public sealed class MailboxController(
     ErpRfqAutomationContext context,
     IMailConnectionTester tester,
     IIamAuditWriter audit,
-    ILogger<MailboxController> logger) : ControllerBase
+    ILogger<MailboxController> logger,
+    IOutboundSenderResolver? senders = null,
+    OutboundEmailProbe? probe = null) : ControllerBase
 {
     /// <summary>The RBAC module already used by the supplier-email screen. Reused rather than
     /// invented so a tenant that has granted email administration does not have to discover a
@@ -102,8 +105,13 @@ public sealed class MailboxController(
     }
 
     /// <summary>
-    /// Whether customer-facing mail can currently leave this tenant, and whether the configuration
-    /// is ambiguous. Read by the screen's containment banner.
+    /// Which sender customer-facing mail will actually leave from, and whether the configuration
+    /// is ambiguous. Read by the screen's banner.
+    ///
+    /// <para>The answer comes from <see cref="IOutboundSenderResolver"/> — the authority the quote
+    /// sender and the supplier RFQ worker use — not from counting rows. Counting rows is how this
+    /// endpoint used to promise "quotes WILL be delivered through smtpout.secureserver.net" while
+    /// dispatch never read the table (issue #54).</para>
     /// </summary>
     [HttpGet("outbound-status")]
     [RequireModulePermission(Module, PermissionAction.View)]
@@ -119,22 +127,116 @@ public sealed class MailboxController(
         var smtp = active.Where(x => IsSmtp(x.Protocol)).ToList();
         var imap = active.Count(x => !IsSmtp(x.Protocol));
 
+        if (senders is null)
+        {
+            // No resolver composed (unit harnesses): report the rows and say nothing about the
+            // sender rather than guess.
+            return Ok(new OutboundMailStatusDTO
+            {
+                CanSendToCustomers = smtp.Count > 0,
+                ActiveSmtpCount = smtp.Count,
+                ActiveSmtpHosts = smtp.Select(x => x.Host).Distinct().ToList(),
+                ActiveImapCount = imap,
+                HasAmbiguousOutbound = smtp.Count > 1,
+                SenderOrigin = "unknown",
+                Summary = smtp.Count > 0
+                    ? $"{smtp.Count} SMTP mailbox(es) active; the sender authority is not available."
+                    : "No SMTP mailbox is active."
+            });
+        }
+
+        var sender = await senders.ResolveAsync(tenant, HttpContext.RequestAborted);
+        var contained = sender.GuardMode != Notifications.OutboundEmailMode.Live;
+        var origin = sender.Origin.ToString().ToLowerInvariant();
+        var summary = sender.Origin switch
+        {
+            OutboundSenderOrigin.Tenant =>
+                $"Quotes and supplier RFQs will be sent from {sender.FromAddress} through {sender.Host} " +
+                $"(this tenant's mailbox \"{sender.MailboxLabel}\").",
+            _ when sender.TransmitsMail =>
+                $"No SMTP mailbox is active for this tenant, so quotes and supplier RFQs will be sent from the " +
+                $"platform address {sender.FromAddress} via {sender.Provider}. Add an SMTP mailbox to send from your own address.",
+            _ =>
+                "Outbound email is contained. No SMTP mailbox is active for this tenant and the platform " +
+                "provider does not transmit, so quotes and supplier RFQs cannot reach anyone."
+        };
+        if (contained)
+            summary += $" The platform containment mode is {sender.GuardMode}: every send is intercepted before it leaves.";
+
         return Ok(new OutboundMailStatusDTO
         {
-            CanSendToCustomers = smtp.Count > 0,
+            CanSendToCustomers = sender.TransmitsMail,
             ActiveSmtpCount = smtp.Count,
             ActiveSmtpHosts = smtp.Select(x => x.Host).Distinct().ToList(),
             ActiveImapCount = imap,
             HasAmbiguousOutbound = smtp.Count > 1,
-            Summary = smtp.Count switch
-            {
-                0 => "Outbound email is contained. No SMTP mailbox is active, so quotes and supplier " +
-                     "emails cannot reach anyone outside this system.",
-                1 => $"Quotes and supplier emails WILL be delivered through {smtp[0].Host}.",
-                _ => $"{smtp.Count} SMTP mailboxes are active. Mail is sent through only one of them — " +
-                     "the oldest — so the others are not doing what they appear to be doing."
-            }
+            SenderOrigin = origin,
+            SenderAddress = sender.FromAddress,
+            SenderName = sender.FromName,
+            SenderHost = sender.Host,
+            SenderMailboxId = sender.MailboxId,
+            SenderMailboxName = sender.MailboxLabel,
+            ContainmentMode = sender.GuardMode.ToString(),
+            Summary = summary
         });
+    }
+
+    /// <summary>
+    /// Sends ONE real message through this tenant's SMTP mailbox, built exactly as a live quote
+    /// send would be built (issue #54), and reports what the provider said.
+    ///
+    /// <para>The connection test proves the server accepts the login; only a send proves the
+    /// mailbox is allowed to send as its address and that the message leaves. The recipient is
+    /// restricted to the signed-in user or the mailbox's own address — this proves a channel, it
+    /// is not a relay a tenant can aim at arbitrary inboxes.</para>
+    /// </summary>
+    [HttpPost("{id:long}/send-test")]
+    [RequireModulePermission(Module, PermissionAction.Edit)]
+    public async Task<ActionResult<OutboundEmailProbeResult>> SendTest(long id, [FromBody] MailboxSendTestRequestDTO request)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+        if (!TryTenant(out var tenant)) return Forbid();
+        if (senders is null || probe is null)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, "The outbound sender is not available.");
+
+        var row = await context.EmailConfigurations.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == id && x.BusinessUnitId == tenant, HttpContext.RequestAborted);
+        if (row is null) return NotFound("Mailbox not found.");
+        if (!IsSmtp(row.Protocol)) return BadRequest("Only an SMTP mailbox can send a test message.");
+        if (!MailEndpointPolicy.IsAllowedEndpoint(row.Host, row.Port))
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, "The mailbox host is not an address this server may connect to.");
+
+        var recipient = request.Recipient.Trim();
+        var callerEmail = User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
+            ?? User.FindFirst("email")?.Value;
+        var permitted = string.Equals(recipient, row.EmailAddress?.Trim(), StringComparison.OrdinalIgnoreCase)
+            || (!string.IsNullOrWhiteSpace(callerEmail)
+                && string.Equals(recipient, callerEmail.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (!permitted)
+            return BadRequest("A test message can only be sent to your own address or to the mailbox's own address.");
+
+        var companyName = await context.BusinessUnits.AsNoTracking()
+            .Where(x => x.Id == tenant).Select(x => x.BusinessUnitName)
+            .FirstOrDefaultAsync(HttpContext.RequestAborted);
+        var platform = await senders.ResolveAsync(null, HttpContext.RequestAborted);
+        var mailbox = new TenantOutboundSender(
+            tenant, row.Id, row.ConfigurationName, row.EmailAddress,
+            string.IsNullOrWhiteSpace(companyName) ? row.ConfigurationName : companyName!, row);
+        var sender = senders.ForMailbox(mailbox, platform.PlatformSettings);
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        deadline.CancelAfter(TestDeadline);
+        var result = await probe.SendAsync(sender, recipient, callerEmail, deadline.Token);
+
+        // Audited for the same reason the connection test is: this server opened a socket to an
+        // operator-chosen host and, this time, put a message on the wire.
+        await audit.WriteAsync(User, new IamAuditEntry(
+            IamAuditActions.MailboxTested, IamAuditTargets.Mailbox, row.Id,
+            $"SMTP {row.Host}:{row.Port} send-test",
+            After: new { result.Succeeded, result.Transmitted, result.Kind, result.EffectiveRecipient }));
+        await context.SaveChangesAsync(HttpContext.RequestAborted);
+
+        return Ok(result);
     }
 
     /// <summary>Known-good settings for the providers a Saudi industrial distributor actually

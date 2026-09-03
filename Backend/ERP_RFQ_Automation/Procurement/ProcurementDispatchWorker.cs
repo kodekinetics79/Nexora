@@ -100,8 +100,15 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             return true;
         }
 
-        if (!_deliveryConfiguration.IsConfigured)
+        // Per TENANT, not per deployment: the tenant's own verified mailbox counts as configured
+        // (issue #54). Resolved through the same authority the sender itself will use, so this
+        // gate cannot disagree with the send that follows it.
+        var readiness = await _deliveryConfiguration.ResolveAsync(claim.BusinessUnitId, ct);
+        if (!readiness.IsConfigured)
         {
+            _logger.LogWarning(
+                "Supplier RFQ dispatch {MessageId} for tenant {BusinessUnitId} has no transmitting sender (origin {Origin}, provider {Provider}).",
+                claim.MessageId, claim.BusinessUnitId, readiness.Origin, readiness.ProviderName);
             await FinishAsync(claim, DispatchOutcome.PermanentFailure, "DELIVERY_PROVIDER_NOT_CONFIGURED", null, ct);
             return true;
         }

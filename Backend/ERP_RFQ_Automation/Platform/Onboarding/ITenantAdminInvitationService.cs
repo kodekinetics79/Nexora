@@ -20,6 +20,13 @@ public sealed record TenantAdminInvitationRequest
 
     /// <summary>Platform operator who caused the issue, for the invitation's own audit trail.</summary>
     public required string IssuedBy { get; init; }
+
+    /// <summary>
+    /// The tenant business unit whose VERIFIED outbound mailbox should carry the invitation
+    /// email, when a tenant administrator is inviting a colleague (issue #54). Null for platform-
+    /// issued invitations, which leave from the platform address as before.
+    /// </summary>
+    public long? SenderBusinessUnitId { get; init; }
 }
 
 /// <summary>
@@ -41,6 +48,9 @@ public sealed record IssuedTenantAdminInvitation
 
     /// <summary>The link the recipient clicks, already combined with <c>Notifications:AppBaseUrl</c>.</summary>
     public required string ActivationUrl { get; init; }
+
+    /// <summary>See <see cref="TenantAdminInvitationRequest.SenderBusinessUnitId"/>.</summary>
+    public long? SenderBusinessUnitId { get; init; }
 
     /// <summary>
     /// A record's compiler-generated ToString prints EVERY property, so a single

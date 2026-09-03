@@ -64,21 +64,56 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
             _time = timeProvider ?? TimeProvider.System;
         }
 
-        public async Task<OutboundEmailProbeResult> SendAsync(
+        public Task<OutboundEmailProbeResult> SendAsync(
             OutboundEmailSettingsSnapshot candidate,
             string recipient,
             string? actorLabel,
             CancellationToken ct = default)
         {
             ArgumentNullException.ThrowIfNull(candidate);
+            return SendCoreAsync(
+                _resolver.BuildTransport(candidate),
+                candidate.NormalizedProvider,
+                candidate.GuardMode,
+                candidate.TransmitsMail,
+                candidate.FromAddress,
+                recipient, actorLabel, ct);
+        }
+
+        /// <summary>
+        /// A verification send through an already-resolved sender — a tenant's own mailbox from
+        /// the mailbox screen (issue #54). Same report shape, same containment: the guard the
+        /// resolver wrapped around the tenant transport is what decides where this goes.
+        /// </summary>
+        public Task<OutboundEmailProbeResult> SendAsync(
+            ResolvedOutboundSender sender,
+            string recipient,
+            string? actorLabel,
+            CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(sender);
+            return SendCoreAsync(
+                sender.Sender, sender.Provider, sender.GuardMode, sender.TransmitsMail,
+                sender.FromAddress, recipient, actorLabel, ct);
+        }
+
+        private async Task<OutboundEmailProbeResult> SendCoreAsync(
+            GuardedEmailSender sender,
+            string provider,
+            OutboundEmailMode guardMode,
+            bool transmitsMail,
+            string fromAddress,
+            string recipient,
+            string? actorLabel,
+            CancellationToken ct)
+        {
             ArgumentException.ThrowIfNullOrWhiteSpace(recipient);
 
             var intended = recipient.Trim();
             var startedAt = _time.GetUtcNow();
             var stopwatch = Stopwatch.StartNew();
 
-            var message = Compose(candidate, intended, actorLabel, startedAt);
-            var sender = _resolver.BuildTransport(candidate);
+            var message = Compose(provider, fromAddress, intended, actorLabel, startedAt);
 
             using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             attemptTimeout.CancelAfter(MaximumAttempt);
@@ -88,17 +123,16 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                 var receipt = await sender.SendAsync(message, attemptTimeout.Token).ConfigureAwait(false);
                 stopwatch.Stop();
 
-                var transmitted = candidate.TransmitsMail &&
-                                  candidate.GuardMode != OutboundEmailMode.DraftOnly;
+                var transmitted = transmitsMail && guardMode != OutboundEmailMode.DraftOnly;
 
                 return new OutboundEmailProbeResult(
                     Succeeded: true,
                     Transmitted: transmitted,
                     Kind: OutboundEmailFailureKind.None,
-                    Message: DescribeSuccess(candidate, intended, EffectiveRecipient(message, intended)),
+                    Message: DescribeSuccess(transmitsMail, guardMode, intended, EffectiveRecipient(message, intended)),
                     ProviderStatus: null,
-                    Provider: candidate.NormalizedProvider,
-                    OutboundGuardMode: candidate.GuardMode.ToString(),
+                    Provider: provider,
+                    OutboundGuardMode: guardMode.ToString(),
                     IntendedRecipient: intended,
                     EffectiveRecipient: EffectiveRecipient(message, intended),
                     AcceptanceReference: receipt?.AcceptanceReference,
@@ -112,7 +146,7 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                     OutboundEmailFailureKind.Timeout,
                     OutboundEmailFailureClassifier.Describe(OutboundEmailFailureKind.Timeout),
                     null);
-                return Failed(candidate, intended, message, failure, startedAt, stopwatch.ElapsedMilliseconds);
+                return Failed(provider, guardMode, intended, message, failure, startedAt, stopwatch.ElapsedMilliseconds);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -124,14 +158,15 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                 // and the action that fixes it.
                 _log.LogWarning(exception,
                     "[Notifications] Verification send failed via {Provider} to {Recipient}: {Kind}.",
-                    candidate.NormalizedProvider, intended, failure.Kind);
+                    provider, intended, failure.Kind);
 
-                return Failed(candidate, intended, message, failure, startedAt, stopwatch.ElapsedMilliseconds);
+                return Failed(provider, guardMode, intended, message, failure, startedAt, stopwatch.ElapsedMilliseconds);
             }
         }
 
         private static OutboundEmailProbeResult Failed(
-            OutboundEmailSettingsSnapshot candidate,
+            string provider,
+            OutboundEmailMode guardMode,
             string intended,
             EmailMessage message,
             OutboundEmailFailure failure,
@@ -143,8 +178,8 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                 Kind: failure.Kind,
                 Message: failure.Message,
                 ProviderStatus: failure.ProviderStatus,
-                Provider: candidate.NormalizedProvider,
-                OutboundGuardMode: candidate.GuardMode.ToString(),
+                Provider: provider,
+                OutboundGuardMode: guardMode.ToString(),
                 IntendedRecipient: intended,
                 EffectiveRecipient: EffectiveRecipient(message, intended),
                 AcceptanceReference: null,
@@ -157,13 +192,13 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
             message.To.FirstOrDefault()?.Address ?? intended;
 
         private static string DescribeSuccess(
-            OutboundEmailSettingsSnapshot candidate, string intended, string effective)
+            bool transmitsMail, OutboundEmailMode guardMode, string intended, string effective)
         {
-            if (!candidate.TransmitsMail)
+            if (!transmitsMail)
                 return "The console provider logged this message instead of sending it. NOTHING was " +
                        "transmitted — choose SMTP or SendGrid before relying on email.";
 
-            if (candidate.GuardMode == OutboundEmailMode.DraftOnly)
+            if (guardMode == OutboundEmailMode.DraftOnly)
                 return "The outbound guard is in DraftOnly mode, so the message was logged and discarded. " +
                        "The provider configuration was not exercised.";
 
@@ -178,7 +213,7 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
         }
 
         private static EmailMessage Compose(
-            OutboundEmailSettingsSnapshot candidate, string recipient, string? actorLabel, DateTimeOffset when)
+            string provider, string fromAddress, string recipient, string? actorLabel, DateTimeOffset when)
         {
             var actor = string.IsNullOrWhiteSpace(actorLabel) ? "a platform operator" : actorLabel!.Trim();
             var stamp = when.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'");
@@ -192,7 +227,7 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                 TextBody =
                     "This is a test message from Nexora.\r\n\r\n" +
                     $"It was sent by {actor} at {stamp} to verify that outbound email delivery is working.\r\n" +
-                    $"Provider: {candidate.NormalizedProvider}. From: {candidate.FromAddress}.\r\n\r\n" +
+                    $"Provider: {provider}. From: {fromAddress}.\r\n\r\n" +
                     "If you received this, transactional email — activation links, quotes, order " +
                     "confirmations — will reach this address.\r\n\r\n" +
                     "No action is required.",
@@ -200,8 +235,8 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                     "<p>This is a test message from Nexora.</p>" +
                     $"<p>It was sent by {System.Net.WebUtility.HtmlEncode(actor)} at {stamp} to verify that " +
                     "outbound email delivery is working.<br>" +
-                    $"Provider: <strong>{System.Net.WebUtility.HtmlEncode(candidate.NormalizedProvider)}</strong>. " +
-                    $"From: {System.Net.WebUtility.HtmlEncode(candidate.FromAddress)}.</p>" +
+                    $"Provider: <strong>{System.Net.WebUtility.HtmlEncode(provider)}</strong>. " +
+                    $"From: {System.Net.WebUtility.HtmlEncode(fromAddress)}.</p>" +
                     "<p>If you received this, transactional email &mdash; activation links, quotes, order " +
                     "confirmations &mdash; will reach this address.</p>" +
                     "<p>No action is required.</p>"

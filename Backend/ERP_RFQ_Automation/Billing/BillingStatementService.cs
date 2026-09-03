@@ -601,7 +601,7 @@ public class BillingStatementService : IBillingStatementService
         // rate card would silently mix currencies on one statement. The API
         // rejects non-USD cards at create/update; this guard (409) covers cards
         // that predate the rule or were seeded out-of-band.
-        if (!string.Equals(rateCard.Currency, "USD", StringComparison.OrdinalIgnoreCase))
+        if (!PlatformBillingCurrency.Matches(rateCard.Currency))
             throw new BillingConflictException(
                 $"Rate card {rateCard.Id} ('{rateCard.Code}') is denominated in '{rateCard.Currency}', but v1 billing is USD-only; " +
                 "statements cannot be computed against a non-USD rate card.");
