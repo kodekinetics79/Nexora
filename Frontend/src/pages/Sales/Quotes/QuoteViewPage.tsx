@@ -87,10 +87,17 @@ const QuoteViewPage: React.FC = () => {
   // background delivery worker, reach nobody, and permanently burn the quote number because
   // the delivery idempotency key is fixed per quote. They also missed a draft with prices but
   // no currency, which is the shape both customer quotes on production are in today.
+  //
+  // Only asked for a quote the Send button can appear on. The readiness check consults
+  // IOutboundSenderResolver, which deliberately keeps no per-tenant cache ("one projected read
+  // per send is the honest cost, and quote and RFQ sends are rare"), so it must not be turned
+  // into one read per page view of every quote ever raised.
+  const sendableStatus = ['DRAFT', 'SENT'].includes(
+    (quote?.statusCode || quote?.statusValue || '').toUpperCase());
   const { data: sendReadiness } = useQuery({
     queryKey: ['quote-send-readiness', id],
     queryFn: () => quoteService.getSendReadiness(Number(id)),
-    enabled: !!id
+    enabled: !!id && sendableStatus
   });
 
   const reviseMutation = useMutation({

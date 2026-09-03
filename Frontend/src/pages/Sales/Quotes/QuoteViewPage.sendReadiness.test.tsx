@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -119,9 +119,10 @@ describe('QuoteViewPage — the send blockers arrive before the dialog', () => {
     });
     renderQuote();
 
-    const send = await screen.findByRole('button', { name: /send to customer/i });
-    expect(send).toBeDisabled();
+    // Wait for the server's answer, then assert the button agrees with it: both are derived
+    // from the same data, so the reason appearing is the point at which the state is settled.
     expect(await screen.findByText(/this quote has no currency/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /send to customer/i })).toBeDisabled();
   });
 
   it('lists every blocker with its setup link, not just the first', async () => {
@@ -142,8 +143,7 @@ describe('QuoteViewPage — the send blockers arrive before the dialog', () => {
     });
     renderQuote();
 
-    await screen.findByRole('button', { name: /send to customer/i });
-    expect(screen.getByText(/this quote has no currency/i)).toBeVisible();
+    expect(await screen.findByText(/this quote has no currency/i)).toBeVisible();
     expect(screen.getByText(/no active SMTP mailbox/i)).toBeVisible();
     expect(screen.getByRole('link', { name: /open setup → mailboxes/i }))
       .toHaveAttribute('href', '/setup/mailboxes');
@@ -161,9 +161,8 @@ describe('QuoteViewPage — the send blockers arrive before the dialog', () => {
     });
     renderQuote();
 
-    const send = await screen.findByRole('button', { name: /send to customer/i });
-    expect(send).toBeDisabled();
     expect(await screen.findByText(/may or may not have received it/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /send to customer/i })).toBeDisabled();
     expect(screen.getByText(/new revision/i)).toBeVisible();
   });
 
@@ -173,8 +172,9 @@ describe('QuoteViewPage — the send blockers arrive before the dialog', () => {
     getSendReadiness.mockResolvedValue({ quoteId: 66, canSend: true, blockers: [] });
     renderQuote();
 
-    const send = await screen.findByRole('button', { name: /send to customer/i });
-    expect(send).toBeEnabled();
+    await screen.findByRole('button', { name: /send to customer/i });
+    await waitFor(() => expect(getSendReadiness).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: /send to customer/i })).toBeEnabled();
     expect(screen.queryByText(/no currency|SMTP mailbox|may or may not/i)).not.toBeInTheDocument();
   });
 });
