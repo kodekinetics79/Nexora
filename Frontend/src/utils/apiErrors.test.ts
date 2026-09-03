@@ -416,3 +416,35 @@ describe('toPresentableError — the document-storage refusal outranks its 503',
     expect(result.message).toContain('document storage');
   });
 });
+
+describe('toPresentableError — route noise is detail for support, never the headline', () => {
+  // The exact body six Inbox queues rendered as red "Not found" panels: a 404 whose text/plain
+  // body was the request line itself. It passed the "safe printable sentence" gate because it
+  // carries no host, no exception name and no markup — it is simply not a sentence.
+  const ROUTE_BODY = 'GET /api/Lead/needs-review';
+
+  it('does not render an API path as product copy', () => {
+    const result = toPresentableError(axiosError({ status: 404, data: ROUTE_BODY, method: 'get', url: '/api/Lead/needs-review' }));
+    expect(result.message).not.toContain('/api/');
+    expect(result.technicalDetail).toContain(ROUTE_BODY);
+  });
+
+  it('treats a verb-plus-path and a port-plus-path as technical', () => {
+    expect(looksLikeTechnicalNoise('POST /rfq/42/send failed')).toBe(true);
+    expect(looksLikeTechnicalNoise('see localhost:5000/health')).toBe(true);
+    expect(looksLikeTechnicalNoise('Received at 10:30/11:00 today')).toBe(true);
+    expect(looksLikeTechnicalNoise('The lead must be qualified before an RFQ is created.')).toBe(false);
+  });
+
+  it('says "This list could not be loaded" for a 404 on a list, not "Not found"', () => {
+    const result = toPresentableError(axiosError({ status: 404, data: ROUTE_BODY }), { context: 'list' });
+    expect(result.title).toBe('This list could not be loaded');
+    expect(result.message).not.toContain('/api/');
+    expect(result.isRetryable).toBe(true);
+  });
+
+  it('keeps "Not found" for a 404 on a single record', () => {
+    const result = toPresentableError(axiosError({ status: 404, data: 'Quote 9 does not exist.' }));
+    expect(result.title).toBe('Not found');
+  });
+});

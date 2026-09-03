@@ -5,7 +5,7 @@ import {
   Box, Typography, Paper, Grid, Stack, Button, TextField,
   Autocomplete, IconButton, Divider, Table, TableHead,
   TableRow, TableCell, TableBody, InputAdornment, Card, CardContent,
-  CircularProgress, Breadcrumbs, Link, MenuItem, Select, FormControl, InputLabel
+  CircularProgress, Breadcrumbs, Link, MenuItem, Select, FormControl, InputLabel, Alert, AlertTitle
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -198,7 +198,22 @@ const EditQuotePage: React.FC = () => {
     storageKey: id ? `nexora.quote.edit.${id}` : '',
     value: { quoteNo, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items },
     enabled: Boolean(quote),
+    leaveMessage: 'Leave without saving? The pricing you have entered on this quote will be lost.',
   });
+  /** Put a recovered draft back on the form — every field the guard stores, nothing invented. */
+  const restoreDraft = (draft: typeof guard.recoveredDraft) => {
+    if (!draft) return;
+    const v = draft.value;
+    if (v.quoteNo) setQuoteNo(v.quoteNo);
+    setCustomerId(v.customerId ?? null);
+    if (v.quoteDate) setQuoteDate(v.quoteDate);
+    if (v.validUntil) setValidUntil(v.validUntil);
+    setHeaderRemarks(v.headerRemarks ?? '');
+    setDiscountTypeId(v.discountTypeId ?? null);
+    setDiscountValue(v.discountValue ?? 0);
+    setItems(Array.isArray(v.items) ? v.items : []);
+    guard.acceptRecovered();
+  };
 
 
   // The render loop walks `items` (deleted rows included, hidden); `totals.lines` is indexed over
@@ -389,6 +404,26 @@ const EditQuotePage: React.FC = () => {
           </Button>
         </Stack>
       </Stack>
+
+      {/* The guard has written this draft to sessionStorage since the day it was added; this page
+          never read it back. Same banner as the lead decision workbench, the one screen that did. */}
+      {guard.recoveredDraft && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 2 }}
+          action={(
+            <Stack direction="row" spacing={1}>
+              <Button color="inherit" onClick={() => restoreDraft(guard.recoveredDraft)}>Restore</Button>
+              <Button color="inherit" onClick={guard.discardRecovered}>Discard</Button>
+            </Stack>
+          )}
+        >
+          <AlertTitle>Unsaved pricing recovered</AlertTitle>
+          Restore the changes to {quoteNo || 'this quote'} saved in this browser
+          {guard.recoveredDraft.savedAt ? ` (saved ${new Date(guard.recoveredDraft.savedAt).toLocaleString()})` : ''},
+          or discard them and keep the saved version.
+        </Alert>
+      )}
 
       <Grid container spacing={2}>
         <Grid size={{ xs: 12, lg: 9 }}>

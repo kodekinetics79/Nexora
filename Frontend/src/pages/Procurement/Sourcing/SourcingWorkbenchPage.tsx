@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link as RouterLink, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -29,6 +29,7 @@ import {
   Tabs,
   TextField,
   Tooltip,
+  Link,
   Typography,
 } from "@mui/material";
 import {
@@ -887,16 +888,27 @@ function SourcingWorkbenchPage() {
                         Retry
                       </Button>
                     )}
-                    <Button
-                      size="small"
-                      onClick={() => setResponseSolicitation(item)}
-                      sx={{ display: canCapture ? "inline-flex" : "none" }}
-                      disabled={!["SENT", "RESPONDED"].includes(
-                        item.status.replaceAll("_", "").toUpperCase(),
-                      )}
-                    >
-                      Capture response
-                    </Button>
+                    {canCapture && (() => {
+                      const delivered = ["SENT", "RESPONDED"].includes(item.status.replaceAll("_", "").toUpperCase());
+                      return (
+                        <Tooltip
+                          title={delivered ? "" : (
+                            <>
+                              Available once the supplier RFQ is delivered, or capture the reply in the{" "}
+                              <Link component={RouterLink} to="/procurement/supplier-quotes" color="inherit" sx={{ fontWeight: 700 }}>
+                                Supplier Quote Inbox
+                              </Link>.
+                            </>
+                          )}
+                        >
+                          <span tabIndex={delivered ? undefined : 0}>
+                            <Button size="small" onClick={() => setResponseSolicitation(item)} disabled={!delivered}>
+                              Capture response
+                            </Button>
+                          </span>
+                        </Tooltip>
+                      );
+                    })()}
                   </Stack>
                 </TableCell>
               </TableRow>
@@ -1201,12 +1213,32 @@ function SourcingWorkbenchPage() {
                             ? "Award more"
                             : "Approve"}
                       </Button>
-                      {award && quoteLine && canAward && hasPermission("Quotations", "edit") && (
+                      {award && canAward && hasPermission("Quotations", "edit") && (quoteLine ? (
                         <Button size="small" startIcon={<PriceCheck />} onClick={() => setPricingSelection({
                           awardId: award.id, quoteItemId: quoteLine.quoteItemId,
                           landedUnitCost: award.landedUnitCost, currencyCode: award.currencyCode,
                         })}>Price customer quote</Button>
-                      )}
+                      ) : (
+                        // The award is made but no customer quote draft exists yet, so there is no
+                        // line to price. The control used to vanish; a rep looked for it and found
+                        // nothing. It now stays, disabled, and says where the missing step is.
+                        <Tooltip
+                          title={(
+                            <>
+                              Draft the customer quote first — open{" "}
+                              <Link component={RouterLink} to={`/procurement/rfqs/view/${rfqId}`} color="inherit" sx={{ fontWeight: 700 }}>
+                                the RFQ
+                              </Link>{" "}
+                              and choose Prepare Quote Draft.
+                            </>
+                          )}
+                        >
+                          {/* Focusable while disabled so a keyboard user can reach the reason. */}
+                          <span tabIndex={quoteLine ? undefined : 0}>
+                            <Button size="small" startIcon={<PriceCheck />} disabled>Price customer quote</Button>
+                          </span>
+                        </Tooltip>
+                      ))}
                     </Stack>
                   </TableCell>
                   </TableRow>

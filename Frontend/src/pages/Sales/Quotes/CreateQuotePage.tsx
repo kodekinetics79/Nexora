@@ -5,7 +5,7 @@ import {
   Box, Typography, Paper, Grid, Stack, Button, TextField,
   Autocomplete, IconButton, Divider, Table, TableHead,
   TableRow, TableCell, TableBody, InputAdornment, Card, CardContent,
-  CircularProgress, Breadcrumbs, Link, MenuItem, Select, FormControl, InputLabel, Alert
+  CircularProgress, Breadcrumbs, Link, MenuItem, Select, FormControl, InputLabel, Alert, AlertTitle
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -151,7 +151,22 @@ const CreateQuotePage: React.FC = () => {
     storageKey: 'nexora.quote.create',
     value: { rfqId, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items },
     enabled: true,
+    leaveMessage: 'Leave without saving? The lines you have entered on this quote will be lost.',
   });
+  /** Put a recovered draft back on the form — every field the guard stores, nothing invented. */
+  const restoreDraft = (draft: typeof guard.recoveredDraft) => {
+    if (!draft) return;
+    const v = draft.value;
+    setRfqId(v.rfqId ?? null);
+    setCustomerId(v.customerId ?? null);
+    if (v.quoteDate) setQuoteDate(v.quoteDate);
+    if (v.validUntil) setValidUntil(v.validUntil);
+    setHeaderRemarks(v.headerRemarks ?? '');
+    setDiscountTypeId(v.discountTypeId ?? null);
+    setDiscountValue(v.discountValue ?? 0);
+    setItems(Array.isArray(v.items) ? v.items : []);
+    guard.acceptRecovered();
+  };
 
 
   // Mutations
@@ -282,6 +297,27 @@ const CreateQuotePage: React.FC = () => {
           </Button>
         </Stack>
       </Stack>
+
+      {/* The guard has written this draft to sessionStorage since the day it was added; this page
+          never read it back, so the "recovery" it promised did not exist here. Same banner as the
+          lead decision workbench, which is the one screen that did. */}
+      {guard.recoveredDraft && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 2 }}
+          action={(
+            <Stack direction="row" spacing={1}>
+              <Button color="inherit" onClick={() => restoreDraft(guard.recoveredDraft)}>Restore</Button>
+              <Button color="inherit" onClick={guard.discardRecovered}>Discard</Button>
+            </Stack>
+          )}
+        >
+          <AlertTitle>Unsaved quote recovered</AlertTitle>
+          Restore the quote you were building in this browser
+          {guard.recoveredDraft.savedAt ? ` (saved ${new Date(guard.recoveredDraft.savedAt).toLocaleString()})` : ''},
+          or discard it and start from a blank form.
+        </Alert>
+      )}
 
       {failedReferenceData.length > 0 && (
         <Alert

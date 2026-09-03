@@ -24,7 +24,12 @@ import { formatMoney } from '../../../utils/currency';
 
 const OrderListPage: React.FC = () => {
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
+  // Orders are confirmed from the Client PO Inbox, which is a Customer Awards screen. A button
+  // there for a reader without that grant lands on Access Denied — and the guarded widget used to
+  // render the whole Access Denied panel in this page's header. Hide the door; name the key.
+  const canConfirmOrders = hasPermission('Customer Awards');
+  const askForAwardsAccess = 'Ask your administrator for Customer Awards access to confirm customer orders.';
   const businessUnitId = userData?.businessUnitId || 0;
   const [searchTerm, setSearchTerm] = useState('');
   /**
@@ -82,11 +87,15 @@ const OrderListPage: React.FC = () => {
           </Typography>
           <Typography variant="body2" color="text.secondary">Manage customer orders and conversions</Typography>
         </Box>
-        <PermissionGuard moduleName="Customer Awards" action="view">
+        {canConfirmOrders ? (
           <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>
             Open Client PO Inbox
           </Button>
-        </PermissionGuard>
+        ) : (
+          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 320, textAlign: 'right' }}>
+            {askForAwardsAccess}
+          </Typography>
+        )}
       </Stack>
 
       <Paper sx={{ p: 2, mb: 3, borderRadius: 2, boxShadow: 'none', border: '1px solid', borderColor: 'divider' }}>
@@ -139,7 +148,9 @@ const OrderListPage: React.FC = () => {
                   </Typography>
                   {searchTerm
                     ? <Button variant="outlined" sx={{ mt: 2, fontWeight: 700 }} onClick={() => setSearchTerm('')}>Clear the search</Button>
-                    : <Button variant="contained" sx={{ mt: 2, fontWeight: 700 }} onClick={() => navigate('/sales/client-pos')}>Open the client PO inbox</Button>}
+                    : canConfirmOrders
+                      ? <Button variant="contained" sx={{ mt: 2, fontWeight: 700 }} onClick={() => navigate('/sales/client-pos')}>Open the client PO inbox</Button>
+                      : <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>{askForAwardsAccess}</Typography>}
                 </TableCell>
               </TableRow>
             ) : (

@@ -17,7 +17,12 @@ import {
   ExpandMore as ExpandIcon,
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
-import { supportDetailText, toPresentableError, type PresentableError } from '../../utils/apiErrors';
+import {
+  supportDetailText,
+  toPresentableError,
+  type ApiErrorContext,
+  type PresentableError,
+} from '../../utils/apiErrors';
 
 interface ApiErrorNoticeProps {
   /** The raw thrown value. Mapped through `toPresentableError`; ignored when `presented` is given. */
@@ -26,6 +31,8 @@ interface ApiErrorNoticeProps {
   presented?: PresentableError;
   /** Domain-specific wording used when the server supplies nothing safe to render. */
   fallbackMessage?: string;
+  /** `'list'` when the failed request was for a list: a 404 then reads "could not be loaded". */
+  context?: ApiErrorContext;
   onRetry?: () => void;
   retryLabel?: string;
   sx?: object;
@@ -42,13 +49,14 @@ export default function ApiErrorNotice({
   error,
   presented,
   fallbackMessage,
+  context,
   onRetry,
   retryLabel = 'Try again',
   sx,
 }: ApiErrorNoticeProps) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
-  const detail = presented ?? toPresentableError(error, { fallbackMessage });
+  const detail = presented ?? toPresentableError(error, { fallbackMessage, context });
 
   const copy = () => {
     void navigator.clipboard?.writeText(supportDetailText(detail)).then(

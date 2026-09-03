@@ -44,7 +44,8 @@ const CreateOrderPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
+  const canConfirmOrders = hasPermission('Customer Awards');
   const { enqueueSnackbar } = useSnackbar();
   const businessUnitId = userData?.businessUnitId || 0;
 
@@ -232,8 +233,17 @@ const CreateOrderPage: React.FC = () => {
           commercial-case lineage. Use the Client PO Inbox to reconcile the customer document and
           create the governed order; free-standing manual orders are not supported.
         </Alert>
+        {/* The only way forward from here is a Customer Awards screen; a button that lands on
+            Access Denied is a dead end wearing a call to action. */}
+        {!canConfirmOrders && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+            Ask your administrator for Customer Awards access to confirm customer orders.
+          </Typography>
+        )}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mt: 2 }}>
-          <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>Open Client PO Inbox</Button>
+          {canConfirmOrders && (
+            <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>Open Client PO Inbox</Button>
+          )}
           <Button variant="outlined" onClick={() => navigate('/sales/orders')}>Back to orders</Button>
         </Stack>
       </Box>

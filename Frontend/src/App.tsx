@@ -1,10 +1,9 @@
 import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { Box, CircularProgress, Typography } from '@mui/material';
+import { Box, CircularProgress } from '@mui/material';
 import MainLayout from './components/layout/MainLayout';
 import PermissionGuard, { RequireAuth, RequireManager } from './components/common/PermissionGuard';
 import RouteAnnouncer from './components/layout/RouteAnnouncer';
-import useDocumentTitle from './hooks/useDocumentTitle';
 import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from './pages/Setup/setupRoutes';
 
 // FE-09: route-level code splitting. Each page is loaded on demand so the
@@ -15,6 +14,7 @@ const LoginPage = lazy(() => import('./pages/Login/LoginPage'));
 // `pages/Setup/setupRoutes.tsx` and mapped into the route tree further down.
 const SetupShell = lazy(() => import('./pages/Setup/SetupShell'));
 const SetupHubPage = lazy(() => import('./pages/Setup/SetupHubPage'));
+const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
 // The landing screen: one prioritised queue of everything waiting on this user, built from the
 // endpoints the individual queue screens already read. It replaced `/analytics/deadlines`, which
 // could only show enquiries and whose only outbound link was to a single lead.
@@ -141,25 +141,6 @@ const PageLoader = () => (
     <CircularProgress aria-label="Loading page" />
   </Box>
 );
-
-/**
- * 404 view. Sets its own title (the route is by definition not in
- * `routeTitles.ts`) and provides the page's `<h1>` — SC 2.4.2 / SC 1.3.1.
- */
-const NotFoundPage = () => {
-  useDocumentTitle('Page Not Found');
-  return (
-    <Box component="main" id="main-content" tabIndex={-1} sx={{ p: 4 }}>
-      <Typography variant="h4" component="h1" gutterBottom>
-        Page not found
-      </Typography>
-      <Typography variant="body1" color="text.secondary">
-        The page you requested does not exist. Check the address, or use the navigation menu to
-        continue.
-      </Typography>
-    </Box>
-  );
-};
 
 function App() {
   return (

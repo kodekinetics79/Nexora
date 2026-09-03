@@ -77,7 +77,14 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     hasPermission.mockReturnValue(true);
-    getAll.mockResolvedValue({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 });
+    // The page asks twice: once for the page it shows, once (pageSize 1) for the unfiltered
+    // total that decides whether "nothing here" is a filter or a truly empty tenant. Both empty
+    // here; the "filtered" cases below answer the total with a real number.
+    getAll.mockImplementation((params: { pageSize?: number }) => Promise.resolve(
+      params.pageSize === 1
+        ? { items: [], totalCount: 3, pageNumber: 1, pageSize: 1 }
+        : { items: [], totalCount: 0, pageNumber: 1, pageSize: 10 },
+    ));
   });
 
   it('saysNoInquiriesYet_andPointsAtInboundMailWhenNothingIsFiltered', async () => {
@@ -86,6 +93,10 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
     expect(await screen.findByText(/no inquiries yet/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /open inbound mail/i }));
     expect(navigate).toHaveBeenCalledWith('/procurement/leads/inbound-mail');
+    fireEvent.click(screen.getByRole('button', { name: /upload a document/i }));
+    expect(navigate).toHaveBeenCalledWith('/procurement/leads/manual-upload');
+    fireEvent.click(screen.getByRole('button', { name: /connect the mailbox/i }));
+    expect(navigate).toHaveBeenCalledWith('/setup/mailboxes');
   });
 
   it('saysTheFiltersMatchedNothing_andOffersToClearThem', async () => {

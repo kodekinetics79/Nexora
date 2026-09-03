@@ -240,6 +240,19 @@ const LeadsPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [leadSource, setLeadSource] = useState('all');
   const [ownerView, setOwnerView] = useState<OwnerView>(() => defaultOwnerView(myUserId, isManager));
+  /**
+   * "All inquiries" used to send NO queue view, and the server's default for no view is the
+   * untriaged inbox (`LeadStatusId == null`, LeadRepository.GetLeadListAsync). Any lifecycle
+   * transition stamps a status, so the list called "All" dropped every inquiry the moment
+   * someone advanced it — a rep who qualified a lead on Monday could not find it on Tuesday.
+   *
+   * The default is now the server's "open" view: everything still live, untriaged or not. The
+   * old behaviour survives as a filter the reader switches on, named for what it shows.
+   */
+  const [untriagedOnly, setUntriagedOnly] = useState(false);
+  // A view carried on the URL (a dashboard tile, the Revisions tab) is a queue of its own and
+  // wins outright; the toggle only applies to the plain list.
+  const queueView = view ?? (untriagedOnly ? undefined : 'open');
   // Column layout and row density are settings, not the day's work. They stay one click away
   // rather than sitting on the default path beside the filters a salesperson actually uses.
   const [displayOpen, setDisplayOpen] = useState(false);
@@ -284,7 +297,7 @@ const LeadsPage: React.FC = () => {
   // Everything that can narrow this list. `view` is included because it is a filter the reader
   // did not type: arriving from a dashboard tile can empty the grid with nothing on screen
   // explaining it, which is exactly the "no data" / "filtered to zero" confusion below.
-  const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view) || ownerView !== 'all';
+  const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view) || ownerView !== 'all' || untriagedOnly;
   // useCallback, not a bare closure: the no-rows overlay below is memoised because DataGrid
   // takes a component TYPE, and a fresh function identity each render would rebuild that type
   // and remount the overlay under the user.
@@ -292,6 +305,7 @@ const LeadsPage: React.FC = () => {
     setSearch('');
     setLeadSource('all');
     setOwnerView('all');
+    setUntriagedOnly(false);
     setPaginationModel((current) => ({ ...current, page: 0 }));
     if (view) {
       // Drop only the view/state keys; anything else on the URL belongs to someone else.
@@ -333,7 +347,7 @@ const LeadsPage: React.FC = () => {
     ),
   });
 
-  const requestedView = composeLeadsView(view, ownerView, myUserId);
+  const requestedView = composeLeadsView(queueView, ownerView, myUserId);
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['leads', paginationModel, search, leadSource, requestedView],
@@ -348,6 +362,25 @@ const LeadsPage: React.FC = () => {
   });
 
   /**
+   * Whether this business unit has ANY live inquiry, independent of every filter on screen.
+   *
+   * The grid opens narrowed (a manager sees "Unassigned", a rep sees "Mine"), so with zero leads
+   * in the tenant the first thing a rep read was "Every inquiry here already has an owner" — a
+   * filtered-to-zero sentence describing a list that had nothing to filter. True zero and
+   * filtered-to-zero must never read the same, and only an unfiltered count can tell them apart.
+   * One row is enough: only `totalCount` is read. Failure is silent here because the main query
+   * reports its own failures and this one only decides which empty-state copy is honest.
+   */
+  const totalQuery = useQuery({
+    queryKey: ['leads-total'],
+    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: 1, view: 'open' }),
+    meta: { silenceGlobalError: true },
+  });
+  const isTrueZero = totalQuery.data?.totalCount === 0;
+  const canUploadDocuments = hasPermission('Leads', 'create');
+  const canConnectMailbox = hasPermission('Email & SMTP');
+
+  /**
    * The top-of-funnel grid shipped MUI's bare "No rows" — the string a rep reads on day one when
    * the mailbox has not yet been configured, and the same string they read when a search matched
    * nothing. Neither reading tells them what to do, and one of the two is a setup problem they can
@@ -355,21 +388,44 @@ const LeadsPage: React.FC = () => {
    */
   const noRowsOverlay = useMemo(() => gridEmptyOverlay({
     title: 'No inquiries yet',
-    message: 'Enquiries arrive on their own once a mailbox is connected — or you can read documents in from your machine right now.',
+    message: 'Inquiries arrive on their own once a mailbox is connected — or you can upload a customer document from your machine right now.',
     action: (
-      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
-        <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
-          Upload a document
-        </Button>
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, alignItems: 'center' }}>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {canUploadDocuments && (
+            <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
+              Upload a document
+            </Button>
+          )}
+          {canConnectMailbox && (
+            <Button variant="outlined" startIcon={<InboxIcon />} onClick={() => navigate('/setup/mailboxes')} sx={{ fontWeight: 700 }}>
+              Connect the mailbox
+            </Button>
+          )}
+        </Box>
+        {/* A button the reader cannot use is a dead end; the reason and the person to ask are the
+            next best thing. */}
+        {!canConnectMailbox && (
+          <Typography variant="caption" color="text.secondary">
+            Ask your administrator to connect a mailbox under Setup &gt; Email Inboxes.
+          </Typography>
+        )}
+        {!canUploadDocuments && (
+          <Typography variant="caption" color="text.secondary">
+            Uploading documents needs Can Create on Leads. Ask your administrator.
+          </Typography>
+        )}
         {/* An empty grid is also what a BROKEN intake looks like. Inbound Mail is the only screen
-            that can tell the user which of the two they are looking at, so it must be reachable
+            that can tell the reader which of the two they are looking at, so it stays reachable
             from here rather than only from the sidebar. */}
-        <Button variant="outlined" startIcon={<InboxIcon />} onClick={() => navigate('/procurement/leads/inbound-mail')} sx={{ fontWeight: 700 }}>
-          Open Inbound Mail
-        </Button>
+        <Link component="button" type="button" underline="hover" onClick={() => navigate('/procurement/leads/inbound-mail')} sx={{ fontWeight: 700 }}>
+          Already connected? Open Inbound Mail
+        </Link>
       </Box>
     ),
-    filtered: filtersActive,
+    // Only a filter can empty a list that has something in it. With nothing in the tenant, the
+    // narrowed opening view must not claim "every inquiry already has an owner".
+    filtered: filtersActive && !isTrueZero,
     // The list now OPENS on a working set, so "nothing here" most often means "nothing of
     // yours", not "nothing at all" — and the two must never read the same. Each says which
     // filter emptied it and offers the one button that widens it by a single step.
@@ -377,14 +433,23 @@ const LeadsPage: React.FC = () => {
       ? 'Nothing is assigned to you'
       : ownerView === 'unassigned'
         ? 'Every inquiry here already has an owner'
-        : 'No inquiries match these filters',
+        : untriagedOnly
+          ? 'Nothing is waiting to be looked at'
+          : 'No inquiries match these filters',
     filteredMessage: ownerView === 'mine'
       ? 'No inquiry in this list carries your name right now. The ones nobody has picked up are one click away.'
       : ownerView === 'unassigned'
         ? 'Nothing in this list is waiting to be picked up. Everything already belongs to somebody.'
-        : 'Nothing matches the search and filters currently applied. Clearing them shows every inquiry this business unit has.',
+        : untriagedOnly
+          ? 'Every inquiry has already been opened by someone. The ones in progress are one click away.'
+          : 'Nothing matches the search and filters currently applied. Clearing them shows every inquiry this business unit has.',
     filteredAction: (
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+        {untriagedOnly && ownerView === 'all' && (
+          <Button variant="contained" onClick={() => setUntriagedOnly(false)} sx={{ fontWeight: 700 }}>
+            Show inquiries in progress
+          </Button>
+        )}
         {ownerView === 'mine' && (
           <Button variant="contained" onClick={() => setOwnerView('unassigned')} sx={{ fontWeight: 700 }}>
             Show unassigned inquiries
@@ -405,7 +470,7 @@ const LeadsPage: React.FC = () => {
         </Button>
       </Box>
     ),
-  }), [filtersActive, clearFilters, navigate, ownerView]);
+  }), [filtersActive, isTrueZero, canUploadDocuments, canConnectMailbox, clearFilters, navigate, ownerView, untriagedOnly]);
 
   const rows = useMemo(() => data?.items ?? [], [data]);
 
@@ -426,7 +491,7 @@ const LeadsPage: React.FC = () => {
   /** Only stated once we actually know — never inferred from a list that has not loaded. */
   const whyICannotTakeLeads = canEditLeads && !ownerOptions.isLoading && !ownerOptions.isError && !iCanTakeLeads
     ? (myOwnerOption?.eligibilityReason?.trim()
-      || 'You do not have a Sales Rep profile yet, so leads cannot be routed to you. Ask an administrator to add one under Sales > Rep directory.')
+      || 'You do not have a Sales Rep profile yet, so leads cannot be routed to you. Ask an administrator to add one under Team & exceptions > Sales reps.')
     : null;
 
   /**
@@ -1095,6 +1160,28 @@ const LeadsPage: React.FC = () => {
           <ToggleButton value="mine" aria-label="Mine" disabled={myUserId == null}>Mine</ToggleButton>
           <ToggleButton value="all" aria-label="Everyone">Everyone</ToggleButton>
         </ToggleButtonGroup>
+        {/* The old "All inquiries" — only what nobody has opened yet — as an opt-in filter. Hidden
+            when the URL already names a queue (Revisions, a dashboard tile): those are lists of
+            their own and the toggle would silently narrow them. */}
+        {!view && (
+          <Tooltip title={untriagedOnly
+            ? 'Showing only inquiries nobody has opened yet. Turn off to include the ones already in progress.'
+            : 'Show only inquiries nobody has opened yet.'}>
+            <ToggleButton
+              size="small"
+              value="untriaged"
+              selected={untriagedOnly}
+              onChange={() => {
+                setUntriagedOnly((current) => !current);
+                setPaginationModel((current) => ({ ...current, page: 0 }));
+              }}
+              aria-label="Untriaged only"
+              sx={{ textTransform: 'none', fontWeight: 700 }}
+            >
+              Untriaged only
+            </ToggleButton>
+          </Tooltip>
+        )}
         {/* A disabled control that will not say why becomes a support call. */}
         {myUserId == null && (
           <Typography variant="caption" sx={{ color: 'text.secondary', maxWidth: 220 }}>
@@ -1148,7 +1235,19 @@ const LeadsPage: React.FC = () => {
               ? 'You can assign inquiries to other people, but not to yourself yet.'
               : 'You cannot pick up inquiries yet.'}
           </Typography>
-          <Typography variant="body2">{whyICannotTakeLeads}</Typography>
+          <Typography variant="body2">
+            {whyICannotTakeLeads}
+            {/* The rep directory is a manager screen; a link a reader cannot open is a dead end,
+                so only a manager gets the shortcut and everyone else gets the menu path. */}
+            {isManager && (
+              <>
+                {' '}
+                <Link component="button" type="button" underline="hover" onClick={() => navigate('/sales/reps')} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
+                  Open Sales reps
+                </Link>
+              </>
+            )}
+          </Typography>
         </Alert>
       )}
 

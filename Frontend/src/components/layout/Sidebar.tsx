@@ -20,6 +20,7 @@ import {
   FiberManualRecord as BulletIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
+import { confirmLeavingUnsavedWork } from '../../hooks/unsavedWorkRegistry';
 import {
   ADVANCED_GROUPS,
   ALL_SCREENS_ENTRY,
@@ -116,7 +117,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const { userData, hasPermission } = useAuth();
+  const { userData, hasPermission, hasEntitlement } = useAuth();
   const isManager = userData.isManager === true;
   // Two Sidebars are mounted at once (mobile drawer + permanent drawer), so aria-controls targets
   // must be unique per instance.
@@ -125,6 +126,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
 
   const navigateTo = (path: string) => {
+    // A half-priced quote must not evaporate on a rail click. Same question, same wording, as
+    // the form's own Cancel button; nothing is asked when nothing is dirty.
+    if (!confirmLeavingUnsavedWork()) return;
     navigate(path);
     onNavigate?.();
   };
@@ -139,15 +143,19 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
 
   /** Operational workspaces belong in the navigation; permissions still decide what users see. */
   const advancedRows: RailGroup[] = useMemo(() => {
-    return ADVANCED_GROUPS.map((group) => ({
-      key: group.key,
-      title: group.title,
-      entries: group.entries.filter(
-        (entry) =>
-          (!entry.managerOnly || isManager) && (!entry.moduleName || hasPermission(entry.moduleName)),
-      ),
-    })).filter((group) => group.entries.length > 0);
-  }, [hasPermission, isManager]);
+    return ADVANCED_GROUPS
+      // A group the tenant has not been granted is not a group with zero permitted entries: it is
+      // absent, whatever the reader's role says.
+      .filter((group) => !group.entitlement || hasEntitlement(group.entitlement))
+      .map((group) => ({
+        key: group.key,
+        title: group.title,
+        entries: group.entries.filter(
+          (entry) =>
+            (!entry.managerOnly || isManager) && (!entry.moduleName || hasPermission(entry.moduleName)),
+        ),
+      })).filter((group) => group.entries.length > 0);
+  }, [hasPermission, hasEntitlement, isManager]);
 
   const rowSx = (isSelected: boolean) => ({
     minHeight: 44,

@@ -160,8 +160,15 @@ const asManager = () => {
   authUser.roleName = 'Sales Manager';
 };
 
+/**
+ * The view the GRID last asked for. The page also reads a pageSize-1 unfiltered total to tell a
+ * truly empty tenant from a filtered-to-zero list; that read is not the grid's and is skipped.
+ */
 const lastListView = (): unknown =>
-  (getAll.mock.calls.at(-1)?.[0] as { view?: unknown } | undefined)?.view;
+  (getAll.mock.calls
+    .map((call) => call[0] as { view?: unknown; pageSize?: number })
+    .filter((params) => params.pageSize !== 1)
+    .at(-1))?.view;
 
 describe('LeadsPage — assigning a lead from the list', () => {
   beforeAll(() => {
@@ -392,14 +399,15 @@ describe('LeadsPage — assigning a lead from the list', () => {
 
   it('opensOnTheReadersOwnWork_notOnEveryRowEverRecorded', async () => {
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe(`mine:${ME}`));
+    // 'open' is the default queue (everything still live), composed with the owner filter.
+    await waitFor(() => expect(lastListView()).toBe(`open,mine:${ME}`));
   });
 
   it('opensOnTheUnclaimedPile_forAManager', async () => {
     authUser.isManager = true;
     authUser.roleName = 'Sales Manager';
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe('unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
   });
 
   it('opensOnEverything_whenTheSessionCannotNameTheReader', async () => {
@@ -407,7 +415,7 @@ describe('LeadsPage — assigning a lead from the list', () => {
     // for is worse than no filter.
     authUser.id = undefined;
     renderPage();
-    await waitFor(() => expect(lastListView()).toBeUndefined());
+    await waitFor(() => expect(lastListView()).toBe('open'));
   });
 
   it('narrowsToUnassignedAndBackToEveryone_fromOneControl', async () => {
@@ -415,13 +423,13 @@ describe('LeadsPage — assigning a lead from the list', () => {
     await screen.findByText('Tariq Al-Harbi');
 
     click(screen.getByRole('button', { name: /^unassigned$/i }));
-    await waitFor(() => expect(lastListView()).toBe('unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
     // MEASURED: finding the unclaimed pile from the leads list costs one click. Before this it
     // could not be done on this screen at all.
     expect(clickCount).toBe(1);
 
     fireEvent.click(screen.getByRole('button', { name: /^everyone$/i }));
-    await waitFor(() => expect(lastListView()).toBeUndefined());
+    await waitFor(() => expect(lastListView()).toBe('open'));
   });
 
   it('narrowsTheQueueItIsOn_ratherThanReplacingIt', async () => {
@@ -434,7 +442,11 @@ describe('LeadsPage — assigning a lead from the list', () => {
   });
 
   it('saysWhichFilterEmptiedTheList_andOffersTheNextStepAsAButton', async () => {
-    getAll.mockResolvedValue(page([]));
+    // The tenant HAS inquiries (the unfiltered pageSize-1 count says 3); the page just has none
+    // for this reader. With a true zero the page would say "No inquiries yet" instead.
+    getAll.mockImplementation((params: { pageSize?: number }) => Promise.resolve(
+      params.pageSize === 1 ? { ...page([]), totalCount: 3 } : page([]),
+    ));
     renderPage();
 
     // The default working set is the reader's own, so "no rows" here means "none of yours".
@@ -442,10 +454,10 @@ describe('LeadsPage — assigning a lead from the list', () => {
     fireEvent.click(screen.getByRole('button', { name: /show unassigned inquiries/i }));
 
     expect(await screen.findByText(/every inquiry here already has an owner/i)).toBeInTheDocument();
-    await waitFor(() => expect(lastListView()).toBe('unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
 
     fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
-    await waitFor(() => expect(lastListView()).toBeUndefined());
+    await waitFor(() => expect(lastListView()).toBe('open'));
     expect(await screen.findByText(/no inquiries yet/i)).toBeInTheDocument();
   });
 

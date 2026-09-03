@@ -36,3 +36,31 @@ describe('ApiErrorNotice', () => {
     expect(screen.getByText('The batch could not be loaded.')).toBeInTheDocument();
   });
 });
+
+describe('ApiErrorNotice — a 404 on a list', () => {
+  // What the Inbox rendered, six times, when the needs-review route answered 404 with its own
+  // request line as the body: a red panel titled "Not found" whose sentence was "GET
+  // /api/Lead/needs-review". A rep reads that as "your work is not found" plus a code.
+  const listNotFound = {
+    message: 'Request failed with status code 404',
+    isAxiosError: true,
+    config: { url: 'https://api.internal.nexora.test/api/Lead/needs-review', method: 'get' },
+    response: { status: 404, data: 'GET /api/Lead/needs-review' },
+  };
+
+  it('says the list could not be loaded and keeps the path in the support disclosure', () => {
+    render(<ApiErrorNotice error={listNotFound} context="list" onRetry={() => {}} />);
+
+    expect(screen.getByText('This list could not be loaded')).toBeInTheDocument();
+    expect(screen.queryByText('Not found')).not.toBeInTheDocument();
+    // The path is not in the visible copy: only inside the collapsed disclosure, unmounted until opened.
+    expect(screen.queryByText(/\/api\/Lead\/needs-review/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /technical detail/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+  });
+
+  it('never shows an API path as the headline even without list context', () => {
+    render(<ApiErrorNotice error={listNotFound} />);
+    expect(screen.queryByText(/\/api\//)).not.toBeInTheDocument();
+  });
+});
