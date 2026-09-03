@@ -1,0 +1,86 @@
+name: Production uptime
+
+# On 2026-09-03 production was down for 90 minutes and nothing noticed. It was found by a
+# person polling /build-identity by hand. There is no pager, no error tracker and no external
+# monitor; /ready is polled by nobody. This workflow is the cheapest honest detector available
+# without buying anything: GitHub e-mails the repository owner when a scheduled run fails.
+#
+# WHAT IT DOES NOT DO. GitHub delays scheduled runs under load, sometimes by many minutes, and
+# stops them entirely after 60 days without repository activity. It is therefore a backstop,
+# NOT an SLA instrument, and it must be replaced by a real external monitor before the pilot
+# carries a client's traffic. Detection here is measured in tens of minutes, not seconds.
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: Backend readiness and frontend reachability
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      API: https://nexora-fyjw.onrender.com
+      APP: https://nexora1-ai.vercel.app
+    steps:
+      - name: Backend answers at all
+        run: |
+          set -uo pipefail
+          # Two attempts, 20s apart: a single failed probe during the ~40s deploy window is
+          # not an incident, and paging on one is how a monitor gets ignored.
+          for attempt in 1 2; do
+            code=$(curl -s -o /tmp/ready.json -w '%{http_code}' --max-time 25 "$API/ready" || echo 000)
+            [ "$code" = "200" ] && break
+            echo "attempt $attempt: HTTP $code"
+            [ "$attempt" = "1" ] && sleep 20
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error title=Nexora backend is DOWN::$API/ready returned HTTP $code twice."
+            echo "If the body was Render's 502 page the container is not starting."
+            echo "Check the deploy list first, then docs/RUNBOOK-INOTIFY.md — a crash inside"
+            echo "WebApplication.CreateBuilder is a host file-watcher limit, not our code."
+            exit 1
+          fi
+
+      - name: Every readiness check is healthy
+        run: |
+          set -uo pipefail
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open('/tmp/ready.json'))
+          checks = d.get('checks', [])
+          bad = [c for c in checks if c.get('status') != 'Healthy']
+          print(f"status={d.get('status')}  {len(checks) - len(bad)}/{len(checks)} healthy")
+          for c in checks:
+              print(f"  {c.get('status'):10} {c.get('name')}  {c.get('description','')[:90]}")
+          if bad or d.get('status') != 'Healthy':
+              names = ', '.join(c.get('name', '?') for c in bad) or d.get('status')
+              print(f"::error title=Nexora is degraded::Unhealthy: {names}")
+              sys.exit(1)
+          # The count is asserted so that a check silently disappearing from the contract
+          # reads as a failure rather than as a green run over fewer probes.
+          if len(checks) < 11:
+              print(f"::error title=Readiness contract shrank::expected >=11 checks, saw {len(checks)}")
+              sys.exit(1)
+          PY
+
+      - name: Frontend is served
+        run: |
+          set -uo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "$APP/" || echo 000)
+          if [ "$code" != "200" ]; then
+            echo "::error title=Nexora frontend is unreachable::$APP returned HTTP $code"
+            exit 1
+          fi
+
+      - name: Report the serving revision
+        if: always()
+        run: |
+          curl -s --max-time 20 "$API/build-identity" || true
