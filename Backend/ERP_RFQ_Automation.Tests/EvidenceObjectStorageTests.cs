@@ -179,6 +179,40 @@ public sealed class EvidenceObjectStorageTests : IDisposable
     }
 
     [Fact]
+    public void S3Probe_DeletesTheVersionItCreatedRatherThanLeavingOneBehind()
+    {
+        // The readiness probe writes an object and deletes it again on every call. On a
+        // versioned bucket -- and ProbeAsync refuses to be ready on any other kind -- a delete
+        // with no version id frees nothing: the probe object stays as a noncurrent version and
+        // a delete marker is stacked on top. /ready is called by the platform health check, the
+        // operations screen and a scheduled monitor, so the leak is unbounded and it accretes
+        // inside the bucket that holds customer evidence.
+        //
+        // There is no seam to mock IAmazonS3 here (the store takes only IOptions), so this
+        // pins the shape of the call the way FrontendCatalogueMirrorTests pins the frontend
+        // catalogue: read the source and require the invariant to be visible in it.
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "Backend")))
+            directory = directory.Parent;
+        Assert.NotNull(directory);
+        var path = Path.Combine(directory!.FullName, "Backend", "ERP_RFQ_Automation",
+            "Infrastructure", "Storage", "IEvidenceObjectStorage.cs");
+        Assert.True(File.Exists(path), $"Evidence storage source is missing at {path}.");
+        var source = File.ReadAllText(path);
+
+        var probe = source.IndexOf("public async Task ProbeAsync", StringComparison.Ordinal);
+        Assert.True(probe > 0, "ProbeAsync was renamed; this guard needs to follow it.");
+        var end = source.IndexOf("\n    /// <summary>", probe, StringComparison.Ordinal);
+        var body = end > probe ? source[probe..end] : source[probe..];
+
+        var delete = body.IndexOf("DeleteObjectRequest", StringComparison.Ordinal);
+        Assert.True(delete > 0, "ProbeAsync no longer deletes its probe object.");
+        var request = body[delete..];
+        var close = request.IndexOf("}", StringComparison.Ordinal);
+        Assert.Contains("VersionId", close > 0 ? request[..close] : request);
+    }
+
+    [Fact]
     public void S3Purge_TreatsAContentHashAsNoVersionId()
     {
         // Local storage records the content hash where S3 records a version id, and a bucket

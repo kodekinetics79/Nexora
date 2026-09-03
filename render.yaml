@@ -84,6 +84,13 @@ services:
     branch: main
     dockerContext: Backend
     dockerfilePath: Backend/Dockerfile
+    # Raised starter -> standard BY HAND on 2026-09-03 and recorded here. On starter
+    # (512 MB) the extraction worker clamps itself to one loop and one concurrent LLM
+    # call and logs "capacity clamped True; requested 4/8/4", so documents were read
+    # strictly one at a time. This does NOT buy availability: a service with a disk
+    # attached still cannot run more than one instance or deploy without downtime.
+    # That waits on the evidence-store cutover in docs/design/evidence-object-store-cutover.md.
+    plan: standard
     # ---------------------------------------------------------------------------
     # DEPLOY ONLY WHAT CI HAS ALREADY GONE GREEN ON.
     #
@@ -146,6 +153,16 @@ services:
     envVars:
       - key: ASPNETCORE_ENVIRONMENT
         value: Production
+      # Set BY HAND on 2026-09-03 to end a 90-minute production outage, and recorded
+      # here so a Blueprint sync cannot quietly undo it. Every deploy crash-looped in
+      # WebApplication.CreateBuilder: the default JSON configuration providers register
+      # an inotify FileSystemWatcher on appsettings.json, and the HOST was out of
+      # inotify instances ("user limit (128) ... has been reached"). It is not our code
+      # -- the previous image, healthy for three days, failed identically at the same
+      # line. Polling removes the dependency entirely for the cost of a periodic stat.
+      # See docs/RUNBOOK-INOTIFY.md before removing this.
+      - key: DOTNET_USE_POLLING_FILE_WATCHER
+        value: "1"
       # MUST sit under the disk mountPath above. This previously read /tmp with
       # enforcement disabled — a Blueprint sync of that value would have silently
       # relocated every upload onto the ephemeral container filesystem and destroyed
