@@ -52,6 +52,12 @@ namespace ERP_RFQ_Automation.Services
         /// only) skips the check.
         /// </summary>
         Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
+
+        /// <summary>
+        /// Everything that will refuse this quote's send, BEFORE the rep opens the send dialog.
+        /// See <see cref="QuoteService.EvaluateSendReadinessAsync"/>.
+        /// </summary>
+        Task<QuoteSendReadinessDTO> EvaluateSendReadinessAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
         Task FinalizeQuoteDeliveryAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
@@ -106,6 +112,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly ISalesApplicationService? _sales;
         private readonly ICommercialLineResolutionApplicationService? _lineResolution;
         private readonly CommercialLearningService? _commercialLearning;
+        private readonly ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? _outboundSenders;
 
         // Optional collaborators preserve existing direct constructions used by focused
         // tests; production DI supplies the lifecycle and sales services.
@@ -117,7 +124,8 @@ namespace ERP_RFQ_Automation.Services
             ILifecycleApplicationService? lifecycle = null,
             ISalesApplicationService? sales = null,
             ICommercialLineResolutionApplicationService? lineResolution = null,
-            CommercialLearningService? commercialLearning = null)
+            CommercialLearningService? commercialLearning = null,
+            ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? outboundSenders = null)
         {
             _context = context;
             _emailService = emailService;
@@ -127,6 +135,7 @@ namespace ERP_RFQ_Automation.Services
             _sales = sales;
             _lineResolution = lineResolution;
             _commercialLearning = commercialLearning;
+            _outboundSenders = outboundSenders;
         }
 
         // Legacy QuoteStatus id map, used ONLY when no matching SetupMaster row is
@@ -926,6 +935,57 @@ namespace ERP_RFQ_Automation.Services
         }
 
         /// <summary>
+        /// The pure half of the draft-completeness gate. A DRAFT missing its currency, its
+        /// validity date, its lines, or a price on any line cannot be rendered — and until this
+        /// was factored out it lived only inside the PDF renderer, so a send passed every
+        /// synchronous check, answered "queued", and died in the outbox where no rep could see
+        /// it. Production holds two customer quotes today, both DRAFT, both with NULL currency,
+        /// one totalling 0.00: every one of them would take that path.
+        ///
+        /// <para>Names the specific missing thing. "Complete the quote" is not an instruction.</para>
+        /// </summary>
+        internal static string? DraftCompletenessBlocker(
+            bool isDraft, long? currencyId, DateTime? validUntil, ICollection<QuoteItem> items)
+        {
+            if (!isDraft) return null;
+            const string prefix = "Commercial Review Required: ";
+            if (items.Count == 0)
+                return prefix + "this quote has no lines. Add the lines you are quoting for.";
+            if (!currencyId.HasValue)
+                return prefix + "this quote has no currency. Set the currency on the quote before sending it.";
+            if (!validUntil.HasValue)
+                return prefix + "this quote has no validity date. Set how long the prices hold before sending it.";
+            if (items.Any(item => item.UnitPrice <= 0))
+                return prefix + "one or more lines have no price. Price every line before sending the quote.";
+            return null;
+        }
+
+        /// <summary>
+        /// The pure half of the issuer-identity gate: a document that cannot name its sender is
+        /// not a document. Returns the refusal and the screen that fixes it — the rep who meets
+        /// this did nothing wrong.
+        ///
+        /// <para>A missing VAT registration number is deliberately NOT here; see the note at the
+        /// call site.</para>
+        /// </summary>
+        internal static (string Message, string SetupLabel, string SetupPath)? IssuerIdentityBlocker(
+            string? sellerLegalName, string? companyAddress, string? companyPhone, string? companyEmail)
+        {
+            if (string.IsNullOrWhiteSpace(sellerLegalName))
+                return ("This quotation cannot be produced because the business unit sending it has no "
+                    + "name on file. Add the legal entity name under Setup → Business Units, then "
+                    + "download the quote again.", "Setup → Business Units", "/setup/business-unit");
+            if (string.IsNullOrWhiteSpace(companyAddress)
+                && string.IsNullOrWhiteSpace(companyPhone)
+                && string.IsNullOrWhiteSpace(companyEmail))
+                return ("This quotation cannot be produced because it would not tell the customer how "
+                    + "to reach you: no company address, telephone or email is configured. Fill in "
+                    + "Setup → Quote Format, then download the quote again.",
+                    "Setup → Quote Format", "/setup/quote-format");
+            return null;
+        }
+
+        /// <summary>
         /// The pure half of the tax gate: the first line that has no derived tax, phrased for the
         /// person who has to fix it. Lines are named by the buyer's own reference where there is
         /// one, because "line 3" means nothing to a rep looking at a bid list numbered 00010,
@@ -1192,10 +1252,8 @@ namespace ERP_RFQ_Automation.Services
 
             var isDraft = string.Equals(quote.Status?.SetupCode, "DRAFT", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
-            if (isDraft && (!quote.CurrencyId.HasValue || !quote.ValidUntil.HasValue
-                || quote.QuoteItems.Count == 0 || quote.QuoteItems.Any(item => item.UnitPrice <= 0)))
-                throw new InvalidOperationException(
-                    "Commercial Review Required: pricing, currency, validity, and every line price must be complete before PDF export.");
+            if (DraftCompletenessBlocker(isDraft, quote.CurrencyId, quote.ValidUntil, quote.QuoteItems) is { } incomplete)
+                throw new InvalidOperationException(incomplete);
 
             // R5: the completeness check above proves the document CAN be rendered; this one
             // proves it MAY be. Runs second so an incomplete draft gets the more specific and
@@ -1251,18 +1309,8 @@ namespace ERP_RFQ_Automation.Services
 
             // A document that cannot name its sender is not a document. Refuse, and name the
             // screen — the rep who meets this did nothing wrong.
-            if (string.IsNullOrWhiteSpace(sellerLegalName))
-                throw new QuoteIssuerIdentityMissingException(
-                    "This quotation cannot be produced because the business unit sending it has no "
-                    + "name on file. Add the legal entity name under Setup → Business Units, then "
-                    + "download the quote again.");
-            if (string.IsNullOrWhiteSpace(companyAddress)
-                && string.IsNullOrWhiteSpace(companyPhone)
-                && string.IsNullOrWhiteSpace(companyEmail))
-                throw new QuoteIssuerIdentityMissingException(
-                    "This quotation cannot be produced because it would not tell the customer how "
-                    + "to reach you: no company address, telephone or email is configured. Fill in "
-                    + "Setup → Quote Format, then download the quote again.");
+            if (IssuerIdentityBlocker(sellerLegalName, companyAddress, companyPhone, companyEmail) is { } issuerGap)
+                throw new QuoteIssuerIdentityMissingException(issuerGap.Message);
 
             // Deliberately NOT a refusal. A VAT number is nullable by design, nothing has ever
             // populated it automatically, and a tenant that is not yet VAT-registered still sends
@@ -1589,6 +1637,128 @@ namespace ERP_RFQ_Automation.Services
             });
 
             return document.GeneratePdf();
+        }
+
+        /// <summary>
+        /// Every reason this quote's send would be refused, answered BEFORE the rep opens the
+        /// send dialog, each naming the screen that fixes it.
+        ///
+        /// <para><b>Why this exists.</b> Half the send chain runs asynchronously, inside
+        /// <c>QuoteDeliveryDispatcher</c>, and its refusals reach nobody. A quote with no
+        /// currency, a business unit with no legal name, or a tenant with no transmitting
+        /// mailbox all pass every synchronous check, answer the rep "Quote delivery queued",
+        /// and then die in the outbox. Worse, the delivery idempotency key is fixed per quote
+        /// (<c>quote:{id}:delivery:v1</c>), so a dead-lettered row makes that quote
+        /// PERMANENTLY unsendable — the rep's only remaining move is a new revision, and
+        /// nothing tells them so.</para>
+        ///
+        /// <para>Measured on production 2026-09-02: <c>quote_delivery_requests</c> has zero
+        /// rows and both existing customer quotes are DRAFT with NULL currency. Every one of
+        /// them takes that path the first time somebody presses Send.</para>
+        ///
+        /// <para>This reads the SAME rules the sender and the renderer apply
+        /// (<see cref="DraftCompletenessBlocker"/>, <see cref="TaxDerivationBlocker"/>,
+        /// <see cref="IssuerIdentityBlocker"/>, <c>IOutboundSenderResolver</c>) rather than
+        /// re-deriving them, because a preflight that re-derives a rule is a preflight that
+        /// will eventually disagree with the thing it predicts.</para>
+        ///
+        /// <para>The price attestation is deliberately NOT a blocker: confirming the price
+        /// source is a designed step of the send dialog, not a setup failure.</para>
+        /// </summary>
+        public async Task<QuoteSendReadinessDTO> EvaluateSendReadinessAsync(
+            long quoteId, long businessUnitId, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            var quote = await _context.Quotes.AsNoTracking()
+                .Include(q => q.QuoteItems)
+                .Include(q => q.BusinessUnit)
+                .Include(q => q.Status)
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+
+            var readiness = new QuoteSendReadinessDTO { QuoteId = quote.Id };
+            void Block(string code, string message, string? label = null, string? path = null) =>
+                readiness.Blockers.Add(new QuoteSendBlockerDTO
+                {
+                    Code = code, Message = message, SetupLabel = label, SetupPath = path
+                });
+
+            // Reported in the order the send applies them, so the first thing the rep reads is
+            // the first thing that would actually stop them.
+            if (await _context.Set<LeadRevisionImpact>().AsNoTracking().AnyAsync(x =>
+                    x.BusinessUnitId == businessUnitId && x.AggregateType == "QUOTE" &&
+                    x.AggregateId == quoteId && x.Status == "OPEN", ct))
+                Block("CUSTOMER_REVISION_UNRESOLVED",
+                    "This quote is stale because a customer revision was received. Review and resolve "
+                    + "the revision impact before sending it.");
+
+            var isDraft = string.Equals(quote.Status?.SetupCode, "DRAFT", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
+            if (DraftCompletenessBlocker(isDraft, quote.CurrencyId, quote.ValidUntil, quote.QuoteItems) is { } incomplete)
+                Block("QUOTE_INCOMPLETE", incomplete);
+
+            if (TaxDerivationBlocker(quote.QuoteItems,
+                    await _context.ResolveOutputTaxRatePercentAsync(businessUnitId, ct)) is { } taxBlocker)
+                Block("OUTPUT_TAX_NOT_DERIVED", taxBlocker,
+                    "Setup → Commercial Policy", "/setup/commercial-policy");
+
+            var config = await _quoteConfigRepository.GetByBusinessUnitIdAsync(businessUnitId);
+            var sellerLegalName = string.IsNullOrWhiteSpace(quote.BusinessUnit?.LegalName)
+                ? quote.BusinessUnit?.BusinessUnitName
+                : quote.BusinessUnit.LegalName;
+            if (IssuerIdentityBlocker(sellerLegalName, config?.CompanyAddress, config?.CompanyPhone,
+                    config?.CompanyEmail) is { } issuerGap)
+                Block("ISSUER_IDENTITY_INCOMPLETE", issuerGap.Message, issuerGap.SetupLabel, issuerGap.SetupPath);
+
+            // The one gate whose failure the rep can do nothing about after the fact: a
+            // non-transmitting sender dead-letters the delivery on its FIRST attempt, and the
+            // fixed idempotency key then makes the quote unsendable for good. Same authority
+            // the sender uses, so the two cannot disagree. Null only in unit harnesses that
+            // compose no resolver — silence is honest there; a guess is not.
+            if (_outboundSenders is not null)
+            {
+                var sender = await _outboundSenders.ResolveAsync(businessUnitId, ct);
+                if (!sender.TransmitsMail)
+                    Block("OUTBOUND_MAIL_NOT_CONFIGURED",
+                        "Nothing can be emailed to customers yet: this tenant has no active SMTP mailbox "
+                        + "and the platform sender does not transmit. Sending now would fail permanently "
+                        + "and this quote could then only go out as a new revision.",
+                        "Setup → Mailboxes", "/setup/mailboxes");
+            }
+
+            // A delivery that already ended terminally. UNCERTAIN is the restart case: the
+            // customer may already hold this quote, and at-most-once means nothing is resent
+            // automatically. Either way the fixed key means this quote itself can never be sent
+            // again — say so, and say what to do instead.
+            var delivery = await _context.QuoteDeliveryRequests.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.QuoteId == quoteId)
+                .OrderByDescending(x => x.Id)
+                .FirstOrDefaultAsync(ct);
+            if (delivery is { DeadLetteredOn: not null })
+            {
+                var uncertain = delivery.LastErrorCode?.StartsWith("DeliveryOutcomeUncertain",
+                    StringComparison.OrdinalIgnoreCase) == true;
+                readiness.DeliveryOutcome = uncertain ? "UNCERTAIN" : "NOT_DELIVERED";
+                Block(uncertain ? "DELIVERY_OUTCOME_UNCERTAIN" : "DELIVERY_FAILED",
+                    uncertain
+                        ? "Delivery of this quote was interrupted and never confirmed either way, so the "
+                          + "customer may or may not have received it. Nothing was resent automatically, on "
+                          + "purpose. Check with the customer; if it did not arrive, issue this quote as a new "
+                          + "revision and send that."
+                        : "Delivery of this quote failed permanently and it cannot be sent again under the "
+                          + "same quote number. Fix the reason above, then issue it as a new revision and send "
+                          + "that.");
+            }
+            else if (delivery is { CompletedOn: null })
+            {
+                readiness.DeliveryInFlight = true;
+                Block("DELIVERY_IN_FLIGHT",
+                    "This quote is already queued for delivery. Wait for it to complete rather than "
+                    + "sending it twice.");
+            }
+
+            readiness.CanSend = readiness.Blockers.Count == 0;
+            return readiness;
         }
 
         public async Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null)

@@ -86,6 +86,48 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
             new() { BlockedPendingTaxDerivation = true, TaxDerivationReason = reason };
     }
 
+    /// <summary>One reason a quote's send would be refused, and the screen that fixes it.</summary>
+    public sealed class QuoteSendBlockerDTO
+    {
+        /// <summary>Stable code for the client; never shown to a user.</summary>
+        public string Code { get; set; } = string.Empty;
+
+        /// <summary>The sentence the rep reads. Says what is wrong AND what to do.</summary>
+        public string Message { get; set; } = string.Empty;
+
+        /// <summary>e.g. "Setup → Commercial Policy". Null when the fix is on this screen.</summary>
+        public string? SetupLabel { get; set; }
+
+        /// <summary>Client route for <see cref="SetupLabel"/>.</summary>
+        public string? SetupPath { get; set; }
+    }
+
+    /// <summary>
+    /// Whether this quote can be sent, answered before the send dialog opens. Half the send
+    /// chain runs in a background worker whose refusals reach nobody, so without this the rep's
+    /// first news of a missing currency or an unconfigured mailbox is a customer who never got
+    /// a quote.
+    /// </summary>
+    public sealed class QuoteSendReadinessDTO
+    {
+        public long QuoteId { get; set; }
+
+        /// <summary>True only when <see cref="Blockers"/> is empty.</summary>
+        public bool CanSend { get; set; }
+
+        public List<QuoteSendBlockerDTO> Blockers { get; set; } = new();
+
+        /// <summary>
+        /// UNCERTAIN when a previous delivery was interrupted and never confirmed — the
+        /// customer may already hold this quote. NOT_DELIVERED when it definitively failed.
+        /// Null when no delivery has ended terminally.
+        /// </summary>
+        public string? DeliveryOutcome { get; set; }
+
+        /// <summary>True while a delivery for this quote is queued and not yet finished.</summary>
+        public bool DeliveryInFlight { get; set; }
+    }
+
     /// <summary>What the rep submits when confirming where a quote's prices came from (R5).</summary>
     public sealed class QuotePriceAttestationRequest
     {

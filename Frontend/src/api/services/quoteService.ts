@@ -161,6 +161,29 @@ export interface QuotePriceAttestationLine {
 }
 
 /** Whether this quote may be sent, and what was last confirmed. */
+/** One reason a quote's send would be refused, and the screen that fixes it. */
+export interface QuoteSendBlocker {
+  /** Stable code for branching. Never render this. */
+  code: string;
+  /** The sentence the rep reads: what is wrong AND what to do. */
+  message: string;
+  setupLabel?: string | null;
+  setupPath?: string | null;
+}
+
+export interface QuoteSendReadiness {
+  quoteId: number;
+  canSend: boolean;
+  blockers: QuoteSendBlocker[];
+  /**
+   * UNCERTAIN when a previous delivery was interrupted and never confirmed — the customer may
+   * already hold this quote, and nothing is resent automatically. NOT_DELIVERED when it
+   * definitively failed. Null when no delivery has ended terminally.
+   */
+  deliveryOutcome?: 'UNCERTAIN' | 'NOT_DELIVERED' | null;
+  deliveryInFlight?: boolean;
+}
+
 export interface QuotePriceAttestationStatus {
   quoteId: number;
   satisfied: boolean;
@@ -326,6 +349,22 @@ const quoteService = {
       }
       throw error;
     }
+  },
+
+  // ==== Send readiness ====
+
+  /**
+   * Everything that would refuse this quote's send, answered BEFORE the send dialog opens.
+   *
+   * Half the send chain runs in a background worker whose refusals reach nobody: a draft with
+   * no currency, a business unit with no legal name, and a tenant with no transmitting mailbox
+   * all pass every synchronous check, produce a green "queued" toast, and die in the outbox.
+   * The delivery idempotency key is fixed per quote, so a dead-lettered row then makes that
+   * quote permanently unsendable.
+   */
+  getSendReadiness: async (id: number): Promise<QuoteSendReadiness> => {
+    const { data } = await axiosInstance.get(`/api/Quote/${id}/send-readiness`);
+    return data;
   },
 
   // ==== Price-provenance attestation (R5) ====

@@ -668,6 +668,28 @@ namespace ERP_RFQ_Automation.Controllers
         // ================================================================
 
         /// <summary>
+        /// Everything that would refuse this quote's send, answered BEFORE the send dialog
+        /// opens. Half the send chain runs in a background worker whose refusals reach nobody,
+        /// so without this the rep's first news of a missing currency or an unconfigured
+        /// mailbox is a customer who never received a quote — by which point the fixed delivery
+        /// idempotency key has made that quote unsendable for good.
+        /// </summary>
+        [HttpGet("{id}/send-readiness")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<QuoteSendReadinessDTO>> GetSendReadiness(long id, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (!await CanAccessQuoteAsync(id, ct)) return NotFound();
+            try
+            {
+                return Ok(await _quoteService.EvaluateSendReadinessAsync(id, businessUnitId, ct));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (Exception ex) { return Unexpected(ex, "quote-send-readiness"); }
+        }
+
+        /// <summary>
         /// Whether this quote may be sent, what was last confirmed, and the prices a fresh
         /// confirmation would cover. Drives the confirm-before-send dialog.
         /// </summary>
