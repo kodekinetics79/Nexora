@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using ERP_RFQ_Automation.Deduplication;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.Services.Uom;
@@ -979,6 +980,11 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         }
         else if (request.Action == "reject") occurrence.Classification = LeadOccurrenceClassification.RejectedOrUnprocessable;
         occurrence.Version++;
+        // THE DECISION MUST ALSO CLOSE THE EMAIL MESSAGE IT LEFT WAITING.
+        //
+        // Driven off occurrence.LeadId rather than request.Action, so any future decision arm
+        // that resolves an identity inherits this without being remembered.
+        await ResolveHeldEmailAssemblyAsync(bu, occurrence, ct);
         _db.Add(new LeadIdentityAuditEvent { BusinessUnitId = bu, LeadId = occurrence.LeadId, OccurrenceId = occurrence.Id,
             EventType = "POSSIBLE_MATCH_DECIDED", PayloadJson = JsonSerializer.Serialize(new { request.Action, request.Reason, request.CandidateLeadId, request.ExpectedVersion, verbatimProjectionApplied = verbatimApplied }),
             ActorType = "User", ActorId = actorId, CorrelationId = $"review:{occurrence.Id}", IdempotencyKey = request.IdempotencyKey, OccurredAtUtc = DateTimeOffset.UtcNow });
@@ -999,6 +1005,93 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         if (_routing is null || !leadId.HasValue) return;
         await _routing.RouteLeadAsync(bu, new RouteLeadCommand(leadId.Value, $"match-review:{Hash(idempotencyKey)}",
             $"match-review:{leadId.Value}"), ct);
+    }
+
+    /// <summary>
+    /// Closes the email message that raising this possible match left parked.
+    ///
+    /// <para><b>The one-way gate this removes.</b> When reconciliation classifies a merged
+    /// message as <see cref="LeadOccurrenceClassification.PossibleMatchReviewRequired"/> it
+    /// returns lead id 0, and <c>EmailInquiryLeadAssembler</c> correctly refuses to call that
+    /// success: the message is held at <see cref="EmailInquiryAssemblyStatus.NeedsReview"/> with
+    /// <c>assembly_lead_not_produced</c> and <c>AssembledLeadId</c> null. That half was right.
+    /// The missing half was here — deciding the match resolved the OCCURRENCE and the Lead and
+    /// never touched the assembly, so the message stayed parked with a now-false reason
+    /// ("confirm whether it is the same request") for a question a person had already answered.
+    /// A message could therefore reach neither <c>Leads.EmailIngestsID</c> nor
+    /// <c>AssembledLeadId</c> permanently, no matter what the operator did. Measured on the live
+    /// tenant on 2026-09-03: 8 of business unit 7's messages sat in exactly this state, three of
+    /// them with <c>ParseStatus = Success</c> and every component terminal.</para>
+    ///
+    /// <para><b>Why it keys on the resolved lead and not the action string.</b> Any decision that
+    /// establishes an identity — confirm the duplicate, accept the revision, link, or create a
+    /// new inquiry — ends with <c>occurrence.LeadId</c> set, and every one of them means the same
+    /// thing to the message: it belongs to that Lead now. Keying on the outcome makes a future
+    /// arm inherit this instead of having to remember it, which is the failure mode that put the
+    /// gate here in the first place.</para>
+    ///
+    /// <para><b>Why it writes state here rather than through
+    /// <c>IEmailInquiryAssemblyCoordinator</c>.</b> That coordinator is the intended sole writer,
+    /// but it can only reach this class as an optional constructor dependency — the type has 83
+    /// construction sites — and an optional dependency is how a fix becomes a no-op that still
+    /// tests green. The invariant that actually matters is the transition rule, and that is the
+    /// same pure <see cref="EmailInquiryAssemblyStateMachine"/> the coordinator itself consults.
+    /// Everything below runs inside the caller's transaction, so the Lead decision and the
+    /// message's disposition commit together or not at all.</para>
+    /// </summary>
+    private async Task ResolveHeldEmailAssemblyAsync(
+        long bu, LeadIngestionOccurrence occurrence, CancellationToken ct)
+    {
+        if (occurrence.ExtractionJobId is not { } jobId) return;
+
+        // Job -> component -> assembly. The job's own EmailInquiryComponentId is the ownership
+        // authority (see the assembly fence in ExtractionWorker); the component's back-reference
+        // is a diagnostic and decides nothing.
+        var componentId = await _db.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == bu && x.Id == jobId)
+            .Select(x => x.EmailInquiryComponentId)
+            .FirstOrDefaultAsync(ct);
+        if (componentId is not { } ownedComponentId) return;
+
+        var assemblyId = await _db.Set<EmailInquiryComponent>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == bu && x.Id == ownedComponentId)
+            .Select(x => (long?)x.AssemblyId)
+            .FirstOrDefaultAsync(ct);
+        if (assemblyId is not { } id) return;
+
+        var assembly = await _db.Set<EmailInquiryAssembly>()
+            .FirstOrDefaultAsync(x => x.BusinessUnitId == bu && x.Id == id, ct);
+        if (assembly is null) return;
+
+        // Already resolved by some other path — leave the existing claim alone rather than
+        // rewriting which Lead the message became.
+        if (assembly.AssembledLeadId is not null) return;
+
+        var now = DateTimeOffset.UtcNow;
+        if (occurrence.LeadId is { } resolvedLeadId && resolvedLeadId > 0)
+        {
+            if (!EmailInquiryAssemblyStateMachine.CanTransition(
+                    assembly.Status, EmailInquiryAssemblyStatus.Assembled))
+                return;
+            assembly.Status = EmailInquiryAssemblyStatus.Assembled;
+            assembly.AssembledLeadId = resolvedLeadId;
+            assembly.StatusReason = null;
+            assembly.UpdatedAtUtc = now;
+            return;
+        }
+
+        // No identity was established: the reviewer rejected the document. NoInquiry is the
+        // reviewer's own terminal verdict and is absorbing, which is right — reopening it needs
+        // an actor, a reason and an idempotency key, and this decision carried all three. What
+        // must NOT happen is leaving it at NeedsReview under a reason that asks the operator to
+        // decide something they just decided.
+        if (occurrence.Classification != LeadOccurrenceClassification.RejectedOrUnprocessable) return;
+        if (!EmailInquiryAssemblyStateMachine.CanTransition(
+                assembly.Status, EmailInquiryAssemblyStatus.NoInquiry))
+            return;
+        assembly.Status = EmailInquiryAssemblyStatus.NoInquiry;
+        assembly.StatusReason = EmailInquiryHoldReasons.MatchReviewRejectedDetail;
+        assembly.UpdatedAtUtc = now;
     }
 
     // ================================================================ Identity baseline
