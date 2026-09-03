@@ -429,7 +429,8 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
                 LifecyclePolicy.RequiresReason(aggregateType, x.Code, false)))
             .ToArray();
         return new LifecycleStateView(aggregateType, aggregateId, caseId, reference, currentStatusId,
-            currentCode, version, LifecyclePolicy.IsTerminal(aggregateType, currentCode), options);
+            currentCode, version, LifecyclePolicy.IsTerminal(aggregateType, currentCode), options,
+            LifecyclePolicy.IsReopenable(aggregateType, currentCode));
     }
 
     private async Task<List<SetupMaster>> LoadStatusesAsync(string aggregateType, long businessUnitId, CancellationToken ct)
