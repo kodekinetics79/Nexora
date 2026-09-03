@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
-  Grid, TextField, MenuItem, Select, FormControl, InputLabel,
+  Grid, TextField, MenuItem, Select, FormControl, FormHelperText, InputLabel,
   CircularProgress, Stack, Chip, Divider,
 } from '@mui/material';
 import {
@@ -219,6 +219,19 @@ const QuotedItemsPage: React.FC = () => {
   );
 
   /**
+   * Why this form cannot be completed at all — null when it can.
+   *
+   * A Save button that is offered while a required list is empty is a promise the form cannot
+   * keep: the click produces a validation refusal about a field the reader was never able to
+   * fill. The reason is printed under the button rather than discovered by pressing it.
+   */
+  const cannotBeCompleted = suppliers.length === 0
+    ? 'You need at least one supplier before a quoted price can be recorded against it.'
+    : currencies.length === 0
+      ? 'You need at least one currency set up before a price can be recorded.'
+      : null;
+
+  /**
    * The search here is CLIENT-side, so "no rows" after typing is a filter result and "no rows"
    * before typing is a real absence. They used to render identically, as MUI's bare "No rows".
    */
@@ -313,6 +326,11 @@ const QuotedItemsPage: React.FC = () => {
               </Stack>
               <Grid container spacing={2}>
                 <Grid size={{ xs: 12, sm: 6 }}>
+                  {/* An empty REQUIRED dropdown with no message is the worst of the four states:
+                      the reader has a form they cannot complete and nothing to act on. It is
+                      empty either because nobody has added a supplier yet, or because reading
+                      suppliers needs a permission this screen does not gate on — the form cannot
+                      tell which, so it names both. */}
                   <FormControl fullWidth>
                     <InputLabel>Supplier *</InputLabel>
                     <Select value={formData.supplierId} label="Supplier *" onChange={f('supplierId')}>
@@ -320,6 +338,12 @@ const QuotedItemsPage: React.FC = () => {
                         <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>
                       ))}
                     </Select>
+                    {suppliers.length === 0 && (
+                      <FormHelperText>
+                        No suppliers are available to you. Either none have been added yet, or you
+                        need permission to view suppliers — ask your administrator.
+                      </FormHelperText>
+                    )}
                   </FormControl>
                 </Grid>
                 <Grid size={{ xs: 12, sm: 6 }}>
@@ -363,6 +387,12 @@ const QuotedItemsPage: React.FC = () => {
                         <MenuItem key={c.id} value={c.id}>{c.currencyName} ({c.code})</MenuItem>
                       ))}
                     </Select>
+                    {currencies.length === 0 && (
+                      <FormHelperText>
+                        No currencies are available to you. Either none have been set up yet, or you
+                        need permission to view currencies — ask your administrator.
+                      </FormHelperText>
+                    )}
                   </FormControl>
                 </Grid>
                 <Grid size={{ xs: 12, sm: 4 }}>
@@ -397,13 +427,19 @@ const QuotedItemsPage: React.FC = () => {
           <Button 
             variant="contained" 
             onClick={handleSave} 
-            disabled={createMutation.isPending || updateMutation.isPending}
+            disabled={createMutation.isPending || updateMutation.isPending || cannotBeCompleted !== null}
             startIcon={(createMutation.isPending || updateMutation.isPending) && <CircularProgress size={18} />}
             sx={{ px: 4, borderRadius: 2, fontWeight: 700 }}
           >
             {selectedItem ? 'Update Item' : 'Save Quoted Item'}
           </Button>
         </DialogActions>
+        {/* A disabled control that will not say why is a support ticket. */}
+        {cannotBeCompleted && (
+          <Typography variant="caption" sx={{ px: 3, pb: 2, display: 'block', color: 'text.secondary', textAlign: 'right' }}>
+            {cannotBeCompleted}
+          </Typography>
+        )}
       </Dialog>
     </Box>
   );

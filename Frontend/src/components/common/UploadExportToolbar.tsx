@@ -43,8 +43,15 @@ const UploadExportToolbar: React.FC<Props> = ({
       setLoading('template');
       const res = await onDownloadTemplate();
       downloadBlob(res.data, templateFileName);
-    } catch {
-      enqueueSnackbar('Failed to download template', { variant: 'error' });
+    } catch (error: unknown) {
+      // A bare `catch` discarded the server's own sentence and printed four fixed words. When
+      // the refusal is "your plan does not include exports" — a permanent 403 from
+      // `[RequiresEntitlement]` — that turned a fact the reader could act on into a mystery they
+      // would retry forever. The upload path a few lines below always did this correctly.
+      enqueueSnackbar(
+        presentableErrorMessage(error, 'The template could not be downloaded. Nothing has changed — try again.'),
+        { variant: 'error' },
+      );
     } finally {
       setLoading(null);
     }
@@ -55,8 +62,11 @@ const UploadExportToolbar: React.FC<Props> = ({
       setLoading('export');
       const res = await onExport();
       downloadBlob(res.data, exportFileName);
-    } catch {
-      enqueueSnackbar('Failed to export data', { variant: 'error' });
+    } catch (error: unknown) {
+      enqueueSnackbar(
+        presentableErrorMessage(error, 'The export could not be produced. Nothing has changed — try again.'),
+        { variant: 'error' },
+      );
     } finally {
       setLoading(null);
     }

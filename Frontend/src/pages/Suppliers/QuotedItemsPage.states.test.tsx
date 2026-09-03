@@ -82,3 +82,32 @@ describe('Supplier quoted items — the four states of one grid', () => {
     expect(screen.queryByRole('button', { name: /new quote item/i })).not.toBeInTheDocument();
   });
 });
+
+/**
+ * A dead affordance: this screen gates on Supplier History, but its two REQUIRED dropdowns read
+ * `/api/Supplier` (Suppliers:View) and `/api/Currency` (Currencies:View). A sourcing role granted
+ * one and not the others opened the form to two empty required fields with NO message at all,
+ * and a Save button that could only ever answer with a validation refusal.
+ */
+describe('Recording a price the form cannot actually record', () => {
+  it('explains an empty required list instead of showing a blank dropdown', async () => {
+    getAll.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /new quote item/i }));
+
+    expect(await screen.findByText(/no suppliers are available to you/i)).toBeInTheDocument();
+    expect(screen.getByText(/no currencies are available to you/i)).toBeInTheDocument();
+  });
+
+  it('does not offer a Save it cannot honour, and prints why beside it', async () => {
+    getAll.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /new quote item/i }));
+
+    expect(screen.getByRole('button', { name: /save quoted item/i })).toBeDisabled();
+    expect(screen.getByText(/you need at least one supplier before a quoted price can be recorded/i))
+      .toBeInTheDocument();
+  });
+});
