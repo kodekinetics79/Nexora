@@ -69,6 +69,15 @@ public sealed class RawEmailEvidenceReader : IRawEmailEvidenceReader
             return await MimeMessage.LoadAsync(stream, ct);
         }
 
+        // The compatibility copy itself may already be an object (legacy writers routed to the
+        // object store, or a row the migration job re-pointed): its key carries the digest.
+        if (EvidenceObjectUris.IsObjectUri(ingest.RawEmailPath)
+            && EvidenceObjectUris.TryParseDigest(ingest.RawEmailPath, out var keyDigest))
+        {
+            await using var objectStream = await _evidence.OpenVerifiedReadAsync(ingest.RawEmailPath!, keyDigest, ct);
+            return await MimeMessage.LoadAsync(objectStream, ct);
+        }
+
         if (!string.IsNullOrWhiteSpace(ingest.RawEmailPath) && File.Exists(ingest.RawEmailPath))
         {
             _logger.LogDebug(

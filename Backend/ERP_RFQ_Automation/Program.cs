@@ -166,6 +166,12 @@ if (ERP_RFQ_Automation.Security.MailEndpointPolicy.EnableLoopbackForLocalDevelop
 }
 
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
+// The four legacy document doors write through ONE component whose target is ONE switch
+// (EvidenceStorage:RouteLegacyWritersToObjectStore, default false = today's disk behaviour), and
+// the one-off disk->object migration job behind its own switch. docs/design/evidence-object-store-cutover.md
+builder.Services.AddSingleton<ILegacyDocumentStore, LegacyDocumentStore>();
+builder.Services.AddScoped<LegacyEvidenceMigrationJob>();
+builder.Services.AddHostedService<LegacyEvidenceMigrationHostedService>();
 builder.Services.Configure<S3EvidenceStorageOptions>(
     builder.Configuration.GetSection(S3EvidenceStorageOptions.SectionName));
 builder.Services.Configure<MalwareVerdictPolicyOptions>(
@@ -308,6 +314,16 @@ builder.Services.AddScoped<IUserGroupRepository, UserGroupRepository>();
 builder.Services.AddScoped<IBusinessUnitRepository, BusinessUnitRepository>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IAuthRepository, AuthRepository>();
+// Per-request tenant token re-check + same-process cache eviction. One class, two interfaces,
+// so a rotation site and the validator share one cache entry by construction. SINGLETON, and
+// it opens its own scope for the one database read: resolving the request's scoped DbContext
+// from OnTokenValidated would freeze the request's tenant context at "no tenant" (see the
+// class remarks).
+builder.Services.AddSingleton<ERP_RFQ_Automation.Security.TenantSessionValidator>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.Security.ITenantSessionValidator>(
+    services => services.GetRequiredService<ERP_RFQ_Automation.Security.TenantSessionValidator>());
+builder.Services.AddSingleton<ERP_RFQ_Automation.Security.ITenantSessionCache>(
+    services => services.GetRequiredService<ERP_RFQ_Automation.Security.TenantSessionValidator>());
 builder.Services.AddPlatformEntitlements();
 builder.Services.AddTenantActivationPolicy();
 builder.Services.AddPlatformBilling(builder.Configuration);
@@ -429,7 +445,6 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ILocalRelated
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ILeadLineCommercialResolutionService, ERP_RFQ_Automation.Inventory.Commercial.LeadLineCommercialResolutionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ICommercialLineResolutionApplicationService, ERP_RFQ_Automation.Inventory.Commercial.CommercialLineResolutionApplicationService>();
 builder.Services.AddScoped<ILifecycleApplicationService, LifecycleApplicationService>();
-builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddCommercialFinanceOutboxDispatcher(builder.Configuration);
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
 builder.Services.AddScoped<ICustomFieldApplicationService, CustomFieldApplicationService>();
@@ -650,10 +665,39 @@ builder.Services.AddAuthentication(options =>
         // resolved to the client-supplied value. AuthRepository now emits the matching claim.
         NameClaimType = System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Name,
         // Default ClockSkew is FIVE MINUTES, which is added on top of the 60-minute token
-        // lifetime — the honest revocation window was therefore up to 65 minutes. Real
-        // revocation needs a SecurityStamp/TokenVersion re-check (backlog item 2); this
-        // shrinks the part of the window that is pure configuration.
+        // lifetime — the honest revocation window was therefore up to 65 minutes. This shrinks
+        // the part of the window that is pure configuration; the OnTokenValidated hook below is
+        // the real revocation (formerly backlog item 2).
         ClockSkew = TimeSpan.FromSeconds(30)
+    };
+    // Live account re-check on every request (docs/design/token-revocation.md). Mirrors the
+    // platform scheme in PlatformAuthExtensions: a deactivated, demoted or re-credentialed
+    // account is refused on its NEXT request instead of keeping full access for the rest of the
+    // token's 60-minute life. Fails closed if the check itself fails.
+    options.Events = new JwtBearerEvents
+    {
+        OnTokenValidated = async context =>
+        {
+            try
+            {
+                var validator = context.HttpContext.RequestServices
+                    .GetRequiredService<ERP_RFQ_Automation.Security.ITenantSessionValidator>();
+                if (context.Principal is null
+                    || !await validator.IsCurrentAsync(context.Principal, context.HttpContext.RequestAborted))
+                    context.Fail("The account behind this token is no longer valid.");
+            }
+            catch (OperationCanceledException) when (context.HttpContext.RequestAborted.IsCancellationRequested)
+            {
+                context.Fail("Tenant session validation was cancelled.");
+            }
+            catch (Exception exception)
+            {
+                context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger("ERP_RFQ_Automation.Security.TenantSessionValidator")
+                    .LogWarning(exception, "Tenant session validation failed; the request is refused.");
+                context.Fail("Tenant session validation failed.");
+            }
+        }
     };
 })
 // Second JWT scheme for the Platform-Owner plane (audience nexora-platform, scope=platform).

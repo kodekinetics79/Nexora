@@ -463,4 +463,64 @@ public sealed class StrandedPendingSweepTests : IDisposable
         public Task<bool> TryDeleteAsync(string storagePath, CancellationToken ct = default)
             => throw new InvalidOperationException("The sweep tests never delete storage.");
     }
+
+    // ---- raw mail in the object store (docs/design/evidence-object-store-cutover.md) ------------
+
+    /// <summary>
+    /// The recovery sweep reads the raw message back through the one legacy-document reader, so
+    /// an ingest whose RawEmailPath is an OBJECT URI — written with the switch on, or re-pointed by
+    /// the migration job — is recovered exactly like one whose copy is on disk. The store is the
+    /// in-memory evidence fake; nothing exists on disk for this row.
+    /// </summary>
+    [Fact]
+    public async Task AStrandedRowWhoseRawCopyIsAnObjectIsRecoveredThroughTheObjectStore()
+    {
+        await SeedMailboxAsync();
+        var evidence = new ERP_RFQ_Automation.Tests.Support.InMemoryEvidenceStorage();
+        var store = new ERP_RFQ_Automation.Infrastructure.Storage.LegacyDocumentStore(
+            new TempStorage(_temp), evidence, routeToObjectStore: true);
+        var stored = await store.StoreRawMailAsync(Tenant, RawEmailBytes("object-1@sender.example",
+            "Please quote 40 nos cable tray 300mm, delivery Jebel Ali."));
+        var ingestId = await SeedStrandedIngestAsync(
+            "object-1@sender.example", age: OlderThanThreshold, rawEmailPath: stored.FilePath);
+        var ingestion = new RecordingIntake();
+        var service = CreateService(store);
+
+        await using var ctx = _db.ContextFor(null);
+        var recovered = await service.SweepStrandedPendingIngestsAsync(
+            ctx, ingestion, new StubLlm(), Tenant, DateTime.UtcNow);
+
+        Assert.Equal(1, recovered);
+        Assert.Single(ingestion.Calls);
+        var row = await ctx.EmailIngests.AsNoTracking().SingleAsync(e => e.Id == ingestId);
+        Assert.Equal("Queued", row.ParseStatus);
+        Assert.Equal(stored.FilePath, row.RawEmailPath);
+    }
+
+    private EmailService CreateService(ERP_RFQ_Automation.Infrastructure.Storage.ILegacyDocumentStore legacyDocuments)
+    {
+        Directory.CreateDirectory(_temp);
+        return new EmailService(
+            context: _db.ContextFor(null),
+            env: new StubEnvironment(_temp),
+            logger: new NoopLogger<EmailService>(),
+            llmService: new StubLlm(),
+            scopeFactory: new UnusedScopeFactory(),
+            configuration: new ConfigurationBuilder().Build(),
+            storage: new TempStorage(_temp),
+            legacyDocuments: legacyDocuments);
+    }
+
+    private static byte[] RawEmailBytes(string messageId, string body)
+    {
+        var message = new MimeMessage();
+        message.From.Add(new MailboxAddress("Ahmed", "ahmed@alnoortrading.ae"));
+        message.To.Add(new MailboxAddress("Intake", "inbox1@example.com"));
+        message.Subject = "RFQ";
+        message.MessageId = messageId;
+        message.Body = new BodyBuilder { TextBody = body }.ToMessageBody();
+        using var buffer = new MemoryStream();
+        message.WriteTo(buffer);
+        return buffer.ToArray();
+    }
 }

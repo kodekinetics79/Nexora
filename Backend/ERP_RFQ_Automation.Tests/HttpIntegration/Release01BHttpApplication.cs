@@ -144,7 +144,12 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         });
     }
 
-    public string Token(long roleId, long? tenantId, long userId = 83_001)
+    /// <param name="securityStamp">
+    /// When null the token is shaped like one minted BEFORE the SecurityStamp release — no
+    /// <c>sst</c> claim — which the validator accepts until <c>Auth:RequireSecurityStamp</c> is
+    /// turned on. Pass the account's current stamp to mint a token the validator re-checks.
+    /// </param>
+    public string Token(long roleId, long? tenantId, long userId = 83_001, string? securityStamp = null)
     {
         var claims = new List<Claim>
         {
@@ -154,6 +159,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         };
         if (tenantId.HasValue)
             claims.Add(new Claim("businessUnitId", tenantId.Value.ToString()));
+        if (securityStamp is not null)
+            claims.Add(new Claim(ERP_RFQ_Automation.Security.SecurityStamps.ClaimType, securityStamp));
 
         var credentials = new SigningCredentials(
             new SymmetricSecurityKey(Encoding.UTF8.GetBytes(JwtKey)),
@@ -166,6 +173,44 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             expires: DateTime.UtcNow.AddMinutes(10),
             credentials);
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    // ---- SecurityStamp (docs/design/token-revocation.md) -------------------------------------
+
+    /// <summary>A throwaway active user in <paramref name="tenantId"/>, returned with the stamp
+    /// the entity initialiser gave it — the same way every production row got one from the
+    /// migration's per-row default.</summary>
+    public async Task<(long Id, string Stamp)> CreateUserAsync(long tenantId, long roleId, string email)
+    {
+        await using var db = Context();
+        var user = User(0, tenantId, roleId, "Revocation", email);
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        return (user.Id, user.SecurityStamp);
+    }
+
+    /// <summary>Writes the account the way ANOTHER instance's deactivate would: straight to the
+    /// row, with no eviction in this process's cache.</summary>
+    public async Task DeactivateUserDirectlyAsync(long userId)
+    {
+        await using var db = Context();
+        await db.Users.IgnoreQueryFilters().Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(u => u.IsActive, (bool?)false)
+                .SetProperty(u => u.SecurityStamp, ERP_RFQ_Automation.Security.SecurityStamps.NewStamp()));
+    }
+
+    public async Task RemoveUserAsync(long userId)
+    {
+        await using var db = Context();
+        await db.Users.IgnoreQueryFilters().Where(u => u.Id == userId).ExecuteDeleteAsync();
+    }
+
+    /// <summary>Same-process eviction, through the same interface the rotation sites use.</summary>
+    public void EvictTenantSession(long userId)
+    {
+        using var scope = Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<ERP_RFQ_Automation.Security.ITenantSessionCache>().Evict(userId);
     }
 
     public void CorruptTenantAEvidence() =>

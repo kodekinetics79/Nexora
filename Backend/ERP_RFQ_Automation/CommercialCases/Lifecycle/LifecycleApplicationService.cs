@@ -162,16 +162,14 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
     /// Records the dedicated lead→RFQ promotion event alongside (never instead of) the generic
     /// CONVERTED_TO_RFQ status transition, in the caller's already-open transaction.
     ///
-    /// <para>The generic <c>commercial-case.lead.statustransitioned</c> outbox message says only
-    /// that a status changed; a consumer that cares that an RFQ now exists for the lead had to
-    /// parse reason strings to find out which RFQ. This event carries the facts of the promotion
-    /// by name: the lead, the RFQ it became, the lead revision that was evaluated
-    /// (<c>Lead.CurrentRevisionId</c>), the actor and the correlation id.</para>
+    /// <para>The generic <c>StatusTransitioned</c> event says only that a status changed; a reader
+    /// that cares that an RFQ now exists for the lead had to parse reason strings to find out
+    /// which RFQ. This event carries the facts of the promotion by name: the lead, the RFQ it
+    /// became (<c>RequestReference = rfq-{id}</c>), the actor and the correlation id.</para>
     ///
-    /// <para>It is written as its own <see cref="CommercialLifecycleEvent"/> row (the outbox is
-    /// 1:1 with lifecycle events, so it cannot share the transition's row) and therefore bumps
-    /// the lead's LifecycleVersion again — the event stream is append-only and every appended
-    /// event advances the aggregate version, which the unique
+    /// <para>It is written as its own <see cref="CommercialLifecycleEvent"/> row and therefore
+    /// bumps the lead's LifecycleVersion again — the event stream is append-only and every
+    /// appended event advances the aggregate version, which the unique
     /// (BusinessUnitId, AggregateType, AggregateId, AggregateVersion) index insists on.</para>
     ///
     /// <para>Idempotent per lead via the (BusinessUnitId, IdempotencyKey) unique index and the
@@ -234,36 +232,10 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         _db.CommercialLifecycleEvents.Add(lifecycleEvent);
         await _db.SaveChangesAsync(ct);
 
-        var payload = JsonSerializer.Serialize(new
-        {
-            lifecycleEvent.Id,
-            BusinessUnitId = businessUnitId,
-            lead.CommercialCaseId,
-            lead.CommercialCaseReference,
-            LeadId = leadId,
-            RfqId = rfqId,
-            // The lead revision whose facts this conversion evaluated. Null on legacy leads
-            // that predate revision tracking — stated as null, never invented.
-            LeadRevisionId = lead.CurrentRevisionId,
-            ActorId = actor.ActorId.Trim(),
-            ActorSource = actor.ActorSource.Trim(),
-            OccurredOn = now,
-            CorrelationId = correlationId.Trim()
-        });
-        _db.LifecycleOutboxMessages.Add(new LifecycleOutboxMessage
-        {
-            BusinessUnitId = businessUnitId,
-            LifecycleEvent = lifecycleEvent,
-            // Named event type (hyphenated, matching the consumer contract) rather than the
-            // ToLowerInvariant() concatenation the generic transition derives — a consumer
-            // routes on this literal string.
-            EventType = "commercial-case.lead.promoted-to-rfq",
-            Payload = payload,
-            SchemaVersion = 1,
-            OccurredOn = now,
-            AvailableOn = now
-        });
-        await _db.SaveChangesAsync(ct);
+        // No outbox row. lifecycle_outbox_messages never had a consumer — 71 rows sat pending in
+        // production with AttemptCount 0 — so the producer was retired rather than a dispatcher
+        // invented to mark them processed (docs/design/lifecycle-outbox.md). The
+        // CommercialLifecycleEvent above IS the durable record of the promotion.
     }
 
     private async Task<LifecycleTransitionResult> ExecuteAsync(
@@ -396,39 +368,9 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         _db.CommercialLifecycleEvents.Add(lifecycleEvent);
         await _db.SaveChangesAsync(ct);
 
-        var payload = JsonSerializer.Serialize(new
-        {
-            lifecycleEvent.Id,
-            lifecycleEvent.BusinessUnitId,
-            lifecycleEvent.CommercialCaseId,
-            lifecycleEvent.CommercialCaseReference,
-            lifecycleEvent.AggregateType,
-            lifecycleEvent.AggregateId,
-            lifecycleEvent.EventType,
-            lifecycleEvent.PreviousStatusCode,
-            lifecycleEvent.NewStatusCode,
-            lifecycleEvent.AggregateVersion,
-            lifecycleEvent.ActorId,
-            lifecycleEvent.ActorSource,
-            lifecycleEvent.OccurredOn,
-            lifecycleEvent.ReasonCode,
-            lifecycleEvent.ReasonNotes,
-            lifecycleEvent.PolicyVersion,
-            lifecycleEvent.Source,
-            lifecycleEvent.CorrelationId,
-            lifecycleEvent.RequestReference
-        });
-        _db.LifecycleOutboxMessages.Add(new LifecycleOutboxMessage
-        {
-            BusinessUnitId = businessUnitId,
-            LifecycleEvent = lifecycleEvent,
-            EventType = $"commercial-case.{aggregateType.ToLowerInvariant()}.{lifecycleEvent.EventType.ToLowerInvariant()}",
-            Payload = payload,
-            SchemaVersion = 1,
-            OccurredOn = now,
-            AvailableOn = now
-        });
-        await _db.SaveChangesAsync(ct);
+        // No outbox row — see RecordLeadPromotedToRfqInCurrentTransactionAsync and
+        // docs/design/lifecycle-outbox.md. The event row above is the record; nothing consumed
+        // the second copy.
         return ToResult(lifecycleEvent, false);
     }
 

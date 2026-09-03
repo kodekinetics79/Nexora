@@ -142,6 +142,8 @@ public sealed class TenantPersonalDataEraser(
                     .SetProperty(u => u.LastName, ErasedName)
                     .SetProperty(u => u.Email, $"erased-{id}@{ErasedEmailDomain}")
                     .SetProperty(u => u.PasswordHash, unusable)
+                    // An erased account has no credential; it must have no live token either.
+                    .SetProperty(u => u.SecurityStamp, ERP_RFQ_Automation.Security.SecurityStamps.NewStamp())
                     .SetProperty(u => u.ImageUrl, string.Empty)
                     .SetProperty(u => u.Timezone, (string?)null)
                     .SetProperty(u => u.Region, (string?)null)

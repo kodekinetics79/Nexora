@@ -484,4 +484,69 @@ public sealed class AttachmentDownloadSecurityTests : IDisposable
         if (Directory.Exists(_root))
             Directory.Delete(_root, recursive: true);
     }
+
+    // ---- object-store rows (docs/design/evidence-object-store-cutover.md) ---------------------
+
+    /// <summary>
+    /// A Lead attachment whose row names an OBJECT and records its digest — what the four legacy
+    /// doors write once the switch is on, and what the migration job re-points every disk row
+    /// to — is served through the object store by the application's DI constructor, which has
+    /// no disk fallback at all. Before this branch such a row answered 404 in production.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAttachment_ServesLeadRowsThatNameAnObjectThroughTheObjectStore()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        Seed.Lead(context, 101, 1);
+        const string payload = "attachment routed to the object store";
+        var evidence = new ERP_RFQ_Automation.Tests.Support.InMemoryEvidenceStorage();
+        var stored = await evidence.WriteImmutableAsync(1, "legacy", Sha256(payload), ".txt", Encoding.UTF8.GetBytes(payload));
+        context.Attachments.Add(Attachment(1001, 101, stored.StorageUri, Sha256(payload)));
+        await context.SaveChangesAsync();
+        var controller = ObjectStoreController(context, evidence, businessUnitId: 1);
+
+        var result = await controller.DownloadAttachment(1001, CancellationToken.None);
+
+        var file = Assert.IsType<FileStreamResult>(result);
+        await using (file.FileStream)
+        using (var reader = new StreamReader(file.FileStream))
+            Assert.Equal(payload, await reader.ReadToEndAsync());
+        Assert.Equal(FileController.IntegrityVerified,
+            controller.Response.Headers[FileController.IntegrityHeader].ToString());
+
+        // Tenant boundary first, verifying read second: the neighbour still gets nothing.
+        var neighbour = ObjectStoreController(context, evidence, businessUnitId: 2);
+        Assert.IsType<NotFoundResult>(await neighbour.DownloadAttachment(1001, CancellationToken.None));
+
+        // And a tampered object is refused, not served.
+        evidence.Tamper(stored.StorageUri, Encoding.UTF8.GetBytes("edited after capture"));
+        var tampered = await ObjectStoreController(context, evidence, businessUnitId: 1)
+            .DownloadAttachment(1001, CancellationToken.None);
+        Assert.Equal(StatusCodes.Status409Conflict, Assert.IsType<ObjectResult>(tampered).StatusCode);
+    }
+
+    private static FileController ObjectStoreController(
+        ErpRfqAutomationContext context, IEvidenceObjectStorage evidence, long businessUnitId)
+    {
+        var controller = new FileController(
+            context,
+            new LocalFileStorage(Path.Combine(Path.GetTempPath(), "nexora-unused-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
+            evidence,
+            new PermitCommercialAccessContext(businessUnitId),
+            new AllowAuthorizationService(),
+            NullLogger<FileController>.Instance)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(
+                        new[] { new Claim("businessUnitId", businessUnitId.ToString()) }, "test"))
+                }
+            },
+            ProblemDetailsFactory = new TestProblemDetailsFactory()
+        };
+        return controller;
+    }
 }

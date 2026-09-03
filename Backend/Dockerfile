@@ -176,6 +176,29 @@ RUN set -eux; L=/usr/lib/x86_64-linux-gnu; mkdir -p /app/x64; \
     ln -sf "$L/liblept.so.5"      /app/x64/libleptonica-1.82.0.so; \
     ln -sf "$L/libdl.so.2"        "$L/libdl.so"; \
     test -e /app/x64/libtesseract50.so && test -e /app/x64/libleptonica-1.82.0.so
+# NON-ROOT RUNTIME, GATED. mcr.microsoft.com/dotnet/aspnet:8.0 ships user `app` (uid 1654). The
+# process owns nothing it does not need to: /app is root-owned and read-only to it, except the
+# two directories it genuinely writes — /app/wwwroot (user and product images, written under
+# WebRootPath by UserController/ProductRepository, never served: UseStaticFiles is deliberately
+# absent) and, while a local storage root still exists, the evidence root under /var/data.
+#
+# WHY A BUILD ARG AND NOT A BARE `USER app`. Every merge to main auto-deploys
+# (render.yaml autoDeployTrigger: checksPass). A Render persistent disk is mounted at runtime,
+# root-owned, OVER whatever this image put at /var/data — so the chown below is inert under a
+# mount, LocalFileStorage's startup write probe fails with EACCES, and the container refuses to
+# boot. With the disk still attached that is not loud-but-safe, it is a production outage on
+# merge. So the default stays root, and the cutover is an explicit build argument:
+#
+#     docker build --build-arg NEXORA_RUNTIME_USER=app ...   (or the Render dashboard build arg)
+#
+# to be set ONLY after the legacy evidence migration has drained, Storage__EnforcePersistentMount
+# is off, Storage__RootPath points at /tmp/nexora/uploads and the disk is detached — render.yaml
+# step 4 on the `disk:` block, docs/design/evidence-object-store-cutover.md §5. The mkdir/chown is
+# unconditional so the arg is the only thing that changes between the two images.
+ARG NEXORA_RUNTIME_USER=root
+RUN mkdir -p /app/wwwroot /var/data/nexora/uploads /tmp/nexora/uploads \
+    && chown -R app:app /app/wwwroot /var/data/nexora /tmp/nexora
+USER ${NEXORA_RUNTIME_USER}
 # Containers listen on 8080 by convention; the host maps it to 443/80.
 ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production

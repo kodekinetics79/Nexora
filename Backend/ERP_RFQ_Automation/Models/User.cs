@@ -49,6 +49,15 @@ public partial class User
     public bool? IsActive { get; set; }
 
     /// <summary>
+    /// Revocation handle for issued tokens — see <see cref="ERP_RFQ_Automation.Security.SecurityStamps"/>.
+    /// Rotated on deactivation, role change, password change/reset, activation and erasure; a
+    /// token whose <c>sst</c> claim no longer matches is refused on its next request. Initialised
+    /// here rather than by a database default so every construction path (controllers,
+    /// provisioning, seeders, tests on the portable lane) gets a value without knowing about it.
+    /// </summary>
+    public string SecurityStamp { get; set; } = ERP_RFQ_Automation.Security.SecurityStamps.NewStamp();
+
+    /// <summary>
     /// UTC instant the user was last deactivated (IsActive flipped true→false); cleared on
     /// reactivation. Enables a reproducible seats meter: a user occupied a seat in a billing
     /// period when CreatedOn &lt; PeriodEnd AND (IsActive OR DeactivatedAtUtc &gt;= PeriodEnd).

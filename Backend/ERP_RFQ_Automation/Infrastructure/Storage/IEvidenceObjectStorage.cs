@@ -427,9 +427,15 @@ public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
         // A separate zone matches neither swap arm, so ZoneKeysFor returns only the exact key
         // and the collision cannot occur. The whitelist is not weakened: this is one more named
         // constant, not an opening for arbitrary paths.
-        if (zone is not ("quarantine" or "cleared" or "raw-mail"))
+        //
+        // "legacy" is the FOURTH zone, for the same reason: compatibility copies written by the
+        // pre-ledger doors (RFQ_Attachments, Manual_Attachments, Leads_Folder_Attachments, the
+        // old Extraction inputs) were never inspected, so "cleared" would be a lie and
+        // "quarantine" would let a document purge delete the copy the lead screen still lists.
+        // See LegacyDocumentStore.LegacyZone and docs/design/evidence-object-store-cutover.md.
+        if (zone is not ("quarantine" or "cleared" or "raw-mail" or "legacy"))
             throw new ArgumentException(
-                "Evidence zone must be quarantine, cleared or raw-mail.", nameof(zone));
+                "Evidence zone must be quarantine, cleared, raw-mail or legacy.", nameof(zone));
         if (sha256.Length != 64 || sha256.Any(c => !Uri.IsHexDigit(c)) || sha256 != sha256.ToLowerInvariant())
             throw new ArgumentException("A lowercase SHA-256 digest is required.", nameof(sha256));
     }

@@ -23,14 +23,15 @@ public sealed class LifecycleApplicationServiceTests
         context.ChangeTracker.Clear();
         var lead = await context.Leads.SingleAsync(x => x.Id == 101);
         var lifecycleEvent = await context.CommercialLifecycleEvents.SingleAsync();
-        var outbox = await context.LifecycleOutboxMessages.SingleAsync();
+        // The event row is the record. No second copy goes to the retired outbox
+        // (docs/design/lifecycle-outbox.md) — this fails against the old producer.
+        Assert.Empty(await context.LifecycleOutboxMessages.ToListAsync());
         Assert.Equal(501, lead.LeadStatusId);
         Assert.Equal(2, lead.LifecycleVersion);
         Assert.Equal(reference, lead.CommercialCaseReference);
         Assert.Equal("PENDING_IDENTIFICATION", lifecycleEvent.NewStatusCode);
         Assert.Equal(LifecyclePolicy.Version, lifecycleEvent.PolicyVersion);
-        Assert.Equal(lifecycleEvent.Id, outbox.LifecycleEventId);
-        Assert.Contains(reference, outbox.Payload);
+        Assert.Equal(reference, lifecycleEvent.CommercialCaseReference);
         Assert.Equal(result.EventId, lifecycleEvent.Id);
     }
 
@@ -53,7 +54,7 @@ public sealed class LifecycleApplicationServiceTests
         Assert.True(replay.Replayed);
         Assert.Equal(first.EventId, replay.EventId);
         Assert.Equal(1, await context.CommercialLifecycleEvents.CountAsync());
-        Assert.Equal(1, await context.LifecycleOutboxMessages.CountAsync());
+        Assert.Equal(0, await context.LifecycleOutboxMessages.CountAsync());
     }
 
     [Fact]
@@ -85,7 +86,7 @@ public sealed class LifecycleApplicationServiceTests
         await Service(context).TransitionLeadAsync(
             74, 104, Actor(), Command("QUALIFIED", 1, "lead-104-qualified"), false, default);
         Assert.Single(context.CommercialLifecycleEvents);
-        Assert.Single(context.LifecycleOutboxMessages);
+        Assert.Empty(context.LifecycleOutboxMessages);
         Assert.Equal(2, context.Leads.Single().LifecycleVersion);
     }
 
@@ -279,7 +280,7 @@ public sealed class LifecycleApplicationServiceTests
         await Assert.ThrowsAsync<LifecycleConflictException>(() => service.TransitionLeadAsync(
             78, 108, Actor(), Command("PENDING_IDENTIFICATION", 1, "stale"), false, default));
         Assert.Equal(1, await context.CommercialLifecycleEvents.CountAsync());
-        Assert.Equal(1, await context.LifecycleOutboxMessages.CountAsync());
+        Assert.Equal(0, await context.LifecycleOutboxMessages.CountAsync());
     }
 
     [Fact]
@@ -451,52 +452,6 @@ public sealed class LifecycleApplicationServiceTests
 
         Assert.Equal("RECEIVED", state.CurrentStatusCode);
         Assert.Equal(new[] { "CANCELLED", "PENDING_IDENTIFICATION", "QUALIFIED" }, state.AllowedTransitions.Select(x => x.StatusCode));
-    }
-
-    [Fact]
-    public async Task OutboxLeaseCanBeCompletedOnlyByOwningWorker()
-    {
-        using var db = new TestDb();
-        await using var context = db.ContextFor(84);
-        Seed.Lead(context, 113, 84);
-        Status(context, 520, 84, "LeadStatus", "PENDING_IDENTIFICATION", "Pending Identification");
-        await context.SaveChangesAsync();
-        await Service(context).TransitionLeadAsync(84, 113, Actor(),
-            Command("PENDING_IDENTIFICATION", 1, "lead-113-pending"), false, default);
-        var store = new LifecycleOutboxStore(context);
-
-        var claimed = Assert.Single(await store.ClaimAsync("worker-a", 10, TimeSpan.FromMinutes(1), default));
-        await Assert.ThrowsAsync<LifecycleConflictException>(() => store.CompleteAsync(claimed.Id, "worker-b", default));
-        await store.CompleteAsync(claimed.Id, "worker-a", default);
-
-        context.ChangeTracker.Clear();
-        var message = await context.LifecycleOutboxMessages.SingleAsync();
-        Assert.NotNull(message.ProcessedOn);
-        Assert.Equal(1, message.AttemptCount);
-        Assert.Null(message.LockedBy);
-        Assert.Empty(await store.ClaimAsync("worker-a", 10, TimeSpan.FromMinutes(1), default));
-    }
-
-    [Fact]
-    public async Task RepeatedOutboxFailureDeadLettersAtConfiguredLimit()
-    {
-        using var db = new TestDb();
-        await using var context = db.ContextFor(85);
-        Seed.Lead(context, 114, 85);
-        Status(context, 521, 85, "LeadStatus", "PENDING_IDENTIFICATION", "Pending Identification");
-        await context.SaveChangesAsync();
-        await Service(context).TransitionLeadAsync(85, 114, Actor(),
-            Command("PENDING_IDENTIFICATION", 1, "lead-114-pending"), false, default);
-        var store = new LifecycleOutboxStore(context);
-
-        var claimed = Assert.Single(await store.ClaimAsync("worker-c", 1, TimeSpan.FromMinutes(1), default));
-        await store.FailAsync(claimed.Id, "worker-c", "downstream rejected payload", 1, default);
-
-        context.ChangeTracker.Clear();
-        var message = await context.LifecycleOutboxMessages.SingleAsync();
-        Assert.NotNull(message.DeadLetteredOn);
-        Assert.Equal("downstream rejected payload", message.LastError);
-        Assert.Empty(await store.ClaimAsync("worker-c", 1, TimeSpan.FromMinutes(1), default));
     }
 
     private static LifecycleApplicationService Service(ErpRfqAutomationContext context) => new(context);

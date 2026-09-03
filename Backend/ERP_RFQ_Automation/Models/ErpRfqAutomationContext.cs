@@ -1757,6 +1757,20 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasColumnName("Password_Hash");
             entity.Property(e => e.Region).HasMaxLength(100);
             entity.Property(e => e.RoleId).HasColumnName("RoleID");
+            // Token revocation handle (docs/design/token-revocation.md). NOT NULL; backfilled per
+            // row by 20260902120000_UserSecurityStamp; nexora_identity_app holds UPDATE on it so
+            // password reset and activation can rotate it.
+            // The database default is for raw-SQL inserts only; the entity initialiser always
+            // supplies the value. Built-in gen_random_uuid(), not pgcrypto: not every database
+            // path has the extension. PostgreSQL ONLY -- the expression is emitted verbatim into
+            // CREATE TABLE, and SQLite rejects the `::` cast while PARSING the schema, which takes
+            // the whole portable lane down rather than just this column.
+            entity.Property(e => e.SecurityStamp).HasMaxLength(64).IsRequired();
+            if (Database.IsNpgsql())
+            {
+                entity.Property(e => e.SecurityStamp)
+                    .HasDefaultValueSql("replace(gen_random_uuid()::text, '-', '')");
+            }
             entity.Property(e => e.TeamId).HasColumnName("TeamID");
             entity.Property(e => e.Timezone).HasMaxLength(50);
             entity.Property(e => e.UserGroupId).HasColumnName("UserGroupID");

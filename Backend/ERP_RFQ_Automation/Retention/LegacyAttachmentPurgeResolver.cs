@@ -44,6 +44,11 @@ public sealed class LegacyAttachmentPurgeResolver(ErpRfqAutomationContext db, IF
     public const string ResultAlreadyAbsent = "ALREADY_ABSENT";
     public const string ResultUnresolved = "LEGACY_COPY_UNRESOLVED";
     public const string ResultRefused = "REFUSED_UNSAFE_PATH";
+    /// <summary>The copy lives in the object store (legacy writers routed there, or a row the
+    /// migration job re-pointed). Attachments records no object version, and a versioned bucket
+    /// reclaims nothing without one, so it is reported rather than pretended. The tenant purge's
+    /// prefix sweep takes every version; a per-document purge of these needs a version column.</summary>
+    public const string ResultObjectStoreCopy = "OBJECT_STORE_COPY";
 
     /// <summary>
     /// Resolves the legacy copies of one purged document. <paramref name="dryRun"/> reports
@@ -90,6 +95,13 @@ public sealed class LegacyAttachmentPurgeResolver(ErpRfqAutomationContext db, IF
         long freed = 0;
         foreach (var attachment in matches)
         {
+            if (EvidenceObjectUris.IsObjectUri(attachment.FilePath))
+            {
+                outcomes.Add(new LegacyCopyOutcome(attachment.Id, attachment.FilePath, ResultObjectStoreCopy, 0));
+                unresolved++;
+                continue;
+            }
+
             string resolved;
             try
             {

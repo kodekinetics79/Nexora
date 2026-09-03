@@ -670,4 +670,59 @@ public sealed class PlatformTenantUserManagementTests
         Assert.IsType<NotFoundResult>(
             (await Controller(context).ListRoles(9_999, CancellationToken.None)).Result);
     }
+
+    // ==== token revocation (docs/design/token-revocation.md) ====================================
+
+    [Fact]
+    public async Task Deactivating_a_user_rotates_the_token_revocation_stamp()
+    {
+        using var db = new TestDb();
+        var acme = await SeedTenantAsync(db, "acme");
+        await using var context = db.ContextFor(null);
+        var created = await CreateMemberAsync(db, acme, "leaver@acme.example");
+        var before = created.SecurityStamp;
+
+        var result = await Controller(context).DeactivateUser(acme.TenantId, created.Id,
+            new TenantUserStatusChangeRequest { Reason = "Left the company." }, CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result.Result);
+
+        await using var verification = db.ContextFor(null);
+        var row = await verification.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == created.Id);
+        Assert.False(row.IsActive);
+        Assert.NotEqual(before, row.SecurityStamp);
+    }
+
+    [Fact]
+    public async Task Changing_a_users_role_rotates_the_token_revocation_stamp()
+    {
+        using var db = new TestDb();
+        var acme = await SeedTenantAsync(db, "acme");
+        await using var context = db.ContextFor(null);
+        var created = await CreateMemberAsync(db, acme, "promoted@acme.example");
+        var before = created.SecurityStamp;
+
+        var result = await Controller(context).ChangeUserRole(acme.TenantId, created.Id,
+            new ChangeTenantUserRoleRequest { RoleId = acme.ManagerRoleId, Reason = "Promoted." },
+            CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result.Result);
+
+        await using var verification = db.ContextFor(null);
+        var row = await verification.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == created.Id);
+        Assert.Equal(acme.ManagerRoleId, row.RoleId);
+        Assert.NotEqual(before, row.SecurityStamp);
+    }
+
+    private static async Task<User> CreateMemberAsync(TestDb db, Fixture tenant, string email)
+    {
+        await using var context = db.ContextFor(null);
+        var user = new User
+        {
+            Buid = tenant.BusinessUnitId, RoleId = tenant.MemberRoleId, FirstName = "Member", LastName = "User",
+            Email = email, PasswordHash = "not-used", ImageUrl = "n/a", IsActive = true,
+            CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        };
+        context.Users.Add(user);
+        await context.SaveChangesAsync();
+        return user;
+    }
 }

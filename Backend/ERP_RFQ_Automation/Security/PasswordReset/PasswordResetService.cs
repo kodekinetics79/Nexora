@@ -60,6 +60,8 @@ public sealed class PasswordResetService : IPasswordResetService
     private readonly ILogger<PasswordResetService> _logger;
     private readonly TimeProvider _timeProvider;
 
+    private readonly ITenantSessionCache? _sessions;
+
     public PasswordResetService(
         ErpRfqAutomationContext db,
         IEmailSender emailSender,
@@ -67,8 +69,10 @@ public sealed class PasswordResetService : IPasswordResetService
         IOptions<NotificationsOptions> notifications,
         IOptions<TenantOnboardingOptions> options,
         ILogger<PasswordResetService> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ITenantSessionCache? sessions = null)
     {
+        _sessions = sessions;
         _db = db;
         _emailSender = emailSender;
         _loginThrottle = loginThrottle;
@@ -451,8 +455,13 @@ public sealed class PasswordResetService : IPasswordResetService
                 .Where(u => u.Id == accountId && u.IsActive == true)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(u => u.PasswordHash, passwordHash)
+                    // A reset ends every session minted under the old credential. Runs as
+                    // nexora_identity_app, which holds UPDATE("SecurityStamp") since
+                    // 20260902120000_UserSecurityStamp for exactly this statement.
+                    .SetProperty(u => u.SecurityStamp, SecurityStamps.NewStamp())
                     .SetProperty(u => u.ModifiedOn, (DateTime?)now)
                     .SetProperty(u => u.ModifiedBy, Actor), ct);
+            _sessions?.Evict(accountId);
 
             if (updated != 1)
             {

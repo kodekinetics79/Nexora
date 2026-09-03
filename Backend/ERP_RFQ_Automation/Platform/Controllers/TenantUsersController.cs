@@ -73,14 +73,28 @@ public class TenantUsersController : ControllerBase
     private readonly TenantOnboardingOptions _onboarding;
     private readonly ILogger<TenantUsersController> _logger;
 
+    private readonly ERP_RFQ_Automation.Security.ITenantSessionCache? _sessions;
+
+    /// <summary>
+    /// Rotates the token-revocation handle and evicts the cached verdict: tokens the account
+    /// already holds are refused on their next request (docs/design/token-revocation.md).
+    /// </summary>
+    private void RevokeIssuedTokens(User user)
+    {
+        user.SecurityStamp = ERP_RFQ_Automation.Security.SecurityStamps.NewStamp();
+        _sessions?.Evict(user.Id);
+    }
+
     public TenantUsersController(
         ErpRfqAutomationContext context,
         IPlatformAuditService audit,
         ITenantAdminInvitationService invitations,
         IEntitlementService entitlements,
         IOptions<TenantOnboardingOptions> onboarding,
-        ILogger<TenantUsersController> logger)
+        ILogger<TenantUsersController> logger,
+        ERP_RFQ_Automation.Security.ITenantSessionCache? sessions = null)
     {
+        _sessions = sessions;
         _context = context;
         _audit = audit;
         _invitations = invitations;
@@ -381,6 +395,9 @@ public class TenantUsersController : ControllerBase
                     current.DeactivatedAtUtc = DateTime.UtcNow;
                     current.ModifiedBy = ActorEmail();
                     current.ModifiedOn = DateTime.UtcNow;
+                    // Deactivation is the case this whole mechanism exists for: without it the
+                    // suspended account keeps every token it holds for up to an hour.
+                    RevokeIssuedTokens(current);
                 }
                 await _context.SaveChangesAsync(ct);
 
@@ -492,6 +509,8 @@ public class TenantUsersController : ControllerBase
                 current.RoleId = target.SetupId;
                 current.ModifiedBy = ActorEmail();
                 current.ModifiedOn = DateTime.UtcNow;
+                // The roleId claim in every live token now names the OLD role.
+                RevokeIssuedTokens(current);
                 await _context.SaveChangesAsync(ct);
 
                 await _audit.WriteAsync(User, "tenant.user.role.change", nameof(User), userId.ToString(),

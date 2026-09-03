@@ -172,6 +172,27 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (source is null || job is null)
                 {
+                    // A row that names an OBJECT and records its digest is served through the
+                    // object store whatever door wrote it: the four legacy doors once the
+                    // EvidenceStorage:RouteLegacyWritersToObjectStore switch is on, and every row
+                    // the disk->object migration job re-pointed. Parent authorisation first, the
+                    // verifying read second, exactly as for every other branch here.
+                    if (!string.IsNullOrWhiteSpace(attachment.ContentSha256)
+                        && EvidenceObjectUris.IsObjectUri(attachment.FilePath))
+                    {
+                        if (!await CanReadAttachmentParentAsync(
+                                isLead, attachment.ParentId, businessUnitId, ct))
+                            return NotFound();
+                        var objectStream = await _evidenceStorage.OpenVerifiedReadAsync(
+                            attachment.FilePath, attachment.ContentSha256, ct);
+                        return await ServeVerifiedAttachmentAsync(
+                            objectStream,
+                            attachment,
+                            attachment.MimeType ?? "application/octet-stream",
+                            businessUnitId,
+                            ct);
+                    }
+
                     // Customer-PO documents are written directly to content-addressed evidence
                     // storage, not through the lead occurrence ledger. The attachment therefore
                     // carries the authoritative URI and digest itself.

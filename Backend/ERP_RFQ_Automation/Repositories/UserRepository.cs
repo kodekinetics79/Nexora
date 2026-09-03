@@ -15,9 +15,25 @@ namespace ERP_RFQ_Automation.Repositories
     {
         private readonly ErpRfqAutomationContext _context;
 
-        public UserRepository(ErpRfqAutomationContext context)
+        private readonly ERP_RFQ_Automation.Security.ITenantSessionCache? _sessions;
+
+        public UserRepository(ErpRfqAutomationContext context,
+            ERP_RFQ_Automation.Security.ITenantSessionCache? sessions = null)
         {
             _context = context;
+            _sessions = sessions;
+        }
+
+        /// <summary>
+        /// Rotates the account's token-revocation handle and evicts any cached verdict for it, so
+        /// every token issued before this write is refused on its next request. Attached to the
+        /// WRITE rather than to a controller so no caller of this repository can change an
+        /// account's authority and leave its tokens alive (docs/design/token-revocation.md).
+        /// </summary>
+        private void RevokeIssuedTokens(User user)
+        {
+            user.SecurityStamp = ERP_RFQ_Automation.Security.SecurityStamps.NewStamp();
+            _sessions?.Evict(user.Id);
         }
 
         public async Task<(IEnumerable<UserResponseDTO>, int TotalCount)> GetAllAsync(int pageNumber, int pageSize, long? id, string? userName, string? email, long? roleId, string? region, bool? isActive, long businessUnitId)
@@ -249,6 +265,15 @@ namespace ERP_RFQ_Automation.Repositories
             else
                 user.DeactivatedAtUtc = existing.DeactivatedAtUtc ?? DateTime.UtcNow;
 
+            // Authority changed: deactivation or a different role. A profile edit (name, avatar,
+            // timezone) must NOT log the person out, so the stamp survives everything else —
+            // including the incoming entity's own stale copy of it, which is restored here.
+            var authorityChanged = (existing.IsActive == true && user.IsActive != true)
+                                   || existing.RoleId != user.RoleId;
+            user.SecurityStamp = existing.SecurityStamp;
+            if (authorityChanged)
+                RevokeIssuedTokens(user);
+
             _context.Users.Update(user);
             await _context.SaveChangesAsync();
         }
@@ -307,6 +332,9 @@ namespace ERP_RFQ_Automation.Repositories
 
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
             user.ModifiedOn = DateTime.UtcNow;
+            // A changed credential ends every session minted under the old one — the same rule
+            // the platform plane applies (PlatformUsersController.RotateSessionGeneration).
+            RevokeIssuedTokens(user);
             await _context.SaveChangesAsync();
         }
 

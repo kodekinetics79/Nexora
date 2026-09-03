@@ -8,6 +8,21 @@
 # and deploy only after checks pass. It is the reviewable contract operators
 # must compare with the Render API before and after every release.
 #
+# RECONCILED 2026-09-02 AGAINST THE LIVE DASHBOARD. Until this date the file
+# declared EvidenceStorage__Provider=Local and DocumentInspection__Scanner__
+# Provider=BuiltIn while production had run S3 (bucket NexoraBucket, confirmed
+# by the owner on 2026-08-16 and by 311 source_documents rows and 320
+# ExtractionJobs paths written to s3://NexoraBucket/ through 2026-09-02) and
+# ClamAV (313 documents carry engine=ClamAV, latest 2026-09-02 18:21 UTC; the
+# BuiltIn engine last wrote a verdict on 2026-08-06). A Blueprint sync of the
+# old file would have silently switched evidence storage back to the disk and
+# malware scanning back to the stub. Every credential is `sync: false`; the
+# non-secret S3 endpoint, region and bucket are stated so a sync cannot point
+# the service at an empty bucket name. The three keys introduced by stream 4
+# (Auth__RequireSecurityStamp, EvidenceStorage__RouteLegacyWritersToObjectStore,
+# EvidenceStorage__LegacyMigration__Enabled) are declared at their safe
+# defaults with the rollout order next to each.
+#
 # Do not create a second Blueprint service. Either link the existing service
 # deliberately after reviewing the proposed plan, or apply the same values in
 # its dashboard. A successful repository test proves this contract is internally
@@ -19,17 +34,50 @@
 # =============================================================================
 services:
   # ---------------------------------------------------------------------------
-  # NOTE: the ClamAV private service is intentionally NOT deployed right now.
-  # DocumentInspection__Scanner__Provider is set to BuiltIn below, which is a
-  # structural inspector (content-type sniffing, size caps, OOXML archive and
-  # zip-bomb defence, macro rejection) but is NOT an anti-virus engine and
-  # detects no real malware. It logs REDUCED SECURITY POSTURE on every boot.
-  #
-  # To enable real scanning: paste the `nexora-clamav` service and the
-  # ClamAV__Host fromService reference from docs/RUNBOOK-CLAMAV-RENDER.md
-  # ("Deferred configuration" section), set Provider back to ClamAV, and sync
-  # the Blueprint. Cost: +$85/mo on Render `pro`.
+  # Real malware scanning. Production runs ClamAV (see the reconciliation note
+  # at the top); this is the private service block from
+  # docs/RUNBOOK-CLAMAV-RENDER.md, restored verbatim so the Blueprint and the
+  # dashboard describe the same estate. Cost: +$85/mo on Render `pro`.
   # ---------------------------------------------------------------------------
+  - type: pserv
+    name: nexora-clamav
+    runtime: image
+    region: oregon
+    # 4 GB / 2 CPU. ClamAV's own docs recommend 4 GB for containers: the
+    # signature set is ~1.5-2 GB resident and clamd briefly needs more while a
+    # freshclam update is loaded. `standard` (2 GB) OOM-kills clamd during
+    # updates.
+    plan: pro
+    image:
+      # Minor-version pinned. Cisco-Talos rebuilds this tag daily with refreshed
+      # signature databases baked in, so a restart starts from a recent DB
+      # instead of downloading the full set. The `_base` tags ship NO databases
+      # and would add several minutes of freshclam download to every cold start.
+      url: docker.io/clamav/clamav:1.5
+    envVars:
+      # Render must detect a bound port to give this service an internal
+      # address. clamd binds 3310 (EXPOSE 3310 in the upstream image); declaring
+      # PORT here stops Render from probing its 10000 default.
+      - key: PORT
+        value: "3310"
+      # The app accepts uploads up to 25 MB; clamd's default StreamMaxLength is
+      # also 25M, so a max-size upload would sit exactly on the limit and be
+      # answered "INSTREAM size limit exceeded". Give it headroom.
+      - key: CLAMD_CONF_StreamMaxLength
+        value: 64M
+      # Concurrent reload builds a SECOND copy of the signature engine while the
+      # old one drains, roughly doubling RSS for a few minutes after every
+      # freshclam update. Disabling it trades a short scan pause for staying
+      # inside 4 GB.
+      - key: CLAMD_CONF_ConcurrentDatabaseReload
+        value: "no"
+      - key: CLAMD_CONF_MaxThreads
+        value: "4"
+      - key: FRESHCLAM_CHECKS
+        value: "2"
+      - key: CLAMAV_NO_MILTERD
+        value: "true"
+
   - type: web
     name: Nexora
     runtime: docker
@@ -74,8 +122,22 @@ services:
     # would restart-loop a service that is actually serving traffic correctly.
     # /health is tag-filtered to "live" checks (Program.cs MapHealthChecks).
     healthCheckPath: /health
-    # Persistent disk. Documents are content-addressed evidence and are NEVER deleted by
-    # the application, so losing this volume is unrecoverable data loss, not a cache miss.
+    # Persistent disk. STILL ATTACHED, and still the reason every deploy is an outage: a
+    # service with a disk cannot be replaced zero-downtime. Governed evidence already lives
+    # in S3 (below); what remains on this volume is the legacy compatibility copies (raw
+    # .eml, lead attachments from the four legacy doors, the pre-ledger extraction inputs).
+    # Removal order (docs/design/evidence-object-store-cutover.md §4):
+    #   1. EvidenceStorage__RouteLegacyWritersToObjectStore=true  (new writes go to S3)
+    #   2. EvidenceStorage__LegacyMigration__Enabled=true, restart, read the
+    #      "LEGACY EVIDENCE MIGRATION" log line, repeat until drained=True, set false
+    #   3. Storage__EnforcePersistentMount=false, Storage__RootPath=/tmp/nexora/uploads,
+    #      delete this `disk:` block and the Storage__RequiredMountPath key, redeploy
+    #   4. only then switch the runtime user: the Dockerfile defaults to root and flips
+    #      to `app` (uid 1654) ONLY with `docker build --build-arg NEXORA_RUNTIME_USER=app`
+    #      — set it as a Docker build arg in the Render dashboard (Settings -> Build &
+    #      Deploy -> Docker Build Args). It is a build arg and not a bare `USER app`
+    #      because every merge auto-deploys: under a root-owned mount the write probe
+    #      fails and the container will not boot.
     # Render preserves ONLY paths under mountPath across deploys and restarts.
     disk:
       name: nexora-evidence
@@ -97,43 +159,45 @@ services:
       # the correct outcome; silently writing to ephemeral storage is not.
       - key: Storage__EnforcePersistentMount
         value: "true"
-      # Evidence object storage: LOCAL (disk-backed), decided deliberately for the pilot.
-      # Program.cs selects S3EvidenceObjectStorage only when this equals "S3"; any other
-      # value falls through to LocalEvidenceObjectStorage over the persistent disk above.
-      # This previously read "S3" while production had it UNSET — a Blueprint sync would
-      # have constructed the S3 client with EMPTY credentials (the four vars below are
-      # sync:false and were never populated) and broken evidence storage outright.
-      #
-      # To move to object storage later: set this to S3 and populate the four commented
-      # variables. NOTE for whoever does that — Cloudflare R2 does NOT implement object
-      # versioning, and VerifyBucketVersioningAsync swallows the resulting 501, so the
-      # versioning guarantee the S3 path advertises is silently absent on R2. Prefer a
-      # provider with real versioning, and convert the legacy physical-path writers
-      # (FolderService, EmailService, ManualUploadService) at the same time or the
-      # document estate ends up split across two stores with two restore procedures.
+      # Evidence object storage: S3 (Backblaze B2 via the S3 API), WHAT PRODUCTION RUNS.
+      # Program.cs selects S3EvidenceObjectStorage only when this equals "S3". The bucket
+      # name is mixed-case ON PURPOSE and must stay exactly `NexoraBucket`: every stored
+      # URI embeds it verbatim and EnsureConfiguredBucket compares ordinally, so a
+      # lower-cased "fix" re-breaks every object (incident 2026-08-16, commit 0a8f2c4).
+      # B2 implements object versioning, which VerifyBucketVersioningAsync requires.
       - key: EvidenceStorage__Provider
-        value: Local
-      # - key: EvidenceStorage__ServiceUrl
-      #   sync: false
-      # - key: EvidenceStorage__Region
-      #   value: auto
-      # - key: EvidenceStorage__AccessKeyId
-      #   sync: false
-      # - key: EvidenceStorage__SecretAccessKey
-      #   sync: false
-      # - key: EvidenceStorage__Bucket
-      #   sync: false
-      # PILOT POSTURE — READ BEFORE PRODUCTION.
-      # BuiltIn is NOT an anti-virus engine. It performs structural inspection
-      # only (content-type sniffing, size caps, OOXML archive validation,
-      # zip-bomb and zip-slip defence, macro rejection) plus EICAR detection.
-      # It will NOT detect real malware. MalwareScannerFactory logs a
-      # REDUCED SECURITY POSTURE warning on every boot while this is set.
-      # Chosen deliberately to defer the +$85/mo ClamAV service until after the
-      # client pilot. Restore ClamAV per docs/RUNBOOK-CLAMAV-RENDER.md before
-      # any production tenant uploads documents.
+        value: S3
+      - key: EvidenceStorage__ServiceUrl
+        value: https://s3.us-east-005.backblazeb2.com
+      - key: EvidenceStorage__Region
+        value: us-east-005
+      - key: EvidenceStorage__Bucket
+        value: NexoraBucket
+      - key: EvidenceStorage__AccessKeyId
+        sync: false
+      - key: EvidenceStorage__SecretAccessKey
+        sync: false
+      # Stream 4 (docs/design/evidence-object-store-cutover.md). Both default false =
+      # today's behaviour; the removal order is on the `disk:` block above.
+      - key: EvidenceStorage__RouteLegacyWritersToObjectStore
+        value: "false"
+      - key: EvidenceStorage__LegacyMigration__Enabled
+        value: "false"
+      # Stream 4 (docs/design/token-revocation.md). Tenant tokens now carry a SecurityStamp
+      # claim that is re-checked every request. Tokens minted BEFORE that release carry no
+      # claim and are honoured until they expire (<= 60 min) while this is false. Set it to
+      # "true" one hour after the release so an unstamped token can never be accepted again.
+      - key: Auth__RequireSecurityStamp
+        value: "false"
+      # Real malware scanning, WHAT PRODUCTION RUNS. BuiltIn is a structural inspector plus
+      # the EICAR signature and detects no real malware; it is for Development only.
       - key: DocumentInspection__Scanner__Provider
-        value: BuiltIn
+        value: ClamAV
+      - key: DocumentInspection__ClamAV__Host
+        fromService:
+          name: nexora-clamav
+          type: pserv
+          property: host
       # Hardcoded rather than `property: port`: that property is documented as
       # "the port of the service's HTTP server" and clamd does not speak HTTP.
       # 3310 is clamd's fixed listener in the upstream image.

@@ -17342,6 +17342,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("RoleID");
 
+                    b.Property<string>("SecurityStamp")
+                        .ValueGeneratedOnAdd()
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasDefaultValueSql("replace(gen_random_uuid()::text, '-', '')");
+
                     b.Property<long?>("TeamId")
                         .HasColumnType("bigint")
                         .HasColumnName("TeamID");
