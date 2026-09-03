@@ -588,6 +588,7 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         var payload = RandomNumberGenerator.GetBytes(32);
         var digest = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
         var key = $"_readiness/{Guid.NewGuid():N}.probe";
+        string? probeVersionId = null;
         try
         {
             await using var input = new MemoryStream(payload, writable: false);
@@ -601,7 +602,14 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
                 IfNoneMatch = "*"
             };
             put.Metadata["sha256"] = digest;
-            await PutAsync(put, ct);
+            // The version id is kept for the same reason TryDeletePurgedObjectAsync keeps one:
+            // this bucket is versioned (VerifyBucketVersioningAsync above refuses to be ready
+            // otherwise), so a DeleteObject with no version id does not delete anything -- it
+            // adds a delete marker OVER the probe object and both stay for ever. /ready is
+            // called by the platform health check, the operations screen and now a scheduled
+            // monitor, so discarding it accreted two entries per call, permanently, in the
+            // bucket that holds customer evidence.
+            probeVersionId = (await PutAsync(put, ct)).VersionId;
 
             using var stored = await _client.GetObjectAsync(new GetObjectRequest
             {
@@ -615,7 +623,8 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
             await _client.DeleteObjectAsync(new DeleteObjectRequest
             {
                 BucketName = _options.Bucket,
-                Key = key
+                Key = key,
+                VersionId = probeVersionId
             }, ct);
         }
     }
