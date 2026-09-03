@@ -11,6 +11,7 @@ import {
 } from '@mui/material';
 import {
   Description as FileIcon,
+  MarkEmailReadOutlined as ReceivedIcon,
   Download as DownloadIcon,
   NavigateNext as NextIcon,
   RuleOutlined as DecisionIcon,
@@ -28,6 +29,7 @@ import { displayDataValue } from '../../utils/displayDataValue';
 import LeadRevisionTimeline from './LeadRevisionTimeline';
 import LeadOwnerControl from './LeadOwnerControl';
 import LeadDecisionActions from './LeadDecisionActions';
+import LeadIntakeRecordDialog from './LeadIntakeRecordDialog';
 import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 
 import { toast } from 'react-hot-toast';
@@ -115,6 +117,7 @@ const LeadDetailPage: React.FC = () => {
   // Second entry point to client resolution, from the Customer field in General
   // Information. Shares the query cache with ClientIdentityPanel's own dialog.
   const [resolveClientOpen, setResolveClientOpen] = React.useState(false);
+  const [intakeRecordOpen, setIntakeRecordOpen] = React.useState(false);
 
   // WP-A3: duplicate-flag resolution ("Not a duplicate" unblocks conversion;
   // "Confirm duplicate" keeps it blocked).
@@ -338,6 +341,21 @@ const LeadDetailPage: React.FC = () => {
                   <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="Email Subject" value={lead.emailSubject ?? null} /></Grid>
                   <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Email Received" value={lead.emailReceivedAtUtc ? formatDate(lead.emailReceivedAtUtc) : '—'} /></Grid>
                   <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="RFC Message-ID" value={lead.emailMessageId ?? null} boldValue={false} /></Grid>
+                  {/* The fields above are what the pipeline EXTRACTED. This is what actually
+                      ARRIVED — which files came, which the intake door dropped and why. The
+                      record behind it (`GET /api/intake-records/by-lead/{id}`) had no caller at
+                      all, so "why is this quantity wrong?" ended at a database console. */}
+                  <Grid size={{ xs: 12 }} component="div">
+                    <Button
+                      size="small"
+                      variant="text"
+                      startIcon={<ReceivedIcon />}
+                      onClick={() => setIntakeRecordOpen(true)}
+                      sx={{ fontWeight: 800, textTransform: 'none', mb: 1.5, px: 0 }}
+                    >
+                      See what we received
+                    </Button>
+                  </Grid>
                 </>
               )}
 
@@ -583,6 +601,16 @@ const LeadDetailPage: React.FC = () => {
       </Grid>
 
       <LeadRevisionTimeline leadId={lead.id} />
+
+      <LeadIntakeRecordDialog
+
+        leadId={lead.id}
+
+        open={intakeRecordOpen}
+
+        onClose={() => setIntakeRecordOpen(false)}
+
+      />
 
       <ResolveClientDialog
         open={resolveClientOpen}
