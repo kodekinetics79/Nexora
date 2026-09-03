@@ -30,17 +30,24 @@ public sealed class EmailTriageController : ControllerBase
     /// <param name="outcome">
     /// Inquiry | CommercialNonInquiry | Noise | Uncertain | Legacy (pre-gate mail). Omit for all.
     /// </param>
+    /// <param name="state">
+    /// <c>stopped</c> — messages that produced no inquiry and that nothing will move without a
+    /// person. Combines with <paramref name="outcome"/>; omit for all states. The response's
+    /// <c>totalCount</c> under this filter IS the count of work waiting on somebody, which is
+    /// what the screen renders as a tab badge.
+    /// </param>
     [HttpGet]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<IActionResult> List(
         [FromQuery] string? outcome = null,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 25,
+        [FromQuery] string? state = null,
         CancellationToken ct = default)
     {
         if (!TryTenant(out var businessUnitId))
             return BadRequest(new { message = "A valid businessUnitId claim is required." });
-        return Ok(await _service.ListAsync(businessUnitId, outcome, page, pageSize, ct));
+        return Ok(await _service.ListAsync(businessUnitId, outcome, page, pageSize, ct, state));
     }
 
     /// <summary>

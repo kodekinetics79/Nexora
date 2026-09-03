@@ -590,11 +590,23 @@ export interface EmailTriagePage {
   pageSize: number | null;
 }
 
+/**
+ * The one list filter that is about STATE rather than about the arrival gate's verdict.
+ *
+ * Every `outcome` value answers "what did triage decide when this arrived". A message stops long
+ * after triage, so no combination of them can answer "what is waiting on somebody" — which is the
+ * only question this screen exists to answer. Must match `EmailTriageStates.Stopped` on the
+ * server; a typo here renders as "nothing is stuck", so it is a constant and not a literal.
+ */
+export const TRIAGE_STATE_STOPPED = 'stopped';
+
 export interface ListTriageParams {
   /** Omit for "every decision". */
   outcome?: EmailTriageOutcome | string;
   page?: number;
   pageSize?: number;
+  /** `stopped` — produced no inquiry, and nothing will move it without a person. */
+  state?: string;
 }
 
 export interface ReprocessTriageResult {
@@ -1030,6 +1042,7 @@ const emailTriageService = {
     const query: Record<string, string | number> = { page };
     if (params.outcome) query.outcome = params.outcome;
     if (params.pageSize) query.pageSize = params.pageSize;
+    if (params.state) query.state = params.state;
     const response = await axiosInstance.get('/api/email-triage', { params: query });
     return readTriagePage(response.data, page);
   },
