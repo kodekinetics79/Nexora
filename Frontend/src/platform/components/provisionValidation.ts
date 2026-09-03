@@ -103,8 +103,15 @@ const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
  */
 export const BILLABLE_CURRENCY = 'USD';
 
-/** Default FUNCTIONAL currency for a new tenant. KSA-first: most tenants quote in riyals. */
-export const DEFAULT_FUNCTIONAL_CURRENCY = 'SAR';
+/**
+ * Default FUNCTIONAL currency offered by the provisioning wizard.
+ *
+ * USD by the product owner's decision on 2026-09-03: the operator picks the tenant's own
+ * currency deliberately rather than inheriting a market assumption. The decoupling from
+ * BILLABLE_CURRENCY is what matters and is unchanged — a tenant set to SAR, AED or PKR here
+ * still activates, which it could not before.
+ */
+export const DEFAULT_FUNCTIONAL_CURRENCY = 'USD';
 
 const trimmed = (value: string) => value.trim();
 const isBlank = (value: string) => trimmed(value).length === 0;
@@ -169,10 +176,10 @@ export const emptyDraft = (defaults: Partial<ProvisionDraft> = {}): ProvisionDra
   billingContactEmail: '',
   billingAddress: '',
   accountOwnerEmail: '',
-  // The tenant's FUNCTIONAL currency. An earlier SAR default made every tenant created with it
-  // permanently unactivatable, because activation compared this column to the USD-only rate
-  // card. Activation now compares the rate card to BILLABLE_CURRENCY and leaves this column to
-  // mean what its name says, so the KSA-first default is safe again.
+  // The tenant's FUNCTIONAL currency, defaulted rather than assumed — the operator sets the
+  // tenant's real currency during provisioning. This column used to be compared against the
+  // USD-only rate card at activation, which made every non-USD tenant permanently
+  // unactivatable; activation now compares the rate card to BILLABLE_CURRENCY instead.
   baseCurrencyCode: DEFAULT_FUNCTIONAL_CURRENCY,
   timeZoneId: '',
   locale: 'en-SA',

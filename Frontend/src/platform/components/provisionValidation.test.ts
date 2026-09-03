@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_FUNCTIONAL_CURRENCY,
   draftFromRequestBody,
   emptyDraft,
   isTrialExpired,
@@ -290,9 +291,11 @@ describe('draft save and resume', () => {
     expect(sparse.name).toBe('Acme Trading');
     expect(sparse.slug).toBe('');
     expect(sparse.billingMode).toBe('Billable');
-    // The FUNCTIONAL currency defaults to SAR (KSA-first). Safe now that activation compares the
-    // pinned rate card to the platform billing currency instead of to this column.
-    expect(sparse.baseCurrencyCode).toBe('SAR');
+    // The FUNCTIONAL currency falls back to the wizard default, and that default is deliberately
+    // the platform billing currency: the operator states the tenant's own currency rather than
+    // inheriting a market assumption. What makes any choice here workable is that activation
+    // compares the pinned rate card to BILLABLE_CURRENCY, not to this column.
+    expect(sparse.baseCurrencyCode).toBe(DEFAULT_FUNCTIONAL_CURRENCY);
     expect(sparse.locale).toBe('en-SA');
     expect(sparse.adminActivation).toBe('invite');
   });
