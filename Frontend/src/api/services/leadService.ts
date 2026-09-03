@@ -250,6 +250,14 @@ export interface AcceptedLeadResponseDTO {
   assignedToFullName?: string;
   assignedToId?: number;
   assignedOn?: string;
+  /**
+   * Optimistic-concurrency token for `PUT /api/commercial-routing/leads/{id}/owner`.
+   *
+   * Both accepted-lead projections in `LeadRepository` have set it since governed assignment
+   * shipped; it was simply never declared here, so the queue screens could not offer the
+   * ownership verb and fell back to the manager-only `POST /api/UnAssignedLead/assign`.
+   */
+  assignmentVersion?: number;
   comment?: string;
   // WP-A1 unassigned-aging: whole hours the lead has sat unassigned (null when
   // assigned) and whether that exceeds the tenant's SLA threshold (default 2h).
