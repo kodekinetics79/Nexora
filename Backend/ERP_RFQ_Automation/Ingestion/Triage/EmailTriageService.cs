@@ -92,7 +92,21 @@ public sealed record EmailTriageRow(
     DateTimeOffset? LastUpdatedAtUtc = null,
     DateTimeOffset? SenderSentAtUtc = null,
     DateTime? ParsedAt = null,
-    IReadOnlyList<EmailIntakeComponentRow>? Components = null);
+    IReadOnlyList<EmailIntakeComponentRow>? Components = null,
+    /// <summary>
+    /// The message stopped INSIDE processing and has no message aggregate to say so.
+    ///
+    /// <para>Derived rather than left to the reader, and this is the one fact
+    /// <see cref="ParseStatus"/> states that <see cref="AssemblyState"/> cannot. The screen is
+    /// forbidden from deciding progress from ParseStatus — on live data the two disagree, and the
+    /// checkpoint reads BACKWARDS (a closed lead-less message says "Queued"; a message that DID
+    /// produce a lead says "NeedsReview"). That rule is kept: this is true only where there is no
+    /// assembly at all to disagree with, which is precisely the population it exists for —
+    /// measured on mailbox 9 on 2026-09-03, 20 dead-lettered messages with no assembly row, whose
+    /// rows reported "assembly not reported", fell out of every needs-a-person branch on the
+    /// screen, and were offered no route to the exceptions surface where their retry lives.</para>
+    /// </summary>
+    bool StoppedInProcessing = false);
 
 /// <summary>
 /// One physical part of the message: what it was, what became of it, and why.
@@ -467,7 +481,12 @@ public sealed class EmailTriageService : IEmailTriageService
                 IngestedAtUtc: assembly?.CreatedAtUtc,
                 LastUpdatedAtUtc: assembly?.UpdatedAtUtc,
                 SenderSentAtUtc: assembly?.ReceivedAtUtc,
-                ParsedAt: row.ParsedAt));
+                ParsedAt: row.ParsedAt,
+                // Only where there is no assembly to disagree with — see the record's remarks.
+                StoppedInProcessing: assembly is null
+                    && row.ParseStatus is not null
+                    && row.ParseStatus.StartsWith(
+                        EmailTriageStates.GaveUpParseStatusPrefix, StringComparison.OrdinalIgnoreCase)));
         }
 
         return items;

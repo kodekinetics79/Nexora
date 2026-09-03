@@ -305,8 +305,21 @@ const DEAD_END_PAGE = readTriagePage(
         reasonCodes: [],
         assemblyState: 'FailedRecoverable',
       },
+      {
+        // THE LIVE SHAPE OF THE DEAD-LETTERED POPULATION. No assemblyState at all — 20 of the 80
+        // stopped messages on mailbox 9 have no assembly row, all but two of them from
+        // 2026-08-13/14, before the message aggregate existed. A fixture that gave this row an
+        // assemblyState would exercise a shape the product does not emit for them.
+        id: 304,
+        receivedOn: '2026-08-13T09:00:00Z',
+        from: 'procurement@buyer.example',
+        subject: 'Fwd: Request for Quotation against PR# 111',
+        outcome: null,
+        reasonCodes: [],
+        stoppedInProcessing: true,
+      },
     ],
-    totalCount: 3,
+    totalCount: 4,
     pageNumber: 1,
     pageSize: 25,
   },
@@ -591,6 +604,43 @@ describe('InboundMailTriagePage — a row is never a dead end', () => {
     expect(
       within(security).getAllByText(/cannot be sent back through extraction/i).length,
     ).toBeGreaterThan(0);
+  });
+
+  it('offersTheExceptionsScreenToAMessageThatStoppedInProcessingWithNoAssembly', async () => {
+    // The population that had NO route out of its own row. `describeAssemblyState(null).needsHuman`
+    // is false — honestly, since nothing was reported — so these fell out of every needs-a-person
+    // branch, and the one screen carrying their retry and their "this can never be retried"
+    // verdict was never offered. The row now says processing stopped and where to go.
+    renderPage();
+    const row = await rowFor(/Request for Quotation against PR# 111/);
+
+    expect(within(row).getAllByText(/processing stopped for this message/i).length).toBeGreaterThan(0);
+    fireEvent.click(within(row).getByRole('button', { name: /retry failed processing/i }));
+    expect(navigate).toHaveBeenCalledWith('/admin/operations');
+  });
+
+  it('doesNotCallEveryUnreportedAssemblyStopped', async () => {
+    // THE CONTROL. A row whose deployment simply does not report assembly state, and which did
+    // NOT stop, must keep saying so — the flag is the server's derived fact, never an inference
+    // from a missing field.
+    listTriage.mockResolvedValue(
+      readTriagePage(
+        {
+          items: [{
+            id: 401, receivedOn: '2026-08-20T09:00:00Z', from: 'a@b.example',
+            subject: 'Deployment reports no assembly', outcome: 'Inquiry', reasonCodes: [],
+          }],
+          totalCount: 1, pageNumber: 1, pageSize: 25,
+        },
+        1,
+      ),
+    );
+    renderPage();
+    const row = await rowFor(/Deployment reports no assembly/);
+    expect(within(row).queryByText(/processing stopped for this message/i)).not.toBeInTheDocument();
+    expect(
+      within(row).queryByRole('button', { name: /retry failed processing/i }),
+    ).not.toBeInTheDocument();
   });
 
   it('keepsReprocessOnAHeldMessage_becauseThatIsTheOneThingThatFreesIt', async () => {

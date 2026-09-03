@@ -52,6 +52,7 @@ import emailTriageService, {
   describeTriageReason,
   isTriageUnavailable,
   readPollFailureReport,
+  stoppedInProcessing,
   TRIAGE_REASON_DESCRIPTIONS,
   TRIAGE_STATE_STOPPED,
   type EmailTriageOutcome,
@@ -288,6 +289,13 @@ const describeMissingLead = (row: EmailTriageRow): string | null => {
   const assembly = describeAssemblyState(row.assemblyState);
   if (assembly.inProgress) return 'No lead exists yet — this message is still being assembled.';
   if (assembly.needsHuman) return 'No lead was created for this message.';
+  // Said BEFORE the "not recorded" fallback below, which is what these rows used to get: a
+  // sentence that names no cause and implies nothing can be done. Processing stopping is a cause,
+  // it is the commonest one on this tenant's oldest mail, and it has its own screen and its own
+  // retry — so the row says which of the two situations it is in.
+  if (!assembly.recognised && stoppedInProcessing(row))
+    return 'Processing stopped for this message, so no lead was created. Its retry — or the reason '
+      + 'it cannot be retried — is on the exceptions screen.';
   if (!assembly.recognised && row.assemblyState !== null)
     return 'No lead has been recorded against this message.';
   return null;
@@ -909,7 +917,13 @@ export default function InboundMailTriagePage() {
                     // A message stopped for a person, with no lead to open. Without a route out
                     // of here these rows were a dead end: no "Open lead" (there is none), and a
                     // "Reprocess" that could only answer 422.
-                    const strandedForHuman = assembly.needsHuman && row.leadId === null;
+                    // ...or that stopped in PROCESSING with no assembly to say so. Those rows
+                    // reported `needsHuman: false` — honestly, since nothing was reported at all —
+                    // and so were offered neither the batch nor the exceptions screen. On the live
+                    // tenant that is 20 dead-lettered messages with no route out of the row.
+                    const stoppedInside = stoppedInProcessing(row);
+                    const strandedForHuman =
+                      (assembly.needsHuman || (!assembly.recognised && stoppedInside)) && row.leadId === null;
                     // Read off the row itself rather than the per-message query: the loss is
                     // stated the moment the panel opens, and it survives the parts read failing.
                     const skipped = row.skippedAttachments;

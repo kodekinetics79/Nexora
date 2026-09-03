@@ -77,6 +77,31 @@ public sealed class EmailTriageStoppedMessagesAreVisibleTests : IDisposable
     }
 
     [Fact]
+    public async Task Only_a_message_with_no_aggregate_that_gave_up_is_flagged_stopped_in_processing()
+    {
+        // The flag exists so the screen can route the twenty dead-lettered messages that have NO
+        // assembly to the exceptions surface. `describeAssemblyState(null).needsHuman` is false
+        // for them — honestly, nothing was reported — so they fell out of every needs-a-person
+        // branch and their row offered no way out at all.
+        //
+        // It must NOT fire where an assembly exists. The per-ingest checkpoint and the assembly
+        // disagree on live data and the checkpoint reads BACKWARDS, so a message whose assembly
+        // has spoken must never be described by its ParseStatus.
+        await SeedCensusAsync();
+        await using var context = _db.ContextFor(Bu);
+        var service = NewService(context);
+
+        var page = await service.ListAsync(Bu, outcome: null, page: 1, pageSize: 50);
+        var byId = page.Items.ToDictionary(x => x.Id);
+
+        Assert.True(byId[8104].StoppedInProcessing);            // dead-lettered, no assembly
+        Assert.False(byId[8103].StoppedInProcessing);           // held, assembly speaks for it
+        Assert.False(byId[8101].StoppedInProcessing);           // rejected as noise: a decision
+        Assert.False(byId[8102].StoppedInProcessing);           // finished
+        Assert.False(byId[8106].StoppedInProcessing);           // held with a lead-not-produced hold
+    }
+
+    [Fact]
     public async Task An_unrecognised_state_shows_everything_rather_than_nothing()
     {
         // Fail OPEN. A typo in a query string must not render as "nothing is stuck", which is the
