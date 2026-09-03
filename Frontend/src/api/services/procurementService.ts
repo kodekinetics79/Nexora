@@ -43,6 +43,14 @@ export interface SupplierSolicitation {
   attemptCount: number;
   providerReference?: string | null;
   lastErrorCode?: string | null;
+  /**
+   * Which of the two terminal delivery states this solicitation is in, or null while delivery
+   * is still running or already succeeded. Both show as DELIVERYFAILED on `status`:
+   *  - NOT_DELIVERED: the send definitely never happened. Retrying is safe.
+   *  - UNCERTAIN: the provider may already hold the message (a deploy restarting the instance
+   *    mid-send produces exactly this). Retrying may double-send.
+   */
+  deliveryOutcome?: "UNCERTAIN" | "NOT_DELIVERED" | null;
   sentOn?: string | null;
   respondedOn?: string | null;
   updatedOn: string;
@@ -647,11 +655,20 @@ const procurementService = {
     );
   },
 
-  retrySolicitation: async (solicitationId: number, idempotencyKey: string) =>
+  /**
+   * `confirmedNotDelivered` is the operator stating they checked with the supplier and the RFQ
+   * never arrived. The server refuses an unconfirmed retry of an UNCERTAIN delivery, so this
+   * must never be defaulted to true — that would authorise a second RFQ nobody asked for.
+   */
+  retrySolicitation: async (
+    solicitationId: number,
+    idempotencyKey: string,
+    confirmedNotDelivered = false,
+  ) =>
     unwrap(
       await axiosInstance.post(
         `/api/procurement/solicitations/${solicitationId}/retry`,
-        {},
+        { confirmedNotDelivered },
         {
           headers: commandHeaders(idempotencyKey),
         },

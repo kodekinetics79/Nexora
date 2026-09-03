@@ -104,7 +104,10 @@ public sealed class ListSolicitationsTool : IAgentTool
                 r.SupplierId,
                 supplierName = nameById.TryGetValue(r.SupplierId, out var nm) ? nm : $"Supplier {r.SupplierId}",
                 status = r.Status.ToString(),
-                sentOn = r.SentOn,
+                // NOT r.SentOn: an unsent solicitation stores DateTime.MinValue (-infinity in
+                // Postgres) because the column is NOT NULL. Handing that to the model made it
+                // report supplier RFQ 1 as "sent on 1 January 0001".
+                sentOn = r.SentOn == default ? (DateTime?)null : r.SentOn,
                 respondedOn = r.RespondedOn,
                 channel = r.Channel,
                 notes = r.Notes

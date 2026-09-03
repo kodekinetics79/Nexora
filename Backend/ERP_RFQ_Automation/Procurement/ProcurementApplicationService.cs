@@ -825,8 +825,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 return new SolicitationView(x.Id, x.RfqId, x.SupplierId, supplier?.Name ?? $"Supplier {x.SupplierId}",
                     supplier?.ContactEmail, solicitedLineIds, x.Status.ToString().ToUpperInvariant(), x.Channel,
                     delivery?.AttemptCount ?? 0,
-                    delivery?.ProviderReference, delivery?.LastErrorCode, x.SentOn == default ? null : x.SentOn,
-                    x.RespondedOn, x.UpdatedOn, x.Version, x.DueOn);
+                    delivery?.ProviderReference, delivery?.LastErrorCode, x.SentOnUtc,
+                    x.RespondedOn, x.UpdatedOn, x.Version, x.DueOn,
+                    ProcurementDeliveryOutcome.FromOutboxStatus(delivery?.Status));
             }).ToArray(), offerViews, awardViews, poViews,
             customerDraft is null ? null : new CustomerQuoteDraftView(customerDraft.Id, customerDraft.QuoteNo,
                 customerDraft.CurrencyId, customerDraft.QuoteItems.Where(x => x.RfqitemId.HasValue)
@@ -1046,6 +1047,22 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var outbox = await _db.ProcurementOutboxMessages.SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.SupplierSolicitationId == solicitation.Id, ct)
                 ?? throw new ProcurementValidationException("Solicitation delivery record was not found.");
+
+            // DELIVERYFAILED covers two facts that must not be treated alike. A DEAD_LETTERED row
+            // definitely never left the building, so retrying is safe and stays one click. A
+            // FAILED row is the UNCERTAIN outcome — the provider may already hold the message —
+            // and that is precisely what a deploy restarting this single instance mid-send
+            // produces. Retrying it blind is how a supplier gets two RFQs for one line and quotes
+            // twice, so the operator has to state that they checked. The dispatch worker never
+            // reaches this state on its own; only a human can clear it, and only knowingly.
+            var deliveryOutcome = ProcurementDeliveryOutcome.FromOutboxStatus(outbox.Status);
+            if (deliveryOutcome == ProcurementDeliveryOutcome.Uncertain && !command.ConfirmedNotDelivered)
+                throw new ProcurementConflictException(
+                    "This Supplier RFQ may already have reached the supplier: delivery was interrupted and the "
+                    + "provider never confirmed either way, so nothing was resent automatically. Check with the "
+                    + "supplier whether the RFQ arrived. If it did, capture their reply in the Supplier Quote "
+                    + "Inbox instead. If it did not, retry and confirm that it never arrived.");
+
             var now = DateTime.UtcNow;
             outbox.Status = ProcurementOutboxStatuses.Pending;
             outbox.AttemptCount = 0;
@@ -1064,7 +1081,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             solicitation.Version++;
             AddEvent(command.BusinessUnitId, "SupplierSolicitation", solicitation.Id, solicitation.Version,
                 "SUPPLIER_SOLICITATION_RETRY_QUEUED", command.Actor, command.CorrelationId,
-                command.IdempotencyKey, JsonSerializer.Serialize(new { solicitation.Id }), now);
+                command.IdempotencyKey, JsonSerializer.Serialize(new
+                {
+                    solicitation.Id,
+                    PriorDeliveryOutcome = deliveryOutcome,
+                    command.ConfirmedNotDelivered
+                }), now);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
             return new SolicitationResult(solicitation.Id, solicitation.Status.ToString(), false);

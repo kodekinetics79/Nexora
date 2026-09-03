@@ -95,9 +95,15 @@ public sealed class ProcurementController(
     [HttpPost("solicitations/{solicitationId:long}/retry")]
     [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
     [RequireModulePermission("Supplier History", PermissionAction.Create)]
-    public Task<IActionResult> RetrySolicitation(long solicitationId)
+    public Task<IActionResult> RetrySolicitation(
+        long solicitationId,
+        // Optional body: an omitted body is an unconfirmed retry, which is refused for an
+        // UNCERTAIN delivery. Defaulting this to true would hand every existing caller the
+        // confirmation it never made.
+        [FromBody] RetrySolicitationRequest? request = null)
         => ExecuteAsync(async () => Ok(await service.RetrySolicitationAsync(new RetrySolicitationCommand(
-            TenantId(), solicitationId, IdempotencyKey(), Actor(), CorrelationId()), RequestAborted)));
+            TenantId(), solicitationId, IdempotencyKey(), Actor(), CorrelationId(),
+            request?.ConfirmedNotDelivered ?? false), RequestAborted)));
 
     [HttpPost("supplier-quotes")]
     [RequireModulePermission("Supplier History", PermissionAction.Create)]
@@ -360,6 +366,9 @@ public sealed record SearchSourcingCandidatesRequest(int Limit, long ExpectedVer
 
 public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion);
 public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);
+
+/// <summary>The operator states they checked with the supplier and the RFQ never arrived.</summary>
+public sealed record RetrySolicitationRequest(bool ConfirmedNotDelivered = false);
 
 public sealed record CaptureSupplierQuoteRequest(
     long SolicitationId,

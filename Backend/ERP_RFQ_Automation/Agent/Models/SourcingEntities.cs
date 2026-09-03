@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace ERP_RFQ_Automation.Agent.Models;
 
@@ -40,7 +41,29 @@ public sealed class SupplierSolicitation
 
     public SolicitationStatus Status { get; set; } = SolicitationStatus.PendingDispatch;
 
+    /// <summary>
+    /// When delivery to the supplier was CONFIRMED. Meaningless before that moment, and the
+    /// column cannot say so: it is <c>NOT NULL</c>, so an unsent solicitation carries
+    /// <see cref="DateTime.MinValue"/>, which Npgsql stores as the literal timestamp
+    /// <c>-infinity</c>.
+    ///
+    /// <para>Observed on production 2026-09-02: supplier solicitation 1 (RFQ 58, supplier 77)
+    /// sits <c>DeliveryFailed</c> with <c>SentOn = -infinity</c>. That value is not a date, and
+    /// every consumer that treats it as one is wrong — the agent tool reported the RFQ as sent
+    /// on 1 January 0001, and subtracting it from a response time yields ~739,000 days.</para>
+    ///
+    /// <para>Read <see cref="SentOnUtc"/>, never this. Making the column nullable — which is the
+    /// real fix — needs an EF migration and is deliberately NOT done on this branch.</para>
+    /// </summary>
     public DateTime SentOn { get; set; }
+
+    /// <summary>
+    /// The only honest reading of <see cref="SentOn"/>: null until delivery was confirmed.
+    /// Not mapped — it is a view of the stored column, not a second column.
+    /// </summary>
+    [NotMapped]
+    public DateTime? SentOnUtc => SentOn == default ? null : SentOn;
+
     public DateTime? RespondedOn { get; set; }
 
     /// <summary>
