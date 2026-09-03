@@ -292,7 +292,7 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         var target = ResolveTarget(statuses, aggregateType, command.TargetStatusCode);
         var currentCode = LifecyclePolicy.Canonicalize(aggregateType, aggregate.CurrentStatus?.SetupCode, aggregate.CurrentStatus?.SetupValue);
         var targetCode = LifecyclePolicy.Canonicalize(aggregateType, target.SetupCode, target.SetupValue);
-        ValidateTransition(aggregateType, currentCode, targetCode, command.ReasonCode, reopen);
+        ValidateTransition(aggregateType, currentCode, targetCode, command.ReasonCode, command.ReasonNotes, reopen);
         if (aggregateType == LeadAggregate && targetCode == "QUALIFIED"
             && aggregate.RequiresCommercialReview && !aggregate.CommercialFactsVerified)
             throw new LifecycleValidationException(
@@ -458,7 +458,8 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         return matches.OrderByDescending(x => !string.IsNullOrWhiteSpace(x.SetupCode)).ThenBy(x => x.SetupId).First();
     }
 
-    private static void ValidateTransition(string aggregateType, string current, string target, string? reason, bool reopen)
+    private static void ValidateTransition(
+        string aggregateType, string current, string target, string? reason, string? notes, bool reopen)
     {
         if (current == target)
             throw new LifecycleValidationException("The aggregate is already in the requested lifecycle state.");
@@ -478,6 +479,13 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         }
         if (LifecyclePolicy.RequiresReason(aggregateType, target, reopen) && string.IsNullOrWhiteSpace(reason))
             throw new LifecycleValidationException("A reason is required for this lifecycle transition.");
+        // A reopen additionally has to say WHY IN WORDS. The reason CODE on a reopen is a
+        // constant — every caller sends the same one — so requiring only that leaves the audit
+        // trail with "Reopened" and nothing about the customer who came back. Requiring it on the
+        // expensive operation rather than in a form means the next caller cannot skip it either.
+        if (reopen && string.IsNullOrWhiteSpace(notes))
+            throw new LifecycleValidationException(
+                "Reopening a closed record must record why, in words.");
     }
 
     private async Task<CommercialLifecycleEvent?> FindReplayAsync(long businessUnitId, string key, CancellationToken ct)

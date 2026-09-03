@@ -507,6 +507,38 @@ public sealed class LifecycleApplicationServiceTests
             92, 122, Actor(), Command("UNDER_REVIEW", 1, "lead-122-reopen", "CORRECTION"), true, default));
     }
 
+    /// <summary>
+    /// The reason on a reopen has to be WORDS, not just the constant code every caller sends.
+    ///
+    /// The reopen command's ReasonCode is fixed ("REOPENED") — it carries no information — so a
+    /// guard that only checked it would leave the audit trail unable to say why a disqualified
+    /// inquiry came back. This is checked on the transition itself, not in the form, so a second
+    /// caller cannot skip it.
+    /// </summary>
+    [Fact]
+    public async Task ReopenWithoutWordsIsRefusedAndWritesNothing()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(93);
+        Status(context, 5205, 93, "LeadStatus", "CANCELLED", "Cancelled");
+        Status(context, 5206, 93, "LeadStatus", "UNDER_REVIEW", "Under Review");
+        var lead = Seed.Lead(context, 123, 93, 5205);
+        await context.SaveChangesAsync();
+        var service = Service(context);
+        var codeOnly = new LifecycleTransitionCommand(
+            "UNDER_REVIEW", 1, "REOPENED", "   ", "Api", "corr-1", "req-1", "lead-123-reopen");
+
+        await Assert.ThrowsAsync<LifecycleValidationException>(() => service.TransitionLeadAsync(
+            93, lead.Id, Actor(), codeOnly, true, default));
+        Assert.Empty(context.CommercialLifecycleEvents);
+
+        // The control: the SAME command carrying words is accepted, so the refusal above is about
+        // the missing sentence and not about the lead, the version or the key.
+        var withWords = codeOnly with { ReasonNotes = "Customer came back with revised quantities." };
+        var reopened = await service.TransitionLeadAsync(93, lead.Id, Actor(), withWords, true, default);
+        Assert.Equal("Reopened", reopened.EventType);
+    }
+
     private static LifecycleApplicationService Service(ErpRfqAutomationContext context) => new(context);
     private static LifecycleActor Actor() => new("user-42", "AuthenticatedUser");
 
