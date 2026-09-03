@@ -4,6 +4,7 @@ using System.Security.Claims;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -17,11 +18,16 @@ namespace ERP_RFQ_Automation.Controllers
     public class QuotationUploaderController : ControllerBase
     {
         private readonly QuotationUploaderService _service;
+        private readonly IFileInspectionService _fileInspection;
         private readonly ILogger<QuotationUploaderController> _logger;
 
-        public QuotationUploaderController(QuotationUploaderService service, ILogger<QuotationUploaderController> logger)
+        public QuotationUploaderController(
+            QuotationUploaderService service,
+            IFileInspectionService fileInspection,
+            ILogger<QuotationUploaderController> logger)
         {
             _service = service;
+            _fileInspection = fileInspection;
             _logger = logger;
         }
 
@@ -51,6 +57,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("upload-template")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Quotations", PermissionAction.Create)]
         public async Task<IActionResult> UploadTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
@@ -67,7 +74,13 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
-                using var stream = file.OpenReadStream();
+                // Inspected BEFORE parsing (signature, archive safety, malware verdict), and refused
+                // with the shared problem shape when inspection says no or cannot answer.
+                await using var inspected = await UploadInspectionGate.InspectAsync(
+                    _fileInspection, file, HttpContext.RequestAborted);
+                if (!inspected.IsCleared)
+                    return UploadInspectionGate.Refuse(this, inspected.Inspection, "Quotation import file rejected");
+                var stream = inspected.Content;
                 var result = await _service.UploadTemplateAsync(stream, targetBUId, createdBy);
 
                 if (!result.Success)
@@ -95,6 +108,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// each quote to its real inquiry where one exists.</para>
         /// </summary>
         [HttpPost("upload-backfill")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
         [RequireModulePermission("Quotations", PermissionAction.Create)]
         public async Task<IActionResult> UploadBackfill(IFormFile file, [FromForm] long? businessUnitId = null)
         {
@@ -111,7 +125,13 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
-                using var stream = file.OpenReadStream();
+                // Inspected BEFORE parsing (signature, archive safety, malware verdict), and refused
+                // with the shared problem shape when inspection says no or cannot answer.
+                await using var inspected = await UploadInspectionGate.InspectAsync(
+                    _fileInspection, file, HttpContext.RequestAborted);
+                if (!inspected.IsCleared)
+                    return UploadInspectionGate.Refuse(this, inspected.Inspection, "Quotation back-fill file rejected");
+                var stream = inspected.Content;
                 var result = await _service.UploadTemplateAsync(stream, targetBUId, createdBy, backfill: true);
 
                 if (!result.Success)

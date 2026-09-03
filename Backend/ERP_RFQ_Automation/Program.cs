@@ -66,6 +66,12 @@ AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Console logging that actually renders the per-request scope (correlation id, tenant, path)
+// that TenantLoggingMiddleware pushes: JSON with scopes outside Development, single-line simple
+// with scopes in Development. Before this the simple formatter dropped the scope entirely, so no
+// production log line could be tied to the X-Correlation-ID a caller was holding.
+builder.Logging.AddNexoraConsole(builder.Environment.IsDevelopment());
+
 // Fail fast on missing / placeholder critical configuration so a misconfigured
 // deploy stops at startup instead of silently using placeholders or an empty
 // signing key. (DATA-07, SEC-12)
@@ -201,7 +207,7 @@ var malwareScannerSelection = MalwareScannerFactory.Select(
     builder.Configuration, builder.Environment.IsDevelopment());
 using (var malwareScannerStartupLoggerFactory = LoggerFactory.Create(logging =>
 {
-    logging.AddConsole();
+    logging.AddNexoraConsole(builder.Environment.IsDevelopment());
     logging.SetMinimumLevel(LogLevel.Information);
 }))
 {
@@ -492,6 +498,11 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Testing.TenantDataReset>(
 // service so it runs after any startup migration has applied, and so a slow or failing database
 // delays reconciliation rather than the whole boot.
 builder.Services.AddHostedService<ModuleCatalogStartupService>();
+// Gives every EXISTING business unit the Setup_Master reference lists a new one is provisioned
+// with (ShipmentStatus, PaymentMethod, LeadRejectedReason, RFQType, QuoteOutcomeReason). Adds a
+// list only where the tenant has none; never edits a row. Guarded by
+// TenantBaseline:ReconcileReferenceListsOnStartup (default true).
+builder.Services.AddHostedService<ERP_RFQ_Automation.Platform.Services.TenantReferenceListStartupReconciler>();
 builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, TenantOwnerRoleHandler>();
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, ModulePermissionPolicyProvider>();
@@ -1050,12 +1061,9 @@ await app.SeedPlatformOwnerAsync();
 
 // Global exception handler — return a generic message to clients and log the
 // detail server-side, instead of leaking exception internals. (DATA-12, SEC-16)
-app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
-{
-    ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
-    ctx.Response.ContentType = "application/json";
-    await ctx.Response.WriteAsync("{\"error\":\"An unexpected error occurred.\"}");
-}));
+// The body carries the correlation id alongside the generic message, so the one value a user
+// can quote back is the one that finds the stack trace (Platform/Hardening/GlobalExceptionResponse).
+app.UseExceptionHandler(errApp => errApp.Run(ERP_RFQ_Automation.Platform.Hardening.GlobalExceptionResponse.WriteAsync));
 
 // Baseline security headers (SEC-13). SEC-G9 adds the Content-Security-Policy this set was
 // missing; the policy itself and the reasoning behind every directive live in

@@ -74,6 +74,7 @@ public sealed class DeliveryController(
     /// confirmation then references.
     /// </summary>
     [HttpPost("shipments/{shipmentId:long}/proof-evidence")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
     [RequireModulePermission("Shipments", PermissionAction.Edit)]
     [RequestSizeLimit(DeliveryProofEvidenceService.MaximumEvidenceBytes)]
     public async Task<IActionResult> CaptureEvidence(

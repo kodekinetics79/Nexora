@@ -189,13 +189,20 @@ public sealed class BillingRunAndProrationPostgreSqlTests
     [Trait("Category", "PostgreSQL")]
     public async Task The_prior_period_catch_up_recomputes_a_draft_and_leaves_a_finalized_one_alone()
     {
-        var current = BillingPeriod.Containing(DateTime.UtcNow);
+        // The sweep's prior period gets FINALIZED below, and FinalizeAsync refuses until 48 h
+        // after a period closes. Anchored on the real clock, "last month" has not cleared that
+        // lag on the 1st and 2nd of every month, so the test failed deterministically two days
+        // out of every thirty. The sweep is therefore anchored on a moment whose prior period has
+        // always settled (see SettledSweepAnchor); the finalize gate itself still reads the real
+        // clock, which is exactly what makes the anchor necessary.
+        var anchor = SettledSweepAnchor();
+        var current = BillingPeriod.Containing(anchor);
         var prior = BillingPeriod.Containing(current.StartUtc.AddDays(-1));
         await SeedAsync();
         try
         {
             await using var provider = WorkerServices();
-            var worker = Worker(provider);
+            var worker = Worker(provider, anchor);
             await worker.SweepOnceAsync(CancellationToken.None);
 
             // Late usage lands in the closed month — the case the settle lag exists for.
@@ -535,10 +542,33 @@ public sealed class BillingRunAndProrationPostgreSqlTests
         return services.BuildServiceProvider();
     }
 
-    private static BillingRunWorker Worker(ServiceProvider provider)
+    private static BillingRunWorker Worker(ServiceProvider provider, DateTime? sweepClockUtc = null)
         => new(provider.GetRequiredService<IServiceScopeFactory>(),
             new StaticOptions(new BillingRunOptions()),
-            NullLogger<BillingRunWorker>.Instance);
+            NullLogger<BillingRunWorker>.Instance,
+            heartbeats: null,
+            clock: sweepClockUtc is { } pinned ? new FixedClock(pinned) : null);
+
+    /// <summary>
+    /// A moment whose PRIOR calendar month has cleared <see cref="BillingStatementService.FinalizeSettleLag"/>
+    /// against the real clock. Today, when today is far enough into the month; otherwise the last
+    /// instant of the previous month, so that "prior" becomes the month before last — which is
+    /// always finalizable. Either way every period involved has already started, so compute (which
+    /// refuses future periods against the real clock) is unaffected.
+    /// </summary>
+    private static DateTime SettledSweepAnchor()
+    {
+        var now = DateTime.UtcNow;
+        var thisMonth = BillingPeriod.Containing(now);
+        return thisMonth.StartUtc + BillingStatementService.FinalizeSettleLag <= now
+            ? now
+            : thisMonth.StartUtc.AddDays(-1);
+    }
+
+    private sealed class FixedClock(DateTime utc) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeSpan.Zero);
+    }
 
     private sealed class StaticOptions(BillingRunOptions value) : IOptionsMonitor<BillingRunOptions>
     {

@@ -67,6 +67,7 @@ public sealed class MaterialTraceabilityController(
     /// inspection and content-addressed evidence pipeline; nothing about storage is re-implemented.
     /// </summary>
     [HttpPost("lots/{materialLotId:long}/certificates")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
     [RequireModulePermission("Products", PermissionAction.Edit)]
     [RequestSizeLimit(MaterialLotCertificateService.MaximumDocumentBytes)]
     public async Task<IActionResult> AttachCertificate(

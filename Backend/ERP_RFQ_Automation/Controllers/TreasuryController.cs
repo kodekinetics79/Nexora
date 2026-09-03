@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.BankReconciliation;
 using ERP_RFQ_Automation.BankReconciliation.Parsing;
 using ERP_RFQ_Automation.BankReconciliation.Services;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,11 +15,15 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Route("api/treasury")]
 [Authorize]
-public sealed class TreasuryController(IBankReconciliationService service, IBankAdjustmentService adjustments) : ControllerBase
+public sealed class TreasuryController(
+    IBankReconciliationService service,
+    IBankAdjustmentService adjustments,
+    IFileInspectionService fileInspection) : ControllerBase
 {
     private const int MaximumUploadBytes = 10 * 1024 * 1024;
     private readonly IBankReconciliationService _service = service;
     private readonly IBankAdjustmentService _adjustments = adjustments;
+    private readonly IFileInspectionService _fileInspection = fileInspection;
 
     [HttpPost("matching-rules")]
     [RequireModulePermission("Bank Matching Rule Administration", PermissionAction.Create)]
@@ -86,6 +91,7 @@ public sealed class TreasuryController(IBankReconciliationService service, IBank
     [HttpPost("statements/import")]
     [Consumes("multipart/form-data")]
     [RequestSizeLimit(MaximumUploadBytes)]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
     [RequireModulePermission("Bank Statement Import", PermissionAction.Create)]
     public Task<IActionResult> ImportStatement([FromForm] long bankAccountId, [FromForm] string sourceType,
         [FromForm] IFormFile file)
@@ -93,9 +99,13 @@ public sealed class TreasuryController(IBankReconciliationService service, IBank
         {
             if (file.Length <= 0 || file.Length > MaximumUploadBytes)
                 throw new ArgumentException("Statement file must contain data and cannot exceed 10 MiB.");
-            await using var input = file.OpenReadStream();
-            using var buffer = new MemoryStream((int)file.Length);
-            await input.CopyToAsync(buffer, HttpContext.RequestAborted);
+            // Inspected BEFORE parsing, like every other upload door; a scanner that cannot
+            // answer refuses the import rather than letting an unscanned statement be parsed.
+            await using var inspected = await UploadInspectionGate.InspectAsync(
+                _fileInspection, file, HttpContext.RequestAborted);
+            if (!inspected.IsCleared)
+                return UploadInspectionGate.Refuse(this, inspected.Inspection, "Bank statement file rejected");
+            var buffer = inspected.Content;
             var payload = buffer.ToArray();
             var sourceHash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
             buffer.Position = 0;

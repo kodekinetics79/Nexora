@@ -1,9 +1,12 @@
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.Controllers;
+using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Services.Uom;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -330,11 +333,15 @@ public sealed class TenantBaselineSeederTests
         // Not delete: a quote is the evidence behind a commercial commitment.
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Quotations", "candelete", Bu));
 
-        // Read-only on the supply side, and completely absent from finance and administration —
-        // a module with no row at all is denied outright for anything below Admin rank.
+        // Read-only on the supply side, and absent from finance and administration except for the
+        // two reads the rail gates Fulfilment and Receivables on — a module with no row at all is
+        // denied outright for anything below Admin rank.
         Assert.True(await repository.CheckPermissionAsync(role.SetupId, "Suppliers", "canview", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Suppliers", "canedit", Bu));
-        Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Accounts Receivable", "canview", Bu));
+        Assert.True(await repository.CheckPermissionAsync(role.SetupId, "Shipments", "canview", Bu));
+        Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Shipments", "cancreate", Bu));
+        Assert.True(await repository.CheckPermissionAsync(role.SetupId, "Accounts Receivable", "canview", Bu));
+        Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Accounts Receivable", "cancreate", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Customer Payments", "cancreate", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Users", "canview", Bu));
         Assert.False(await repository.CheckPermissionAsync(role.SetupId, "Roles & Permissions", "canedit", Bu));
@@ -716,5 +723,156 @@ public sealed class TenantBaselineSeederTests
         Assert.Equal(["FIXED", "PERCENTAGE"],
             await verify.SetupMasters.Where(row => row.SetupType == "DiscountType")
                 .Select(row => row.SetupCode).OrderBy(code => code).ToListAsync());
+    }
+
+    // ---- reference lists ---------------------------------------------------------------------
+
+    /// <summary>
+    /// The second thing a tenant does after its first quote is win it: raise the order and despatch
+    /// it. On the live database business units 7 and 8 could not — neither had a ShipmentStatus
+    /// row, so <c>ShipmentController.CreateShipment</c> refused every status, and neither had a
+    /// PaymentMethod for the order form's picker. This raises the order through
+    /// <c>OrderService</c> (which resolves OrderStatus/DRAFT and PaymentStatus/UNPAID by name) and
+    /// then asks the shipment controller's own status predicate the question its despatch form
+    /// asks.
+    /// </summary>
+    [Fact]
+    public async Task A_freshly_provisioned_business_unit_can_raise_a_manual_order_and_has_a_status_to_despatch_with()
+    {
+        using var db = new TestDb();
+        const long customerId = 9101;
+        const long warehouseId = 9102;
+        const long productId = 9103;
+        const long leadId = 9104;
+        long paymentMethodId;
+        long pendingShipmentStatusId;
+
+        await using (var context = db.ContextFor(null))
+        {
+            ReconcileModuleCatalogue(context);
+            ProvisionedBusinessUnit(context);
+
+            var summary = await Seeder(context).SeedAsync(Bu, AcmeProfile, Actor);
+            Assert.Equal(
+                TenantBaselineCatalog.ReferenceLists.Sum(list => list.Entries.Count),
+                summary.ReferenceListRowsCreated);
+
+            // What a real order needs besides reference data: somebody to sell to, something to
+            // sell, and the inquiry it fulfils (an order cannot exist outside a commercial case).
+            // These are the customer's own records, not baseline.
+            Seed.Customer(context, customerId, Bu, "First customer");
+            Seed.Lead(context, leadId, Bu, buyersName: "First customer");
+            context.Warehouses.Add(new Warehouse
+            {
+                Id = warehouseId, BusinessUnitId = Bu, WarehouseCode = "WH-MAIN", WarehouseName = "Main",
+                IsActive = true, CreatedBy = Actor, CreatedOn = DateTime.UtcNow
+            });
+            context.Products.Add(new Product
+            {
+                Id = productId, Buid = Bu, PartNo = "GV-6-150", ProductName = "Gate valve, 6in, class 150",
+                WarehouseId = warehouseId, QtyOnHand = 10m, ReorderPoint = 0m, IsActive = true,
+                CreatedBy = Actor, CreatedOn = DateTime.UtcNow
+            });
+            await context.SaveChangesAsync();
+
+            paymentMethodId = await context.SetupMasters.IgnoreQueryFilters()
+                .Where(row => row.BusinessUnitId == Bu && row.SetupType == "PaymentMethod" && row.SetupCode == "BANK_TRANSFER")
+                .Select(row => row.SetupId).SingleAsync();
+            pendingShipmentStatusId = await context.SetupMasters.IgnoreQueryFilters()
+                .Where(row => row.BusinessUnitId == Bu && row.SetupType == "ShipmentStatus" && row.SetupCode == "PENDING")
+                .Select(row => row.SetupId).SingleAsync();
+        }
+
+        // Through the tenant-scoped context the product actually uses, so the status rows the
+        // service resolves are provably THIS tenant's.
+        await using var tenant = db.ContextFor(Bu);
+        var created = await new OrderService(new OrderRepository(tenant), tenant).CreateManualOrderAsync(
+            new CreateOrderDto
+            {
+                LeadId = leadId,
+                CustomerId = customerId,
+                BusinessUnitId = Bu,
+                OrderDate = DateTime.UtcNow,
+                Items =
+                [
+                    new CreateOrderItemDto
+                    {
+                        ProductId = productId, Description = "Gate valve, 6in, class 150",
+                        Quantity = 2m, UnitPrice = 125m, Discount = 0m, TaxAmount = 0m
+                    }
+                ]
+            }, Bu);
+        Assert.True(created.Id > 0);
+
+        var stored = await tenant.Orders.AsNoTracking()
+            .Include(order => order.Status)
+            .SingleAsync(order => order.Id == created.Id);
+        Assert.Equal("OrderStatus", stored.Status.SetupType);
+        Assert.Equal("DRAFT", stored.Status.SetupCode);
+        Assert.Equal(Bu, stored.Status.BusinessUnitId);
+
+        // OrderService deliberately records no payment method at creation (payment is captured
+        // later), so the order form's picker is proven the way the form reads it: an active
+        // PaymentMethod row of this tenant that Orders.PaymentMethodID can point at.
+        var bankTransfer = await tenant.SetupMasters.AsNoTracking().SingleAsync(row => row.SetupId == paymentMethodId);
+        Assert.Equal(Bu, bankTransfer.BusinessUnitId);
+        Assert.True(bankTransfer.IsActive);
+
+        // The despatch form's gate, verbatim: an active ShipmentStatus row of this business unit.
+        Assert.True(await ShipmentController.IsActiveShipmentStatusAsync(tenant, Bu, pendingShipmentStatusId));
+
+        // And every list the catalogue promises is there in full, spelled as production spells it.
+        foreach (var list in TenantBaselineCatalog.ReferenceLists)
+        {
+            var codes = await tenant.SetupMasters.AsNoTracking()
+                .Where(row => row.SetupType == list.SetupType && row.IsActive == true)
+                .Select(row => row.SetupCode).ToListAsync();
+            Assert.Equal(list.Entries.Select(entry => entry.Code).Order(), codes.Order());
+        }
+    }
+
+    /// <summary>
+    /// A list the customer has already shaped is theirs. The tenant below has ONE payment method
+    /// of its own and none of the other lists; the seeder fills the empty lists and leaves the
+    /// shaped one exactly as it found it — no "missing" codes added, no rename, no reactivation —
+    /// and a second pass creates nothing at all.
+    /// </summary>
+    [Fact]
+    public async Task A_reference_list_the_tenant_has_already_shaped_is_left_exactly_as_it_is()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        ReconcileModuleCatalogue(context);
+        ProvisionedBusinessUnit(context);
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupType = "PaymentMethod", SetupCode = "WIRE", SetupValue = "Wire (customer's own)",
+            BusinessUnitId = Bu, IsActive = false, CreatedBy = "admin@acme-trading.example",
+            CreatedOn = DateTime.UtcNow.AddDays(-30)
+        });
+        await context.SaveChangesAsync();
+
+        var first = await Seeder(context).SeedAsync(Bu, AcmeProfile, Actor);
+        var expectedWithoutPaymentMethods = TenantBaselineCatalog.ReferenceLists
+            .Where(list => list.SetupType != "PaymentMethod").Sum(list => list.Entries.Count);
+        Assert.Equal(expectedWithoutPaymentMethods, first.ReferenceListRowsCreated);
+
+        var paymentMethods = await context.SetupMasters.IgnoreQueryFilters().AsNoTracking()
+            .Where(row => row.BusinessUnitId == Bu && row.SetupType == "PaymentMethod").ToListAsync();
+        var wire = Assert.Single(paymentMethods);
+        Assert.Equal("WIRE", wire.SetupCode);
+        Assert.Equal("Wire (customer's own)", wire.SetupValue);
+        Assert.False(wire.IsActive);
+        Assert.Equal("admin@acme-trading.example", wire.CreatedBy);
+
+        var second = await Seeder(context).SeedAsync(Bu, AcmeProfile, Actor);
+        Assert.Equal(0, second.ReferenceListRowsCreated);
+        var duplicates = await context.SetupMasters.IgnoreQueryFilters().AsNoTracking()
+            .Where(row => row.BusinessUnitId == Bu)
+            .GroupBy(row => new { row.SetupType, row.SetupCode })
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key.SetupType + "/" + group.Key.SetupCode)
+            .ToListAsync();
+        Assert.Empty(duplicates);
     }
 }

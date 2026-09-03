@@ -108,7 +108,11 @@ export const ROLE_LADDER: readonly RolePreset[] = [
       { module: "RFQ Management", canView: true, canCreate: true, canEdit: true, canDelete: false },
       { module: "Quotations", canView: true, canCreate: true, canEdit: true, canDelete: false },
       { module: "Orders", canView: true, canCreate: true, canEdit: false, canDelete: false },
+      // The rail shows Fulfilment only to a role that can view "Shipments" and Receivables only
+      // to one that can view "Accounts Receivable" (navCatalog.tsx). Both are reads; nothing here
+      // lets the desk create a shipment or move money. Mirrors TenantBaselineCatalog.StarterRoles.
       { module: "Shipments", canView: true, canCreate: false, canEdit: false, canDelete: false },
+      { module: "Accounts Receivable", canView: true, canCreate: false, canEdit: false, canDelete: false },
       { module: "Customers", canView: true, canCreate: true, canEdit: true, canDelete: false },
       { module: "Customer Awards", canView: true, canCreate: false, canEdit: false, canDelete: false },
       { module: "Suppliers", canView: true, canCreate: false, canEdit: false, canDelete: false },

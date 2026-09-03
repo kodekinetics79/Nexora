@@ -59,6 +59,7 @@ public sealed class SupplierQuoteInboxController(
         });
 
     [HttpPost("documents")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
     [RequestSizeLimit(25 * 1024 * 1024)]
     [RequireModulePermission("Supplier History", PermissionAction.Create)]
     public Task<IActionResult> Upload([FromForm] SupplierQuoteDocumentUploadRequest request) =>

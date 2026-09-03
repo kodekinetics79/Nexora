@@ -353,6 +353,9 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Module(usersModuleId, "Users"),
             Module(quotationsModuleId, "Quotations"),
             Module(suppliersModuleId, "Suppliers"));
+        // Seeded by the migration baseline like Supplier Negotiation above, so it is read, not inserted.
+        var bankStatementImportModuleId = await db.Modules.Where(x =>
+            x.ModuleName == "Bank Statement Import").Select(x => x.Id).SingleAsync();
 
         db.SetupMasters.AddRange(
             Role(AllowedRole, TenantA, "Release 01B Reader"),
@@ -372,7 +375,10 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Permission(85_008, AllowedRole, usersModuleId, TenantA),
             Permission(85_009, AllowedRole, supplierNegotiationModuleId, TenantA, canEdit: true),
             Permission(85_010, SupplierHistoryViewerRole, supplierHistoryModuleId, TenantA),
-            Permission(85_011, AllowedRole, quotationsModuleId, TenantA),
+            // Create as well as view: the quote back-fill door is gated on Quotations Create, and
+            // a fixture role that could never pass that gate would make the 403 assertion in
+            // QuoteBackfillAuthenticatedHttpTests indistinguishable from the gate being absent.
+            Permission(85_011, AllowedRole, quotationsModuleId, TenantA, canCreate: true),
             Permission(85_012, GrowthManagerRole, leadsModuleId, TenantA, canEdit: true),
             Permission(85_013, GrowthManagerRole, customersModuleId, TenantA),
             Permission(85_014, GrowthManagerRole, rfqManagementModuleId, TenantA),
@@ -382,7 +388,9 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.RolePermissions.AddRange(
             Permission(85_018, AllowedRole, suppliersModuleId, TenantA,
                 canCreate: true, canEdit: true, canDelete: true),
-            Permission(85_019, SupplierHistoryViewerRole, suppliersModuleId, TenantA));
+            Permission(85_019, SupplierHistoryViewerRole, suppliersModuleId, TenantA),
+            // The treasury statement import door, for UploadDoorsAuthenticatedHttpTests.
+            Permission(85_020, AllowedRole, bankStatementImportModuleId, TenantA, canCreate: true));
 
         db.Users.AddRange(
             User(GrowthRepUser, TenantA, AllowedRole, "Rep", "growth-rep@nexora.invalid"),

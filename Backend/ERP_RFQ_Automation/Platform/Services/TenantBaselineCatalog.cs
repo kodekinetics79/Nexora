@@ -83,6 +83,78 @@ public static class TenantBaselineCatalog
         ("FIXED", "Fixed amount", "Discount entered as an absolute amount in the quote currency")
     ];
 
+    // ── Reference lists ─────────────────────────────────────────────────────────────────────
+    // The Setup_Master lists a commercial screen reads by SetupType and that nothing seeded until
+    // now. Copied value-for-value from business unit 1 on the live database (2026-09-02), which
+    // is the only tenant that ever had them — every later tenant was provisioned without them,
+    // and each absence fails somewhere other than where it is caused:
+    //
+    //   ShipmentStatus     ShipmentController.CreateShipment refuses any status that is not an
+    //                      active row of this type for the tenant, so a tenant with no rows cannot
+    //                      despatch at all ("The shipment status is not active for this business
+    //                      unit" on a form whose status picker was empty).
+    //   PaymentMethod      Orders.PaymentMethodID is a foreign key to this list; the order form's
+    //                      payment method picker renders empty.
+    //   LeadRejectedReason Leads.LeadRejectedReasonID is a foreign key to this list; a lead cannot
+    //                      be rejected with a reason.
+    //   RFQType            The RFQ form's type picker (Direct vs Agreement pricing).
+    //   QuoteOutcomeReason The reason recorded when a quote is lost or withdrawn.
+    //
+    // Lifecycle states (LeadStatus, RFQStatus, QuoteStatus, OrderStatus, PaymentStatus) are NOT
+    // here: they are governed by LifecyclePolicy and seeded from LifecycleStatusCatalog, and
+    // DiscountType keeps its own entry above because QuoteService acts on its codes.
+    //
+    // These are seeded only when the tenant has NO row of the type at all. A list a customer has
+    // already shaped — renamed, deactivated, or trimmed — is theirs; adding "missing" entries to
+    // it would reinstate choices they removed on purpose.
+
+    public sealed record ReferenceListEntry(string Code, string Label, string Description);
+
+    public sealed record ReferenceList(string SetupType, IReadOnlyList<ReferenceListEntry> Entries);
+
+    public static readonly IReadOnlyList<ReferenceList> ReferenceLists =
+    [
+        new("ShipmentStatus",
+        [
+            new("PENDING", "Pending", "Shipment is pending"),
+            new("SHIPPED", "Shipped", "Shipment dispatched"),
+            new("IN_TRANSIT", "In Transit", "Shipment in transit"),
+            new("DELIVERED", "Delivered", "Shipment delivered"),
+            new("CANCELLED", "Cancelled", "Shipment cancelled")
+        ]),
+        new("PaymentMethod",
+        [
+            new("BANK_TRANSFER", "Bank Transfer", "Direct Bank Transfer"),
+            new("CASH", "Cash", "Cash Payment"),
+            new("CHECK", "Check", "Cheque Payment"),
+            new("CREDIT_CARD", "Credit Card", "Credit Card Payment")
+        ]),
+        new("LeadRejectedReason",
+        [
+            new("MANUFACTURER_DIRECT", "Manufacturer Direct", "Customer prefers to deal directly with manufacturer"),
+            new("NOT_OUR_BUSINESS", "Not Our Business", "Requirement does not match our business offerings"),
+            new("NO_SOURCE", "No Source", "Lead has no valid source information"),
+            new("OBSOLETE_ITEM", "Obsolete Item/System", "Requested item or system is obsolete"),
+            new("SHORT_BCD", "Short BCD", "Remaining shelf life (BCD) is too short")
+        ]),
+        new("RFQType",
+        [
+            new("DIRECT", "Direct Bidding", "Direct RFQ type - one-time purchase"),
+            new("AGREEMENT", "Agreement", "Agreement-based RFQ - contract pricing")
+        ]),
+        new("QuoteOutcomeReason",
+        [
+            new("PRICE", "Price too high", "Price too high"),
+            new("LEAD_TIME", "Lead time too long", "Lead time too long"),
+            new("NO_STOCK", "Item unavailable", "Item unavailable"),
+            new("LOST_COMPETITOR", "Lost to competitor", "Lost to competitor"),
+            new("CUSTOMER_CANCELLED", "Customer cancelled", "Customer cancelled"),
+            new("NO_RESPONSE", "No response", "No response"),
+            new("AUTO_EXPIRED", "Expired automatically", "Expired automatically"),
+            new("OTHER", "Other", "Other")
+        ])
+    ];
+
     // ── Currencies ──────────────────────────────────────────────────────────────────────────
     // A hand-held table rather than anything derived from CultureInfo/RegionInfo. Two reasons.
     // Mapping an ISO-4217 code back to a name through the framework means scanning every culture
@@ -249,7 +321,14 @@ public static class TenantBaselineCatalog
                 // accepted order is a commitment to the customer, and changing it after the fact
                 // is the manager's call.
                 ReadAdd("Orders"),
+
+                // The rail shows Fulfilment only to a role that can view "Shipments" and
+                // Receivables only to one that can view "Accounts Receivable" (navCatalog.tsx).
+                // A representative who has just raised an order needs to see it despatched and
+                // needs to know whether the customer is on stop before quoting them again; both
+                // are reads. Nothing here lets them create a shipment or move money.
                 Read("Shipments"),
+                Read("Accounts Receivable"),
 
                 Work("Customers"),
                 Read("Customer Awards"),

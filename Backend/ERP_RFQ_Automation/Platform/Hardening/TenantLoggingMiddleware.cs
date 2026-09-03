@@ -55,7 +55,9 @@ public sealed class TenantLoggingMiddleware
         }
     }
 
-    private static string ResolveCorrelationId(HttpContext context)
+    /// <summary>The inbound <c>X-Correlation-ID</c> when present, else the framework's trace
+    /// identifier. Public so the global exception handler names the same id the log lines carry.</summary>
+    public static string ResolveCorrelationId(HttpContext context)
     {
         if (context.Request.Headers.TryGetValue(CorrelationHeader, out var header))
         {

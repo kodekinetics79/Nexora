@@ -50,6 +50,7 @@ public sealed record TenantBaselineSummary(
     int CountriesCreated,
     int DiscountTypesCreated,
     int LifecycleStatusesCreated,
+    int ReferenceListRowsCreated,
     int ModulesCreated,
     int RolesCreated,
     int RolePermissionsCreated,
@@ -123,6 +124,15 @@ public interface ITenantBaselineSeeder
     /// <exception cref="InvalidOperationException">The business unit does not exist.</exception>
     Task<TenantBaselineSummary> SeedAsync(
         long businessUnitId, TenantBaselineProfile profile, string actor, CancellationToken ct = default);
+
+    /// <summary>
+    /// Adds every <see cref="TenantBaselineCatalog.ReferenceLists"/> list the business unit has
+    /// NO rows of, and saves. Idempotent: a second call creates nothing. A list the tenant already
+    /// holds — in any shape — is never touched, so this is safe to run against a live tenant at any
+    /// point in its life; it is what the startup reconciler runs for every business unit.
+    /// </summary>
+    /// <returns>The number of Setup_Master rows written.</returns>
+    Task<int> ReconcileReferenceListsAsync(long businessUnitId, string actor, CancellationToken ct = default);
 }
 
 public sealed class TenantBaselineSeeder(
@@ -178,6 +188,8 @@ public sealed class TenantBaselineSeeder(
         var countries = await EnsureCountryAsync(businessUnitId, profile.CountryCode, seededBy, now, ct);
         var discountTypes = await EnsureDiscountTypesAsync(businessUnitId, seededBy, now, ct);
         var lifecycleStatuses = await EnsureLifecycleStatusesAsync(businessUnit, seededBy, now, ct);
+        await LockReferenceListsAsync(businessUnitId, ct);
+        var referenceRows = await EnsureReferenceListsAsync(businessUnitId, seededBy, now, ct);
         var (leadReferenceSeeded, leadReferencePrefix) =
             await EnsureLeadReferenceConfigurationAsync(businessUnit, now, ct);
         var roles = await EnsureStarterRolesAsync(businessUnitId, seededBy, now, ct);
@@ -196,6 +208,7 @@ public sealed class TenantBaselineSeeder(
             countries,
             discountTypes,
             lifecycleStatuses,
+            referenceRows,
             roles.ModulesCreated,
             roles.RolesCreated,
             roles.GrantsCreated,
@@ -207,8 +220,9 @@ public sealed class TenantBaselineSeeder(
         logger.LogInformation(
             "Seeded tenant baseline for business unit {BusinessUnitId}: base currency {Currency}, "
             + "{Units} unit(s) of measure, {Countries} country row(s), {LifecycleStatuses} lifecycle "
-            + "status row(s), {Roles} starter role(s) holding {Grants} permission grant(s).",
-            businessUnitId, currency.Code, units, countries, lifecycleStatuses,
+            + "status row(s), {ReferenceRows} reference-list row(s), {Roles} starter role(s) holding "
+            + "{Grants} permission grant(s).",
+            businessUnitId, currency.Code, units, countries, lifecycleStatuses, referenceRows,
             roles.RolesCreated, roles.GrantsCreated);
 
         return summary;
@@ -489,6 +503,97 @@ public sealed class TenantBaselineSeeder(
     private Task<int> EnsureLifecycleStatusesAsync(
         BusinessUnit businessUnit, string actor, DateTime now, CancellationToken ct)
         => LifecycleStatusCatalog.EnsureAsync(context, businessUnit, actor, now, ct);
+
+    public async Task<int> ReconcileReferenceListsAsync(
+        long businessUnitId, string actor, CancellationToken ct = default)
+    {
+        var seededBy = string.IsNullOrWhiteSpace(actor) ? "provisioning" : actor.Trim();
+        if (!await context.BusinessUnits.IgnoreQueryFilters().AnyAsync(unit => unit.Id == businessUnitId, ct))
+            throw new InvalidOperationException(
+                $"Business unit {businessUnitId} does not exist; its reference lists cannot be reconciled.");
+
+        await LockReferenceListsAsync(businessUnitId, ct);
+        var created = await EnsureReferenceListsAsync(businessUnitId, seededBy, DateTime.UtcNow, ct);
+        if (created > 0)
+            await context.SaveChangesAsync(ct);
+        return created;
+    }
+
+    /// <summary>
+    /// Serialises every writer of one business unit's reference lists: provisioning (inside its
+    /// own transaction) and the startup reconciler (one transaction per unit) both take this
+    /// before their check-then-insert, so whichever is second re-reads after the first commits
+    /// and finds the lists present. Setup_Master has no unique index on (unit, type, code), so
+    /// without it a boot-time sweep racing a fresh provision could write a list twice.
+    ///
+    /// <para>PostgreSQL only, and only inside a transaction: a transaction-scoped advisory lock
+    /// taken in autocommit is released at the end of its own statement and protects nothing, so
+    /// outside a transaction the call is skipped rather than pretending. The SQLite test lane
+    /// never runs two hosts against one file.</para>
+    /// </summary>
+    private async Task LockReferenceListsAsync(long businessUnitId, CancellationToken ct)
+    {
+        if (!context.Database.IsNpgsql() || context.Database.CurrentTransaction is null)
+            return;
+        await context.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock(hashtextextended({"nexora:reference-lists:" + businessUnitId}, 0))", ct);
+    }
+
+    /// <summary>
+    /// The Setup_Master reference lists in <see cref="TenantBaselineCatalog.ReferenceLists"/>.
+    ///
+    /// <para><b>Whole-list, type-level presence.</b> A list is written only when the tenant has NO
+    /// row of that SetupType — active or not — matched with the type folded for case and spacing,
+    /// the same comparison <c>ShipmentController</c> and <c>LifecycleStatusCatalog</c> read with.
+    /// This is deliberately coarser than the per-code check the lifecycle catalogue uses. A
+    /// lifecycle code is a hard runtime dependency the product resolves by name, so a missing one
+    /// must be restored; a reference list is the customer's vocabulary, and a tenant that has
+    /// deleted "CHECK" from its payment methods has not lost a row — it has made a decision. The
+    /// re-run therefore fills empty lists and leaves shaped ones alone.</para>
+    ///
+    /// <para>What a missing list costs is stated per list on the catalogue. The one that bites
+    /// first is <c>ShipmentStatus</c>: business units 7 and 8 on the live database had none, and
+    /// their despatch screen could not be submitted at all.</para>
+    /// </summary>
+    private async Task<int> EnsureReferenceListsAsync(
+        long businessUnitId, string actor, DateTime now, CancellationToken ct)
+    {
+        var presentTypes = (await context.SetupMasters.IgnoreQueryFilters().AsNoTracking()
+                .Where(row => row.BusinessUnitId == businessUnitId)
+                .Select(row => row.SetupType)
+                .Distinct()
+                .ToListAsync(ct))
+            .Select(FoldSetupType)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var created = 0;
+        foreach (var list in TenantBaselineCatalog.ReferenceLists)
+        {
+            if (presentTypes.Contains(FoldSetupType(list.SetupType)))
+                continue;
+
+            foreach (var entry in list.Entries)
+            {
+                context.SetupMasters.Add(new SetupMaster
+                {
+                    SetupType = list.SetupType,
+                    SetupCode = entry.Code,
+                    SetupValue = entry.Label,
+                    Description = entry.Description,
+                    BusinessUnitId = businessUnitId,
+                    RoleRank = RoleRanks.Member,
+                    IsActive = true,
+                    CreatedBy = actor,
+                    CreatedOn = now
+                });
+                created++;
+            }
+        }
+        return created;
+    }
+
+    private static string FoldSetupType(string? setupType)
+        => (setupType ?? string.Empty).Replace(" ", string.Empty).ToLowerInvariant();
 
     /// <summary>
     /// The commercial-case reference format.

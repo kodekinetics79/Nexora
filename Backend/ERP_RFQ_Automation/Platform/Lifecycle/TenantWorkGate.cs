@@ -97,6 +97,14 @@ public sealed class MailboxTenantWorkGate(
     ITenantAccessService access,
     ILogger<MailboxTenantWorkGate> logger) : IMailboxTenantWorkGate
 {
+    /// <summary>
+    /// Orphan business units this process has already warned about. The refusal is re-evaluated
+    /// every poll (once a minute per mailbox) and the situation does not change on its own, so
+    /// the warning is stated once per unit per process and thereafter at Debug: an operator
+    /// still finds it, and it stops being the loudest line in the log.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> OrphansAnnounced = new();
+
     public async Task<IReadOnlyList<long>> FilterPollableAsync(
         IEnumerable<long> businessUnitIds, CancellationToken ct = default)
         => await FilterAsync(businessUnitIds, fresh: false, ct);
@@ -132,7 +140,8 @@ public sealed class MailboxTenantWorkGate(
 
         if (!snapshot.HasTenant && !snapshot.IsUnresolvable)
         {
-            logger.LogWarning(
+            logger.Log(
+                OrphansAnnounced.TryAdd(businessUnitId, 0) ? LogLevel.Warning : LogLevel.Debug,
                 "Mailbox polling refused for orphan business unit {BusinessUnitId}: no platform "
                 + "tenant owns it. Deactivate the stale mailbox or deliberately link the "
                 + "business unit to an active tenant before polling can resume.",

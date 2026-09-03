@@ -178,7 +178,12 @@ namespace ERP_RFQ_Automation.Controllers
             });
 
         [HttpPost("upload-leads-folder")]
-        [RequestSizeLimit(200L * 1024 * 1024)]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
+        // 25 MB, the same ceiling as every other upload door and as the inspection limit itself
+        // (DocumentFileInspectionService.DefaultMaximumFileBytes). This door accepted 200 MB,
+        // eight times what inspection will ever read, so the excess could only ever be buffered
+        // and then refused.
+        [RequestSizeLimit(ERP_RFQ_Automation.Security.DocumentInspection.DocumentInspectionOptions.DefaultMaximumFileBytes)]
         [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> UploadLeadsToFolder(
             [FromForm] List<IFormFile> files,
