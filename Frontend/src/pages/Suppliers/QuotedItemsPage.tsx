@@ -20,6 +20,9 @@ import uomService from '../../api/services/uomService';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 import SearchField from '../../components/common/SearchField';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import { gridEmptyOverlay } from '../../components/common/gridOverlays';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 const emptyItem: Partial<SupplierQuotedItemDTO> = {
   supplierId: 0,
@@ -37,6 +40,9 @@ const emptyItem: Partial<SupplierQuotedItemDTO> = {
   isActive: true,
 };
 
+/** Said wherever a quoted item cannot be created, so the absence is never unexplained. */
+const NO_CREATE_PERMISSION = 'Ask your administrator for permission to record supplier prices.';
+
 const QuotedItemsPage: React.FC = () => {
   const { t } = useTranslation();
   const { userData, hasPermission } = useAuth();
@@ -53,7 +59,7 @@ const QuotedItemsPage: React.FC = () => {
   const [search, setSearch] = useState('');
 
   // ── Queries ──
-  const { data: quotedItems = [], isLoading } = useQuery({
+  const { data: quotedItems = [], isLoading, isError, error, refetch } = useQuery({
     queryKey: ['quoted-items', buid],
     queryFn: () => supplierQuotedItemService.getAll(buid),
     enabled: !!buid,
@@ -87,7 +93,11 @@ const QuotedItemsPage: React.FC = () => {
       enqueueSnackbar('Quoted item added successfully', { variant: 'success' });
       setIsModalOpen(false);
     },
-    onError: (err: any) => enqueueSnackbar(err.message || 'Failed to add item', { variant: 'error' }),
+    // `err.message` is the transport's own sentence — API hostname and all. Never shown.
+    onError: (err: unknown) => enqueueSnackbar(
+      presentableErrorMessage(err, 'The quoted item could not be added. Nothing was saved — try again.'),
+      { variant: 'error' },
+    ),
   });
 
   const updateMutation = useMutation({
@@ -97,7 +107,10 @@ const QuotedItemsPage: React.FC = () => {
       enqueueSnackbar('Quoted item updated successfully', { variant: 'success' });
       setIsModalOpen(false);
     },
-    onError: (err: any) => enqueueSnackbar(err.message || 'Failed to update item', { variant: 'error' }),
+    onError: (err: unknown) => enqueueSnackbar(
+      presentableErrorMessage(err, 'The quoted item could not be updated. Your change was not saved — try again.'),
+      { variant: 'error' },
+    ),
   });
 
   const deleteMutation = useMutation({
@@ -106,6 +119,12 @@ const QuotedItemsPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['quoted-items'] });
       enqueueSnackbar('Item deleted', { variant: 'info' });
     },
+    // This had no failure handler at all: a delete that was refused looked exactly like one that
+    // worked, until the row reappeared.
+    onError: (err: unknown) => enqueueSnackbar(
+      presentableErrorMessage(err, 'The quoted item could not be deleted. It is still there — try again.'),
+      { variant: 'error' },
+    ),
   });
 
   // ── Handlers ──
@@ -199,6 +218,28 @@ const QuotedItemsPage: React.FC = () => {
     item.quoteReference?.toLowerCase().includes(search.toLowerCase())
   );
 
+  /**
+   * The search here is CLIENT-side, so "no rows" after typing is a filter result and "no rows"
+   * before typing is a real absence. They used to render identically, as MUI's bare "No rows".
+   */
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No supplier prices recorded yet',
+    message: 'This is the history of what your vendors have quoted. Record one and it is there to compare against next time.',
+    action: canCreate
+      ? <Button variant="contained" onClick={handleAddNew} sx={{ fontWeight: 700 }}>Record the first quote</Button>
+      : (
+        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 360 }}>
+          {NO_CREATE_PERMISSION}
+        </Typography>
+      ),
+    filtered: search.trim().length > 0,
+    filteredTitle: 'Nothing matches this search',
+    filteredMessage: 'Clear the search to see every recorded supplier price.',
+    filteredAction: (
+      <Button variant="outlined" onClick={() => setSearch('')} sx={{ fontWeight: 700 }}>Clear the search</Button>
+    ),
+  }), [canCreate, search, handleAddNew]);
+
   return (
     <Box sx={{ p: 3 }}>
       {/* Header */}
@@ -207,9 +248,18 @@ const QuotedItemsPage: React.FC = () => {
           <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Supplier Quoted Items</Typography>
           <Typography variant="body2" color="text.secondary">Maintain a master list of all prices and items quoted by your vendors</Typography>
         </Box>
-        {canCreate && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3, borderRadius: 2, height: 48 }}>
-          New Quote Item
-        </Button>}
+        {canCreate
+          ? (
+            <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3, borderRadius: 2, height: 48 }}>
+              New Quote Item
+            </Button>
+          )
+          : (
+            /* A missing button is a support ticket unless it says why it is missing. */
+            <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 300, textAlign: 'right' }}>
+              {NO_CREATE_PERMISSION}
+            </Typography>
+          )}
       </Box>
 
       {/* Search */}
@@ -218,16 +268,33 @@ const QuotedItemsPage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
+      {/* A failed request used to fall through as an empty grid, which reads as "your vendors have
+          never quoted you anything" — a statement about the business, not the network. The failure
+          REPLACES the grid rather than sitting above it: an error panel over an empty-state panel
+          saying "none recorded yet" contradicts itself, and the reader believes the wrong half. */}
       <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
-          rows={filteredItems}
-          columns={columns}
-          loading={isLoading}
-          getRowId={(r) => r.id}
-          disableRowSelectionOnClick
-          rowHeight={65}
-          sx={{ border: 'none' }}
-        />
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Box sx={{ maxWidth: 520 }}>
+              <ApiErrorNotice
+                error={error}
+                fallbackMessage="We couldn't load quoted items. No empty result has been assumed."
+                onRetry={() => refetch()}
+              />
+            </Box>
+          </Box>
+        ) : (
+          <DataGrid
+            rows={filteredItems}
+            columns={columns}
+            loading={isLoading}
+            slots={{ noRowsOverlay }}
+            getRowId={(r) => r.id}
+            disableRowSelectionOnClick
+            rowHeight={65}
+            sx={{ border: 'none' }}
+          />
+        )}
       </Paper>
 
       {/* Dialog */}

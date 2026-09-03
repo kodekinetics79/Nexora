@@ -26,6 +26,7 @@ import cityService from '../../api/services/cityService';
 import teamService from '../../api/services/teamService';
 import { useAuth } from '../../context/AuthContext';
 import SearchField from '../../components/common/SearchField';
+import { gridEmptyOverlay } from '../../components/common/gridOverlays';
 import UploadExportToolbar from '../../components/common/UploadExportToolbar';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
 import CustomFieldValuesEditor from '../../components/common/CustomFieldValuesEditor';
@@ -153,6 +154,9 @@ const ContactSubForm: React.FC<{
 };
 
 // ─── Main Page ─────────────────────────────────────────────────────────────
+/** Said wherever a customer cannot be created, so the absence is never unexplained. */
+const NO_CREATE_PERMISSION = 'Ask your administrator for permission to add customers.';
+
 const CustomersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -500,6 +504,34 @@ const CustomersPage: React.FC = () => {
 
   // AA-01: this user's saved layout, plus a column for every custom field the tenant has
   // defined on Customer. `customFields` is the raw jsonb bag carried on each list row.
+  /**
+   * Three different nothings used to render as MUI's bare "No rows": a tenant that has not added
+   * a customer yet, a search that matched none, and a failed request whose rows fell through as
+   * an empty array. A salesperson acts differently on each. The error case is already answered by
+   * the alert above the grid — which also blanks the rows — so this covers the two the grid can
+   * tell apart, and each carries the button that is actually the next move.
+   *
+   * Memoised because DataGrid takes a component TYPE here: a new factory each render would remount
+   * the overlay for no reason.
+   */
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No customers yet',
+    message: 'Customers appear here once you add them, or when an inquiry is matched to a new company.',
+    action: canCreate
+      ? <Button variant="contained" onClick={handleAddNew} sx={{ fontWeight: 700 }}>Add the first customer</Button>
+      : (
+        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 360 }}>
+          {NO_CREATE_PERMISSION}
+        </Typography>
+      ),
+    filtered: search.trim().length > 0,
+    filteredTitle: 'No customer matches this search',
+    filteredMessage: 'Clear the search to see every customer.',
+    filteredAction: (
+      <Button variant="outlined" onClick={() => setSearch('')} sx={{ fontWeight: 700 }}>Clear the search</Button>
+    ),
+  }), [canCreate, search, handleAddNew]);
+
   const orderedColumns = columnPreferences.arrangeColumns(columns);
 
   return (
@@ -519,7 +551,14 @@ const CustomersPage: React.FC = () => {
             exportFileName="Customers.xlsx"
             canUpload={canCreate && canEdit}
           />
-          {canCreate && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>Add Customer</Button>}
+          {canCreate
+            ? <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>Add Customer</Button>
+            : (
+              /* A missing button is a support ticket unless it says why it is missing. */
+              <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 300, textAlign: 'right' }}>
+                {NO_CREATE_PERMISSION}
+              </Typography>
+            )}
         </Box>
       </Box>
 
@@ -536,15 +575,19 @@ const CustomersPage: React.FC = () => {
         </Alert>
       )}
 
-      {customerListQuery.isError && (
-        <Alert severity="error" sx={{ mb: 1.5 }} action={<Button color="inherit" onClick={() => void customerListQuery.refetch()}>Retry</Button>}>
-          Customers could not be loaded. No empty result has been assumed.
-        </Alert>
-      )}
-
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid aria-label="Customers" rows={customerListQuery.isError ? [] : data?.items ?? []} columns={orderedColumns} rowCount={customerListQuery.isError ? 0 : data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick columnVisibilityModel={columnPreferences.columnVisibilityModel} onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange} />
+        {/* The failure REPLACES the grid. An error alert above an empty-state panel reading "no
+            customers yet" contradicts itself, and the reader believes the wrong half. */}
+        {customerListQuery.isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3, textAlign: 'center' }}>
+            <Alert severity="error" sx={{ maxWidth: 520, borderRadius: 2 }} action={<Button color="inherit" onClick={() => void customerListQuery.refetch()}>Retry</Button>}>
+              Customers could not be loaded. No empty result has been assumed.
+            </Alert>
+          </Box>
+        ) : (
+        <DataGrid aria-label="Customers" slots={{ noRowsOverlay }} rows={data?.items ?? []} columns={orderedColumns} rowCount={data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick columnVisibilityModel={columnPreferences.columnVisibilityModel} onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange} />
+        )}
       </Paper>
 
       {/* ── Dialog ─────────────────────────────────────────────────────────── */}

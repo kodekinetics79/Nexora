@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Box, Typography, Paper, Button, Chip, IconButton, Alert,
+  Box, Typography, Paper, Button, Chip, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
   Grid, FormControlLabel, Switch, TextField, CircularProgress,
   Table, TableHead, TableRow, TableCell, TableBody,
@@ -24,6 +24,8 @@ import countryService from '../../api/services/countryService';
 import cityService from '../../api/services/cityService';
 import { useAuth } from '../../context/AuthContext';
 import SearchField from '../../components/common/SearchField';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import { gridEmptyOverlay } from '../../components/common/gridOverlays';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
 import CustomFieldValuesEditor from '../../components/common/CustomFieldValuesEditor';
 import useColumnPreferences from '../../hooks/useColumnPreferences';
@@ -115,6 +117,9 @@ const ContactSubForm: React.FC<{
 };
 
 // ─── Main Page ─────────────────────────────────────────────────────────────
+/** Said wherever a supplier cannot be created, so the absence is never unexplained. */
+const NO_CREATE_PERMISSION = 'Ask your administrator for permission to add suppliers.';
+
 const SuppliersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -274,6 +279,30 @@ const SuppliersPage: React.FC = () => {
     setIsModalOpen(true);
   };
 
+  /**
+   * True zero, filtered-to-zero and failed-to-load used to render identically as MUI's bare
+   * "No rows". The failure is answered by the panel above the grid (which also blanks the rows);
+   * these are the two the grid can tell apart, each with the button that is the next move.
+   */
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No suppliers yet',
+    message: 'Suppliers are who you ask for prices. Add one before sourcing a customer inquiry.',
+    action: canCreateSupplier
+      ? <Button variant="contained" onClick={handleAddNew} sx={{ fontWeight: 700 }}>Add the first supplier</Button>
+      : (
+        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 360 }}>
+          {NO_CREATE_PERMISSION}
+        </Typography>
+      ),
+    filtered: search.trim().length > 0,
+    filteredTitle: 'No supplier matches this search',
+    filteredMessage: 'Clear the search to see every supplier.',
+    filteredAction: (
+      <Button variant="outlined" onClick={() => setSearch('')} sx={{ fontWeight: 700 }}>Clear the search</Button>
+    ),
+  }), [canCreateSupplier, search, handleAddNew]);
+
+
   const handleSaveSupplier = () => {
     if (selectedRecord ? !canEditSupplier : !canCreateSupplier) return;
     if (!formData.name.trim()) {
@@ -372,7 +401,14 @@ const SuppliersPage: React.FC = () => {
         </Box>
         <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
           <UploadExportToolbar canUpload={canCreateSupplier} onDownloadTemplate={supplierService.downloadTemplate} onUpload={supplierService.uploadTemplate} onExport={supplierService.export} templateFileName="SupplierTemplate.xlsx" exportFileName="Suppliers.xlsx" />
-          {canCreateSupplier && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>}
+          {canCreateSupplier
+            ? <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>
+            : (
+              /* A missing button is a support ticket unless it says why it is missing. */
+              <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 300, textAlign: 'right' }}>
+                {NO_CREATE_PERMISSION}
+              </Typography>
+            )}
         </Box>
       </Box>
 
@@ -384,11 +420,25 @@ const SuppliersPage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
-      {isError && <Alert severity="error" sx={{ mb: 1.5 }} action={<Button onClick={() => refetch()}>Retry</Button>}>
-        {(error as any)?.response?.data?.detail || (error as Error)?.message || 'Suppliers could not be loaded.'}
-      </Alert>}
+      {/* This used to render `error.response.data.detail || error.message` straight into the
+          alert — the transport's own sentence, API hostname and all. Every user-visible failure
+          message goes through the presentation boundary instead. */}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid rows={data?.items ?? []} columns={columnPreferences.arrangeColumns(columns)} rowCount={data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick columnVisibilityModel={columnPreferences.columnVisibilityModel} onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange} />
+        {/* The failure REPLACES the grid. An error panel above an empty-state panel reading "no
+            suppliers yet" contradicts itself, and the reader believes the wrong half. */}
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Box sx={{ maxWidth: 520 }}>
+              <ApiErrorNotice
+                error={error}
+                fallbackMessage="We couldn't load suppliers. No empty result has been assumed."
+                onRetry={() => refetch()}
+              />
+            </Box>
+          </Box>
+        ) : (
+        <DataGrid slots={{ noRowsOverlay }} rows={data?.items ?? []} columns={columnPreferences.arrangeColumns(columns)} rowCount={data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick columnVisibilityModel={columnPreferences.columnVisibilityModel} onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange} />
+        )}
       </Paper>
 
       {/* ── Dialog ─────────────────────────────────────────────────────────── */}
