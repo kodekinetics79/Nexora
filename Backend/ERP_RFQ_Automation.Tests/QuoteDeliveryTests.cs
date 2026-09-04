@@ -58,6 +58,125 @@ public sealed class QuoteDeliveryTests
     }
 
     [Fact]
+    public async Task A_sent_quote_on_an_unowned_lead_is_still_chased_using_the_tenants_fallback_owner()
+    {
+        // 2026-09-04, on production: a quote went to a customer and no follow-up and no activity
+        // were recorded, because the lead had no owner and the recorder returned in silence. On a
+        // tenant carrying 179 unassigned leads that is the ordinary case, not the edge case, so a
+        // sent quote routinely had nobody to chase it and nothing said so.
+        //
+        // The tenant already answers "if nobody owns it, give it to ___" for routing, so the same
+        // answer is used here rather than inventing a second rule.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant + 7);
+        SeedUnownedLeadQuote(context, Tenant + 7, 95_071, fallbackOwner: 95_555);
+        var sales = new RecordingSalesService();
+        var service = new QuoteService(context, new RecordingEmailService(), null!, sales: sales);
+
+        await service.FinalizeQuoteDeliveryAsync(95_071, Tenant + 7);
+
+        Assert.Equal(95_555, sales.FollowUpOwner);
+        Assert.Equal(95_555, sales.ActivityOwner);
+    }
+
+    [Fact]
+    public async Task A_sent_quote_with_no_owner_anywhere_is_reported_rather_than_silently_unchased()
+    {
+        // The other half: when the tenant has named no fallback either, there is genuinely nobody
+        // to assign to. That must not be a silent skip — it is a setup gap the tenant can close.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant + 8);
+        SeedUnownedLeadQuote(context, Tenant + 8, 95_081, fallbackOwner: null);
+        var sales = new RecordingSalesService();
+        var service = new QuoteService(context, new RecordingEmailService(), null!, sales: sales);
+
+        await service.FinalizeQuoteDeliveryAsync(95_081, Tenant + 8);
+
+        // Nothing is invented: no follow-up is raised against a user that does not exist.
+        Assert.Null(sales.FollowUpOwner);
+        // But the quote is still marked sent — the missing owner must not fail the delivery.
+        var quote = await context.Quotes.IgnoreQueryFilters()
+            .SingleAsync(x => x.Id == 95_081 && x.BusinessUnitId == Tenant + 8);
+        Assert.NotNull(quote.SentOn);
+    }
+
+    private static void SeedUnownedLeadQuote(
+        ErpRfqAutomationContext context, long tenant, long quoteId, long? fallbackOwner)
+    {
+        var bu = new BusinessUnit
+        {
+            Id = tenant, BusinessUnitCode = $"QF{tenant}", BusinessUnitName = "Follow-up Fallback",
+            CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        };
+        if (fallbackOwner is long owner) bu.DefaultLeadOwnerUserId = owner;
+        context.BusinessUnits.Add(bu);
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = tenant + 2, BusinessUnitId = tenant, SetupType = "QuoteStatus",
+            SetupCode = "SENT", SetupValue = "Sent", CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        });
+        // AssignTo deliberately null: the production shape this defect lived in.
+        context.Leads.Add(new Lead
+        {
+            Id = tenant + 401, BusinessUnitId = tenant, AssignTo = null,
+            LeadSource = "EMAIL", CreatedBy = "tests", CreatedDate = DateTime.UtcNow
+        });
+        context.Rfqs.Add(new Rfq
+        {
+            Id = tenant + 301, BusinessUnitId = tenant, Rfqno = $"RFQ-FB-{tenant}",
+            LeadId = tenant + 401, CreatedBy = "tests", CreatedDate = DateTime.UtcNow
+        });
+        context.Quotes.Add(new Quote
+        {
+            Id = quoteId, QuoteNo = $"Q-FB-{quoteId}", BusinessUnitId = tenant,
+            Rfqid = tenant + 301, QuoteDate = DateTime.UtcNow,
+            ValidUntil = DateTime.UtcNow.AddDays(30), TotalAmount = 500,
+            CreatedBy = "tests", CreatedDate = DateTime.UtcNow
+        });
+        context.SaveChanges();
+    }
+
+    private sealed class RecordingSalesService : ERP_RFQ_Automation.CommercialIntelligence.Sales.ISalesApplicationService
+    {
+        public long? FollowUpOwner { get; private set; }
+        public long? ActivityOwner { get; private set; }
+
+        public Task<ERP_RFQ_Automation.CommercialIntelligence.Sales.CommercialActivity> AppendActivityAsync(
+            long businessUnitId,
+            ERP_RFQ_Automation.CommercialIntelligence.Sales.AppendCommercialActivityCommand command,
+            CancellationToken ct)
+        {
+            ActivityOwner = command.SalesRepUserId;
+            return Task.FromResult(new ERP_RFQ_Automation.CommercialIntelligence.Sales.CommercialActivity());
+        }
+
+        public Task<ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpTask> CreateFollowUpAsync(
+            long businessUnitId,
+            ERP_RFQ_Automation.CommercialIntelligence.Sales.CreateFollowUpTaskCommand command,
+            CancellationToken ct)
+        {
+            FollowUpOwner = command.AssignedToUserId;
+            return Task.FromResult(new ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpTask());
+        }
+
+        public Task<ERP_RFQ_Automation.CommercialIntelligence.Sales.SalesRepProfile> UpsertProfileAsync(
+            long b, ERP_RFQ_Automation.CommercialIntelligence.Sales.UpsertSalesRepProfileCommand c, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpTransitionEvent> TransitionFollowUpAsync(
+            long b, long t, ERP_RFQ_Automation.CommercialIntelligence.Sales.TransitionFollowUpTaskCommand c, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<ERP_RFQ_Automation.CommercialIntelligence.Sales.SalesContribution> RecordContributionAsync(
+            long b, ERP_RFQ_Automation.CommercialIntelligence.Sales.RecordSalesContributionCommand c, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<IReadOnlyList<ERP_RFQ_Automation.CommercialIntelligence.Sales.SalesRepPerformance>> GetPerformanceAsync(
+            long b, ERP_RFQ_Automation.CommercialIntelligence.Sales.SalesPerformanceQuery q, CancellationToken ct)
+            => throw new NotSupportedException();
+        public ERP_RFQ_Automation.CommercialIntelligence.Sales.WeightedRoutingResult ScoreNewCustomer(
+            ERP_RFQ_Automation.CommercialIntelligence.Sales.NewCustomerRoutingRequest request)
+            => throw new NotSupportedException();
+    }
+
+    [Fact]
     public async Task QuoteSend_CannotAddressAnotherTenantsQuote()
     {
         using var db = new TestDb();

@@ -148,6 +148,44 @@ public class QuoteSendReadinessTests
     /// </summary>
     private const long DraftStatusId = 98010;
 
+    [Fact]
+    public async Task Readiness_reports_the_price_attestation_the_sender_will_demand()
+    {
+        // 2026-09-04, on production: readiness answered canSend=true for quote 66 and the send
+        // came straight back 409 "the price source has not been confirmed". Readiness knew about
+        // completeness, tax, issuer identity, outbound mail and delivery state — every gate except
+        // the one that actually refused. A screen that decides for itself what the sender will
+        // allow eventually disagrees with it, which is the entire reason this endpoint exists.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        var quoteId = SeedQuote(context, currencyId: 98_501);
+
+        // SeedQuote attests as its last step, because most cases here are about the gates AFTER
+        // provenance. Quote 66 was not attested at the moment readiness was asked, so the
+        // attestation is removed to reproduce the shape that actually shipped the defect. A
+        // fixture that leaves it in place passes this test for the wrong reason.
+        context.QuotePriceAttestations.RemoveRange(
+            context.QuotePriceAttestations.Where(a => a.QuoteId == quoteId).ToList());
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+
+        var service = new QuoteService(context, null!, Configured());
+
+        var before = await service.EvaluateSendReadinessAsync(quoteId, Tenant);
+        Assert.False(before.CanSend);
+        Assert.Contains(before.Blockers, x => x.Code == "PRICE_ATTESTATION_REQUIRED");
+
+        // Agreement is the point, not refusal: satisfying the sender's own gate clears it here too.
+        await new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(context).AttestAsync(
+            quoteId, Tenant,
+            ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationSources.SupplierQuote,
+            "SQ-READINESS", null, "tests", default);
+        context.ChangeTracker.Clear();
+
+        var after = await service.EvaluateSendReadinessAsync(quoteId, Tenant);
+        Assert.DoesNotContain(after.Blockers, x => x.Code == "PRICE_ATTESTATION_REQUIRED");
+    }
+
     private static long SeedQuote(ErpRfqAutomationContext context, long? currencyId)
     {
         Seed.EnsureBusinessUnit(context, Tenant);

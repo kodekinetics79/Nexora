@@ -112,6 +112,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly ISalesApplicationService? _sales;
         private readonly ICommercialLineResolutionApplicationService? _lineResolution;
         private readonly CommercialLearningService? _commercialLearning;
+        private readonly Microsoft.Extensions.Logging.ILogger<QuoteService>? _logger;
         private readonly ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? _outboundSenders;
 
         // Optional collaborators preserve existing direct constructions used by focused
@@ -125,8 +126,12 @@ namespace ERP_RFQ_Automation.Services
             ISalesApplicationService? sales = null,
             ICommercialLineResolutionApplicationService? lineResolution = null,
             CommercialLearningService? commercialLearning = null,
-            ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? outboundSenders = null)
+            ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? outboundSenders = null,
+            // Optional and last, so every existing caller and fixture keeps compiling unchanged.
+            // It exists for one reason: a sent quote that cannot be chased must say so.
+            Microsoft.Extensions.Logging.ILogger<QuoteService>? logger = null)
         {
+            _logger = logger;
             _context = context;
             _emailService = emailService;
             _quoteConfigRepository = quoteConfigRepository;
@@ -1757,6 +1762,22 @@ namespace ERP_RFQ_Automation.Services
                     + "sending it twice.");
             }
 
+            // R5 price provenance. This is the LAST thing the sender checks and it was the one
+            // thing readiness did not, so on 2026-09-04 readiness answered canSend=true and the
+            // send came back 409 "the price source has not been confirmed". That is precisely the
+            // defect this endpoint exists to prevent, one gate further along: a screen that decides
+            // for itself what the sender would allow will eventually disagree with it.
+            //
+            // So this asks the same service the sender asks (EnsureAttestedPricesAsync above) and
+            // reports its own sentence, rather than restating the rule in a second place where the
+            // two can drift apart.
+            var attestation = await new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(_context)
+                .EvaluateAsync(quote.Id, businessUnitId, ct);
+            if (!attestation.Satisfied)
+                Block("PRICE_ATTESTATION_REQUIRED",
+                    attestation.Reason
+                    ?? "Confirm where these prices came from - your sales manager, or a supplier quote - before sending.");
+
             readiness.CanSend = readiness.Blockers.Count == 0;
             return readiness;
         }
@@ -2001,18 +2022,45 @@ namespace ERP_RFQ_Automation.Services
         private async Task RecordQuoteSentWorkAsync(Quote quote, QuoteSendOptions options, CancellationToken ct)
         {
             var lead = quote.Rfq?.Lead;
-            if (_sales is null || lead?.AssignTo is not > 0 || !quote.SentOn.HasValue) return;
+            if (_sales is null || !quote.SentOn.HasValue) return;
+
+            // A quote that has gone to a customer needs somebody to chase it. Until now this
+            // returned silently whenever the lead had no owner, so on a tenant carrying 179
+            // unassigned leads a sent quote produced no activity record and no follow-up, and
+            // nothing anywhere said so. The quote sent on 2026-09-04 is exactly that case.
+            //
+            // The tenant already answers "if nobody owns it, give it to ___" for routing
+            // (BusinessUnit.DefaultLeadOwnerUserId), so the same answer is used here rather than
+            // inventing a second rule. If the tenant has not set one there is genuinely nobody to
+            // assign to, and that is recorded as a warning instead of being swallowed: no owner is
+            // a setup gap the tenant can fix, not a reason to lose the chase.
+            var owner = lead?.AssignTo is > 0
+                ? lead.AssignTo!.Value
+                : await _context.Set<BusinessUnit>().AsNoTracking()
+                    .Where(x => x.Id == quote.BusinessUnitId)
+                    .Select(x => x.DefaultLeadOwnerUserId)
+                    .SingleOrDefaultAsync(ct) ?? 0;
+
+            if (owner <= 0)
+            {
+                _logger?.LogWarning(
+                    "Quote {QuoteId} was sent on business unit {BusinessUnitId} but neither its lead nor the " +
+                    "business unit names an owner, so no follow-up was created. Set a fallback lead owner in " +
+                    "Setup so sent quotes are always chased.",
+                    quote.Id, quote.BusinessUnitId);
+                return;
+            }
             var actor = string.IsNullOrWhiteSpace(options.RequestedBy) ? "system:quote-send" : options.RequestedBy.Trim();
             var correlation = $"quote-send:{quote.Id}";
             await _sales.AppendActivityAsync(quote.BusinessUnitId, new AppendCommercialActivityCommand(
-                lead.AssignTo.Value, CommercialActivityType.QuoteSent, "Quote", quote.Id,
-                lead.CustomerId, null, quote.SentOn.Value, "SENT", $"quote:{quote.Id}:sent",
+                owner, CommercialActivityType.QuoteSent, "Quote", quote.Id,
+                lead?.CustomerId, null, quote.SentOn.Value, "SENT", $"quote:{quote.Id}:sent",
                 actor, correlation, $"quote:{quote.Id}:sent-activity"), ct);
             var staleDays = await _context.Set<SlaPolicy>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == quote.BusinessUnitId).Select(x => (int?)x.StaleQuoteDays)
                 .SingleOrDefaultAsync(ct) ?? SlaPolicy.Default(quote.BusinessUnitId).StaleQuoteDays;
             await _sales.CreateFollowUpAsync(quote.BusinessUnitId, new CreateFollowUpTaskCommand(
-                lead.AssignTo.Value, "Quote", quote.Id, lead.CustomerId,
+                owner, "Quote", quote.Id, lead?.CustomerId,
                 quote.SentOn.Value.AddDays(staleDays), 2, "QUOTE_RESPONSE",
                 actor, correlation, $"quote:{quote.Id}:sent-follow-up"), ct);
         }
