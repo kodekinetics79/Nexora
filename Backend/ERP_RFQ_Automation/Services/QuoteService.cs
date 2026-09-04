@@ -1768,6 +1768,11 @@ namespace ERP_RFQ_Automation.Services
 
             var quote = await _context.Quotes
                 .Include(q => q.BusinessUnit)
+                // Currency and Customer are loaded for the customer-facing body below: a quote
+                // e-mail that states neither what it is worth nor who it is for is a covering
+                // note, not a quotation.
+                .Include(q => q.Currency)
+                .Include(q => q.Customer)
                 .Include(q => q.Rfq)
                     .ThenInclude(r => r.Lead)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
@@ -1836,14 +1841,36 @@ namespace ERP_RFQ_Automation.Services
                 ? customSubject
                 : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
 
+            // The default body used to say only "please find attached", which told a buyer nothing
+            // they could act on and nothing they could file. Everything added below is already
+            // known at this point and is a FACT ABOUT THIS QUOTE -- no marketing, no invented
+            // commitment. Each line is omitted entirely when its value is absent, because a
+            // customer-facing e-mail must never read "valid until" followed by nothing, and the
+            // greeting falls back rather than printing an empty name.
+            //
+            // CustomerRfqReference is the buyer's OWN number for the enquiry. It matters more than
+            // ours: it is how they match this quote to the request they raised, and without it a
+            // procurement desk has to open the attachment to find out what it answers.
+            var greetingName = quote.Customer?.Name;
+            var greeting = string.IsNullOrWhiteSpace(greetingName) ? "Dear Customer" : $"Dear {greetingName}";
+
+            var facts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(quote.Rfq?.CustomerRfqReference))
+                facts.Add($"<p>Your reference: {quote.Rfq!.CustomerRfqReference}</p>");
+            if (quote.TotalAmount is decimal total && !string.IsNullOrWhiteSpace(quote.Currency?.Code))
+                facts.Add($"<p>Total: {quote.Currency!.Code} {total:N2}</p>");
+            if (quote.ValidUntil is DateTime validUntil)
+                facts.Add($"<p>Valid until: {validUntil:d MMMM yyyy}</p>");
+
             var body = !string.IsNullOrEmpty(customBody)
                 ? customBody.Replace("\n", "<br/>")
                 : $@"
-                <p>Dear Customer,</p>
-                <p>Please find attached the quote #{quote.QuoteNo}.</p>
-                <p>Thank you for your business.</p>
+                <p>{greeting},</p>
+                <p>Please find attached our quotation #{quote.QuoteNo}.</p>
+                {string.Join("\n                ", facts)}
+                <p>If anything here needs revisiting, reply to this message and we will pick it up.</p>
                 <br/>
-                <p>Best Regards,</p>
+                <p>Kind regards,</p>
                 <p>{quote.BusinessUnit?.BusinessUnitName}</p>
             ";
 
