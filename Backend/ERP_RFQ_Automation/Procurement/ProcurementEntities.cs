@@ -315,8 +315,45 @@ public static class ProcurementOutboxStatuses
     public const string Pending = "PENDING";
     public const string Processing = "PROCESSING";
     public const string Sent = "SENT";
+
+    /// <summary>
+    /// Delivery ended and we DO NOT KNOW whether the supplier received it. Written only by
+    /// <c>ProcurementDispatchWorker</c>, in exactly two places: the uncertain terminal outcome,
+    /// and the stale-claim fence that runs when a deploy restarts the instance mid-send.
+    /// </summary>
     public const string Failed = "FAILED";
+
+    /// <summary>Delivery ended and the supplier definitively did NOT receive it.</summary>
     public const string DeadLettered = "DEAD_LETTERED";
+}
+
+/// <summary>
+/// The two terminal delivery states, told apart. Both leave the solicitation showing
+/// <c>DELIVERYFAILED</c>, and they are not the same fact:
+///
+/// <list type="bullet">
+/// <item><see cref="NotDelivered"/> — the send definitely did not happen (bad payload, no
+/// transmitting sender, governance moved). Retrying is safe.</item>
+/// <item><see cref="Uncertain"/> — the provider may already have accepted the message. This is
+/// what a deploy restarting the single instance mid-send produces: the claim goes stale, the
+/// worker fences it, and nobody knows whether the email left. Retrying may put a SECOND RFQ for
+/// the same line in the supplier's inbox, so it requires an operator who has checked.</item>
+/// </list>
+///
+/// At-most-once is the deliberate design. Nothing here may become an automatic resend.
+/// </summary>
+public static class ProcurementDeliveryOutcome
+{
+    public const string Uncertain = "UNCERTAIN";
+    public const string NotDelivered = "NOT_DELIVERED";
+
+    /// <summary>Null while delivery is still in progress or already succeeded.</summary>
+    public static string? FromOutboxStatus(string? outboxStatus) => outboxStatus switch
+    {
+        ProcurementOutboxStatuses.Failed => Uncertain,
+        ProcurementOutboxStatuses.DeadLettered => NotDelivered,
+        _ => null
+    };
 }
 
 /// <summary>Why a supplier purchase order exists — the discriminator R4 turns on.</summary>

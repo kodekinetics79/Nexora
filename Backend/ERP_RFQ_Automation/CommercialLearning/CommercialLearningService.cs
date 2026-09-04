@@ -113,7 +113,13 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         var responseRows = await (from solicitation in context.Set<ERP_RFQ_Automation.Agent.Models.SupplierSolicitation>().AsNoTracking()
             where solicitation.BusinessUnitId == businessUnitId && solicitation.SupplierId == supplierId && solicitation.RespondedOn != null
             select new { solicitation.SentOn, solicitation.RespondedOn }).ToArrayAsync(cancellationToken);
-        var responseDays = responseRows.Select(x => (decimal)(x.RespondedOn!.Value - x.SentOn).TotalDays).ToArray();
+        // SentOn is NOT NULL, so an unsent solicitation carries DateTime.MinValue (-infinity in
+        // Postgres). Subtracting that from a response date yields ~739,000 days and would drag
+        // this supplier's average response time to a number no reader could interpret. A
+        // solicitation with no confirmed send has no response time to measure; drop it.
+        var responseDays = responseRows
+            .Where(x => x.SentOn != default)
+            .Select(x => (decimal)(x.RespondedOn!.Value - x.SentOn).TotalDays).ToArray();
         var reliability = projected.Where(x => x.ReliabilitySnapshot.HasValue).Select(x => x.ReliabilitySnapshot!.Value).ToArray();
         var handoffs = await context.ProcurementHandoffs.AsNoTracking().Where(x =>
             x.BusinessUnitId == businessUnitId && x.SupplierId == supplierId)

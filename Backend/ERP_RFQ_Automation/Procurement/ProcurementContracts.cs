@@ -214,7 +214,15 @@ public sealed record RetrySolicitationCommand(
     long SolicitationId,
     string IdempotencyKey,
     string Actor,
-    string CorrelationId);
+    string CorrelationId,
+    /// <summary>
+    /// The operator states that they checked with the supplier and the Supplier RFQ did NOT
+    /// arrive. Required only when delivery ended UNCERTAIN — see
+    /// <see cref="ProcurementDeliveryOutcome"/>. Never set it from a default: an uncertain
+    /// send may already be in the supplier's inbox, and a retry the operator did not
+    /// consciously authorise is a second RFQ for the same line.
+    /// </summary>
+    bool ConfirmedNotDelivered = false);
 
 public sealed record ApproveAwardCommand(
     long BusinessUnitId,
@@ -403,7 +411,13 @@ public sealed record SolicitationView(long Id, long RfqId, long SupplierId, stri
     string? SupplierEmail, IReadOnlyCollection<long> RfqItemIds, string Status, string Channel,
     int AttemptCount, string? ProviderReference,
     string? LastErrorCode, DateTime? SentOn, DateTime? RespondedOn, DateTime UpdatedOn, long Version,
-    DateTime? DueOn = null);
+    DateTime? DueOn = null,
+    /// <summary>
+    /// UNCERTAIN, NOT_DELIVERED, or null while delivery is not in a terminal failure state.
+    /// Both failure states show as <c>DELIVERYFAILED</c> on the solicitation, and they are not
+    /// the same fact: one is safe to retry, the other may double-send.
+    /// </summary>
+    string? DeliveryOutcome = null);
 public sealed record SupplierOfferView(long Id, long SolicitationId, long RfqItemId, long SupplierId,
     string SupplierName, string? QuoteReference, int QuoteRevision, long CurrencyId, string CurrencyCode,
     decimal Quantity, decimal? AvailableQuantity, decimal UnitPrice, decimal FreightCost, decimal DutyCost,

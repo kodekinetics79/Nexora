@@ -79,6 +79,27 @@ const QuoteViewPage: React.FC = () => {
     enabled: !!id
   });
 
+  // Everything the SERVER knows would refuse this send, asked before the dialog opens.
+  //
+  // The three client-side reasons below this used to be the whole story, and they could only
+  // ever see what the quote screen already had. They cannot see that the business unit has no
+  // legal name, or that the tenant has no transmitting mailbox — refusals that live in the
+  // background delivery worker, reach nobody, and permanently burn the quote number because
+  // the delivery idempotency key is fixed per quote. They also missed a draft with prices but
+  // no currency, which is the shape both customer quotes on production are in today.
+  //
+  // Only asked for a quote the Send button can appear on. The readiness check consults
+  // IOutboundSenderResolver, which deliberately keeps no per-tenant cache ("one projected read
+  // per send is the honest cost, and quote and RFQ sends are rare"), so it must not be turned
+  // into one read per page view of every quote ever raised.
+  const sendableStatus = ['DRAFT', 'SENT'].includes(
+    (quote?.statusCode || quote?.statusValue || '').toUpperCase());
+  const { data: sendReadiness } = useQuery({
+    queryKey: ['quote-send-readiness', id],
+    queryFn: () => quoteService.getSendReadiness(Number(id)),
+    enabled: !!id && sendableStatus
+  });
+
   const reviseMutation = useMutation({
     mutationFn: () => quoteService.revise(Number(id)),
     onSuccess: (draft) => {
@@ -132,9 +153,15 @@ const QuoteViewPage: React.FC = () => {
       } else {
         toast.success('Quote emailed to the customer');
         queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
+        queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] });
       }
     },
-    onError: () => toast.error('Failed to send the quote email')
+    // The server's refusals here are sentences a rep can act on — a stale revision, a delivery
+    // key already used, prices that moved since the send was authorised, a delivery already
+    // dead-lettered. Replacing all of them with "Failed to send the quote email" threw away the
+    // only part that said what to do.
+    onError: (error) => toast.error(
+      presentableErrorMessage(error, 'Failed to send the quote email'), { duration: 10000 })
   });
 
   // R5: record the confirmation, then send. Both steps must succeed for the quote to go out.
@@ -246,16 +273,31 @@ const QuoteViewPage: React.FC = () => {
   // The tax gate used to live only in the Financial Summary as a warning ("cannot be sent")
   // while this button stayed enabled — the server refused the send later with a toast, and the
   // rep had been told two things at once.
-  const sendBlockedReason: { text: string; link?: { label: string; to: string } } | null = quote.revisionImpact
-    ? { text: 'Review the customer revision before sending.' }
-    : isUnpricedDraft
-      ? { text: 'Add prices to the quote lines before sending.' }
-      : totals.hasUnderivedTax
-        ? {
-            text: 'Set the VAT rate in Setup > Commercial Policy before sending.',
-            link: { label: 'Open Commercial Policy', to: '/setup/commercial-policy' },
-          }
-        : null;
+  //
+  // The server's list wins whenever it has loaded: it applies the same rules the sender and the
+  // renderer will, so it cannot disagree with them. The client heuristics remain as the fallback
+  // for a failed or in-flight readiness call, so a broken query never makes this screen worse
+  // than it was.
+  const serverBlocker = sendReadiness?.blockers?.[0];
+  const sendBlockedReason: { text: string; link?: { label: string; to: string } } | null = serverBlocker
+    ? {
+        text: serverBlocker.message,
+        link: serverBlocker.setupPath && serverBlocker.setupLabel
+          ? { label: `Open ${serverBlocker.setupLabel}`, to: serverBlocker.setupPath }
+          : undefined,
+      }
+    : sendReadiness?.canSend
+      ? null
+      : quote.revisionImpact
+        ? { text: 'Review the customer revision before sending.' }
+        : isUnpricedDraft
+          ? { text: 'Add prices to the quote lines before sending.' }
+          : totals.hasUnderivedTax
+            ? {
+                text: 'Set the VAT rate in Setup > Commercial Policy before sending.',
+                link: { label: 'Open Commercial Policy', to: '/setup/commercial-policy' },
+              }
+            : null;
   const revisionImpactPresentation = quote.revisionImpact === 'INVENTORY_REVALIDATION_REQUIRED'
     ? {
         title: 'Inventory Revalidation Required',
@@ -385,20 +427,30 @@ const QuoteViewPage: React.FC = () => {
               >
                 {isDraftQuote ? 'Send to customer' : 'Send again'}
               </Button>
-              {/* A disabled control that will not say why becomes a support call. */}
-              {sendBlockedReason && (
-                <Typography variant="caption" color="text.secondary" sx={{ maxWidth: 260 }}>
-                  {sendBlockedReason.text}
-                  {sendBlockedReason.link && (
+              {/* A disabled control that will not say why becomes a support call.
+
+                  Every blocker is listed, not just the first. A rep who fixes one, comes back,
+                  and is stopped by the next has made a round trip for nothing — and an
+                  incomplete draft usually has more than one thing missing. */}
+              {(sendReadiness?.blockers?.length ? sendReadiness.blockers.map((blocker) => ({
+                key: blocker.code,
+                text: blocker.message,
+                link: blocker.setupPath && blocker.setupLabel
+                  ? { label: `Open ${blocker.setupLabel}`, to: blocker.setupPath }
+                  : undefined,
+              })) : sendBlockedReason ? [{ key: 'client', ...sendBlockedReason }] : []).map((reason) => (
+                <Typography key={reason.key} variant="caption" color="text.secondary" sx={{ maxWidth: 260 }}>
+                  {reason.text}
+                  {reason.link && (
                     <>
                       {' '}
-                      <Link component={RouterLink} to={sendBlockedReason.link.to} underline="hover" sx={{ fontWeight: 700 }}>
-                        {sendBlockedReason.link.label}
+                      <Link component={RouterLink} to={reason.link.to} underline="hover" sx={{ fontWeight: 700 }}>
+                        {reason.link.label}
                       </Link>
                     </>
                   )}
                 </Typography>
-              )}
+              ))}
             </Box>
           )}
 

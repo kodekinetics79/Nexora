@@ -403,6 +403,8 @@ function SourcingWorkbenchPage() {
   const [tab, setTab] = useState(0);
   const [responseSolicitation, setResponseSolicitation] =
     useState<SupplierSolicitation | null>(null);
+  const [uncertainRetry, setUncertainRetry] =
+    useState<SupplierSolicitation | null>(null);
   const [awardOffer, setAwardOffer] = useState<SupplierOffer | null>(null);
   const [pricingSelection, setPricingSelection] = useState<{ awardId: number; quoteItemId: number; landedUnitCost: number; currencyCode: string } | null>(null);
   const [memoryLineId, setMemoryLineId] = useState<number | null>(null);
@@ -552,7 +554,7 @@ function SourcingWorkbenchPage() {
   });
 
   const retryMutation = useMutation({
-    mutationFn: (id: number) =>
+    mutationFn: ({ id, confirmedNotDelivered }: { id: number; confirmedNotDelivered: boolean }) =>
       procurementService.retrySolicitation(
         id,
         retryKeys.get(id) ?? (() => {
@@ -560,9 +562,11 @@ function SourcingWorkbenchPage() {
           retryKeys.set(id, key);
           return key;
         })(),
+        confirmedNotDelivered,
       ),
-    onSuccess: (_, id) => {
+    onSuccess: (_, { id }) => {
       retryKeys.delete(id);
+      setUncertainRetry(null);
       toast.success("Retry queued");
       refresh();
     },
@@ -858,12 +862,28 @@ function SourcingWorkbenchPage() {
                     color={statusColor(item.status)}
                   />
                 </TableCell>
-                <TableCell>
+                <TableCell sx={{ maxWidth: 320 }}>
                   <Typography variant="body2">
                     {item.providerReference || "Awaiting provider confirmation"}
                   </Typography>
-                  {item.lastErrorCode && (
-                    <Typography variant="caption" color="error">
+                  {/* DELIVERY_UNCERTAIN used to print here verbatim, in 12px red, beside a
+                      one-click Retry. A rep cannot act on an error code, and the one action
+                      offered was the one that risks a second RFQ. Both terminal states now say
+                      what happened and what to do about it. */}
+                  {item.deliveryOutcome === "UNCERTAIN" && (
+                    <Typography variant="caption" color="warning.main" sx={{ display: "block", mt: 0.5 }}>
+                      Delivery was interrupted and never confirmed either way. The supplier may
+                      already have this RFQ — check before retrying.
+                    </Typography>
+                  )}
+                  {item.deliveryOutcome === "NOT_DELIVERED" && (
+                    <Typography variant="caption" color="error" sx={{ display: "block", mt: 0.5 }}>
+                      Not delivered{item.lastErrorCode ? ` (${item.lastErrorCode})` : ""}. Nothing
+                      reached the supplier; retrying is safe.
+                    </Typography>
+                  )}
+                  {!item.deliveryOutcome && item.lastErrorCode && (
+                    <Typography variant="caption" color="error" sx={{ display: "block", mt: 0.5 }}>
                       {item.lastErrorCode}
                     </Typography>
                   )}
@@ -883,7 +903,11 @@ function SourcingWorkbenchPage() {
                         size="small"
                         startIcon={<Replay />}
                         disabled={retryMutation.isPending}
-                        onClick={() => retryMutation.mutate(item.id)}
+                        onClick={() =>
+                          item.deliveryOutcome === "UNCERTAIN"
+                            ? setUncertainRetry(item)
+                            : retryMutation.mutate({ id: item.id, confirmedNotDelivered: false })
+                        }
                       >
                         Retry
                       </Button>
@@ -1521,6 +1545,51 @@ function SourcingWorkbenchPage() {
           )}
         </Stack>
       )}
+
+      {/* An UNCERTAIN delivery is the one case where Retry can do harm: the message may already
+          be in the supplier's inbox, so a blind retry is a second RFQ for the same line and two
+          quotes to reconcile. The server refuses an unconfirmed retry of this state; this dialog
+          is where the operator makes the confirmation the server is asking for. There is
+          deliberately no automatic resend. */}
+      <Dialog open={uncertainRetry !== null} onClose={() => setUncertainRetry(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Did this RFQ reach {uncertainRetry?.supplierName}?</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" icon={<WarningAmber />} sx={{ mb: 2 }}>
+            Delivery was interrupted before the provider confirmed anything, so nobody knows
+            whether the email went out. Nothing was resent automatically, on purpose.
+          </Alert>
+          <Typography variant="body2" sx={{ mb: 1.5 }}>
+            Contact {uncertainRetry?.supplierName}
+            {uncertainRetry?.supplierEmail ? ` (${uncertainRetry.supplierEmail})` : ""} and ask
+            whether they received the RFQ.
+          </Typography>
+          <Typography variant="body2" component="div">
+            <strong>If it arrived:</strong> do not retry. Capture their reply in the{" "}
+            <Link component={RouterLink} to="/procurement/supplier-quotes" sx={{ fontWeight: 700 }}>
+              Supplier Quote Inbox
+            </Link>
+            .
+            <br />
+            <strong>If it never arrived:</strong> send it again below. Retrying when it did arrive
+            puts a second RFQ for the same line in front of the supplier.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setUncertainRetry(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color="warning"
+            startIcon={<Replay />}
+            disabled={retryMutation.isPending}
+            onClick={() =>
+              uncertainRetry &&
+              retryMutation.mutate({ id: uncertainRetry.id, confirmedNotDelivered: true })
+            }
+          >
+            It never arrived — send again
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {responseSolicitation && (
         <ResponseDialog

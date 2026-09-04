@@ -169,8 +169,10 @@ public sealed class ProcurementDispatchWorkerTests
         var firstCount = first.Events.Count;
 
         // The REAL manual retry — the exact path the workbench Retry button takes. It resets
-        // the attempt counter and advances the round.
-        await fixture.RetryThroughServiceAsync();
+        // the attempt counter and advances the round. Round one ended UNCERTAIN, so the retry
+        // carries the operator's confirmation that nothing arrived; see
+        // An_uncertain_delivery_cannot_be_retried_without_the_operator_confirming_non_delivery.
+        await fixture.RetryThroughServiceAsync(confirmedNotDelivered: true);
 
         // Round two, attempt 1 fails the same way at the same attempt number. It must not
         // throw, must release the claim, and must record the round's own events under
@@ -249,6 +251,111 @@ public sealed class ProcurementDispatchWorkerTests
         Assert.Equal(ProcurementOutboxStatuses.Sent, state.Message.Status);
         Assert.Equal(1, state.Message.AttemptCount);
         Assert.Null(state.Message.LeaseToken);
+    }
+
+    [Fact]
+    public async Task An_uncertain_delivery_cannot_be_retried_without_the_operator_confirming_non_delivery()
+    {
+        // WHY THIS EXISTS. Every deploy restarts the single instance. A merge landing while a
+        // supplier RFQ is mid-send leaves the claim stale; the worker fences it as
+        // DELIVERY_UNCERTAIN, which means the provider MAY ALREADY HOLD THE MESSAGE. The
+        // solicitation then shows DELIVERYFAILED — indistinguishable, until now, from a send
+        // that definitely never happened — beside a one-click Retry. Clicking it puts a second
+        // RFQ for the same line in the supplier's inbox and produces two quotes to reconcile.
+        //
+        // The shape below is production's. Supplier solicitation 1 (RFQ 58, supplier 77, tenant
+        // 7) has sat in exactly this state since 2026-08-20: outbox FAILED, LastErrorCode
+        // DELIVERY_UNCERTAIN, DeadLetteredOn NULL, solicitation DeliveryFailed. It is reached
+        // here through the worker rather than hand-seeded, so the fixture cannot describe a
+        // state the product does not produce.
+        using var fixture = new DispatchFixture(new RecordingNotification
+        {
+            Exception = new InvalidOperationException("Ambiguous provider outcome")
+        });
+        fixture.SeedPending(withSourcingCase: true);
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var uncertain = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Failed, uncertain.Message.Status);
+        Assert.Null(uncertain.Message.DeadLetteredOn);
+        Assert.Equal(SolicitationStatus.DeliveryFailed, uncertain.Solicitation.Status);
+        Assert.Equal(ProcurementDeliveryOutcome.Uncertain,
+            ProcurementDeliveryOutcome.FromOutboxStatus(uncertain.Message.Status));
+
+        var refusal = await Assert.ThrowsAsync<ProcurementConflictException>(() =>
+            fixture.RetryThroughServiceAsync(confirmedNotDelivered: false));
+        // The refusal has to name the check the operator must make; "retry refused" is not an
+        // instruction anybody can act on.
+        Assert.Contains("may already have reached the supplier", refusal.Message);
+        Assert.Contains("Supplier Quote Inbox", refusal.Message);
+
+        // Refused means NOTHING was queued: the row is untouched, so the refusal cannot itself
+        // become the second send it exists to prevent.
+        var afterRefusal = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Failed, afterRefusal.Message.Status);
+        Assert.Equal(uncertain.Message.AttemptCount, afterRefusal.Message.AttemptCount);
+        Assert.Equal(uncertain.Message.DispatchRound, afterRefusal.Message.DispatchRound);
+        Assert.Equal("DELIVERY_UNCERTAIN", afterRefusal.Message.LastErrorCode);
+        Assert.DoesNotContain(afterRefusal.Events, e => e.EventType == "SUPPLIER_SOLICITATION_RETRY_QUEUED");
+
+        // Confirmed non-delivery is a human decision, and it is allowed — this is a gate, not a
+        // wall. The ledger records WHAT was confirmed and what state it was confirmed out of,
+        // because that is the only evidence of why a second send was authorised.
+        await fixture.RetryThroughServiceAsync(confirmedNotDelivered: true);
+        var afterConfirmed = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Pending, afterConfirmed.Message.Status);
+        Assert.Equal(SolicitationStatus.PendingDispatch, afterConfirmed.Solicitation.Status);
+        var retryEvent = Assert.Single(afterConfirmed.Events,
+            e => e.EventType == "SUPPLIER_SOLICITATION_RETRY_QUEUED");
+        Assert.Contains("\"ConfirmedNotDelivered\":true", retryEvent.PayloadJson);
+        Assert.Contains(ProcurementDeliveryOutcome.Uncertain, retryEvent.PayloadJson);
+    }
+
+    [Fact]
+    public async Task A_delivery_that_definitely_never_happened_is_still_one_click_to_retry()
+    {
+        // THE CONTROL for the test above, and the reason this is a gate rather than a ban. A
+        // tenant with no transmitting sender dead-letters as DELIVERY_PROVIDER_NOT_CONFIGURED:
+        // the message provably never left, so there is nothing to double-send and nothing to
+        // ask the operator. Configure the mailbox, press Retry, done. If this test ever needs a
+        // confirmation flag to pass, the gate has been put on the wrong state.
+        using var fixture = new DispatchFixture(deliveryConfiguration: new DisabledDeliveryConfiguration());
+        fixture.SeedPending(withSourcingCase: true);
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var deadLettered = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.DeadLettered, deadLettered.Message.Status);
+        Assert.Equal(ProcurementDeliveryOutcome.NotDelivered,
+            ProcurementDeliveryOutcome.FromOutboxStatus(deadLettered.Message.Status));
+
+        await fixture.RetryThroughServiceAsync(confirmedNotDelivered: false);
+
+        var after = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Pending, after.Message.Status);
+        Assert.Null(after.Message.DeadLetteredOn);
+        Assert.Equal(SolicitationStatus.PendingDispatch, after.Solicitation.Status);
+    }
+
+    [Fact]
+    public async Task An_unsent_solicitation_reports_no_send_date_rather_than_the_year_one()
+    {
+        // SupplierSolicitations.SentOn is NOT NULL, so an unsent row carries DateTime.MinValue,
+        // which Npgsql stores as the literal timestamp -infinity. Production solicitation 1
+        // holds exactly that today. Read back it is a date like any other, and every consumer
+        // that treats it as one is wrong.
+        using var fixture = new DispatchFixture(new RecordingNotification { Result = false });
+        fixture.SeedPending();
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(SolicitationStatus.DeliveryFailed, state.Solicitation.Status);
+        Assert.Equal(default, state.Solicitation.SentOn);
+        Assert.Null(state.Solicitation.SentOnUtc);
+
+        // And the value survives a real send, so this is a null-when-unknown accessor rather
+        // than one that always answers null.
+        state.Solicitation.SentOn = new DateTime(2026, 9, 3, 8, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(state.Solicitation.SentOn, state.Solicitation.SentOnUtc);
     }
 
     [Fact]
@@ -447,6 +554,11 @@ public sealed class ProcurementDispatchWorkerTests
             var now = updatedOn ?? DateTime.UtcNow;
             var seededSolicitation = AgentSeed.Solicitation(
                 db, Solicitation, Tenant, Rfq, Supplier, SolicitationStatus.PendingDispatch);
+            // AgentSeed stamps a send date on every solicitation it makes. A PENDINGDISPATCH row
+            // has not been sent, and production's carries the NOT NULL column's default —
+            // DateTime.MinValue, stored as -infinity. Seeding a plausible date instead hides
+            // every consumer that reads SentOn without checking whether a send happened.
+            seededSolicitation.SentOn = default;
 
             // A REAL solicitation belongs to a sourcing case, and the default fixture's does not.
             // UpdateSourcingCaseLifecycleAsync returns immediately when SourcingCaseId is null,
@@ -522,11 +634,14 @@ public sealed class ProcurementDispatchWorkerTests
         /// drift from what the workbench Retry button actually does to the row (attempt
         /// counter reset to zero, round advanced, lease and error cleared).
         /// </summary>
-        public async Task RetryThroughServiceAsync()
+        public async Task RetryThroughServiceAsync(
+            bool confirmedNotDelivered = false,
+            string idempotencyKey = "manual-retry-1")
         {
             await using var db = _database.ContextFor(Tenant);
             await new ProcurementApplicationService(db).RetrySolicitationAsync(
-                new RetrySolicitationCommand(Tenant, Solicitation, "manual-retry-1", "qa", "corr-manual-retry-1"));
+                new RetrySolicitationCommand(Tenant, Solicitation, idempotencyKey, "qa",
+                    $"corr-{idempotencyKey}", confirmedNotDelivered));
         }
 
         public async Task<(ProcurementOutboxMessage Message, SupplierSolicitation Solicitation, List<ProcurementEvent> Events)> StateAsync()
