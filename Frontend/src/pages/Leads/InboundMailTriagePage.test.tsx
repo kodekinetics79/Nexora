@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import InboundMailTriagePage from './InboundMailTriagePage';
+import InboundMailTriagePage, { presentableReason } from './InboundMailTriagePage';
 import {
   describeAssemblyState,
   describeMessageProgress,
@@ -305,8 +305,21 @@ const DEAD_END_PAGE = readTriagePage(
         reasonCodes: [],
         assemblyState: 'FailedRecoverable',
       },
+      {
+        // THE LIVE SHAPE OF THE DEAD-LETTERED POPULATION. No assemblyState at all — 20 of the 80
+        // stopped messages on mailbox 9 have no assembly row, all but two of them from
+        // 2026-08-13/14, before the message aggregate existed. A fixture that gave this row an
+        // assemblyState would exercise a shape the product does not emit for them.
+        id: 304,
+        receivedOn: '2026-08-13T09:00:00Z',
+        from: 'procurement@buyer.example',
+        subject: 'Fwd: Request for Quotation against PR# 111',
+        outcome: null,
+        reasonCodes: [],
+        stoppedInProcessing: true,
+      },
     ],
-    totalCount: 3,
+    totalCount: 4,
     pageNumber: 1,
     pageSize: 25,
   },
@@ -366,12 +379,30 @@ beforeEach(() => {
 });
 
 describe('InboundMailTriagePage', () => {
-  it('landsOnRejections_soALostDealIsTheFirstThingVisible', async () => {
+  it('landsOnWhatIsWaitingOnAPerson_notOnDecisionsThatNeedNobody', async () => {
+    // The screen used to open on "Rejected as noise". A rejection is a DECISION — the reader has
+    // to notice unaided that a different tab holds the work — and on the live tenant 80 of 332
+    // messages had stopped without one, spread across four outcome tabs with no way to gather
+    // them. The landing tab asks the state question, and it must send `state` to get an answer:
+    // the outcome parameter cannot express "stopped" at all.
     renderPage();
     await waitFor(() => expect(listTriage).toHaveBeenCalled());
-    expect(listTriage).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'Noise' }));
-    expect(screen.getByRole('tab', { name: /rejected as noise/i })).toHaveAttribute('aria-selected', 'true');
+    // pageSize 25 pins this to the PAGED LIST call and not to the one-row count query, which
+    // also carries the state. Asserted loosely first, the test passed with the filter removed
+    // from the list entirely — green over a screen that showed every message on every tab.
+    expect(listTriage).toHaveBeenCalledWith({ outcome: undefined, state: 'stopped', page: 1, pageSize: 25 });
+    expect(screen.getByRole('tab', { name: /needs a person/i })).toHaveAttribute('aria-selected', 'true');
     expect(await screen.findByText(/Automatic reply: Cable tray enquiry/)).toBeInTheDocument();
+  });
+
+  it('stillOffersTheRejectionsTab_soAnOverturnedDecisionStaysOneClickAway', async () => {
+    renderPage();
+    await waitFor(() => expect(listTriage).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('tab', { name: /rejected as noise/i }));
+    // The state filter is the stopped tab's alone; it must not leak onto an outcome tab and
+    // silently hide the rejections the reader came to check.
+    await waitFor(() =>
+      expect(listTriage).toHaveBeenCalledWith({ outcome: 'Noise', state: undefined, page: 1, pageSize: 25 }));
   });
 
   it('rendersReasonCodesAsHumanWording_notRawCodes', async () => {
@@ -575,6 +606,43 @@ describe('InboundMailTriagePage — a row is never a dead end', () => {
     ).toBeGreaterThan(0);
   });
 
+  it('offersTheExceptionsScreenToAMessageThatStoppedInProcessingWithNoAssembly', async () => {
+    // The population that had NO route out of its own row. `describeAssemblyState(null).needsHuman`
+    // is false — honestly, since nothing was reported — so these fell out of every needs-a-person
+    // branch, and the one screen carrying their retry and their "this can never be retried"
+    // verdict was never offered. The row now says processing stopped and where to go.
+    renderPage();
+    const row = await rowFor(/Request for Quotation against PR# 111/);
+
+    expect(within(row).getAllByText(/processing stopped for this message/i).length).toBeGreaterThan(0);
+    fireEvent.click(within(row).getByRole('button', { name: /retry failed processing/i }));
+    expect(navigate).toHaveBeenCalledWith('/admin/operations');
+  });
+
+  it('doesNotCallEveryUnreportedAssemblyStopped', async () => {
+    // THE CONTROL. A row whose deployment simply does not report assembly state, and which did
+    // NOT stop, must keep saying so — the flag is the server's derived fact, never an inference
+    // from a missing field.
+    listTriage.mockResolvedValue(
+      readTriagePage(
+        {
+          items: [{
+            id: 401, receivedOn: '2026-08-20T09:00:00Z', from: 'a@b.example',
+            subject: 'Deployment reports no assembly', outcome: 'Inquiry', reasonCodes: [],
+          }],
+          totalCount: 1, pageNumber: 1, pageSize: 25,
+        },
+        1,
+      ),
+    );
+    renderPage();
+    const row = await rowFor(/Deployment reports no assembly/);
+    expect(within(row).queryByText(/processing stopped for this message/i)).not.toBeInTheDocument();
+    expect(
+      within(row).queryByRole('button', { name: /retry failed processing/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it('keepsReprocessOnAHeldMessage_becauseThatIsTheOneThingThatFreesIt', async () => {
     // The P0: nothing sweeps a held message, so this button is its only way back into flight.
     renderPage();
@@ -700,7 +768,7 @@ describe('InboundMailTriagePage — an empty list states its real cause', () => 
     listTriage.mockResolvedValue(EMPTY);
     renderPage();
 
-    expect(await screen.findByText(/nothing is being hidden from you/i)).toBeInTheDocument();
+    expect(await screen.findByText(/nothing is waiting on you/i)).toBeInTheDocument();
   });
 
   it('saysNothingAboutMailboxesToARoleThatCannotSeeThem', async () => {
@@ -710,7 +778,7 @@ describe('InboundMailTriagePage — an empty list states its real cause', () => 
     hasPermission.mockImplementation((module: string) => module !== 'Email & SMTP');
     renderPage();
 
-    await screen.findByText(/nothing is being hidden from you/i);
+    await screen.findByText(/nothing is waiting on you/i);
     expect(getMailboxes).not.toHaveBeenCalled();
   });
 });
@@ -1317,5 +1385,46 @@ describe('describeMessageProgress — the checkpoint reads backwards, so the scr
         expect(describeMessageProgress(state, hasLead).label).not.toContain(state);
       }
     }
+  });
+});
+
+describe('presentableReason — an operator reads a sentence, never a code', () => {
+  // The exact strings the live tenant stores. EmailInquiryAssemblyCoordinator.HoldForReviewAsync
+  // writes "{code}: {detail}" into one column because the code is what a query groups by, so both
+  // audiences were being served the same string and every held message opened its explanation
+  // with a snake_case token.
+  const LIVE_LEAD_NOT_PRODUCED =
+    'assembly_lead_not_produced: This message repeats an inquiry Nexora already has, so no second '
+    + 'inquiry was created. Nothing is lost. Open Possible Matches to say whether it is the same '
+    + 'request or a new one; the message finishes as soon as you decide.';
+  const LIVE_NO_REQUESTABLE_CONTENT =
+    'assembly_no_requestable_content: This message was read in full and names no product, quantity '
+    + 'or specification anywhere, so no inquiry was created.';
+
+  it('stripsTheMachineCodeAndKeepsTheWholeSentence', () => {
+    const shown = presentableReason(LIVE_LEAD_NOT_PRODUCED);
+    expect(shown).not.toContain('assembly_lead_not_produced');
+    expect(shown).not.toContain('_');
+    expect(shown).toMatch(/^This message repeats an inquiry Nexora already has/);
+    expect(shown).toContain('Open Possible Matches');
+  });
+
+  it('stripsItForEveryHoldCodeAndNotJustTheOneThatWasReported', () => {
+    // 37 of the 57 held messages on the live tenant carry this code, not the other one. A fix
+    // keyed on the string that happened to be in the report would have left them unchanged.
+    const shown = presentableReason(LIVE_NO_REQUESTABLE_CONTENT);
+    expect(shown).toMatch(/^This message was read in full/);
+    expect(shown).not.toContain('_');
+  });
+
+  it('stillTitleCasesABareCodeThatCarriesNoSentence', () => {
+    // The other shape the wire carries: a component reason code with no detail beside it. There
+    // is nothing to strip, and rendering it as nothing would delete the only explanation there is.
+    expect(presentableReason('stranded_extraction_job_missing')).toBe('Stranded Extraction Job Missing');
+  });
+
+  it('leavesAPlainSentenceExactlyAsAuthored', () => {
+    const plain = 'No part of this message could be read. Its attachments were refused or are unsupported.';
+    expect(presentableReason(plain)).toBe(plain);
   });
 });

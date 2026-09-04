@@ -92,7 +92,21 @@ public sealed record EmailTriageRow(
     DateTimeOffset? LastUpdatedAtUtc = null,
     DateTimeOffset? SenderSentAtUtc = null,
     DateTime? ParsedAt = null,
-    IReadOnlyList<EmailIntakeComponentRow>? Components = null);
+    IReadOnlyList<EmailIntakeComponentRow>? Components = null,
+    /// <summary>
+    /// The message stopped INSIDE processing and has no message aggregate to say so.
+    ///
+    /// <para>Derived rather than left to the reader, and this is the one fact
+    /// <see cref="ParseStatus"/> states that <see cref="AssemblyState"/> cannot. The screen is
+    /// forbidden from deciding progress from ParseStatus — on live data the two disagree, and the
+    /// checkpoint reads BACKWARDS (a closed lead-less message says "Queued"; a message that DID
+    /// produce a lead says "NeedsReview"). That rule is kept: this is true only where there is no
+    /// assembly at all to disagree with, which is precisely the population it exists for —
+    /// measured on mailbox 9 on 2026-09-03, 20 dead-lettered messages with no assembly row, whose
+    /// rows reported "assembly not reported", fell out of every needs-a-person branch on the
+    /// screen, and were offered no route to the exceptions surface where their retry lives.</para>
+    /// </summary>
+    bool StoppedInProcessing = false);
 
 /// <summary>
 /// One physical part of the message: what it was, what became of it, and why.
@@ -124,6 +138,25 @@ public sealed record EmailIntakeComponentRow(
 public sealed record EmailTriagePage(
     int PageNumber, int PageSize, int TotalCount, IReadOnlyList<EmailTriageRow> Items);
 
+/// <summary>
+/// The named list filters that are about STATE rather than about the arrival gate's verdict.
+///
+/// <para>A constant rather than a literal at the call site so the screen, the service and the
+/// tests all agree on the spelling of the one filter that decides whether a stopped message is
+/// visible. A typo in a query string is otherwise indistinguishable from "nothing is stuck".</para>
+/// </summary>
+public static class EmailTriageStates
+{
+    /// <summary>Produced no Lead, and nothing will move it without a person.</summary>
+    public const string Stopped = "stopped";
+
+    /// <summary>Every ParseStatus that has stopped trying begins with this word.</summary>
+    public const string GaveUpParseStatusPrefix = "Failed";
+
+    public static bool IsStopped(string? state)
+        => state is not null && state.Trim().Equals(Stopped, StringComparison.OrdinalIgnoreCase);
+}
+
 /// <param name="Enqueued">Processable jobs associated with the replay, including jobs already
 /// scheduled by an earlier identical request. Zero means nothing extractable was found.</param>
 /// <param name="Status">The ingest's resulting ParseStatus.</param>
@@ -135,8 +168,14 @@ public sealed record EmailTriageReprocessResult(
 
 public interface IEmailTriageService
 {
+    /// <param name="state">
+    /// <c>"stopped"</c> selects the messages that produced no Lead and that nothing will move on
+    /// their own: held for a person, or dead-lettered with no message aggregate at all. Any other
+    /// value, or null, selects everything. See <see cref="EmailTriageStates.Stopped"/>.
+    /// </param>
     Task<EmailTriagePage> ListAsync(
-        long businessUnitId, string? outcome, int page, int pageSize, CancellationToken ct = default);
+        long businessUnitId, string? outcome, int page, int pageSize, CancellationToken ct = default,
+        string? state = null);
 
     /// <summary>
     /// One message, with every part it was made of.
@@ -185,7 +224,8 @@ public sealed class EmailTriageService : IEmailTriageService
     }
 
     public async Task<EmailTriagePage> ListAsync(
-        long businessUnitId, string? outcome, int page, int pageSize, CancellationToken ct = default)
+        long businessUnitId, string? outcome, int page, int pageSize, CancellationToken ct = default,
+        string? state = null)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 100);
@@ -199,6 +239,36 @@ public sealed class EmailTriageService : IEmailTriageService
             query = wanted.Equals("Legacy", StringComparison.OrdinalIgnoreCase)
                 ? query.Where(e => e.TriageOutcome == null)
                 : query.Where(e => e.TriageOutcome == wanted);
+        }
+
+        // "WHAT STOPPED?" — the one question this screen could not be asked.
+        //
+        // Every existing filter is a triage OUTCOME, which is a statement about what the gate
+        // decided on arrival. It cannot express the thing an operator actually needs, because a
+        // message stops long after triage: measured on mailbox 9 on 2026-09-03, 80 of 332
+        // ingested messages produced no Lead and had nothing left that would move them, spread
+        // across the Inquiry, Uncertain, Noise and legacy tabs with no way to gather them. The
+        // default landing tab was "Rejected as noise", so the screen opened on the one population
+        // that needs nobody.
+        //
+        // Two shapes, deliberately in ONE bucket, because a person's question is "what stopped?"
+        // and not "which subsystem stopped it":
+        //   * held for a person   — the message aggregate reached NeedsReview and named no Lead;
+        //   * dead-lettered alone — no aggregate at all (mail that predates the assembly barrier,
+        //     or whose capture never produced one) with a ParseStatus that has given up.
+        // A message with a decided terminal verdict (NoInquiry, RejectedSecurity, Rejected as
+        // noise) is NOT stopped. It ended, which is a different and correct thing.
+        if (EmailTriageStates.IsStopped(state))
+        {
+            query = query.Where(e =>
+                !_context.Leads.Any(lead => lead.EmailIngestsId == e.Id)
+                && (_context.EmailInquiryAssemblies.Any(a =>
+                        a.EmailIngestId == e.Id
+                        && a.Status == ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyStatus.NeedsReview
+                        && a.AssembledLeadId == null)
+                    || (!_context.EmailInquiryAssemblies.Any(a => a.EmailIngestId == e.Id)
+                        && e.ParseStatus != null
+                        && e.ParseStatus.StartsWith(EmailTriageStates.GaveUpParseStatusPrefix))));
         }
 
         var total = await query.CountAsync(ct);
@@ -411,7 +481,12 @@ public sealed class EmailTriageService : IEmailTriageService
                 IngestedAtUtc: assembly?.CreatedAtUtc,
                 LastUpdatedAtUtc: assembly?.UpdatedAtUtc,
                 SenderSentAtUtc: assembly?.ReceivedAtUtc,
-                ParsedAt: row.ParsedAt));
+                ParsedAt: row.ParsedAt,
+                // Only where there is no assembly to disagree with — see the record's remarks.
+                StoppedInProcessing: assembly is null
+                    && row.ParseStatus is not null
+                    && row.ParseStatus.StartsWith(
+                        EmailTriageStates.GaveUpParseStatusPrefix, StringComparison.OrdinalIgnoreCase)));
         }
 
         return items;

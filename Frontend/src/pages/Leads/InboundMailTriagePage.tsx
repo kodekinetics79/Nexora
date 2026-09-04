@@ -52,7 +52,9 @@ import emailTriageService, {
   describeTriageReason,
   isTriageUnavailable,
   readPollFailureReport,
+  stoppedInProcessing,
   TRIAGE_REASON_DESCRIPTIONS,
+  TRIAGE_STATE_STOPPED,
   type EmailTriageOutcome,
   type EmailTriageRow,
   type MailPollReport,
@@ -105,6 +107,11 @@ interface TriageTab {
   key: string;
   /** Null sends no `outcome` parameter, which the endpoint reads as "every decision". */
   outcome: EmailTriageOutcome | null;
+  /**
+   * Sent as `state`. Only the stopped tab sets it: every other tab asks about the arrival gate's
+   * verdict, and this one asks what is still waiting on a person.
+   */
+  state?: string;
   label: string;
   blurb: string;
   emptyTitle: string;
@@ -112,6 +119,24 @@ interface TriageTab {
 }
 
 const TABS: TriageTab[] = [
+  {
+    // THE TAB THE SCREEN WAS MISSING, and the reason the rest of it could not be used.
+    //
+    // Every other tab filters on the arrival gate's verdict, and a message stops long after
+    // arrival — so "what is waiting on me" was spread across four tabs with no way to gather it,
+    // and the screen opened on "Rejected as noise", the one population that needs nobody. On the
+    // live tenant that hid 80 of 332 messages that had produced no inquiry and had nothing left
+    // that would move them: mail arrived, was recorded honestly, and no one screen would say so.
+    key: 'Stopped',
+    outcome: null,
+    state: TRIAGE_STATE_STOPPED,
+    label: 'Needs a person',
+    blurb:
+      'Messages that produced no inquiry and that nothing will move on their own. Each one says why it stopped and what to do about it. Nothing here is lost — the original email and every part of it are kept.',
+    emptyTitle: 'Nothing is waiting on you',
+    emptyMessage:
+      'Every message this mailbox has taken either became an inquiry, attached to one that already existed, or was decided and closed. New arrivals appear here only if they stop.',
+  },
   {
     // EVERY message, including the ones no other tab can show.
     //
@@ -218,17 +243,34 @@ const describeBodyRouting = (row: EmailTriageRow): string => {
 };
 
 /**
+ * A stored reason that leads with its own machine code — the shape the coordinator writes, which
+ * is `"{code}: {sentence}"`. Matched only when a real sentence follows, so a bare code still falls
+ * through to the title-cased branch below.
+ */
+const LEADING_REASON_CODE = /^[a-z0-9]+(?:_[a-z0-9]+)+:\s+(?=\S)/;
+
+/**
  * Turns a server-supplied reason into product copy.
  *
  * A stable snake_case code is Nexora's own vocabulary and is simply title-cased. Anything else is
  * free text the server authored, and goes through the same gate every other backend string in the
  * product does — bounded, printable, no hostnames, no stack frames. A reason that fails the gate
  * renders as nothing rather than as operator diagnostics.
+ *
+ * <b>The code prefix is stripped.</b> `EmailInquiryAssemblyCoordinator.HoldForReviewAsync` stores
+ * `"{code}: {detail}"` in one column, because the code is what a query groups by and an operator
+ * cannot be asked to read `assembly_lead_not_produced`. Both audiences were being served the same
+ * string, so every held message on the live tenant opened its explanation with a snake_case token
+ * — a code, not a sentence, and the first thing a salesperson sees about work waiting for them.
+ * The code is unchanged in the database and in the logs; it just no longer leads the sentence.
+ * Stripping it also buys back its own length against the 300-character ceiling
+ * `presentableServerText` REJECTS (does not truncate) on, which renders a too-long reason as no
+ * reason at all.
  */
 export const presentableReason = (value: string | null): string | null => {
   if (!value) return null;
   if (/^[a-z0-9]+(_[a-z0-9]+)+$/.test(value)) return readableHint(value);
-  return presentableServerText(value);
+  return presentableServerText(value.replace(LEADING_REASON_CODE, ''));
 };
 
 /** "3 of 5 parts assembled" — omitted entirely when the deployment reports no component totals. */
@@ -247,6 +289,13 @@ const describeMissingLead = (row: EmailTriageRow): string | null => {
   const assembly = describeAssemblyState(row.assemblyState);
   if (assembly.inProgress) return 'No lead exists yet — this message is still being assembled.';
   if (assembly.needsHuman) return 'No lead was created for this message.';
+  // Said BEFORE the "not recorded" fallback below, which is what these rows used to get: a
+  // sentence that names no cause and implies nothing can be done. Processing stopping is a cause,
+  // it is the commonest one on this tenant's oldest mail, and it has its own screen and its own
+  // retry — so the row says which of the two situations it is in.
+  if (!assembly.recognised && stoppedInProcessing(row))
+    return 'Processing stopped for this message, so no lead was created. Its retry — or the reason '
+      + 'it cannot be retried — is on the exceptions screen.';
   if (!assembly.recognised && row.assemblyState !== null)
     return 'No lead has been recorded against this message.';
   return null;
@@ -399,11 +448,13 @@ export default function InboundMailTriagePage() {
   /** /admin/operations, where a dead-lettered extraction job can be replayed. */
   const canReplayDeadLetters = hasPermission('Users', 'view');
 
-  // The landing tab is deliberately "Rejected as noise" and NOT the first tab. A rejection is the
-  // only outcome that produces nothing downstream, so it is the only one that can hide a lost
-  // deal; "All messages" sits first because that is where a reader looks for everything, but it
-  // is not what this screen is for.
-  const defaultTabIndex = Math.max(0, TABS.findIndex((tab) => tab.key === 'Noise'));
+  // The landing tab is "Needs a person". It used to be "Rejected as noise", on the reasoning that
+  // a wrong rejection is the only outcome that can hide a lost deal. That was half right and it
+  // opened the screen on the wrong half: a rejection is a DECISION, and a reader arriving at a
+  // list of decisions has to notice on their own that a different tab holds the work. A message
+  // that stopped without a decision is the one that goes stale unread, so it is what the screen
+  // opens on. Rejections are one click away and their tab still carries its own count.
+  const defaultTabIndex = Math.max(0, TABS.findIndex((tab) => tab.key === 'Stopped'));
   const [tabIndex, setTabIndex] = useState(defaultTabIndex);
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -422,6 +473,7 @@ export default function InboundMailTriagePage() {
     queryFn: () =>
       emailTriageService.listTriage({
         outcome: activeTab.outcome ?? undefined,
+        state: activeTab.state,
         page,
         pageSize: PAGE_SIZE,
       }),
@@ -446,7 +498,12 @@ export default function InboundMailTriagePage() {
     queries: TABS.map((tab) => ({
       queryKey: ['email-triage-count', tab.key],
       queryFn: () =>
-        emailTriageService.listTriage({ outcome: tab.outcome ?? undefined, page: 1, pageSize: 1 }),
+        emailTriageService.listTriage({
+          outcome: tab.outcome ?? undefined,
+          state: tab.state,
+          page: 1,
+          pageSize: 1,
+        }),
       select: (result: { totalCount: number | null }) => result.totalCount,
       staleTime: 30_000,
     })),
@@ -860,7 +917,13 @@ export default function InboundMailTriagePage() {
                     // A message stopped for a person, with no lead to open. Without a route out
                     // of here these rows were a dead end: no "Open lead" (there is none), and a
                     // "Reprocess" that could only answer 422.
-                    const strandedForHuman = assembly.needsHuman && row.leadId === null;
+                    // ...or that stopped in PROCESSING with no assembly to say so. Those rows
+                    // reported `needsHuman: false` — honestly, since nothing was reported at all —
+                    // and so were offered neither the batch nor the exceptions screen. On the live
+                    // tenant that is 20 dead-lettered messages with no route out of the row.
+                    const stoppedInside = stoppedInProcessing(row);
+                    const strandedForHuman =
+                      (assembly.needsHuman || (!assembly.recognised && stoppedInside)) && row.leadId === null;
                     // Read off the row itself rather than the per-message query: the loss is
                     // stated the moment the panel opens, and it survives the parts read failing.
                     const skipped = row.skippedAttachments;

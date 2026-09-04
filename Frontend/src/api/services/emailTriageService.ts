@@ -284,6 +284,24 @@ const ASSEMBLY_STATE_ALIASES: Record<string, string> = {
  * never be assumed successful: the "Open lead" action is gated on an actual lead id, so a state
  * this build cannot read degrades to "we do not know", not to a dead link.
  */
+/**
+ * The message stopped INSIDE processing and has no message aggregate to say so.
+ *
+ * <p>Read from the server's derived `stoppedInProcessing`, never recomputed here from
+ * `parseStatus`: on live data the per-ingest checkpoint and the assembly state disagree, and the
+ * checkpoint reads BACKWARDS (see describeMessageProgress). The server sets this flag only where
+ * there is no assembly at all to disagree with, which is exactly the population it exists for —
+ * measured on mailbox 9 on 2026-09-03, 20 dead-lettered messages with no assembly row, all but
+ * two from 2026-08-13/14. `describeAssemblyState(null).needsHuman` is false for those, quite
+ * correctly since nothing was reported, so they fell out of every "this needs a person" branch on
+ * the screen and were offered no route to the exceptions surface where their retry actually
+ * lives.</p>
+ *
+ * <p>False when the deployment does not report it, so an older backend degrades to today's
+ * behaviour rather than to a claim it cannot support.</p>
+ */
+export const stoppedInProcessing = (row: EmailTriageRow): boolean => row.stoppedInProcessing === true;
+
 export const describeAssemblyState = (state: string | null): AssemblyStateCopy => {
   if (state === null) {
     return {
@@ -580,6 +598,11 @@ export interface EmailTriageRow {
    * this same value. With the state, it is how "stuck" is told apart from "busy".
    */
   lastUpdatedOn: string | null;
+  /**
+   * Server-derived: this message stopped inside processing and has no assembly to say so.
+   * Read through {@link stoppedInProcessing}. False when the deployment does not report it.
+   */
+  stoppedInProcessing: boolean | null;
 }
 
 export interface EmailTriagePage {
@@ -590,11 +613,23 @@ export interface EmailTriagePage {
   pageSize: number | null;
 }
 
+/**
+ * The one list filter that is about STATE rather than about the arrival gate's verdict.
+ *
+ * Every `outcome` value answers "what did triage decide when this arrived". A message stops long
+ * after triage, so no combination of them can answer "what is waiting on somebody" — which is the
+ * only question this screen exists to answer. Must match `EmailTriageStates.Stopped` on the
+ * server; a typo here renders as "nothing is stuck", so it is a constant and not a literal.
+ */
+export const TRIAGE_STATE_STOPPED = 'stopped';
+
 export interface ListTriageParams {
   /** Omit for "every decision". */
   outcome?: EmailTriageOutcome | string;
   page?: number;
   pageSize?: number;
+  /** `stopped` — produced no inquiry, and nothing will move it without a person. */
+  state?: string;
 }
 
 export interface ReprocessTriageResult {
@@ -791,6 +826,7 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     parsedOn: asText(root.parsedAt) ?? asText(root.parsedOn),
     ingestedOn: asText(root.ingestedAtUtc) ?? asText(root.ingestedOn),
     lastUpdatedOn: asText(root.lastUpdatedAtUtc) ?? asText(root.lastUpdatedOn),
+    stoppedInProcessing: asFlag(root.stoppedInProcessing),
   };
 };
 
@@ -1030,6 +1066,7 @@ const emailTriageService = {
     const query: Record<string, string | number> = { page };
     if (params.outcome) query.outcome = params.outcome;
     if (params.pageSize) query.pageSize = params.pageSize;
+    if (params.state) query.state = params.state;
     const response = await axiosInstance.get('/api/email-triage', { params: query });
     return readTriagePage(response.data, page);
   },

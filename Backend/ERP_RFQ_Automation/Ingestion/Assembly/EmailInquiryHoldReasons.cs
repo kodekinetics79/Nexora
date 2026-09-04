@@ -161,10 +161,31 @@ public static class EmailInquiryHoldReasons
     /// It does not promise a retry — nothing sweeps this, because there is nothing to retry;
     /// the decision is the next step and a person owns it.</para>
     /// </summary>
+    /// <para><b>It now says where the decision is made.</b> The first version told an operator
+    /// to "confirm whether it is the same request or a new one" and stopped there, which reads
+    /// as an instruction and is not one: nothing on the Inbound Mail screen confirms anything.
+    /// The decision lives on Possible Matches, and a sentence that describes a judgement without
+    /// naming the place it is entered leaves the message parked exactly as if it had said
+    /// nothing. Kept under the 300-character ceiling <c>presentableServerText</c> imposes on the
+    /// stored <c>"{code}: {detail}"</c> string — pinned by <c>EmailInquiryHoldReasonTextTests</c>.
+    /// </para>
     public const string LeadNotProducedDetail =
-        "This message was read in full, but it looks like an inquiry that already exists, so no "
-        + "new inquiry was created from it. Nothing has been lost — confirm whether it is the "
-        + "same request or a new one.";
+        "This message repeats an inquiry Nexora already has, so no second inquiry was created. "
+        + "Nothing is lost. Open Possible Matches to say whether it is the same request or a new "
+        + "one; the message finishes as soon as you decide.";
+
+    /// <summary>
+    /// What an operator is told after a person decided, on Possible Matches, that the message is
+    /// not a usable inquiry.
+    ///
+    /// <para>Stored WITHOUT a reason code prefix, because there is no machine decision left to
+    /// explain: a named person made this call and the audit event carries who and why. The
+    /// message stops asking.</para>
+    /// </summary>
+    public const string MatchReviewRejectedDetail =
+        "Someone reviewed this message against the inquiry it resembled and decided it is not a "
+        + "request Nexora should quote, so no inquiry was created. The original email and "
+        + "everything read from it are retained.";
 
     /// <summary>
     /// What an operator is told when an email job reaches persistence owning no component.
