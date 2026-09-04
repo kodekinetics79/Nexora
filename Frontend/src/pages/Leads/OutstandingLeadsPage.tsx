@@ -4,9 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
-  Stack, Dialog, DialogTitle, DialogContent,
-  DialogActions, TextField, MenuItem, Chip,
-  Menu, FormControlLabel, Switch, Alert,
+  Stack, Chip, Link,
+  Menu, MenuItem, FormControlLabel, Switch, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -23,7 +22,13 @@ import {
   Person as UserIcon,
   MoreHoriz as MenuIcon,
 } from '@mui/icons-material';
-import leadService, { assignabilityNote, type AcceptedLeadResponseDTO } from '../../api/services/leadService';
+import leadService, { type AcceptedLeadResponseDTO } from '../../api/services/leadService';
+import commercialRoutingService, {
+  LEAD_OWNERSHIP_ACTION, type RoutingOwnerOption,
+} from '../../api/services/commercialRoutingService';
+import {
+  OwnerPickerMenu, AssignReasonDialog, assignmentNeedsReason, useOwnerOptions,
+} from './LeadOwnerPicker';
 import SearchField from '../../components/common/SearchField';
 import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
@@ -48,7 +53,9 @@ const OutstandingLeadsPage: React.FC = () => {
   // still waiting for an owner; off = every accepted Lead not yet promoted to an RFQ.
   const [unassignedOnly, setUnassignedOnly] = useState(true);
   // Inline 2-click assign: click "Assign to..." on a row, then pick a name.
-  const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number } | null>(null);
+  const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, lead: AcceptedLeadResponseDTO } | null>(null);
+  // Only when the target already belongs to somebody else — never on a plain self-take.
+  const [reasonPrompt, setReasonPrompt] = useState<{ owner: RoutingOwnerOption, lead: AcceptedLeadResponseDTO } | null>(null);
 
   const getUrgencyColor = (dateStr: string | null) => {
     if (!dateStr) return 'text.secondary';
@@ -59,12 +66,6 @@ const OutstandingLeadsPage: React.FC = () => {
     if (diffDays < 7) return 'warning.main';
     return 'success.main';
   };
-
-  // Assignment Dialog State
-  const [assignDialogOpen, setAssignDialogOpen] = useState(false);
-  const [selectedAcceptedLeadId, setSelectedAcceptedLeadId] = useState<number | null>(null);
-  const [assignToUserId, setAssignToUserId] = useState<string>('');
-  const [assignComment, setAssignComment] = useState('');
 
   const isAdminOrManager = userData?.isManager === true || userData?.isSuperAdmin === true;
 
@@ -79,44 +80,63 @@ const OutstandingLeadsPage: React.FC = () => {
     }),
   });
 
-  const { data: users = [] } = useQuery({
-    queryKey: ['assignment-users'],
-    queryFn: () => leadService.getUsersForAssignment(userData?.businessUnitId || 0),
-    enabled: !!userData.businessUnitId,
-  });
+  /**
+   * Can the READER take a lead themselves?
+   *
+   * This queue used to post to `POST /api/UnAssignedLead/assign`, which is manager-only, from a
+   * screen any Leads:Edit user can open — so the assign control was hidden from every rep and the
+   * rep was told nothing. Taking an UNOWNED inquiry is ordinary rep work and the server allows it
+   * through `PUT /api/commercial-routing/leads/{id}/owner`, which resolves the caller's rank
+   * against the lead's current owner. The eligible-owner list is the server's own verdict on
+   * whether routing would accept this reader at all, so the control appears only when it would.
+   */
+  const ownerOptions = useOwnerOptions(canEditLeads);
+  const myOwnerOption = React.useMemo(
+    () => (ownerOptions.data ?? []).find((option) => option.userId === userData?.id) ?? null,
+    [ownerOptions.data, userData?.id],
+  );
+  const iCanTakeLeads = myOwnerOption?.isAvailable === true;
+  /** Stated only once we actually know — never inferred from a list that has not loaded. */
+  const whyICannotTakeLeads = canEditLeads && !ownerOptions.isLoading && !ownerOptions.isError && !iCanTakeLeads
+    ? (myOwnerOption?.eligibilityReason?.trim()
+      || 'You do not have a Sales Rep profile yet, so inquiries cannot be routed to you. Ask an administrator to add one under Sales > Rep directory.')
+    : null;
 
   const assignMutation = useMutation({
-    mutationFn: (data: { leadId: number; assignedToUserId: number; comment?: string }) => leadService.assignLead(data),
-    onSuccess: () => {
-      enqueueSnackbar('Lead assigned successfully!', { variant: 'success' });
-      setAssignDialogOpen(false);
+    mutationFn: ({ owner, lead, reason }: { owner: RoutingOwnerOption; lead: AcceptedLeadResponseDTO; reason?: string }) => {
+      const identity = `lead-owner-${lead.id}-${crypto.randomUUID()}`;
+      return commercialRoutingService.changeLeadOwner(lead.id, {
+        action: LEAD_OWNERSHIP_ACTION.Assign,
+        assignedToUserId: owner.userId,
+        expectedAssignmentVersion: lead.assignmentVersion ?? 1,
+        idempotencyKey: identity,
+        correlationId: identity,
+        comment: reason ?? null,
+      });
+    },
+    onSuccess: (_result, { owner }) => {
+      enqueueSnackbar(`Assigned to ${owner.name}.`, { variant: 'success' });
       setQuickAssign(null);
-      setAssignToUserId('');
-      setAssignComment('');
+      setReasonPrompt(null);
       queryClient.invalidateQueries({ queryKey: ['leads-outstanding'] });
       queryClient.invalidateQueries({ queryKey: ['leads-assigned'] });
+      queryClient.invalidateQueries({ queryKey: ['leads'] });
     },
     onError: (error: unknown) => enqueueSnackbar(
-      presentableErrorMessage(error, 'The lead could not be assigned. Its current owner is unchanged — try again.'),
+      presentableErrorMessage(error, 'The owner could not be changed. This inquiry still belongs to whoever held it before.'),
       { variant: 'error' },
     ),
   });
 
-  const handleAssignClick = (id: number) => {
-    setSelectedAcceptedLeadId(id);
-    setAssignDialogOpen(true);
-  };
-
-
-  const handleConfirmAssign = () => {
-    if (selectedAcceptedLeadId && assignToUserId) {
-      assignMutation.mutate({
-        leadId: selectedAcceptedLeadId,
-        assignedToUserId: Number(assignToUserId),
-        comment: assignComment || undefined,
-      });
+  /** A reason is asked for ONLY when the inquiry already belongs to somebody else. */
+  const assignTo = React.useCallback((owner: RoutingOwnerOption, lead: AcceptedLeadResponseDTO) => {
+    if (assignmentNeedsReason(lead.assignedToId, owner.userId)) {
+      setQuickAssign(null);
+      setReasonPrompt({ owner, lead });
+      return;
     }
-  };
+    assignMutation.mutate({ owner, lead });
+  }, [assignMutation]);
 
   // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
   // render would hand it a new type each time and remount the overlay for no reason.
@@ -210,17 +230,45 @@ const OutstandingLeadsPage: React.FC = () => {
                 sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, bgcolor: 'error.main', color: 'white', mb: 0.5, borderRadius: 1, width: 'fit-content' }}
               />
             )}
-            {isUnassigned && isAdminOrManager ? (
-              // Click 1 of the 2-click assign: opens the name list right here.
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<AssignIcon sx={{ fontSize: 14 }} />}
-                onClick={(e) => setQuickAssign({ el: e.currentTarget, leadId: p.row.id })}
-                sx={{ fontWeight: 800, fontSize: '0.7rem', py: 0.25, px: 1, borderRadius: 1.5, width: 'fit-content', textTransform: 'none' }}
-              >
-                Assign to...
-              </Button>
+            {isUnassigned && canEditLeads ? (
+              <Box sx={{ lineHeight: 1.3 }}>
+                {/* One click, no menu: picking up work nobody holds is the commonest action on
+                    this queue and the server allows any Leads:Edit user to do it. Shown only when
+                    governed routing would accept this reader — the sentence saying why it would
+                    not is printed once above the grid, not fifty times here. */}
+                {iCanTakeLeads && (
+                  <Button
+                    size="small"
+                    variant="contained"
+                    disableElevation
+                    startIcon={<AssignIcon sx={{ fontSize: 14 }} />}
+                    disabled={assignMutation.isPending}
+                    onClick={() => { if (myOwnerOption) assignTo(myOwnerOption, p.row); }}
+                    sx={{ fontWeight: 800, fontSize: '0.7rem', py: 0.25, px: 1, borderRadius: 1.5, width: 'fit-content', textTransform: 'none' }}
+                  >
+                    Assign to me
+                  </Button>
+                )}
+                {/* Handing an inquiry to a COLLEAGUE is a manager's decision; the server answers
+                    403 otherwise and the error layer replaces that sentence with a generic one,
+                    so the control is not offered rather than offered and refused. */}
+                {isAdminOrManager && (
+                  <Link
+                    component="button"
+                    type="button"
+                    underline="hover"
+                    onClick={(e) => setQuickAssign({ el: e.currentTarget, lead: p.row })}
+                    sx={{ display: 'block', fontSize: '0.7rem', fontWeight: 700, mt: iCanTakeLeads ? 0.25 : 0 }}
+                  >
+                    {iCanTakeLeads ? 'Someone else…' : 'Assign to…'}
+                  </Link>
+                )}
+                {!iCanTakeLeads && !isAdminOrManager && (
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.85rem', color: 'error.main' }}>
+                    Unassigned
+                  </Typography>
+                )}
+              </Box>
             ) : (
               <>
                 <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
@@ -354,6 +402,23 @@ const OutstandingLeadsPage: React.FC = () => {
         />
       </Paper>
 
+      {/* A control that is absent for a reason must say the reason. Before this, a rep simply saw
+          no way to pick up an inquiry and was told nothing about why. */}
+      {whyICannotTakeLeads && (
+        <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
+          <Typography variant="body2" sx={{ fontWeight: 700 }}>
+            You cannot pick these up yourself yet.
+          </Typography>
+          <Typography variant="body2">{whyICannotTakeLeads}</Typography>
+        </Alert>
+      )}
+      {canEditLeads && ownerOptions.isError && (
+        <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>
+          We couldn&apos;t check who can take these inquiries, so the assign controls are hidden.
+          Nothing has changed — reload the page to try again.
+        </Alert>
+      )}
+
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 280px)', width: '100%', borderRadius: 3, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: '0 4px 20px rgba(0,0,0,0.03)' }}>
         {/* A failed request used to fall through `data?.items ?? []` into MUI's bare "No rows",
@@ -406,92 +471,31 @@ const OutstandingLeadsPage: React.FC = () => {
         onResolved={() => queryClient.invalidateQueries({ queryKey: ['leads-outstanding'] })}
       />
 
-      {/* Assignment Dialog */}
-      <Dialog open={assignDialogOpen} onClose={() => setAssignDialogOpen(false)} fullWidth>
-        <DialogTitle sx={{ fontWeight: 900, textTransform: 'uppercase', fontSize: '1rem', letterSpacing: '0.05em' }}>Assign Lead</DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={3} sx={{ mt: 1 }}>
-            <TextField
-              select
-              fullWidth
-              label="Assign To User"
-              value={assignToUserId}
-              onChange={(e) => setAssignToUserId(e.target.value)}
-              sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
-            >
-              {users.map((u) => (
-                <MenuItem key={u.id} value={u.id} disabled={!u.isEligibleForAssignment}>
-                  {u.fullName} &mdash; {assignabilityNote(u)}
-                </MenuItem>
-              ))}
-            </TextField>
-            {users.length > 0 && !users.some((u) => u.isEligibleForAssignment) && (
-              <Alert severity="warning" sx={{ borderRadius: 2 }}>
-                Nobody in this business unit can currently receive a lead. Governed routing only
-                accepts a user who has an effective Sales Rep profile with capacity left, and there
-                is no such user right now. Give someone a profile in Sales &gt; Rep directory.
-              </Alert>
-            )}
-            <TextField
-              fullWidth
-              multiline
-              rows={3}
-              label="Assignment Comment (Optional)"
-              value={assignComment}
-              onChange={(e) => setAssignComment(e.target.value)}
-              placeholder="Add any instructions for the assignee..."
-              sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
-            />
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2.5 }}>
-          <Button onClick={() => setAssignDialogOpen(false)} color="inherit" sx={{ fontWeight: 800 }}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={handleConfirmAssign}
-            disabled={!assignToUserId || assignMutation.isPending}
-            sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-          >
-            Confirm Assignment
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Inline quick-assign: click 2 of 2 — pick a name and it's assigned */}
-      <Menu
-        anchorEl={quickAssign?.el}
+      {/* Click 2 of 2: the ONE owner picker every leads screen opens, with each name carrying
+          the routing engine's own verdict on whether it can take the inquiry. This replaced a
+          bespoke list built from `/api/UnAssignedLead/users-for-assignment`, which the picker
+          already supersedes. */}
+      <OwnerPickerMenu
+        anchorEl={quickAssign?.el ?? null}
         open={Boolean(quickAssign)}
         onClose={() => setQuickAssign(null)}
-        slotProps={{
-          paper: {
-            sx: { borderRadius: 2, boxShadow: '0 8px 32px rgba(0,0,0,0.1)', border: '1px solid', borderColor: 'divider', minWidth: 200, maxHeight: 320 }
-          }
+        onPick={(owner) => { if (quickAssign) assignTo(owner, quickAssign.lead); }}
+        busy={assignMutation.isPending}
+        heading="Assign this inquiry to"
+        currentOwnerId={quickAssign?.lead.assignedToId ?? null}
+      />
+
+      <AssignReasonDialog
+        open={Boolean(reasonPrompt)}
+        ownerName={reasonPrompt?.owner.name ?? ''}
+        currentOwnerName={reasonPrompt?.lead.assignedToFullName}
+        leadCount={1}
+        busy={assignMutation.isPending}
+        onCancel={() => setReasonPrompt(null)}
+        onConfirm={(reason) => {
+          if (reasonPrompt) assignMutation.mutate({ owner: reasonPrompt.owner, lead: reasonPrompt.lead, reason });
         }}
-      >
-        <Typography sx={{ px: 2, py: 0.75, fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>
-          Pick a person
-        </Typography>
-        {users.length === 0 && (
-          <MenuItem disabled sx={{ fontSize: '0.8rem' }}>No team members found</MenuItem>
-        )}
-        {users.map((u) => (
-          <MenuItem
-            key={u.id}
-            disabled={assignMutation.isPending || !u.isEligibleForAssignment}
-            onClick={() => {
-              if (quickAssign) assignMutation.mutate({ leadId: quickAssign.leadId, assignedToUserId: Number(u.id) });
-            }}
-            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1, display: 'block' }}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center' }}>
-              <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName}
-            </Box>
-            <Typography variant="caption" sx={{ display: 'block', pl: 3, color: 'text.secondary', whiteSpace: 'normal' }}>
-              {assignabilityNote(u)}
-            </Typography>
-          </MenuItem>
-        ))}
-      </Menu>
+      />
 
       {/* Actions Menu */}
       <Menu
@@ -517,18 +521,6 @@ const OutstandingLeadsPage: React.FC = () => {
         >
           <ViewIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> View
         </MenuItem>
-        {isAdminOrManager && (
-          <MenuItem
-            onClick={() => {
-              const id = menuAnchor!.row.id;
-              setMenuAnchor(null);
-              handleAssignClick(id);
-            }}
-            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
-          >
-            <AssignIcon sx={{ fontSize: 16, mr: 1, color: 'warning.main' }} /> Assign with a note
-          </MenuItem>
-        )}
       </Menu>
     </Box >
   );

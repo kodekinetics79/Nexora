@@ -454,6 +454,91 @@ public sealed class LifecycleApplicationServiceTests
         Assert.Equal(new[] { "CANCELLED", "PENDING_IDENTIFICATION", "QUALIFIED" }, state.AllowedTransitions.Select(x => x.StatusCode));
     }
 
+    /// <summary>
+    /// The state view has to answer "can this be reopened", not merely "is this over".
+    ///
+    /// Both leads below are terminal. Only the cancelled one may use the reopen command
+    /// (<see cref="LifecyclePolicy.IsReopenable"/>), so a screen driving its Reopen control off
+    /// <c>IsTerminal</c> would offer the verb on the completed lead and be refused after the
+    /// click. CanReopen is the server's own verdict, so the client never restates the policy.
+    /// </summary>
+    [Fact]
+    public async Task StateViewSeparatesReopenableTerminalsFromFinishedOnes()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(91);
+        Status(context, 5201, 91, "LeadStatus", "CANCELLED", "Cancelled");
+        Status(context, 5202, 91, "LeadStatus", "COMPLETED", "Completed");
+        Status(context, 5203, 91, "LeadStatus", "UNDER_REVIEW", "Under Review");
+        var cancelled = Seed.Lead(context, 120, 91, 5201);
+        var completed = Seed.Lead(context, 121, 91, 5202);
+        await context.SaveChangesAsync();
+        var service = Service(context);
+
+        var cancelledState = await service.GetLeadStateAsync(91, cancelled.Id, default);
+        var completedState = await service.GetLeadStateAsync(91, completed.Id, default);
+
+        Assert.True(cancelledState.IsTerminal);
+        Assert.True(cancelledState.CanReopen);
+        // Terminal too — and NOT reopenable. This is the assertion that fails if CanReopen is
+        // ever wired to IsTerminal, or hardcoded true.
+        Assert.True(completedState.IsTerminal);
+        Assert.False(completedState.CanReopen);
+    }
+
+    /// <summary>
+    /// The control that proves the pair above is not simply always-true/always-false: a lead still
+    /// in play is neither terminal nor reopenable, and the reopen command refuses it.
+    /// </summary>
+    [Fact]
+    public async Task StateViewSaysAnOpenLeadCannotBeReopened()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(92);
+        Seed.Lead(context, 122, 92);
+        Status(context, 5204, 92, "LeadStatus", "UNDER_REVIEW", "Under Review");
+        await context.SaveChangesAsync();
+
+        var state = await Service(context).GetLeadStateAsync(92, 122, default);
+
+        Assert.False(state.IsTerminal);
+        Assert.False(state.CanReopen);
+        await Assert.ThrowsAsync<LifecycleValidationException>(() => Service(context).TransitionLeadAsync(
+            92, 122, Actor(), Command("UNDER_REVIEW", 1, "lead-122-reopen", "CORRECTION"), true, default));
+    }
+
+    /// <summary>
+    /// The reason on a reopen has to be WORDS, not just the constant code every caller sends.
+    ///
+    /// The reopen command's ReasonCode is fixed ("REOPENED") — it carries no information — so a
+    /// guard that only checked it would leave the audit trail unable to say why a disqualified
+    /// inquiry came back. This is checked on the transition itself, not in the form, so a second
+    /// caller cannot skip it.
+    /// </summary>
+    [Fact]
+    public async Task ReopenWithoutWordsIsRefusedAndWritesNothing()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(93);
+        Status(context, 5205, 93, "LeadStatus", "CANCELLED", "Cancelled");
+        Status(context, 5206, 93, "LeadStatus", "UNDER_REVIEW", "Under Review");
+        var lead = Seed.Lead(context, 123, 93, 5205);
+        await context.SaveChangesAsync();
+        var service = Service(context);
+        var codeOnly = new LifecycleTransitionCommand(
+            "UNDER_REVIEW", 1, "REOPENED", "   ", "Api", "corr-1", "req-1", "lead-123-reopen");
+
+        await Assert.ThrowsAsync<LifecycleValidationException>(() => service.TransitionLeadAsync(
+            93, lead.Id, Actor(), codeOnly, true, default));
+        Assert.Empty(context.CommercialLifecycleEvents);
+
+        // The control: the SAME command carrying words is accepted, so the refusal above is about
+        // the missing sentence and not about the lead, the version or the key.
+        var withWords = codeOnly with { ReasonNotes = "Customer came back with revised quantities." };
+        var reopened = await service.TransitionLeadAsync(93, lead.Id, Actor(), withWords, true, default);
+        Assert.Equal("Reopened", reopened.EventType);
+    }
+
     private static LifecycleApplicationService Service(ErpRfqAutomationContext context) => new(context);
     private static LifecycleActor Actor() => new("user-42", "AuthenticatedUser");
 

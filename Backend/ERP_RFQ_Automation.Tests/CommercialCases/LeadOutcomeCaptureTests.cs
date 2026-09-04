@@ -143,8 +143,11 @@ public sealed class LeadOutcomeCaptureTests
         await service.TransitionLeadAsync(Tenant, 6_106, Actor(),
             Command("CANCELLED", 1, "lead-6106-cancel", "NO_RESPONSE", "Gone quiet."), false, default);
 
+        // A reopen must say why in words, not only carry the constant code — see
+        // LifecycleApplicationServiceTests.ReopenWithoutWordsIsRefusedAndWritesNothing.
         await service.TransitionLeadAsync(Tenant, 6_106, Actor(),
-            Command("UNDER_REVIEW", 2, "lead-6106-reopen", "NEW_INFORMATION"), true, default);
+            Command("UNDER_REVIEW", 2, "lead-6106-reopen", "NEW_INFORMATION",
+                "Customer came back after the tender was re-issued."), true, default);
 
         context.ChangeTracker.Clear();
         var lead = await context.Leads.SingleAsync(x => x.Id == 6_106);
