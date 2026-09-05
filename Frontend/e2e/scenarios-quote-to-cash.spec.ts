@@ -888,13 +888,26 @@ test('8a two operators confirm the same delivery at once: exactly one proof is r
     confirmDelivery(page, manager, shipment.id, lines, 'race-manager'),
     confirmDelivery(page, editor, shipment.id, lines, 'race-editor'),
   ]);
+  // Two answers are correct here and both were seen across runs. A loser whose command differs
+  // (run 1: the receivedOn stamps differed by a millisecond) is 409 "This shipment was confirmed
+  // concurrently with a different delivery confirmation command."; a loser whose command is
+  // byte-identical (run 2) is answered with the winner's proof, as a replay of the same fact. Either
+  // way exactly one proof exists.
   const statuses = [a.status, b.status].sort();
-  expect(statuses, `${sentence(a.body)} | ${sentence(b.body)}`).toEqual([201, 409]);
-  const loser = a.status === 409 ? a : b;
-  expect(sentence(loser.body)).toMatch(/already carries a proof|cannot be confirmed received|confirmed concurrently|conflict/i);
+  expect([a.status, b.status].filter((code) => code === 201).length, `${sentence(a.body)} | ${sentence(b.body)}`).toBeGreaterThanOrEqual(1);
+  if (statuses[1] === 409) {
+    const loser = a.status === 409 ? a : b;
+    expect(sentence(loser.body)).toMatch(/already carries a proof|cannot be confirmed received|confirmed concurrently|conflict/i);
+  } else {
+    expect(statuses).toEqual([201, 201]);
+    expect((a.body as Json).id).toBe((b.body as Json).id);
+    note('observation', 'identical concurrent confirmations: the loser was answered with the winner\'s proof (same id), not a 409');
+  }
   const proof = await jsonOk<Json>(await api(page, manager, 'get', `/api/delivery/shipments/${shipment.id}/confirmation`));
   expect(proof.outcome).toBe('DELIVERED');
   expect(proof.lines).toHaveLength(1);
+  const shipmentsNow = await shipmentsOf(page, manager, state.orderId);
+  expect(shipmentsNow.find((sh) => sh.id === shipment.id)!.deliveryStatus).toBe('DELIVERED');
   note('matrix', `POD race: manager ${a.status}, editor ${b.status}`);
 });
 
