@@ -38,6 +38,7 @@ public sealed class FinanceOutboxDispatcherService : BackgroundService
     private readonly IOptionsMonitor<FinanceOutboxDispatcherOptions> _options;
     private readonly ILogger<FinanceOutboxDispatcherService> _logger;
     private readonly ITenantScopeAccessor? _tenantScope;
+    private readonly ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? _heartbeats;
     private readonly string _workerId;
 
     /// <summary>
@@ -51,13 +52,21 @@ public sealed class FinanceOutboxDispatcherService : BackgroundService
         IServiceScopeFactory scopeFactory,
         IOptionsMonitor<FinanceOutboxDispatcherOptions> options,
         ILogger<FinanceOutboxDispatcherService> logger,
-        ITenantScopeAccessor? tenantScope = null)
+        ITenantScopeAccessor? tenantScope = null,
+        ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? heartbeats = null)
     {
         _scopeFactory = scopeFactory;
         _options = options;
         _logger = logger;
         _tenantScope = tenantScope;
+        _heartbeats = heartbeats;
         _workerId = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
+        // Disabled registers nothing: this dispatcher is opt-in and a host that chose not to
+        // run it must not be reported as broken (same rule as BillingRunWorker).
+        if (_options.CurrentValue.Enabled)
+            _heartbeats?.Register(
+                ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.FinanceOutbox,
+                _options.CurrentValue.PollInterval);
     }
 
     /// <summary>The container's accessor, which is a singleton, so any scope yields the same one.</summary>
@@ -78,9 +87,15 @@ public sealed class FinanceOutboxDispatcherService : BackgroundService
 
         _logger.LogInformation("Commercial finance outbox dispatcher {WorkerId} started.", _workerId);
         var consecutiveErrors = 0;
+        _heartbeats?.Beat(
+            ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.FinanceOutbox, _options.CurrentValue.PollInterval);
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            // Beats at the top of every turn, before the claim, so a cycle that throws still
+            // counts as the loop turning; a loop that stopped is the only thing that goes quiet.
+            _heartbeats?.Beat(
+                ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.FinanceOutbox, _options.CurrentValue.PollInterval);
             try
             {
                 var options = _options.CurrentValue;

@@ -24,6 +24,10 @@ using ERP_RFQ_Automation.LeadIdentity;
 
 namespace ERP_RFQ_Automation.Services
 {
+    /// <summary>Outcome of one tenant's delivered-quote catch-up: quotes marked SENT, and
+    /// quotes whose status update failed and was deferred on the ledger row.</summary>
+    public sealed record DeliveredQuoteReconciliation(int Finalized, int Deferred);
+
     public interface IQuoteService
     {
         /// <summary>
@@ -59,6 +63,14 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
         Task<QuoteSendReadinessDTO> EvaluateSendReadinessAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
         Task FinalizeQuoteDeliveryAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
+
+        /// <summary>
+        /// Marks SENT every quote of the tenant whose delivery ledger row is sealed
+        /// (<c>CompletedOn</c> set: the provider accepted the message) but whose
+        /// <c>SentOn</c> is still null. Never sends anything. A quote that cannot be marked
+        /// is deferred on its ledger row (<c>AvailableOn</c>, <c>LastErrorCode</c>) and retried.
+        /// </summary>
+        Task<DeliveredQuoteReconciliation> ReconcileDeliveredQuotesAsync(long businessUnitId, CancellationToken ct = default);
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
@@ -546,14 +558,30 @@ namespace ERP_RFQ_Automation.Services
             // under one set of numbers and delivered under another. The dispatcher detects that
             // and fails closed, but detection alone means the customer's quote silently never
             // arrives; refusing the edit keeps the rep in control of the outcome.
-            var deliveryInFlight = await _context.QuoteDeliveryRequests.AsNoTracking().IgnoreQueryFilters()
-                .AnyAsync(x => x.BusinessUnitId == quote.BusinessUnitId && x.QuoteId == quote.Id
-                    && x.CompletedOn == null && x.DeadLetteredOn == null);
-            if (deliveryInFlight)
+            var deliveries = await _context.QuoteDeliveryRequests.AsNoTracking().IgnoreQueryFilters()
+                .Where(x => x.BusinessUnitId == quote.BusinessUnitId && x.QuoteId == quote.Id)
+                .Select(x => new { x.CompletedOn, x.DeadLetteredOn, x.LastErrorCode })
+                .ToListAsync();
+            // The delivery ledger, not the status flag, is the authority on whether the customer
+            // holds this quote. A sealed row means the provider accepted the message even if
+            // SentOn has not caught up yet; an UNCERTAIN row means the customer may hold it.
+            // Editing either would diverge the stored figures from a document that is, or may
+            // be, in the customer's inbox.
+            if (deliveries.Any(x => x.CompletedOn != null))
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' has been delivered to the customer and can no longer be edited. " +
+                    "Create a new revision instead.");
+            if (deliveries.Any(x => x.CompletedOn == null && x.DeadLetteredOn == null))
                 throw new InvalidOperationException(
                     $"Quote '{quote.QuoteNo}' is queued for delivery to the customer and its prices are locked " +
                     "to the price source you confirmed. Wait for the delivery to complete, then create a new " +
                     "revision if the figures still need to change.");
+            if (deliveries.Any(x => x.DeadLetteredOn != null && x.LastErrorCode != null
+                    && x.LastErrorCode.StartsWith("DeliveryOutcomeUncertain", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' may already have reached the customer: its delivery was interrupted " +
+                    "and never confirmed either way. It cannot be edited. Check with the customer; if the quote " +
+                    "did not arrive, create a new revision and send that.");
 
             quote.QuoteNo = request.QuoteNo;
             quote.CustomerId = request.CustomerId;
@@ -1761,6 +1789,17 @@ namespace ERP_RFQ_Automation.Services
                     "This quote is already queued for delivery. Wait for it to complete rather than "
                     + "sending it twice.");
             }
+            else if (delivery is { CompletedOn: not null } && !quote.SentOn.HasValue)
+            {
+                // Sealed by the worker on provider acceptance, but the quote's own status has
+                // not caught up yet (the process died between the two writes, or the status
+                // update threw and is being retried). The customer HAS this quote. Say so —
+                // never "uncertain", and never let it look sendable.
+                readiness.DeliveryOutcome = "DELIVERED";
+                Block("DELIVERY_STATUS_PENDING",
+                    $"This quote was delivered to the customer on {delivery.CompletedOn:yyyy-MM-dd HH:mm} UTC. "
+                    + "Its status is still being updated; nothing needs to be resent.");
+            }
 
             // R5 price provenance. This is the LAST thing the sender checks and it was the one
             // thing readiness did not, so on 2026-09-04 readiness answered canSend=true and the
@@ -2017,6 +2056,58 @@ namespace ERP_RFQ_Automation.Services
                 }, ct);
                 await transaction.CommitAsync(ct);
             });
+        }
+
+        public async Task<DeliveredQuoteReconciliation> ReconcileDeliveredQuotesAsync(
+            long businessUnitId, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            var now = DateTime.UtcNow;
+            // Sealed deliveries (provider acceptance recorded) whose quote never reached SENT.
+            // The join is on the quote's own SentOn so the query is the same "what does the
+            // ledger say" question the dispatcher's tenant discovery asks, answered per tenant.
+            var candidates = await (
+                from delivery in _context.QuoteDeliveryRequests.AsNoTracking()
+                join quote in _context.Quotes.AsNoTracking() on delivery.QuoteId equals quote.Id
+                where delivery.BusinessUnitId == businessUnitId
+                    && quote.BusinessUnitId == businessUnitId
+                    && delivery.CompletedOn != null
+                    && delivery.AvailableOn <= now
+                    && quote.SentOn == null
+                orderby delivery.CompletedOn
+                select new { delivery.Id, delivery.QuoteId })
+                .Take(50)
+                .ToListAsync(ct);
+
+            var finalized = 0;
+            var deferred = 0;
+            foreach (var candidate in candidates)
+            {
+                try
+                {
+                    await FinalizeQuoteDeliveryAsync(candidate.QuoteId, businessUnitId, ct);
+                    finalized++;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception exception)
+                {
+                    // Defer on the ledger row, never on the quote: the row already proves the
+                    // send, and its AvailableOn is what keeps a persistently refusing quote from
+                    // being retried every five seconds. The error code is visible to the tenant
+                    // through send-readiness and to the operator through the ledger.
+                    deferred++;
+                    _context.ChangeTracker.Clear();
+                    var row = await _context.QuoteDeliveryRequests
+                        .SingleOrDefaultAsync(x => x.Id == candidate.Id && x.BusinessUnitId == businessUnitId, ct);
+                    if (row is null) continue;
+                    var code = $"SentNotFinalized:{exception.GetType().Name}";
+                    row.LastErrorCode = code.Length <= 160 ? code : code[..160];
+                    row.AvailableOn = DateTime.UtcNow.AddMinutes(5);
+                    row.Version++;
+                    await _context.SaveChangesAsync(ct);
+                }
+            }
+            return new DeliveredQuoteReconciliation(finalized, deferred);
         }
 
         private async Task RecordQuoteSentWorkAsync(Quote quote, QuoteSendOptions options, CancellationToken ct)

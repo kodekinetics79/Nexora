@@ -64,18 +64,25 @@ public sealed class ExtractionQueueMetricsPoller : BackgroundService
     private readonly IExtractionQueueSnapshotProvider _provider;
     private readonly ExtractionQueueMetricsOptions _options;
     private readonly ILogger<ExtractionQueueMetricsPoller> _log;
+    private readonly ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? _heartbeats;
     private bool _loggedFailure;
 
     public ExtractionQueueMetricsPoller(
         IServiceScopeFactory scopeFactory,
         IExtractionQueueSnapshotProvider provider,
         ExtractionQueueMetricsOptions options,
-        ILogger<ExtractionQueueMetricsPoller> log)
+        ILogger<ExtractionQueueMetricsPoller> log,
+        ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? heartbeats = null)
     {
         _scopeFactory = scopeFactory;
         _provider = provider;
         _options = options;
         _log = log;
+        _heartbeats = heartbeats;
+        if (_options.Enabled)
+            _heartbeats?.Register(
+                ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.ExtractionQueueMetrics,
+                _options.EffectiveInterval);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -98,6 +105,10 @@ public sealed class ExtractionQueueMetricsPoller : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             await PollOnceAsync(stoppingToken);
+            // PollOnceAsync contains its own failure; the beat records that the loop turned.
+            _heartbeats?.Beat(
+                ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.ExtractionQueueMetrics,
+                _options.EffectiveInterval);
             try { await Task.Delay(_options.EffectiveInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
