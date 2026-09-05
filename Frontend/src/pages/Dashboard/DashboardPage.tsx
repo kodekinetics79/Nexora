@@ -189,7 +189,7 @@ export default function DashboardPage() {
           />
           <Button
             variant="outlined"
-            startIcon={busy ? <CircularProgress size={16} /> : <RefreshIcon />}
+            startIcon={busy ? <CircularProgress size={16} aria-label="Refreshing" /> : <RefreshIcon />}
             onClick={refreshAll}
             disabled={busy || invalidWindow}
           >

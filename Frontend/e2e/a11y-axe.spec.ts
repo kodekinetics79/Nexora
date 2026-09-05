@@ -217,12 +217,18 @@ test.describe('login form error handling', () => {
     await expect(page.getByRole('textbox', { name: 'Password', exact: true })).toHaveAttribute('aria-invalid', 'true');
   });
 
-  test('the fixture login still works end to end', async ({ page }) => {
-    const credentials = credentialsFor('manager');
-    expect(credentials, 'fixture credentials are required for this spec').not.toBeNull();
-    await loginThroughUi(page, credentials!);
-    // Landing is the work queue, not a dashboard — see landingRoute.test.ts, which pins /inbox
-    // for every role including one with no modules at all.
+  test('the fixture login still works end to end, and lands by tier', async ({ page }) => {
+    // Landing is decided by tier, not by module — see landingRoute.test.ts. The fixture manager
+    // (isManager) opens on the executive view; the editor, who works deals, opens on the work
+    // queue, which is also where anyone with no modules at all lands.
+    const manager = credentialsFor('manager');
+    expect(manager, 'fixture credentials are required for this spec').not.toBeNull();
+    await loginThroughUi(page, manager!);
+    await expect(page).toHaveTitle('Dashboard | NEXORA');
+
+    const editor = credentialsFor('editor');
+    expect(editor, 'fixture credentials are required for this spec').not.toBeNull();
+    await loginThroughUi(page, editor!);
     await expect(page).toHaveTitle('Inbox | NEXORA');
   });
 });
