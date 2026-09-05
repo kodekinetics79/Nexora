@@ -32,6 +32,14 @@ interface Props {
   deliveryStatus: string;
   items: ShipmentItemDTO[];
   canEdit: boolean;
+  /**
+   * Whether this user may decide a shortfall (re-supply or credit). The server gates
+   * POST /api/delivery/shortfalls/{id}/decision on Shipments:Edit AND Orders:Edit, because the
+   * decision commits the order commercially, not only the despatch. A warehouse role that edits
+   * shipments but not orders used to see the button and get a 403 after typing a reason.
+   * Defaults to canEdit for callers that have not resolved the second permission.
+   */
+  canDecide?: boolean;
 }
 
 const serverMessage = (error: unknown, fallback: string): string => {
@@ -47,7 +55,7 @@ const resultIsUncertain = (error: unknown) => {
   return status == null || status >= 500;
 };
 
-const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliveryStatus, items, canEdit }) => {
+const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliveryStatus, items, canEdit, canDecide = canEdit }) => {
   const queryClient = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [decisionFor, setDecisionFor] = useState<number | null>(null);
@@ -281,8 +289,12 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
                               <br />
                               {l.commercialDecisionBy} on {dayjs(l.commercialDecisionOn).format('DD MMM YYYY')}
                             </Typography>
-                          ) : canEdit ? (
+                          ) : canDecide ? (
                             <Button size="small" onClick={() => setDecisionFor(l.id)}>Decide</Button>
+                          ) : canEdit ? (
+                            <Typography variant="caption" color="text.secondary">
+                              Awaiting authorized decision — deciding a shortfall needs Orders edit permission as well as Shipments edit.
+                            </Typography>
                           ) : (
                             <Typography variant="caption" color="text.secondary">Awaiting authorized decision</Typography>
                           )}
@@ -305,7 +317,7 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
           onRecorded={() => { setConfirmOpen(false); invalidate(); }}
         />
       )}
-      {canEdit && decisionFor !== null && (
+      {canDecide && decisionFor !== null && (
         <ShortfallDecisionDialog
           proofLineId={decisionFor}
           onClose={() => setDecisionFor(null)}

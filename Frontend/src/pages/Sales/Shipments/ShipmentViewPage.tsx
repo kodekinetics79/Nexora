@@ -29,6 +29,8 @@ const ShipmentViewPage: React.FC = () => {
   const { userData, hasPermission } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
   const canEditShipment = hasPermission('Shipments', 'edit');
+  // The shortfall decision is gated server-side on BOTH permissions (DeliveryController.RecordDecision).
+  const canDecideShortfall = canEditShipment && hasPermission('Orders', 'edit');
 
   const { data: shipment, isLoading: isLoadingShipment } = useQuery({
     queryKey: ['shipment-details', id],
@@ -113,6 +115,7 @@ const ShipmentViewPage: React.FC = () => {
             deliveryStatus={shipment.deliveryStatus}
             items={shipment.items}
             canEdit={canEditShipment}
+            canDecide={canDecideShortfall}
           />
 
           {/* General Information */}
