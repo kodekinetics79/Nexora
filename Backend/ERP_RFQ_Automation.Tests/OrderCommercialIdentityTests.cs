@@ -105,6 +105,103 @@ public sealed class OrderCommercialIdentityTests
         Assert.Empty(await verify.Orders.ToListAsync());
     }
 
+    /// <summary>
+    /// Finance refuses to invoice an order that names no currency, and the manual order screen
+    /// was the one door that let such an order in. The refusal now sits at the door, worded for
+    /// the person keying the order, and the currency has to be one of this tenant's own.
+    /// </summary>
+    [Fact]
+    public async Task A_manual_order_naming_no_currency_is_refused_where_it_is_keyed()
+    {
+        using var db = new TestDb();
+        var fixture = await ArrangeAsync(db);
+
+        var failure = await Assert.ThrowsAsync<ArgumentException>(() =>
+            fixture.Service.CreateManualOrderAsync(
+                Request(fixture, leadId: fixture.LeadId, rfqId: null, currencyId: null), Tenant));
+
+        Assert.Contains("currency", failure.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.Orders.ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_manual_order_cannot_be_denominated_in_another_tenants_currency()
+    {
+        using var db = new TestDb();
+        var fixture = await ArrangeAsync(db);
+
+        var failure = await Assert.ThrowsAsync<ArgumentException>(() =>
+            fixture.Service.CreateManualOrderAsync(
+                Request(fixture, leadId: fixture.LeadId, rfqId: null, currencyId: ForeignCurrencyId), Tenant));
+
+        Assert.Contains("currency", failure.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.Orders.ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_manual_order_keeps_the_currency_it_was_raised_in()
+    {
+        using var db = new TestDb();
+        var fixture = await ArrangeAsync(db);
+
+        var created = await fixture.Service.CreateManualOrderAsync(
+            Request(fixture, leadId: fixture.LeadId, rfqId: null), Tenant);
+
+        await using var verify = db.ContextFor(Tenant);
+        var stored = await verify.Orders.SingleAsync(o => o.Id == created.Id);
+        Assert.Equal(OwnCurrencyId, stored.CurrencyId);
+    }
+
+    /// <summary>
+    /// The other door that minted currency-less orders: raising one straight from an RFQ. The RFQ
+    /// has no currency of its own, its lines do, so the order inherits the one currency every
+    /// line agrees on and is refused otherwise.
+    /// </summary>
+    [Fact]
+    public async Task An_order_raised_from_an_rfq_inherits_the_currency_its_lines_agree_on()
+    {
+        using var db = new TestDb();
+        var fixture = await ArrangeAsync(db);
+        await PriceRfqLinesAsync(db, fixture, OwnCurrencyId, OwnCurrencyId);
+
+        var created = await fixture.Service.CreateOrderFromRfqAsync(fixture.RfqId, Tenant);
+
+        await using var verify = db.ContextFor(Tenant);
+        var stored = await verify.Orders.SingleAsync(o => o.Id == created.Id);
+        Assert.Equal(OwnCurrencyId, stored.CurrencyId);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(OwnCurrencyId, ForeignCurrencyId)]
+    public async Task An_order_is_not_raised_from_an_rfq_whose_lines_do_not_agree_on_a_currency(long? first, long? second)
+    {
+        using var db = new TestDb();
+        var fixture = await ArrangeAsync(db);
+        await PriceRfqLinesAsync(db, fixture, first, second);
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.CreateOrderFromRfqAsync(fixture.RfqId, Tenant));
+
+        Assert.Contains("currency", failure.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.Orders.ToListAsync());
+    }
+
+    private static async Task PriceRfqLinesAsync(TestDb db, Fixture fixture, long? firstCurrency, long? secondCurrency)
+    {
+        await using var seed = db.ContextFor(null);
+        var rfq = await seed.Rfqs.IgnoreQueryFilters().SingleAsync(r => r.Id == fixture.RfqId);
+        rfq.CustomerId = fixture.CustomerId;
+        var one = AgentSeed.RfqItem(seed, 97_581, fixture.RfqId, "Spine line one", 2);
+        one.UnitPrice = 25m; one.CurrencyId = firstCurrency; one.ProductId = fixture.ProductId;
+        var two = AgentSeed.RfqItem(seed, 97_582, fixture.RfqId, "Spine line two", 1);
+        two.UnitPrice = 40m; two.CurrencyId = secondCurrency; two.ProductId = fixture.ProductId;
+        await seed.SaveChangesAsync();
+    }
+
     [Fact]
     public void An_order_refuses_a_source_document_from_another_tenant()
     {
@@ -169,6 +266,17 @@ public sealed class OrderCommercialIdentityTests
             seed.SetupMasters.AddRange(
                 Status(97_531, "OrderStatus", "DRAFT", Tenant),
                 Status(97_532, "PaymentStatus", "UNPAID", Tenant));
+            seed.Currencies.AddRange(
+                new Currency
+                {
+                    Id = OwnCurrencyId, BusinessUnitId = Tenant, Code = "SAR", CurrencyName = "Saudi riyal",
+                    IsBaseCurrency = true, IsActive = true, CreatedBy = "qa", CreatedOn = Now
+                },
+                new Currency
+                {
+                    Id = ForeignCurrencyId, BusinessUnitId = foreignTenant, Code = "AED", CurrencyName = "UAE dirham",
+                    IsBaseCurrency = true, IsActive = true, CreatedBy = "qa", CreatedOn = Now
+                });
             seed.Warehouses.Add(new Warehouse
             {
                 Id = 97_541, BusinessUnitId = Tenant, WarehouseCode = "WH-SPINE",
@@ -201,10 +309,15 @@ public sealed class OrderCommercialIdentityTests
         return new Fixture(service, 97_551, 97_561, 97_562, caseId, serial, Tenant, 97_542);
     }
 
-    private static CreateOrderDto Request(Fixture fixture, long? leadId, long? rfqId) => new()
+    private const long OwnCurrencyId = 97_571;
+    private const long ForeignCurrencyId = 97_572;
+
+    private static CreateOrderDto Request(Fixture fixture, long? leadId, long? rfqId,
+        long? currencyId = OwnCurrencyId) => new()
     {
         LeadId = leadId,
         RfqId = rfqId,
+        CurrencyId = currencyId,
         CustomerId = fixture.CustomerId,
         BusinessUnitId = Tenant,
         OrderDate = Now,

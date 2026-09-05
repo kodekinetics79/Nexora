@@ -62,6 +62,19 @@ namespace ERP_RFQ_Automation.Services
             if (dto.Items == null || dto.Items.Count == 0)
                 throw new ArgumentException("An order must contain at least one line item.");
 
+            // The order is the document the customer is invoiced from, and finance refuses to
+            // issue an invoice against an order that names no currency. Refuse it here, on the
+            // screen that raised the order, instead of two steps later on the invoice with no
+            // pointer back to the field. The currency must be one of this tenant's own.
+            if (dto.CurrencyId is not { } currencyId)
+                throw new ArgumentException(
+                    "An order must state its currency. Choose the currency the customer will be invoiced in.");
+            var currencyIsOurs = await _context.Currencies.AnyAsync(c =>
+                c.Id == currencyId && c.BusinessUnitId == businessUnitId && c.IsActive != false);
+            if (!currencyIsOurs)
+                throw new ArgumentException(
+                    "The selected currency is not one of this business unit's active currencies.");
+
             // FR-COM-07. The originating document is resolved BEFORE any money is computed, so a
             // request that cannot name its case is rejected outright rather than half-built.
             //
@@ -292,6 +305,15 @@ namespace ERP_RFQ_Automation.Services
 
             var orderNo = await _orderRepository.GetNextOrderNumberAsync(businessUnitId);
 
+            // An RFQ has no currency of its own; its lines do. An order raised straight from the
+            // RFQ is invoiced in the currency those lines were priced in, which only means something
+            // when every line agrees. Mixed or missing line currencies are refused here — finance
+            // cannot invoice an order that names no currency, and guessing one is worse.
+            var lineCurrencies = rfq.Rfqitems.Select(item => item.CurrencyId).Distinct().ToList();
+            if (lineCurrencies.Count != 1 || lineCurrencies[0] is not { } rfqCurrencyId)
+                throw new InvalidOperationException(
+                    $"RFQ {rfq.Rfqno} does not price every line in one currency, so an order cannot be raised from it directly. Quote it and award from the quote.");
+
             // Create Order Header
             var order = new Order
             {
@@ -299,6 +321,7 @@ namespace ERP_RFQ_Automation.Services
                 Rfqid = rfq.Id,
                 LeadId = rfq.LeadId,
                 CustomerId = rfq.CustomerId ?? 0,
+                CurrencyId = rfqCurrencyId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,

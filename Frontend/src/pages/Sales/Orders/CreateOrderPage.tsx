@@ -168,13 +168,11 @@ const CreateOrderPage: React.FC = () => {
   const { subtotal, totalDiscount, totalTax, grandTotal } = calculateTotals();
 
   /**
-   * The order's own currency, in edit mode. In CREATE mode there is none — and that is the honest
-   * state, not an oversight to paper over: `CreateOrderDto.CurrencyId` is on the wire and this
-   * screen, the only one that raises a manual order, has never sent it, so a manually created
-   * order carries no currency at all. `formatMoney` renders a bare number for that case rather
-   * than the literal "$" this screen used to print over records that may be denominated in SAR.
-   * Giving the screen a currency to state is a product decision (which currencies, and what the
-   * default is), not a formatting one.
+   * The order's own currency. This screen only ever edits an order (create mode renders the
+   * client-PO notice below), and an order keeps the currency it was raised in — the update DTO
+   * does not carry one. The server now refuses to raise an order that names no currency, because
+   * finance cannot invoice such an order; an older order that predates that gate shows
+   * "Not stated" here so the gap is visible rather than printed as a bare number.
    */
   const currencyCode = orderData?.currencyCode ?? null;
 
@@ -298,6 +296,18 @@ const CreateOrderPage: React.FC = () => {
                       helperText={customerError ? 'Customer is required' : ''}
                     />
                   )}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 6 }}>
+                <TextField
+                  label="Currency"
+                  size="small"
+                  fullWidth
+                  value={currencyCode ?? 'Not stated'}
+                  disabled
+                  helperText={currencyCode
+                    ? 'An order keeps the currency it was raised in.'
+                    : 'This order was raised before a currency was required. It cannot be invoiced until one is stated.'}
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 3 }}>

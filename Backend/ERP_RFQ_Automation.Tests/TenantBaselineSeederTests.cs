@@ -745,6 +745,7 @@ public sealed class TenantBaselineSeederTests
         const long productId = 9103;
         const long leadId = 9104;
         long paymentMethodId;
+        long baseCurrencyId;
         long pendingShipmentStatusId;
 
         await using (var context = db.ContextFor(null))
@@ -781,6 +782,10 @@ public sealed class TenantBaselineSeederTests
             pendingShipmentStatusId = await context.SetupMasters.IgnoreQueryFilters()
                 .Where(row => row.BusinessUnitId == Bu && row.SetupType == "ShipmentStatus" && row.SetupCode == "PENDING")
                 .Select(row => row.SetupId).SingleAsync();
+            // The currency the seeder set up as this tenant's base — the one the order screen starts on.
+            baseCurrencyId = await context.Currencies.IgnoreQueryFilters()
+                .Where(c => c.BusinessUnitId == Bu && c.IsBaseCurrency == true)
+                .Select(c => c.Id).SingleAsync();
         }
 
         // Through the tenant-scoped context the product actually uses, so the status rows the
@@ -792,6 +797,7 @@ public sealed class TenantBaselineSeederTests
                 LeadId = leadId,
                 CustomerId = customerId,
                 BusinessUnitId = Bu,
+                CurrencyId = baseCurrencyId,
                 OrderDate = DateTime.UtcNow,
                 Items =
                 [
