@@ -108,7 +108,7 @@ const LeadDetailPage: React.FC = () => {
     }
   };
 
-  const { data: lead, isLoading, isError, refetch } = useQuery({
+  const { data: lead, isLoading, isError, error: leadError, refetch } = useQuery({
     queryKey: ['lead-detail', Number(id)],
     queryFn: () => leadService.getById(Number(id)),
     enabled: !!id,
@@ -145,7 +145,29 @@ const LeadDetailPage: React.FC = () => {
   const formatDate = (dateStr: string | null) => formatDateSafe(dateStr);
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
-  if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this lead.</Alert></Box>;
+  if (isError) {
+    // A 404 here is usually not a missing record. An owner-less Lead — every freshly uploaded
+    // inquiry whose customer did not resolve — is deliberately outside ordinary record scope
+    // (CommercialAccessFilters.InCommercialScope) until a manager assigns an owner from the Routing
+    // queue. The batch page links straight here, so without this sentence the person who uploaded
+    // the file lands on "We couldn't load this lead" with nowhere to go (intake scenario audit
+    // 2026-09-04, finding F2).
+    const notFound = (leadError as { response?: { status?: number } } | null)?.response?.status === 404;
+    return (
+      <Box sx={{ p: 4 }}>
+        <Alert
+          severity={notFound ? 'info' : 'error'}
+          action={notFound
+            ? <Button color="inherit" onClick={() => navigate('/sales/routing')}>Open routing queue</Button>
+            : <Button color="inherit" onClick={() => refetch()}>Retry</Button>}
+        >
+          {notFound
+            ? 'This lead is not in your view yet. A newly uploaded inquiry waits in the Routing queue until a manager assigns an owner; once it has one, it opens here.'
+            : "We couldn't load this lead."}
+        </Alert>
+      </Box>
+    );
+  }
   if (!lead) return <Box sx={{ p: 4 }}><Typography>Lead not found.</Typography></Box>;
 
   // Review state, from facts the platform records — not from a model score.
