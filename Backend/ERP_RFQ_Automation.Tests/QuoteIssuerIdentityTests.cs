@@ -145,12 +145,21 @@ public class QuoteIssuerIdentityTests
             CreatedDate = DateTime.UtcNow
         });
 
+        // A currency on record: the document gate now refuses a currency-less quote (it once
+        // printed "USD" for a null currency), and these tests are about the SELLER identity on
+        // the PDF, not the currency, so the quote must carry one to reach the rule under test.
+        context.Currencies.Add(new Currency
+        {
+            Id = 97060, BusinessUnitId = Tenant, Code = "SAR", CurrencyName = "Saudi Riyal",
+            CreatedBy = "seed", CreatedOn = DateTime.UtcNow
+        });
         var quote = new Quote
         {
             Id = 97013,
             QuoteNo = "QT-ID-9701",
             Rfqid = 97012,
             BusinessUnitId = Tenant,
+            CurrencyId = 97060,
             QuoteDate = DateTime.UtcNow,
             ValidUntil = DateTime.UtcNow.AddDays(30),
             TotalAmount = 57.50m,
