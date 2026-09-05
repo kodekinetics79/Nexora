@@ -278,6 +278,20 @@ PY
   unset login_json token secret code
 }
 
+persist_kept_stack_environment() {
+  local suite_dir="$1" name
+  (
+    umask 077
+    {
+      for name in $(compgen -e | grep -E '^E2E_'); do
+        printf 'export %s=%q\n' "$name" "${!name}"
+      done
+      printf 'export E2E_PG_PASSWORD=%q\n' "$PG_PASSWORD"
+    } >"$suite_dir/stack.env"
+  )
+  chmod 600 "$suite_dir/stack.env"
+}
+
 run_suite() {
   local suite="$1" database="$2" config="$3" expected_count="$4"
   local suite_dir="$RUN_DIR/$suite" storage_root="$RUN_DIR/$suite/storage"
@@ -308,6 +322,12 @@ run_suite() {
   if [[ "$suite" == "commercial-v2" ]]; then
     log "$suite: enrolling the disposable Platform Owner in mandatory MFA."
     enroll_disposable_platform_owner "$suite_dir"
+  fi
+  if [[ "${E2E_KEEP_STACK:-0}" == "1" ]]; then
+    # Persist BEFORE the suite runs: a kept stack whose smoke test failed is exactly the stack
+    # someone wants to poke at, and the generated secrets would otherwise die with this script.
+    persist_kept_stack_environment "$suite_dir"
+    log "$suite: E2E_KEEP_STACK=1 — fixture environment written to $suite_dir/stack.env."
   fi
 
   log "$suite: verifying test discovery ($expected_count expected) before execution."
@@ -364,7 +384,12 @@ run_suite() {
       "$CURRENT_BACKEND_LOG" | tail -160 >&2 || true
     die "$suite failed (exit $status). Artifacts: $suite_dir and $FRONTEND_DIR/test-results."
   fi
-  stop_backend
+  if [[ "${E2E_KEEP_STACK:-0}" == "1" ]]; then
+    # A kept stack is only useful if the backend is still answering.
+    log "$suite: E2E_KEEP_STACK=1 — backend left running on $BACKEND_URL; environment in $suite_dir/stack.env."
+  else
+    stop_backend
+  fi
   if [[ -n "${E2E_TEST_GREP:-}" ]]; then
     log "$suite focused selection PASSED: '$E2E_TEST_GREP'."
   else

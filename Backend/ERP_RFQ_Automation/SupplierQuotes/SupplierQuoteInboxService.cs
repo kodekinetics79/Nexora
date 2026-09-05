@@ -687,6 +687,16 @@ public sealed class SupplierQuoteInboxService
             command.SourcingCaseId <= 0 || command.CurrencyId <= 0)
             throw new SupplierQuoteValidationException("Tenant, Supplier, Supplier RFQ, Sourcing Case, and currency are required.");
         if (command.RevisionNumber <= 0) throw new SupplierQuoteValidationException("Revision number must be positive.");
+        // A validity date already in the past is a quote nobody can compare or award. The
+        // projection step refuses it ("A current, unexpired Supplier Quote validity date is
+        // required."), but capture accepted it silently and reported the quote READY FOR
+        // COMPARISON; the buyer found out two screens later with no pointer back to the field.
+        // Refuse here, while the person who keyed the date is still looking at it. Null stays
+        // valid — it means the date was not captured, and the extracted-channel evidence pass
+        // flags that for review rather than inventing one.
+        if (command.ValidUntil is { } validUntil && validUntil <= DateTime.UtcNow)
+            throw new SupplierQuoteValidationException(
+                $"The Supplier Quote validity date {validUntil:yyyy-MM-dd} has already passed, so this quote cannot enter comparison. Capture the supplier's current validity date.");
         if (!Channels.Contains(command.CaptureChannel)) throw new SupplierQuoteValidationException("Capture channel is invalid.");
         if (string.IsNullOrWhiteSpace(command.NexoraSerial)) throw new SupplierQuoteValidationException("Nexora Serial is required.");
         if (command.FreightAmount < 0 || command.TaxAmount < 0 || command.DutyAmount < 0 ||

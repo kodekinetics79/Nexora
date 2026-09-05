@@ -56,6 +56,21 @@ public sealed class Release02SupplierQuoteInboxServiceTests
     }
 
     [Fact]
+    public async Task Expired_validity_date_is_refused_at_capture_naming_the_field()
+    {
+        var store = new FakeStore(7);
+        var exception = await Assert.ThrowsAsync<SupplierQuoteValidationException>(() =>
+            new SupplierQuoteInboxService(store).CaptureAsync(Command() with
+            {
+                ValidUntil = DateTime.UtcNow.AddDays(-3)
+            }));
+
+        Assert.Contains("validity date", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("already passed", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(store.Quotes);
+    }
+
+    [Fact]
     public async Task Tenant_context_cannot_be_overridden_by_command()
     {
         var service = new SupplierQuoteInboxService(new FakeStore(8));
@@ -146,7 +161,7 @@ public sealed class Release02SupplierQuoteInboxServiceTests
         // Freight 20, tax 5, duty 9, other 3, discount 2. Duty is non-zero on purpose: this is an
         // FCA round, so the Supplier has not cleared KSA customs and the duty is the buyer's — the
         // capture contract had no field for it at all until now, and no field means a hard zero.
-        61, new DateTime(2026, 8, 15, 0, 0, 0, DateTimeKind.Utc), "FCA", 20, 5, 9, 3, 2, "NET 30", null,
+        61, DateTime.UtcNow.Date.AddDays(30), "FCA", 20, 5, 9, 3, 2, "NET 30", null,
         [Line()], [], "quote-capture-1", "buyer@example.com", "corr-1");
 
     private static CaptureSupplierQuoteLine Line(

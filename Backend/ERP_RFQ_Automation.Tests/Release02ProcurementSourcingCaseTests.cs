@@ -310,6 +310,47 @@ public sealed class Release02ProcurementSourcingCaseTests
     }
 
     [Fact]
+    public async Task Prepared_supplier_rfq_resnapshots_dispatch_address_after_contact_change()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            CreateCase(fixture, "contact-change-case")));
+        var candidate = Assert.Single(created.Candidates);
+        var prepared = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+            "contact-change-prepare", "qa", "corr-contact-change")));
+        await using (var update = fixture.Context())
+        {
+            var supplier = await update.Suppliers.SingleAsync(x => x.Id == candidate.SupplierId);
+            supplier.ContactEmail = "corrected@example.test";
+            await update.SaveChangesAsync();
+        }
+
+        // Before the fix this replayed the stale snapshot (Replayed = true, same version), and the
+        // queue step then refused it with "Supplier dispatch details changed after preparation.
+        // Prepare a new Supplier RFQ after governance review." — the instruction it could not follow.
+        var reprepared = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, prepared.SourcingCaseVersion,
+            "contact-change-prepare-again", "qa", "corr-contact-change-again")));
+
+        Assert.Equal(prepared.SupplierSolicitationId, reprepared.SupplierSolicitationId);
+        Assert.False(reprepared.Replayed);
+        Assert.Equal(prepared.SolicitationVersion + 1, reprepared.SolicitationVersion);
+
+        var queued = await fixture.Execute(service => service.QueuePreparedSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, reprepared.SupplierSolicitationId,
+            reprepared.SourcingCaseVersion, reprepared.SolicitationVersion,
+            "contact-change-queue", "qa-manager", "corr-contact-change-queue")));
+        Assert.False(queued.Replayed);
+
+        await using var verify = fixture.Context();
+        var outbox = Assert.Single(await verify.ProcurementOutboxMessages
+            .Where(x => x.SupplierSolicitationId == reprepared.SupplierSolicitationId).ToListAsync());
+        Assert.Contains("corrected@example.test", outbox.PayloadJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Candidate_refresh_is_blocked_once_supplier_outreach_is_prepared()
     {
         using var fixture = new ProcurementScenario();

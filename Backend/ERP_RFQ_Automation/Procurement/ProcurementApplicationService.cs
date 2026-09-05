@@ -427,6 +427,32 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 if (originalPayload is null || originalPayload.DueOn != command.DueOn)
                     throw new ProcurementConflictException(
                         "A prepared Supplier RFQ already exists with different delivery terms. Review or cancel it before preparing another.");
+                // The dispatch address was corrected after this Supplier RFQ was prepared: the
+                // supplier's contact changed, governance was re-run, and the queue step refuses the
+                // stale snapshot with "Prepare a new Supplier RFQ after governance review". This IS
+                // that preparation. Replaying the old snapshot here made the instruction circular —
+                // prepare replayed, queue refused, prepare replayed again — and a second Sourcing
+                // Case on the same line replays too, so the operator had no way forward at all.
+                // Re-snapshot the envelope on the same numbered Supplier RFQ; the queue step still
+                // verifies the address against the supplier record before anything is sent.
+                if (!string.Equals(originalPayload.ToEmail.Trim(), supplier.ContactEmail!.Trim(),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    var refreshedOn = DateTime.UtcNow;
+                    existingPrepared.Version++;
+                    existingPrepared.UpdatedOn = refreshedOn;
+                    AddEvent(command.BusinessUnitId, "SupplierSolicitation", existingPrepared.Id,
+                        existingPrepared.Version, "SUPPLIER_RFQ_CREATED", command.Actor, command.CorrelationId,
+                        command.IdempotencyKey, JsonSerializer.Serialize(originalPayload with
+                        {
+                            ToEmail = supplier.ContactEmail!,
+                            SupplierName = supplier.Name
+                        }), refreshedOn);
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+                    return new PreparedSupplierRfqResult(sourcingCase.Id, existingPrepared.Id,
+                        existingPrepared.Status.ToString(), sourcingCase.Version, existingPrepared.Version, false);
+                }
                 await tx.CommitAsync(ct);
                 return new PreparedSupplierRfqResult(sourcingCase.Id, existingPrepared.Id,
                     existingPrepared.Status.ToString(), sourcingCase.Version, existingPrepared.Version, true);
