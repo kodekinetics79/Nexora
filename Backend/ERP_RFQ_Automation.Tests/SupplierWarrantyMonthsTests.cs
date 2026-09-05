@@ -307,7 +307,7 @@ public sealed class SupplierWarrantyMonthsTests
     private static ERP_RFQ_Automation.SupplierQuotes.CaptureSupplierQuoteCommand Command() => new(
         7, 31, 41, 51, "NX-2026-0001", "SUP-Q-900", 1,
         SupplierQuoteCaptureChannels.Manual, null, "warranty-capture", new string('A', 64),
-        61, new DateTime(2026, 8, 15, 0, 0, 0, DateTimeKind.Utc), "FCA", 20, 5, 9, 3, 2, "NET 30", null,
+        61, DateTime.UtcNow.AddDays(30), "FCA", 20, 5, 9, 3, 2, "NET 30", null,
         [Line(null, null)], [], "warranty-capture-1", "buyer@example.com", "corr-warranty");
 
     private static ERP_RFQ_Automation.SupplierQuotes.CaptureSupplierQuoteLine Line(
