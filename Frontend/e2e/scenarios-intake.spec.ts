@@ -326,7 +326,7 @@ test('S2 an amendment with changed quantities becomes revision 2 of the same Lea
 
   await page.goto(`/procurement/leads/view/${original.leadId}`);
   await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
-  await expect(page.getByText('Revision 2', { exact: true })).toBeVisible();
+  await expect(page.getByText('Revision 2', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Changes', { exact: true }).first()).toBeVisible();
 });
 
