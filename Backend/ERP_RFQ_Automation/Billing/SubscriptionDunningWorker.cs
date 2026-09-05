@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.HealthChecks;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -12,12 +13,32 @@ public sealed class SubscriptionDunningOptions
 }
 
 /// <summary>Creates one durable, idempotent dunning occurrence per overdue invoice per UTC day.</summary>
-public sealed class SubscriptionDunningWorker(
-    IServiceScopeFactory scopes, IOptions<SubscriptionDunningOptions> options,
-    ILogger<SubscriptionDunningWorker> log) : BackgroundService
+public sealed class SubscriptionDunningWorker : BackgroundService
 {
+    private readonly IServiceScopeFactory scopes;
+    private readonly IOptions<SubscriptionDunningOptions> options;
+    private readonly ILogger<SubscriptionDunningWorker> log;
+    private readonly IBackgroundWorkerHeartbeats? _heartbeats;
+
+    public SubscriptionDunningWorker(
+        IServiceScopeFactory scopes, IOptions<SubscriptionDunningOptions> options,
+        ILogger<SubscriptionDunningWorker> log, IBackgroundWorkerHeartbeats? heartbeats = null)
+    {
+        this.scopes = scopes;
+        this.options = options;
+        this.log = log;
+        _heartbeats = heartbeats;
+        // The loop turns whether or not dunning is enabled (a disabled cycle is a no-op plus
+        // the delay), so liveness is meaningful either way and is registered unconditionally.
+        _heartbeats?.Register(BackgroundWorkerNames.SubscriptionDunning, Period(options.Value));
+    }
+
+    private static TimeSpan Period(SubscriptionDunningOptions options)
+        => TimeSpan.FromMinutes(Math.Clamp(options.PollMinutes, 1, 1440));
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _heartbeats?.Beat(BackgroundWorkerNames.SubscriptionDunning, Period(options.Value));
         while (!stoppingToken.IsCancellationRequested)
         {
             if (options.Value.Enabled)
@@ -49,7 +70,8 @@ public sealed class SubscriptionDunningWorker(
                     log.LogError(exception, "Subscription dunning cycle failed.");
                 }
             }
-            await Task.Delay(TimeSpan.FromMinutes(Math.Clamp(options.Value.PollMinutes, 1, 1440)), stoppingToken);
+            _heartbeats?.Beat(BackgroundWorkerNames.SubscriptionDunning, Period(options.Value));
+            await Task.Delay(Period(options.Value), stoppingToken);
         }
     }
 }

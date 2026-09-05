@@ -156,10 +156,21 @@ public sealed class QuoteDeliveryDispatcher(
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var now = DateTime.UtcNow;
-        var businessUnits = await db.Set<QuoteDeliveryRequest>().AsNoTracking().IgnoreQueryFilters()
+        var deliveries = db.Set<QuoteDeliveryRequest>().AsNoTracking().IgnoreQueryFilters();
+        var pending = deliveries
             .Where(x => x.CompletedOn == null && x.DeadLetteredOn == null)
             .Where(x => x.AvailableOn <= now || x.LeaseUntil != null)
-            .Select(x => x.BusinessUnitId)
+            .Select(x => x.BusinessUnitId);
+        // A delivery the provider ACCEPTED whose quote never reached SENT: the process died, or
+        // the quote's own bookkeeping threw, between sealing the row and updating the quote.
+        // The tenant needs a visit so the status can catch up without anything being resent.
+        // Bounded by AvailableOn, which the reconcile pushes forward when a catch-up fails.
+        var unfinalized = deliveries
+            .Where(x => x.CompletedOn != null && x.AvailableOn <= now)
+            .Where(x => db.Quotes.IgnoreQueryFilters().Any(q =>
+                q.Id == x.QuoteId && q.BusinessUnitId == x.BusinessUnitId && q.SentOn == null))
+            .Select(x => x.BusinessUnitId);
+        var businessUnits = await pending.Concat(unfinalized)
             .Distinct()
             .OrderBy(id => id)
             .ToListAsync(ct);
@@ -176,6 +187,25 @@ public sealed class QuoteDeliveryDispatcher(
     private async Task<int> DispatchTenantAsync(long businessUnitId, CancellationToken ct)
     {
         using var tenant = tenantScope.Push(businessUnitId);
+
+        // Catch-up BEFORE claiming anything new: a quote whose delivery was sealed on a previous
+        // cycle (or by a process that died right after sealing it) is marked SENT here. This
+        // never sends — it only reads the delivery ledger and derives the quote's status from it.
+        await using (var scope = scopes.CreateAsyncScope())
+        {
+            EnsureScoped(scope.ServiceProvider, businessUnitId);
+            // Optional only for compositions that send without a quote service (delivery
+            // harnesses); the production container always has one, and the send below
+            // requires it regardless.
+            var reconciled = scope.ServiceProvider.GetService<IQuoteService>() is { } quotes
+                ? await quotes.ReconcileDeliveredQuotesAsync(businessUnitId, ct)
+                : new DeliveredQuoteReconciliation(0, 0);
+            if (reconciled.Deferred > 0)
+                logger.LogError(
+                    "{Count} delivered quote(s) for BU {BusinessUnitId} could not be marked SENT; the ledger "
+                    + "row names the error and the status update will be retried. Nothing was resent.",
+                    reconciled.Deferred, businessUnitId);
+        }
 
         IReadOnlyList<QuoteDeliveryEnvelope> requests;
         await using (var scope = scopes.CreateAsyncScope())
@@ -233,21 +263,67 @@ public sealed class QuoteDeliveryDispatcher(
                 continue;
             }
 
+            // The provider has ACCEPTED the message with evidence. From here on nothing is
+            // uncertain about the send — only about our own bookkeeping — so the order of the
+            // two writes that follow is load-bearing:
+            //
+            //   1. Seal the ledger row (CompletedOn). This is the at-most-once fact: a sealed
+            //      row can never be claimed again and can never be "recovered" into a resend.
+            //   2. Mark the quote SENT. This is derived from (1) and is idempotent, so if it
+            //      fails here — a lifecycle refusal, a follow-up-task write, a dropped
+            //      connection — ReconcileDeliveredQuotesAsync repeats it on the next cycle.
+            //
+            // It used to run the other way round, with any failure after the send recorded as
+            // DeliveryOutcomeUncertain. That told the rep "the customer may or may not have
+            // received it" about a quote the provider had just confirmed accepting, left the
+            // quote in DRAFT — editable, with the customer holding the PDF — and made the quote
+            // number unsendable for good.
+            try
+            {
+                await store.CompleteAsync(request.Id, _workerId, request.LeaseToken, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception exception)
+            {
+                // Accepted by the provider, but the acceptance could not be written. The ledger
+                // cannot prove the send, so the honest terminal state IS uncertain; the sweep
+                // would reach the same verdict when the lease expires. Recording it now keeps
+                // the error code; if even that fails, the sweep still fences it.
+                var errorCode = exception.GetType().Name;
+                logger.LogCritical(exception,
+                    "Quote delivery {DeliveryId} was accepted by the provider but the acceptance could not be "
+                    + "recorded ({ErrorCode}); the delivery is fenced as uncertain and will not be resent.",
+                    request.Id, errorCode);
+                try
+                {
+                    await store.MarkOutcomeUncertainAsync(request.Id, _workerId, request.LeaseToken, errorCode, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception fenceException)
+                {
+                    logger.LogError(fenceException,
+                        "Quote delivery {DeliveryId} could not be fenced; the expired-lease sweep will fence it.",
+                        request.Id);
+                }
+                continue;
+            }
+
             try
             {
                 await scope.ServiceProvider.GetRequiredService<IQuoteService>()
                     .FinalizeQuoteDeliveryAsync(request.QuoteId, request.BusinessUnitId, ct);
-                await store.CompleteAsync(request.Id, _workerId, request.LeaseToken, ct);
                 logger.LogInformation("Quote delivery {DeliveryId} completed on attempt {AttemptCount}.",
                     request.Id, request.AttemptCount);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception exception)
             {
-                var errorCode = exception.GetType().Name;
-                await store.MarkOutcomeUncertainAsync(request.Id, _workerId, request.LeaseToken, errorCode, ct);
-                logger.LogCritical("Quote delivery {DeliveryId} has an uncertain external outcome after {ErrorCode} on attempt {AttemptCount}.",
-                    request.Id, errorCode, request.AttemptCount);
+                // Delivered and sealed. Only the quote's status is behind, and the next cycle's
+                // reconcile repeats this step without touching the outbox.
+                logger.LogError(exception,
+                    "Quote delivery {DeliveryId} was delivered and sealed, but quote {QuoteId} could not be marked "
+                    + "SENT ({ErrorCode}); the status update will be retried without resending.",
+                    request.Id, request.QuoteId, exception.GetType().Name);
             }
         }
         return requests.Count;

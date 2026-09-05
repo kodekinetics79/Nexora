@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.HealthChecks;
 using Microsoft.Extensions.Options;
 
 namespace ERP_RFQ_Automation.Platform.Provisioning;
@@ -29,19 +30,28 @@ public sealed class ProvisioningRunWorker : BackgroundService
     private readonly ProvisioningRunSignal _signal;
     private readonly IOptionsMonitor<ProvisioningOptions> _options;
     private readonly ILogger<ProvisioningRunWorker> _log;
+    private readonly IBackgroundWorkerHeartbeats? _heartbeats;
     private readonly string _workerId;
 
     public ProvisioningRunWorker(
         IServiceScopeFactory scopeFactory,
         ProvisioningRunSignal signal,
         IOptionsMonitor<ProvisioningOptions> options,
-        ILogger<ProvisioningRunWorker> log)
+        ILogger<ProvisioningRunWorker> log,
+        IBackgroundWorkerHeartbeats? heartbeats = null)
     {
         _scopeFactory = scopeFactory;
         _signal = signal;
         _options = options;
         _log = log;
+        _heartbeats = heartbeats;
         _workerId = $"{Environment.MachineName}:{Environment.ProcessId}";
+        // Registered here, not in the loop, so a worker that never reaches its loop — the
+        // model splice missing, the initial delay never returning — fails the readiness check
+        // once the startup grace expires instead of being silently absent. A worker the host
+        // deliberately disabled registers nothing (same rule as BillingRunWorker).
+        if (_options.CurrentValue.Enabled)
+            _heartbeats?.Register(BackgroundWorkerNames.TenantProvisioning, _options.CurrentValue.PollInterval);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -68,6 +78,7 @@ public sealed class ProvisioningRunWorker : BackgroundService
         if (!await IsWiredAsync())
             return;
 
+        _heartbeats?.Beat(BackgroundWorkerNames.TenantProvisioning, _options.CurrentValue.PollInterval);
         while (!stoppingToken.IsCancellationRequested)
         {
             var options = _options.CurrentValue;
@@ -88,10 +99,28 @@ public sealed class ProvisioningRunWorker : BackgroundService
                 _log.LogError(exception, "Provisioning sweep failed; will retry next interval.");
             }
 
+            // Beats after the sweep whatever its outcome: liveness is "the loop is turning",
+            // not "the sweep succeeded" — a sweep that throws every time is a loud log line,
+            // a loop that stopped turning is silence, and only the second one is this signal.
+            _heartbeats?.Beat(BackgroundWorkerNames.TenantProvisioning, options.PollInterval);
+
             // Woken immediately by a submit or a retry, so the console's first poll already shows
             // a step in flight. Falls back to the interval, which is what recovers work left
-            // behind by a process that died holding a lease.
-            await _signal.WaitAsync(options.PollInterval, stoppingToken);
+            // behind by a process that died holding a lease. Inside the guard: this wait used
+            // to sit outside every try, so any non-cancellation exception from it ended the
+            // worker for the life of the process with nothing to say so.
+            try
+            {
+                await _signal.WaitAsync(options.PollInterval, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                _log.LogError(exception, "Provisioning wake-up wait failed; continuing on the next interval.");
+            }
         }
 
         _log.LogInformation("ProvisioningRunWorker {WorkerId} stopped.", _workerId);

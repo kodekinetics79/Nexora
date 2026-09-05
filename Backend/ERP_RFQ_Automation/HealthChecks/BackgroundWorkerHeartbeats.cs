@@ -44,6 +44,31 @@ public static class BackgroundWorkerNames
     /// absence of a lead nobody knew to expect.
     /// </summary>
     public const string EmailInquiryAssemblyRecovery = "email-inquiry-assembly-recovery";
+
+    /// <summary>
+    /// Durable tenant provisioning. A dead provisioning loop is indistinguishable from an idle
+    /// one: a submitted execution is accepted, sits QUEUED, and nothing ever moves it.
+    /// </summary>
+    public const string TenantProvisioning = "tenant-provisioning";
+
+    /// <summary>
+    /// Extraction queue gauges. A dead poller freezes every per-tenant queue metric at its last
+    /// value — including oldest-pending age, the only signal of a starving tenant — so the
+    /// dashboards keep reporting a healthy queue that nobody is measuring.
+    /// </summary>
+    public const string ExtractionQueueMetrics = "extraction-queue-metrics";
+
+    /// <summary>Overdue subscription-invoice dunning. Silent by construction when dead: no
+    /// notice goes out and nobody reports the absence of a reminder.</summary>
+    public const string SubscriptionDunning = "subscription-dunning";
+
+    /// <summary>Accounting export outbox. Dead means claimed rows sit leased and nothing
+    /// reaches the accounting system, with no error anywhere.</summary>
+    public const string AccountingOutbox = "accounting-outbox";
+
+    /// <summary>Commercial finance outbox. Dead means invoice/payment events are written and
+    /// never published.</summary>
+    public const string FinanceOutbox = "finance-outbox";
 }
 
 public sealed record BackgroundWorkerHeartbeatStatus(

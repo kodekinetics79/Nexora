@@ -23,11 +23,18 @@ public static class PlatformDeadLetterQueues
     };
 }
 
+/// <param name="ConfirmedNotDelivered">
+/// Required to recover a quote delivery whose outcome is UNCERTAIN — the customer may already
+/// hold the quote, and recovery re-sends it. Same statement the tenant must make to retry an
+/// uncertain supplier RFQ (<c>RetrySolicitationCommand.ConfirmedNotDelivered</c>). An omitted
+/// body field is <c>false</c>, deliberately.
+/// </param>
 public sealed record RecoverPlatformDeadLetterCommand(
     string Queue,
     [property: JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)] long ItemId,
     string Reason,
-    string IdempotencyKey);
+    string IdempotencyKey,
+    bool ConfirmedNotDelivered = false);
 
 public sealed record RecoverPlatformDeadLetterResult(
     string Queue,
@@ -129,6 +136,20 @@ public sealed class PlatformDeadLetterRecoveryService(
                 if (row.DeadLetteredOn is null || row.CompletedOn is not null)
                     throw new InvalidOperationException("Only a dead-lettered quote delivery can be recovered.");
                 EnsureNotLeased(row.LeaseOwner, row.LeaseToken, row.LeaseUntil);
+                // Recovery RE-SENDS. A dead-letter that never left the building is safe to
+                // release; an UNCERTAIN one is the post-send case — the SMTP call returned
+                // ambiguously, or this single instance was restarted mid-send — and releasing
+                // it blind is how a customer receives the same quote twice. The supplier-RFQ
+                // branch cannot reach this state (only DEAD_LETTERED rows are recoverable
+                // there); this branch could, and used to.
+                if (row.LastErrorCode?.StartsWith("DeliveryOutcomeUncertain", StringComparison.OrdinalIgnoreCase) == true
+                    && !command.ConfirmedNotDelivered)
+                    throw new InvalidOperationException(
+                        "This quote delivery may already have reached the customer: the send was interrupted and "
+                        + "the provider never confirmed either way, so nothing was resent automatically. Confirm "
+                        + "with the tenant that the quote did not arrive, then recover it with "
+                        + "confirmedNotDelivered=true. If it did arrive, leave it: the tenant can issue a new "
+                        + "revision if anything changed.");
                 row.AttemptCount = 0;
                 row.AvailableOn = DateTime.UtcNow;
                 row.DeadLetteredOn = null;
@@ -144,7 +165,8 @@ public sealed class PlatformDeadLetterRecoveryService(
                 idempotencyKey = key,
                 reason,
                 previousState = "DeadLetter",
-                newState = "RetryQueued"
+                newState = "RetryQueued",
+                confirmedNotDelivered = command.ConfirmedNotDelivered
             }, tenantId, httpContext, ct);
             await tx.CommitAsync(ct);
             return new(queue, command.ItemId, tenantId, "RetryQueued", false);

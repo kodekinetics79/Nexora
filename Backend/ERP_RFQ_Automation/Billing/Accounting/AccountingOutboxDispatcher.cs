@@ -57,18 +57,43 @@ public sealed class HttpAccountingExportConnector(
     }
 }
 
-public sealed class AccountingOutboxDispatcher(
-    IServiceScopeFactory scopes, IAccountingExportConnector connector,
-    IOptions<AccountingExportOptions> options, ILogger<AccountingOutboxDispatcher> log) : BackgroundService
+public sealed class AccountingOutboxDispatcher : BackgroundService
 {
+    private readonly IServiceScopeFactory scopes;
+    private readonly IAccountingExportConnector connector;
+    private readonly IOptions<AccountingExportOptions> options;
+    private readonly ILogger<AccountingOutboxDispatcher> log;
+    private readonly ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? _heartbeats;
+
+    public AccountingOutboxDispatcher(
+        IServiceScopeFactory scopes, IAccountingExportConnector connector,
+        IOptions<AccountingExportOptions> options, ILogger<AccountingOutboxDispatcher> log,
+        ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? heartbeats = null)
+    {
+        this.scopes = scopes;
+        this.connector = connector;
+        this.options = options;
+        this.log = log;
+        _heartbeats = heartbeats;
+        // The loop turns whether or not export is enabled (a disabled cycle is just the delay),
+        // so liveness is meaningful either way.
+        _heartbeats?.Register(
+            ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AccountingOutbox, Period(options.Value));
+    }
+
+    private static TimeSpan Period(AccountingExportOptions settings)
+        => TimeSpan.FromSeconds(Math.Clamp(settings.PollSeconds, 2, 300));
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _heartbeats?.Beat(ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AccountingOutbox, Period(options.Value));
         while (!stoppingToken.IsCancellationRequested)
         {
             var settings = options.Value;
             if (!settings.Enabled)
             {
-                await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(settings.PollSeconds, 2, 300)), stoppingToken);
+                _heartbeats?.Beat(ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AccountingOutbox, Period(settings));
+                await Task.Delay(Period(settings), stoppingToken);
                 continue;
             }
             try
@@ -97,7 +122,8 @@ public sealed class AccountingOutboxDispatcher(
             {
                 log.LogError(exception, "Accounting outbox dispatcher cycle failed.");
             }
-            await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(settings.PollSeconds, 2, 300)), stoppingToken);
+            _heartbeats?.Beat(ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AccountingOutbox, Period(settings));
+            await Task.Delay(Period(settings), stoppingToken);
         }
     }
 }
