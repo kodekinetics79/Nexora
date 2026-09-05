@@ -73,7 +73,11 @@ export default function HeroTile({
         <Typography variant="overline" sx={{ fontWeight: 800, letterSpacing: '0.08em', lineHeight: 1.4, color: 'text.secondary' }}>
           {label}
         </Typography>
-        {icon && <Box sx={{ color: 'primary.main', display: 'grid', placeItems: 'center', opacity: 0.9 }}>{icon}</Box>}
+        {icon && (
+          <Tooltip title={definition ?? ''} placement="top-end" disableHoverListener={!definition}>
+            <Box sx={{ color: 'primary.main', display: 'grid', placeItems: 'center', opacity: 0.9 }} aria-label={definition ? 'Definition' : undefined}>{icon}</Box>
+          </Tooltip>
+        )}
       </Stack>
       {available ? (
         <Typography
@@ -91,11 +95,9 @@ export default function HeroTile({
           Not available
         </Typography>
       )}
-      <Tooltip title={definition ?? ''} placement="top-start" disableHoverListener={!definition}>
-        <Typography variant="body2" sx={{ mt: 0.5, color: 'text.secondary', lineHeight: 1.35 }}>
-          {available ? basis : (unavailableReason ?? basis)}
-        </Typography>
-      </Tooltip>
+      <Typography variant="body2" sx={{ mt: 0.5, color: 'text.secondary', lineHeight: 1.35 }}>
+        {available ? basis : (unavailableReason ?? basis)}
+      </Typography>
       <Box sx={{ flexGrow: 1 }} />
       <Stack direction="row" sx={{ mt: 1.25, alignItems: 'flex-end', justifyContent: 'space-between', gap: 1 }}>
         {series && series.length > 1 ? <Sparkline points={series} label={seriesLabel} /> : <span />}

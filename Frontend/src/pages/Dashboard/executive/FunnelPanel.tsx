@@ -19,12 +19,14 @@ export interface FunnelPanelProps {
   data?: PipelineAnalyticsDTO;
   loading?: boolean;
   error?: boolean;
+  /** The server answered 403: the funnel is a manager's view, and this reader is not one. */
+  forbidden?: boolean;
   onStage?: (stage: PipelineStageDTO) => void;
 }
 
 const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : null);
 
-export default function FunnelPanel({ data, loading, error, onStage }: FunnelPanelProps) {
+export default function FunnelPanel({ data, loading, error, forbidden, onStage }: FunnelPanelProps) {
   const theme = useTheme();
   const dark = theme.palette.mode === 'dark';
   const gradId = useId().replace(/:/g, '');
@@ -47,6 +49,10 @@ export default function FunnelPanel({ data, loading, error, onStage }: FunnelPan
         <Stack spacing={1} sx={{ mt: 2 }}>
           {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} variant="rounded" height={34} sx={{ borderRadius: 1.5 }} />)}
         </Stack>
+      ) : forbidden ? (
+        <Alert severity="info" sx={{ mt: 1.5 }}>
+          The funnel is available to managers and administrators.
+        </Alert>
       ) : error || !data ? (
         <Alert severity="warning" sx={{ mt: 1.5 }}>
           The funnel could not be loaded. This is a request failure, not an empty pipeline.
@@ -97,6 +103,7 @@ export default function FunnelPanel({ data, loading, error, onStage }: FunnelPan
                     onKeyDown={(e) => { if (onStage && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onStage(s); } }}
                     aria-label={`${s.label}: ${s.count}, ${valueText}${ratio !== null ? `, ${ratio}% of ${prev?.label.toLowerCase()}` : ''}`}
                   >
+                    <title>{`${s.label}: ${s.count} · ${valueText}`}</title>
                     <text x="0" y={ROW / 2 + 5} fontSize="13" fontWeight="700" fill={theme.palette.text.primary}>{s.label}</text>
                     {ratio !== null && (
                       <text x="0" y={ROW / 2 + 20} fontSize="10.5" fill={theme.palette.text.secondary}>{ratio}% of previous</text>

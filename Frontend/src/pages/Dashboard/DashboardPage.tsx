@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Collapse } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -126,6 +127,11 @@ export default function DashboardPage() {
   const valueSeries = monthly.map((m) => m.value);
   const countSeries = monthly.map((m) => m.count);
   const workloadForbidden = (workload.error as any)?.response?.status === 403;
+  const funnelForbidden = (pipeline.error as any)?.response?.status === 403;
+  const funnelDown = pipeline.isLoading ? 'Loading…' : funnelForbidden ? 'Available to managers and administrators.' : pipeline.isError ? 'The funnel could not be loaded.' : undefined;
+  const measurable = evidenceKpis.filter((k) => k.state === 'available');
+  const notYet = evidenceKpis.filter((k) => k.state !== 'available');
+  const [showNotYet, setShowNotYet] = useState(false);
   const attention = salesToday.data?.attentionItems?.slice(0, 5) ?? [];
 
   const refreshAll = () => {
@@ -206,7 +212,7 @@ export default function DashboardPage() {
           icon={<WonIcon />}
           value={pipeline.isLoading ? null : won ? (won.value !== null ? formatMoney(won.value, won.valueCurrency) : won.count.toLocaleString('en-US')) : null}
           basis={won ? `${won.count.toLocaleString('en-US')} won quote${won.count === 1 ? '' : 's'}, all time${won.value === null && won.valueUnavailableReason ? ` · ${won.valueUnavailableReason}` : ''}` : 'Won quotes, all time'}
-          unavailableReason={pipeline.isLoading ? 'Loading…' : pipeline.isError ? 'The funnel could not be loaded.' : undefined}
+          unavailableReason={funnelDown}
           series={valueSeries.some((v) => v > 0) ? valueSeries : null}
           seriesLabel="Order value by month"
           definition="Quotes the customer accepted, valued in the tenant's base currency when every one can be converted."
@@ -219,7 +225,7 @@ export default function DashboardPage() {
           icon={<PipelineIcon />}
           value={funnel ? (funnel.weightedForecast !== null ? formatMoney(funnel.weightedForecast, funnel.forecastCurrency) : null) : null}
           basis={funnel ? `${(funnel.awaitingResponseQuotes + funnel.respondedQuotes).toLocaleString('en-US')} open quotes, weighted by stage` : 'Open quotes, weighted by stage'}
-          unavailableReason={pipeline.isLoading ? 'Loading…' : funnel?.forecastUnavailableReason ?? (pipeline.isError ? 'The funnel could not be loaded.' : undefined)}
+          unavailableReason={funnelDown ?? funnel?.forecastUnavailableReason ?? undefined}
           definition="Open quote value multiplied by the likelihood of each stage. Not a forecast of cash."
           onOpen={() => navigate('/sales/quotes')}
           openLabel="Quotes"
@@ -230,7 +236,7 @@ export default function DashboardPage() {
           icon={<WaitingIcon />}
           value={funnel ? funnel.awaitingResponseQuotes.toLocaleString('en-US') : null}
           basis={funnel ? (funnel.awaitingResponseValue !== null ? `${formatMoney(funnel.awaitingResponseValue, funnel.forecastCurrency)} on the table` : 'Sent quotes with no answer yet') : 'Sent quotes with no answer yet'}
-          unavailableReason={pipeline.isLoading ? 'Loading…' : pipeline.isError ? 'The funnel could not be loaded.' : undefined}
+          unavailableReason={funnelDown}
           definition="Quotes sent and neither accepted, declined nor expired."
           onOpen={() => navigate('/sales/quotes?state=sent')}
           openLabel="Sent quotes"
@@ -255,7 +261,8 @@ export default function DashboardPage() {
         <FunnelPanel
           data={funnel}
           loading={pipeline.isLoading}
-          error={pipeline.isError}
+          error={pipeline.isError && !funnelForbidden}
+          forbidden={funnelForbidden}
           onStage={(stage) => navigate(stageRoute(stage))}
         />
         <TrendPanel
@@ -296,9 +303,34 @@ export default function DashboardPage() {
           {release.isLoading ? (
             <Box sx={{ minHeight: 160, display: 'grid', placeItems: 'center' }}><CircularProgress aria-label="Loading dashboard" /></Box>
           ) : evidenceKpis.length ? (
-            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(3, 1fr)' }, gap: 2 }}>
-              {evidenceKpis.map((kpi, index) => <KpiCard key={kpi.key} kpi={kpi} index={index} />)}
-            </Box>
+            <>
+              {measurable.length > 0 ? (
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(3, 1fr)' }, gap: 2 }}>
+                  {measurable.map((kpi, index) => <KpiCard key={kpi.key} kpi={kpi} index={index} />)}
+                </Box>
+              ) : (
+                <Alert severity="info">Nothing in the verified snapshot can be measured yet for this window and scope.</Alert>
+              )}
+              {/* The figures the snapshot cannot yet state are one line, not a wall of grey cards:
+                  the reason each is unmeasurable is worth reading once, not at every glance. */}
+              {notYet.length > 0 && (
+                <Box sx={{ mt: 1.5 }}>
+                  <Button size="small" onClick={() => setShowNotYet((v) => !v)} sx={{ fontWeight: 700, px: 1 }}>
+                    {showNotYet ? 'Hide' : 'Show'} {notYet.length} not yet measurable
+                  </Button>
+                  <Collapse in={showNotYet}>
+                    <Box component="dl" sx={{ mt: 1, mb: 0, display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'auto 1fr' }, columnGap: 2, rowGap: 0.75 }}>
+                      {notYet.map((kpi) => (
+                        <Box key={kpi.key} sx={{ display: 'contents' }}>
+                          <Typography component="dt" variant="body2" sx={{ fontWeight: 700 }}>{kpi.label}</Typography>
+                          <Typography component="dd" variant="body2" sx={{ m: 0, color: 'text.secondary' }}>{kpi.insufficientDataReason ?? kpi.definition}</Typography>
+                        </Box>
+                      ))}
+                    </Box>
+                  </Collapse>
+                </Box>
+              )}
+            </>
           ) : !release.isError ? (
             <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
           ) : null}

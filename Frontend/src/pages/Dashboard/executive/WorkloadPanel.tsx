@@ -28,7 +28,7 @@ export default function WorkloadPanel({ data, loading, forbidden, error, onOpen 
     .slice()
     .sort((a, b) => Number(b.isUnassignedBucket) - Number(a.isUnassignedBucket) || (b.openLeads + b.overdueLeads) - (a.openLeads + a.overdueLeads))
     .slice(0, 8)
-    .map((r) => ({ ...r, name: r.isUnassignedBucket ? 'Unassigned' : r.name.split(' ')[0] || r.name }));
+    .map((r) => ({ ...r, name: r.isUnassignedBucket ? 'Unassigned' : (r.name.length > 18 ? `${r.name.slice(0, 17)}…` : r.name) }));
   const grid = dark ? 'rgba(163,169,181,0.16)' : 'rgba(42,47,58,0.12)';
   const axis = theme.palette.text.secondary;
   const graphite = dark ? '#7d8597' : '#3a4050';
@@ -55,7 +55,7 @@ export default function WorkloadPanel({ data, loading, forbidden, error, onOpen 
             <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }} barCategoryGap={8}>
               <CartesianGrid strokeDasharray="3 3" stroke={grid} horizontal={false} />
               <XAxis type="number" stroke={axis} fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
-              <YAxis type="category" dataKey="name" stroke={axis} fontSize={12} tickLine={false} axisLine={false} width={84} />
+              <YAxis type="category" dataKey="name" stroke={axis} fontSize={12} tickLine={false} axisLine={false} width={124} />
               <Tooltip
                 cursor={{ fill: dark ? 'rgba(255,255,255,0.04)' : 'rgba(42,47,58,0.06)' }}
                 contentStyle={{
