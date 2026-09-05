@@ -938,6 +938,17 @@ public sealed class ExtractionWorker : BackgroundService
             // RFQ is held forever or quoted against a document nobody read.
             component.Status = ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentClosure
                 .StatusFor(errorCode);
+            // The status alone told the message detail WHICH part stopped and nothing else
+            // (reasonCode null). The code the closure rule decided on, and one sentence about
+            // what it means for the message, are what a person reads there (intake scenario
+            // testing 2026-09-05, F2).
+            component.ReasonCode = errorCode;
+            component.ReasonDetail = component.Status
+                == ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable
+                ? "This part is held: its extraction stopped on a service or authorization that is not "
+                  + "available. The message waits without re-reading the mailbox until that is restored "
+                  + "and the stopped job is recovered."
+                : "This part could not be read and the message continues to review without it.";
             component.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
             await db.SaveChangesAsync(ct);

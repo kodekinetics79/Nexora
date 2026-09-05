@@ -735,6 +735,14 @@ public sealed class EmailInquiryStrandingHasAWayOutPostgreSqlTests(PostgreSqlTes
         Assert.False(string.IsNullOrWhiteSpace(reason));
         AssertNoInternalNames(reason!);
 
+        // AND THE PART SAYS WHY. Intake scenario testing 2026-09-05 (F2): the worker closed the
+        // component with a status and nothing else, so the message detail listed the part as
+        // "FailedRecoverable" with reasonCode null — an operator could see WHICH part stopped
+        // but not what stopped it or what would unblock it. The code the closure rule decided on
+        // is the one thing the detail must carry.
+        Assert.Equal(1, await CountComponentsAsync(assemblyId,
+            "\"ReasonCode\" = 'unexpected_extraction_failure' AND \"ReasonDetail\" IS NOT NULL AND \"ReasonDetail\" <> ''"));
+
         // And the sweep, which is still the backstop for the dead letters the queue's own claim
         // statement writes with no worker in the loop, has nothing left to do here.
         Assert.Equal(0, (await SweepAsync(broken)).StrandedComponents.Examined);

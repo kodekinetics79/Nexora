@@ -256,6 +256,14 @@ public sealed class EmailTriageService : IEmailTriageService
         //   * held for a person   — the message aggregate reached NeedsReview and named no Lead;
         //   * dead-lettered alone — no aggregate at all (mail that predates the assembly barrier,
         //     or whose capture never produced one) with a ParseStatus that has given up.
+        //   * held, and its job gave up — the aggregate is FailedRecoverable (a part's extraction
+        //     stopped on something the closure rule classes as infrastructure, e.g. no model
+        //     authorization) AND the ledger says the job dead-lettered. The hold is job-bound, so
+        //     the stranded-component sweep deliberately leaves it alone; nothing retries it on
+        //     its own. From the person's side it has stopped exactly as surely as the other two,
+        //     and before this it was the one shape the Stopped tab did not count: three live
+        //     RFQ e-mails with cleanly extracted CSV attachments sat behind "0 stopped" (intake
+        //     scenario testing 2026-09-05, F1).
         // A message with a decided terminal verdict (NoInquiry, RejectedSecurity, Rejected as
         // noise) is NOT stopped. It ended, which is a different and correct thing.
         if (EmailTriageStates.IsStopped(state))
@@ -266,6 +274,12 @@ public sealed class EmailTriageService : IEmailTriageService
                         a.EmailIngestId == e.Id
                         && a.Status == ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyStatus.NeedsReview
                         && a.AssembledLeadId == null)
+                    || (_context.EmailInquiryAssemblies.Any(a =>
+                            a.EmailIngestId == e.Id
+                            && a.Status == ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyStatus.FailedRecoverable
+                            && a.AssembledLeadId == null)
+                        && e.ParseStatus != null
+                        && e.ParseStatus.StartsWith(EmailTriageStates.GaveUpParseStatusPrefix))
                     || (!_context.EmailInquiryAssemblies.Any(a => a.EmailIngestId == e.Id)
                         && e.ParseStatus != null
                         && e.ParseStatus.StartsWith(EmailTriageStates.GaveUpParseStatusPrefix))));
