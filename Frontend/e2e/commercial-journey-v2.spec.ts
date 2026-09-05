@@ -1010,8 +1010,10 @@ test('34 role Today surfaces expose persisted operational work', async ({ page }
   await expect(page).toHaveURL(/\/inventory\/demand$/);
 
   await page.goto('/executive/today');
-  await expect(page.getByRole('heading', { name: 'Executive RFQ-to-Revenue' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Verified Performance' })).toBeVisible();
+  // /executive/today and /dashboard are the same screen now: the executive view, with the
+  // verified Release 01 snapshot as its evidence row beneath the glance.
+  await expect(page.getByRole('heading', { name: 'Executive view' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Verified performance' })).toBeVisible();
   await page.getByRole('button', { name: 'Deadline board' }).click();
   await expect(page).toHaveURL(/\/analytics\/deadlines$/);
 
