@@ -2,18 +2,19 @@
 name: Nexora
 description: Evidence-led enterprise commercial operations from governed intake to collected cash.
 colors:
-  primary-action: "#075dcc"
-  primary-action-hover: "#064da9"
-  evidence-navy: "#08172a"
-  completion-teal: "#20c7b5"
-  canvas: "#f8fafc"
+  primary-action: "#c9931a"
+  primary-action-hover: "#a87a12"
+  evidence-navy: "#0f1218"
+  graphite: "#2a2f3a"
+  completion-teal: "#2f9e6e"
+  canvas: "#f5f4f1"
   paper: "#ffffff"
-  ink: "#0f172a"
-  muted-ink: "#64748b"
-  evidence-rule: "#35506f"
-  field-border: "#aeb8c7"
-  dark-paper: "#1e293b"
-  dark-ink: "#f1f5f9"
+  ink: "#15181e"
+  muted-ink: "#5f6673"
+  evidence-rule: "#3a4050"
+  field-border: "#b9bcc4"
+  dark-paper: "#1b1f26"
+  dark-ink: "#eceef2"
 typography:
   display:
     fontFamily: "Cambay, Source Sans 3, sans-serif"
@@ -111,7 +112,7 @@ The system should remain calm under real operational load. Authentication demons
 
 - Evidence-led hierarchy with clear ownership, status, and lineage.
 - Cambay display type paired with Source Sans 3 operational text.
-- Navy, white, cobalt, and teal used in stable semantic roles.
+- Graphite, warm paper, brass and a verified green used in stable semantic roles (palette decided 2026-09-05: Graphite & Brass).
 - Three materials in fixed roles: solid actions you can press, a glass shell you look through, paper records you read.
 - Compact enterprise density without sacrificing 44px targets or visible focus.
 
@@ -121,15 +122,15 @@ The palette behaves like a commercial record: dark evidence context, quiet worki
 
 ### Primary
 
-- **Governed Cobalt:** Use `primary-action` for the clearest next action, active navigation, and focused task progression; use `primary-action-hover` only for its hover state.
+- **Governed Brass:** Use `primary-action` for the clearest next action, active navigation, and focused task progression; use `primary-action-hover` only for its hover state.
 
 ### Secondary
 
-- **Verified Teal:** Use `completion-teal` for completed, reconciled, posted, or otherwise verified states. It is not a second call-to-action color.
+- **Verified Green:** Use `completion-teal` (the token keeps its historical name) for completed, reconciled, posted, or otherwise verified states. It is not a second call-to-action color.
 
 ### Neutral
 
-- **Evidence Navy:** Use `evidence-navy` for evidence context, lineage, and dark operational regions.
+- **Evidence Graphite:** Use `evidence-navy` (historical token name) and `graphite` for evidence context, lineage, and dark operational regions.
 - **Working Canvas and Paper:** Use `canvas` for the application ground and `paper` for contained work surfaces.
 - **Operational Ink:** Use `ink` for primary copy and `muted-ink` for supporting text that must remain readable.
 - **Evidence Rule:** Use `evidence-rule` to separate dense records without introducing extra cards.
@@ -138,7 +139,7 @@ The palette behaves like a commercial record: dark evidence context, quiet worki
 
 ### Named Rules
 
-**The Evidence Before Accent Rule.** Navy holds evidence, blue advances work, and teal confirms governed completion; never exchange those roles for decoration.
+**The Evidence Before Accent Rule.** Graphite holds evidence, brass advances work, and green confirms governed completion; never exchange those roles for decoration.
 
 ## Typography
 
@@ -187,13 +188,14 @@ glass you look through; records are paper you read. Three materials, each in one
 - **Paper (tables, forms, records):** opaque, one-pixel border, no blur. Nothing shimmers behind a
   figure someone is reading.
 
-The canvas carries two fixed radial washes of cobalt and teal — the "weather" the glass refracts.
+The canvas carries fixed radial washes of brass and graphite — the "weather" the glass refracts.
 Without them glass is a lighter grey. `prefers-reduced-motion` removes lifts and press travel.
 
 ### Shadow Vocabulary
 
 - **Tactile** (`inset 0 1px 0 rgba(255,255,255,.28), inset 0 -1px 0 rgba(0,0,0,.22), 0 1px 2px rgba(8,23,42,.28)`): every solid control.
-- **Brand Lift** (`0 8px 18px -8px alpha(primary, .75)`): the primary action and the current rail stage.
+- **Brand Lift** (`0 10px 20px -10px alpha(primary, .8)`): the primary action. The current rail stage is a graphite key with a brass tab.
+- **Motion**: pages rise 8px into place (280ms), summary tiles follow at 45ms intervals, solid keys sheen on hover (640ms), the mark glints every 7s. All of it is off under `prefers-reduced-motion`.
 - **Glass** (`inset 0 1px 0 highlight, 0 14px 36px -20px rgba(8,23,42,.3)`): translucent shell surfaces.
 - **Overlay** (`0 32px 80px -28px rgba(8,23,42,.55)`): dialogs and other temporary surfaces above the shell.
 
@@ -211,7 +213,7 @@ Controls use disciplined 8px corners; standard cards use 12px corners; navigatio
 ### Buttons
 
 - **Shape:** Solid and assured, with 8px corners and a 44px minimum target.
-- **Primary:** Governed cobalt with high-contrast white text, finished as a solid tactile object (see Elevation & Depth). Full-width task actions may grow taller when the task benefits, while preserving the same radius and type treatment.
+- **Primary:** Governed brass with high-contrast near-black text, finished as a solid tactile key (see Elevation & Depth). Full-width task actions may grow taller when the task benefits, while preserving the same radius and type treatment.
 - **Hover / Focus:** Darken one step on hover. Use a visible three-pixel focus outline or ring, never a color-only shift.
 - **Secondary / Ghost:** Keep the surface flat and the label readable; reserve these variants for recovery, navigation, or lower-priority actions.
 

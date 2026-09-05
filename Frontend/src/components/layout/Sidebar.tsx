@@ -166,16 +166,25 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
     '&:hover': { backgroundColor: 'action.hover' },
     // `&.Mui-selected` keeps our colours ahead of MUI's default selected styling in the cascade.
     '&.Mui-selected': {
-      backgroundColor: 'primary.main',
-      // The current stage is a solid, lit object on the glass rail: light top edge, shaded
-      // bottom edge, brand-coloured lift. Overlays, not shades, so contrastText's AA holds.
-      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0) 55%, rgba(0,0,0,0.14) 100%)',
-      color: 'primary.contrastText',
-      boxShadow: (theme: any) => `inset 0 1px 0 rgba(255,255,255,0.28), inset 0 -1px 0 rgba(0,0,0,0.2), 0 10px 15px -3px ${alpha(theme.palette.primary.main, 0.35)}`,
+      // The current stage is a solid graphite key on the glass rail — lit top edge, shaded
+      // bottom edge, a physical lower edge — with a brass tab on its leading side. White on
+      // graphite clears AA in both modes; the brass tab is a second cue, not the only one.
+      backgroundColor: (theme: any) => theme.palette.mode === 'dark' ? '#3a4050' : '#2a2f3a',
+      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0) 55%, rgba(0,0,0,0.16) 100%)',
+      color: '#ffffff',
+      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -1px 0 rgba(0,0,0,0.25), 0 2px 0 rgba(0,0,0,0.3), 0 10px 16px -8px rgba(15,18,24,0.6)',
+      '& .MuiListItemIcon-root, & .MuiListItemText-secondary': { color: 'rgba(255,255,255,0.85)' },
+      '&::before': {
+        content: '""',
+        position: 'absolute',
+        left: 0, top: 10, bottom: 10, width: 3,
+        borderRadius: '0 3px 3px 0',
+        background: 'linear-gradient(180deg, #fff1c9, #c9931a)',
+      },
     },
     '&.Mui-selected:hover': {
-      backgroundColor: 'primary.dark',
-      color: 'primary.contrastText',
+      backgroundColor: (theme: any) => theme.palette.mode === 'dark' ? '#454c5e' : '#353b47',
+      color: '#ffffff',
     },
     '&:active': { transform: 'translateY(1px)' },
     '@media (prefers-reduced-motion: reduce)': { '&:active': { transform: 'none' } },

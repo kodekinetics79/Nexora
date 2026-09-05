@@ -24,7 +24,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
     return (localStorage.getItem('themeMode') as PaletteMode) || 'light';
   });
   const [primaryColor, setPrimaryColorState] = useState(() => {
-    return localStorage.getItem('primaryColor') || '#4682B4';
+    return localStorage.getItem('primaryColor') || '#c9931a';
   });
 
   const setPrimaryColor = (color: string) => {
@@ -42,7 +42,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
 
     // Worst-case surface the brand colour is drawn *on* as text: in light mode
     // the off-white page background, in dark mode the lighter paper surface.
-    const worstCaseSurface = mode === 'dark' ? '#1e293b' : '#f8fafc';
+    const worstCaseSurface = mode === 'dark' ? '#1b1f26' : '#f5f4f1';
     // Text/outlined buttons paint `primary.main` as their label. Several brand
     // colours fail AA in that role (Steel Blue 3.92:1 on the light page;
     // Executive Navy 1.40:1 on dark paper), so derive a readable variant.
@@ -56,8 +56,8 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
     // primary.contrastText's AA ratio intact at every point of the gradient: the lightest stop
     // is a 14% white wash, which on the palest permitted brand colour still clears 4.5:1.
     const isDark = mode === 'dark';
-    const glassFill = isDark ? 'rgba(15, 23, 42, 0.58)' : 'rgba(255, 255, 255, 0.58)';
-    const glassEdge = isDark ? 'rgba(148, 163, 184, 0.22)' : 'rgba(100, 116, 139, 0.18)';
+    const glassFill = isDark ? 'rgba(27, 31, 38, 0.58)' : 'rgba(255, 255, 255, 0.58)';
+    const glassEdge = isDark ? 'rgba(170, 176, 190, 0.20)' : 'rgba(95, 102, 115, 0.18)';
     const glassHighlight = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.85)';
     const glass = {
       backgroundColor: glassFill,
@@ -70,23 +70,39 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
     };
     // A solid control with a lit top edge, a shaded bottom edge and a lift; the press state
     // drops it by a pixel and swaps the lift for an inner shadow, so the click reads by hand.
+    // A key you can press: lit top edge, shaded bottom edge, a 2px physical edge below, and a
+    // sheen that crosses the face on hover. Press drops the key onto its edge.
     const tactile = {
-      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0) 52%, rgba(0,0,0,0.14) 100%)',
-      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.28), inset 0 -1px 0 rgba(0,0,0,0.22), 0 1px 2px rgba(8,23,42,0.28)',
+      position: 'relative' as const,
+      overflow: 'hidden' as const,
+      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0) 52%, rgba(0,0,0,0.14) 100%)',
+      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.30), inset 0 -1px 0 rgba(0,0,0,0.22), 0 2px 0 rgba(0,0,0,0.28), 0 3px 3px rgba(15,18,24,0.22)',
+      '&::after': {
+        content: '""',
+        position: 'absolute',
+        top: 0, bottom: 0, left: 0, width: '60%',
+        pointerEvents: 'none',
+        background: 'linear-gradient(105deg, transparent 20%, rgba(255,255,255,0.32) 50%, transparent 80%)',
+        transform: 'translateX(-160%)',
+        transition: 'transform 640ms ease',
+      },
+      '&:hover::after': { transform: 'translateX(260%)' },
     };
     const tactileHover = {
-      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.20) 0%, rgba(255,255,255,0.02) 52%, rgba(0,0,0,0.16) 100%)',
+      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.02) 52%, rgba(0,0,0,0.16) 100%)',
       transform: 'translateY(-1px)',
+      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.32), inset 0 -1px 0 rgba(0,0,0,0.22), 0 3px 0 rgba(0,0,0,0.28), 0 8px 14px -6px rgba(15,18,24,0.4)',
     };
     const tactileActive = {
-      backgroundImage: 'linear-gradient(180deg, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.02) 60%, rgba(255,255,255,0.06) 100%)',
-      boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.30), 0 1px 1px rgba(8,23,42,0.18)',
-      transform: 'translateY(1px)',
+      backgroundImage: 'linear-gradient(180deg, rgba(0,0,0,0.10) 0%, rgba(0,0,0,0.02) 60%, rgba(255,255,255,0.06) 100%)',
+      boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.32), 0 0 0 rgba(0,0,0,0.28), 0 1px 1px rgba(15,18,24,0.18)',
+      transform: 'translateY(2px)',
     };
     const reducedMotion = {
       '@media (prefers-reduced-motion: reduce)': {
         transition: 'none',
         '&:hover, &:active': { transform: 'none' },
+        '&::after': { transition: 'none', display: 'none' },
       },
     };
 
@@ -103,7 +119,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       // over a white page).
       primary: primaryPalette,
       secondary: {
-        main: '#0ea5e9', // Sky Blue
+        main: mode === 'dark' ? '#a3a9b5' : '#3a4050', // Graphite: the quiet second voice next to brass
       },
       // MUI's light defaults are designed primarily as filled-control colours,
       // not as small text on white. Nexora also uses these semantic tokens for
@@ -119,20 +135,20 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       // target AA body text instead of its 3:1 default.
       contrastThreshold: AA_TEXT_CONTRAST,
       background: {
-        default: mode === 'dark' ? '#0f172a' : '#f8fafc',
-        paper: mode === 'dark' ? '#1e293b' : '#ffffff',
+        default: mode === 'dark' ? '#121418' : '#f5f4f1',
+        paper: mode === 'dark' ? '#1b1f26' : '#ffffff',
       },
       text: {
-        primary: mode === 'dark' ? '#f1f5f9' : '#0f172a',
-        secondary: mode === 'dark' ? '#94a3b8' : '#64748b',
+        primary: mode === 'dark' ? '#eceef2' : '#15181e',
+        secondary: mode === 'dark' ? '#a3a9b5' : '#5f6673',
         // `text.disabled` is also used by this application for explanatory
         // captions (for example "More workspaces" and "No deadline"). MUI's
         // default 38%-black resolves to #9a9b9c on the page — 2.66:1. Keep
         // these captions readable; genuinely disabled native controls remain
         // exposed as disabled independently of their colour.
-        disabled: mode === 'dark' ? '#94a3b8' : '#64748b',
+        disabled: mode === 'dark' ? '#a3a9b5' : '#5f6673',
       },
-      divider: mode === 'dark' ? 'rgba(148, 163, 184, 0.1)' : 'rgba(100, 116, 139, 0.1)',
+      divider: mode === 'dark' ? 'rgba(170, 176, 190, 0.12)' : 'rgba(95, 102, 115, 0.12)',
     },
     typography: {
       fontFamily: '"Source Sans 3", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -185,11 +201,11 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
               // overlays above only lighten or darken it by a bounded amount.
               backgroundColor: primaryPalette.main,
               color: primaryPalette.contrastText,
-              boxShadow: `${tactile.boxShadow}, 0 8px 18px -8px ${alpha(primaryPalette.main, 0.75)}`,
+              boxShadow: `${tactile.boxShadow}, 0 10px 20px -10px ${alpha(primaryPalette.main, 0.8)}`,
               '&:hover': {
                 ...tactileHover,
                 backgroundColor: primaryPalette.dark,
-                boxShadow: `${tactile.boxShadow}, 0 12px 22px -8px ${alpha(primaryPalette.main, 0.8)}`,
+                boxShadow: `${tactileHover.boxShadow}, 0 14px 26px -10px ${alpha(primaryPalette.main, 0.85)}`,
               },
               '&:active': { ...tactileActive, backgroundColor: primaryPalette.dark },
             },
@@ -204,7 +220,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
               color: primaryOnSurface,
               borderColor: primaryBorderOnSurface,
               backgroundColor: alpha(primaryPalette.main, isDark ? 0.10 : 0.05),
-              boxShadow: isDark ? 'none' : 'inset 0 1px 0 rgba(255,255,255,0.6)',
+              boxShadow: isDark ? 'inset 0 1px 0 rgba(255,255,255,0.06), 0 1px 0 rgba(0,0,0,0.3)' : 'inset 0 1px 0 rgba(255,255,255,0.6), 0 1px 0 rgba(0,0,0,0.08)',
               '&:hover': { backgroundColor: alpha(primaryPalette.main, isDark ? 0.16 : 0.10), transform: 'translateY(-1px)' },
               '&:active': { transform: 'translateY(1px)' },
             },
@@ -233,7 +249,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             backgroundImage: 'none',
             boxShadow: 'none',
             border: '1px solid',
-            borderColor: mode === 'dark' ? 'rgba(148, 163, 184, 0.16)' : 'rgba(100, 116, 139, 0.16)',
+            borderColor: mode === 'dark' ? 'rgba(170, 176, 190, 0.16)' : 'rgba(95, 102, 115, 0.16)',
             // Opt-in glass for the shell and summary tiles. Data surfaces (tables, forms) stay
             // opaque paper: nothing should shimmer behind a figure someone is reading.
             '&.nx-glass': {
@@ -246,7 +262,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
                 content: '""',
                 position: 'absolute',
                 top: 0, left: 0, right: 0, height: 2,
-                background: 'linear-gradient(90deg, #075dcc 0%, #20c7b5 100%)',
+                background: 'linear-gradient(90deg, #c9931a 0%, #fff1c9 100%)',
                 opacity: isDark ? 0.85 : 0.7,
               },
             },
@@ -259,8 +275,8 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
           // competes with the form in front.
           paper: {
             ...glass,
-            backgroundColor: isDark ? 'rgba(15, 23, 42, 0.88)' : 'rgba(255, 255, 255, 0.90)',
-            boxShadow: `inset 0 1px 0 ${glassHighlight}, 0 32px 80px -28px rgba(8, 23, 42, ${isDark ? 0.9 : 0.55})`,
+            backgroundColor: isDark ? 'rgba(27, 31, 38, 0.90)' : 'rgba(255, 255, 255, 0.90)',
+            boxShadow: `inset 0 1px 0 ${glassHighlight}, 0 32px 80px -28px rgba(15, 18, 24, ${isDark ? 0.9 : 0.55})`,
           },
         },
       },
@@ -268,7 +284,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
         styleOverrides: {
           paper: {
             ...glass,
-            backgroundColor: isDark ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.90)',
+            backgroundColor: isDark ? 'rgba(27, 31, 38, 0.92)' : 'rgba(255, 255, 255, 0.92)',
           },
         },
       },
@@ -276,14 +292,14 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
         styleOverrides: {
           paper: {
             ...glass,
-            backgroundColor: isDark ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.90)',
+            backgroundColor: isDark ? 'rgba(27, 31, 38, 0.92)' : 'rgba(255, 255, 255, 0.92)',
           },
         },
       },
       MuiTooltip: {
         styleOverrides: {
           tooltip: {
-            backgroundColor: isDark ? 'rgba(30, 41, 59, 0.92)' : 'rgba(8, 23, 42, 0.92)',
+            backgroundColor: isDark ? 'rgba(42, 47, 58, 0.94)' : 'rgba(15, 18, 24, 0.92)',
             backdropFilter: 'blur(10px)',
             boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.12), 0 8px 24px -12px rgba(8,23,42,0.6)',
             fontSize: 13,
@@ -340,28 +356,46 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             // The canvas has weather: two soft washes of cobalt and teal fixed behind the
             // page, which is what the glass surfaces above it refract. Without them glass is
             // just a lighter grey.
-            backgroundColor: isDark ? '#0f172a' : '#f8fafc',
+            backgroundColor: isDark ? '#121418' : '#f5f4f1',
             backgroundImage: isDark
-              ? 'radial-gradient(1100px 640px at 6% -12%, rgba(7, 93, 204, 0.34), transparent 62%), radial-gradient(900px 540px at 102% -4%, rgba(32, 199, 181, 0.16), transparent 58%), radial-gradient(800px 500px at 90% 110%, rgba(7, 93, 204, 0.16), transparent 60%)'
-              : 'radial-gradient(1100px 640px at 6% -12%, rgba(7, 93, 204, 0.18), transparent 62%), radial-gradient(900px 540px at 102% -4%, rgba(32, 199, 181, 0.16), transparent 58%), radial-gradient(800px 500px at 90% 110%, rgba(7, 93, 204, 0.10), transparent 60%)',
+              ? 'radial-gradient(1100px 640px at 6% -12%, rgba(224, 161, 0, 0.16), transparent 62%), radial-gradient(900px 540px at 102% -4%, rgba(120, 130, 150, 0.14), transparent 58%), radial-gradient(800px 500px at 90% 110%, rgba(224, 161, 0, 0.09), transparent 60%)'
+              : 'radial-gradient(1100px 640px at 6% -12%, rgba(224, 161, 0, 0.14), transparent 62%), radial-gradient(900px 540px at 102% -4%, rgba(42, 47, 58, 0.10), transparent 58%), radial-gradient(800px 500px at 90% 110%, rgba(224, 161, 0, 0.07), transparent 60%)',
             backgroundAttachment: 'fixed',
-            scrollbarColor: mode === 'dark' ? '#334155 #0f172a' : '#cbd5e1 #f8fafc',
+            scrollbarColor: mode === 'dark' ? '#3a4050 #121418' : '#cfd2d8 #f5f4f1',
             '&::-webkit-scrollbar, & *::-webkit-scrollbar': {
               width: '8px',
               height: '8px',
             },
             '&::-webkit-scrollbar-track, & *::-webkit-scrollbar-track': {
-              backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.5)' : 'rgba(248, 250, 252, 0.5)',
+              backgroundColor: mode === 'dark' ? 'rgba(18, 20, 24, 0.5)' : 'rgba(245, 244, 241, 0.5)',
             },
             '&::-webkit-scrollbar-thumb, & *::-webkit-scrollbar-thumb': {
               borderRadius: '8px',
-              backgroundColor: mode === 'dark' ? '#334155' : '#cbd5e1',
+              backgroundColor: mode === 'dark' ? '#3a4050' : '#cfd2d8',
               border: '2px solid',
-              borderColor: mode === 'dark' ? '#0f172a' : '#f8fafc',
+              borderColor: mode === 'dark' ? '#121418' : '#f5f4f1',
             },
             '&::-webkit-scrollbar-thumb:hover, & *::-webkit-scrollbar-thumb:hover': {
-              backgroundColor: mode === 'dark' ? '#475569' : '#94a3b8',
+              backgroundColor: mode === 'dark' ? '#4d5566' : '#a3a9b5',
             },
+          },
+          // Motion, all of it small and all of it decorative: a page rises 8px into place as it
+          // mounts, summary tiles follow in sequence, and the brand mark catches a glint every
+          // few seconds. Every rule sits under [data-decorative-motion] or .nx-enter so the
+          // reduce-motion block below can switch the lot off with one selector.
+          '@keyframes nx-rise': {
+            from: { opacity: 0, transform: 'translateY(8px)' },
+            to: { opacity: 1, transform: 'none' },
+          },
+          '@keyframes nx-glint': {
+            '0%, 78%': { transform: 'skewX(-20deg) translateX(0)' },
+            '100%': { transform: 'skewX(-20deg) translateX(560%)' },
+          },
+          '.nx-enter, #main-content > :nth-child(2)': {
+            animation: 'nx-rise 280ms cubic-bezier(0.2, 0.7, 0.2, 1) both',
+          },
+          '.nx-glint': {
+            animation: 'nx-glint 7s cubic-bezier(0.4, 0, 0.2, 1) infinite',
           },
           // SC 2.2.2 / SC 2.3.3 mitigation — several surfaces (notably the
           // login page) run infinite decorative animations. Honour the OS
@@ -370,7 +404,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             'html:focus-within': {
               scrollBehavior: 'auto !important',
             },
-            '[data-decorative-motion="true"]': {
+            '[data-decorative-motion="true"], [data-decorative-motion="true"] *, .nx-enter, #main-content > :nth-child(2), .nx-glint': {
               animation: 'none !important',
               transition: 'none !important',
             },

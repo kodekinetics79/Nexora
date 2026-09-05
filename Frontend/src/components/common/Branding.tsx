@@ -19,7 +19,7 @@ const Branding: React.FC<BrandingProps> = ({
 
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-      <BrandMark size={logoSize} tint={theme.palette.primary.main} title={showText ? '' : 'Nexora'} />
+      <BrandMark size={logoSize} face={theme.palette.primary.main} title={showText ? '' : 'Nexora'} />
       {showText && (
         <Box sx={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
           <Typography

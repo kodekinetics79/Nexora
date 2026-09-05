@@ -504,6 +504,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
   );
 
   const colorOptions = [
+    { name: 'Brass', color: '#c9931a' },
     { name: 'Executive Navy', color: '#1e3a8a' },
     { name: 'Corporate Blue', color: '#0056b3' },
     { name: 'Trust Blue', color: '#2563eb' },
