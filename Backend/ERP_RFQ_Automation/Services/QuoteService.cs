@@ -223,6 +223,17 @@ namespace ERP_RFQ_Automation.Services
                 if (!sourceRfq.CommercialCaseId.HasValue || string.IsNullOrWhiteSpace(sourceRfq.NexoraSerial))
                     throw new InvalidOperationException(
                         "The selected RFQ is not linked to a commercial case, so a quote cannot inherit governed lineage from it.");
+                // The database keeps one quote per RFQ per tenant (OneQuotePerRfqIndex). Left to
+                // the index, the second POST answered "An unexpected error occurred" with a
+                // correlation id, and the rep learned nothing. Checked here, and mapped again on
+                // the INSERT for the race the pre-check cannot close.
+                var existingQuoteNo = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.BusinessUnitId == request.BusinessUnitId && q.Rfqid == sourceRfq.Id)
+                    .OrderBy(q => q.Id)
+                    .Select(q => q.QuoteNo)
+                    .FirstOrDefaultAsync();
+                if (existingQuoteNo is not null)
+                    throw new InvalidOperationException(OneQuotePerRfqMessage(sourceRfq.Rfqno, existingQuoteNo));
             }
 
             var quote = new Quote
@@ -279,10 +290,27 @@ namespace ERP_RFQ_Automation.Services
             await CalculateQuoteTotals(quote);
 
             _context.Quotes.Add(quote);
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException exception) when (sourceRfq is not null && IsOneQuotePerRfqViolation(exception))
+            {
+                _context.Entry(quote).State = EntityState.Detached;
+                var winner = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.BusinessUnitId == request.BusinessUnitId && q.Rfqid == sourceRfq.Id)
+                    .OrderBy(q => q.Id)
+                    .Select(q => q.QuoteNo)
+                    .FirstOrDefaultAsync();
+                throw new InvalidOperationException(OneQuotePerRfqMessage(sourceRfq.Rfqno, winner ?? "another quote"));
+            }
 
             return await GetQuoteByIdAsync(quote.Id);
         }
+
+        private static string OneQuotePerRfqMessage(string rfqNo, string existingQuoteNo)
+            => $"RFQ '{rfqNo}' already has quote '{existingQuoteNo}'. Open that quote and edit it, or revise it "
+               + "once it has been sent — one RFQ carries one quote.";
 
         public async Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(
             long rfqId, long businessUnitId, string actor, CancellationToken ct = default)
@@ -1745,9 +1773,12 @@ namespace ERP_RFQ_Automation.Services
 
             // Reported in the order the send applies them, so the first thing the rep reads is
             // the first thing that would actually stop them.
-            if (await _context.Set<LeadRevisionImpact>().AsNoTracking().AnyAsync(x =>
-                    x.BusinessUnitId == businessUnitId && x.AggregateType == "QUOTE" &&
-                    x.AggregateId == quoteId && x.Status == "OPEN", ct))
+            // The same predicate the quote detail uses (LeadRevisionImpactQueries): an impact
+            // resolved through POST {id}/revision-impact/resolve is an audit event, not a status
+            // change, because the impact table is append-only. Reading Status alone here kept
+            // refusing a quote whose screen already said the revision was resolved.
+            if (await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                    .OpenQuoteImpacts(_context, businessUnitId, quoteId).AsNoTracking().AnyAsync(ct))
                 Block("CUSTOMER_REVISION_UNRESOLVED",
                     "This quote is stale because a customer revision was received. Review and resolve "
                     + "the revision impact before sending it.");
@@ -1784,6 +1815,18 @@ namespace ERP_RFQ_Automation.Services
                         + "and the platform sender does not transmit. Sending now would fail permanently "
                         + "and this quote could then only go out as a new revision.",
                         "Setup → Mailboxes", "/setup/mailboxes");
+                // The containment guard applies to a tenant mailbox exactly as to the platform
+                // sender (OutboundSenderResolver.ForMailbox). DraftOnly logs and discards every
+                // message and returns no receipt, which the dispatcher records as an interrupted
+                // delivery — so a transmitting mailbox behind a DraftOnly guard burns the quote
+                // number just as surely as no mailbox at all. Same authority the sender reads.
+                else if (sender.GuardMode == ERP_RFQ_Automation.Notifications.OutboundEmailMode.DraftOnly)
+                    Block("OUTBOUND_MAIL_DRAFT_ONLY",
+                        "Nothing can be emailed to customers right now: the platform's outbound mail guard is "
+                        + "in DraftOnly, so every message is logged and discarded instead of transmitted. "
+                        + "Sending now would be recorded as an interrupted delivery and this quote could then "
+                        + "only go out as a new revision. Ask the platform operator to take the guard out of "
+                        + "DraftOnly first.");
             }
 
             // A delivery that already ended terminally. UNCERTAIN is the restart case: the
@@ -1868,9 +1911,10 @@ namespace ERP_RFQ_Automation.Services
             // A customer amendment creates an explicit open impact rather than silently mutating
             // an existing quote. Sending while that impact is open would distribute a commercial
             // document known to be stale, even if its old prices still have a valid attestation.
-            if (await _context.Set<LeadRevisionImpact>().AsNoTracking().AnyAsync(x =>
-                    x.BusinessUnitId == businessUnitId && x.AggregateType == "QUOTE" &&
-                    x.AggregateId == quoteId && x.Status == "OPEN"))
+            // Same authority as send-readiness and the quote detail (LeadRevisionImpactQueries);
+            // see EvaluateSendReadinessAsync for why Status alone is the wrong question.
+            if (await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                    .OpenQuoteImpacts(_context, businessUnitId, quoteId).AsNoTracking().AnyAsync())
                 throw new InvalidOperationException(
                     "This Quote Draft is stale because a customer revision was received. Review and resolve the revision impact before sending it.");
 
@@ -2187,7 +2231,45 @@ namespace ERP_RFQ_Automation.Services
         // Revisions-lite (WP-B4)
         // ==================================================================
 
-        public async Task<QuoteResponseDTO> ReviseQuoteAsync(long quoteId, long businessUnitId, string actor)
+        /// <summary>
+        /// Name of the partial unique index that keeps one quote per RFQ per tenant
+        /// (Migrations/20260722051308_OperationalizeCommercialLifecycle.cs). A revision is a second
+        /// quote on the same RFQ, so on a database that still carries the unfiltered index the
+        /// INSERT is refused — and that refusal must reach the rep as a sentence, not a 500.
+        /// </summary>
+        internal const string OneQuotePerRfqIndex = "UX_Quotes_BusinessUnitID_RFQID";
+
+        /// <summary>
+        /// Program.cs configures EnableRetryOnFailure, so NpgsqlRetryingExecutionStrategy refuses a
+        /// user-initiated transaction opened outside its delegate: on PostgreSQL every call used to
+        /// fail with "does not support user-initiated transactions" before the quote was even read.
+        /// Same shape as <see cref="ExtendQuoteValidityAsync"/>.
+        /// </summary>
+        public Task<QuoteResponseDTO> ReviseQuoteAsync(long quoteId, long businessUnitId, string actor)
+        {
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return ReviseQuoteCoreAsync(quoteId, businessUnitId, actor);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return ReviseQuoteCoreAsync(quoteId, businessUnitId, actor);
+            });
+        }
+
+        /// <summary>
+        /// A delivery that ended terminally — dead-lettered as uncertain or failed. The delivery
+        /// key is fixed per quote, so such a quote can never be sent again under its own number;
+        /// the readiness screen tells the rep to issue it as a new revision. That has to be
+        /// possible even while the quote is still DRAFT, which it is whenever the worker never
+        /// reached FinalizeQuoteDeliveryAsync.
+        /// </summary>
+        private Task<bool> HasTerminalDeliveryAsync(long quoteId, long businessUnitId)
+            => _context.QuoteDeliveryRequests.AsNoTracking()
+                .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.QuoteId == quoteId && x.DeadLetteredOn != null);
+
+        private async Task<QuoteResponseDTO> ReviseQuoteCoreAsync(long quoteId, long businessUnitId, string actor)
         {
             var isolation = _context.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _context.Database.BeginTransactionAsync(isolation);
@@ -2203,7 +2285,7 @@ namespace ERP_RFQ_Automation.Services
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
             if (source == null) throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
 
-            if (await IsQuoteInDraftAsync(source))
+            if (await IsQuoteInDraftAsync(source) && !await HasTerminalDeliveryAsync(source.Id, businessUnitId))
                 throw new InvalidOperationException(
                     $"Quote '{source.QuoteNo}' is still a draft — edit it directly instead of creating a revision.");
 
@@ -2268,10 +2350,28 @@ namespace ERP_RFQ_Automation.Services
             await CalculateQuoteTotals(revision);
 
             _context.Quotes.Add(revision);
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException exception) when (IsOneQuotePerRfqViolation(exception))
+            {
+                await transaction.RollbackAsync();
+                throw new InvalidOperationException(
+                    $"Quote '{source.QuoteNo}' cannot be revised on this database: it enforces one quote per RFQ "
+                    + $"({OneQuotePerRfqIndex}), and a revision is a second quote on the same RFQ. The rule has to be "
+                    + "scoped to original quotes by a migration before revisions can be issued.");
+            }
             await transaction.CommitAsync();
 
             return await GetQuoteByIdAsync(revision.Id);
+        }
+
+        private static bool IsOneQuotePerRfqViolation(DbUpdateException exception)
+        {
+            for (Exception? current = exception; current is not null; current = current.InnerException)
+                if (current.Message.Contains(OneQuotePerRfqIndex, StringComparison.Ordinal)) return true;
+            return false;
         }
 
         public async Task<QuoteRevisionInfoDTO> GetRevisionInfoAsync(long quoteId, long businessUnitId)
@@ -2296,7 +2396,10 @@ namespace ERP_RFQ_Automation.Services
 
             var chain = await LoadRevisionChainAsync(quote.Id, quote.RevisionOfQuoteId);
             var chainLocked = quote.OutcomeOn.HasValue || chain.Any(c => c.OutcomeOn.HasValue);
-            var isDraft = await IsQuoteInDraftAsync(quote);
+            // A draft is editable, so it is not revised — unless its delivery already ended
+            // terminally, in which case a revision is the ONLY way it can ever reach the customer.
+            var isDraft = await IsQuoteInDraftAsync(quote)
+                && !await HasTerminalDeliveryAsync(quote.Id, businessUnitId);
 
             return new QuoteRevisionInfoDTO
             {
@@ -2690,14 +2793,9 @@ namespace ERP_RFQ_Automation.Services
                 .AnyAsync(x => x.Id == quoteId && x.BusinessUnitId == businessUnitId, ct))
                 throw new KeyNotFoundException();
 
-            var impacts = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact>()
+            var impacts = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .OpenQuoteImpacts(_context, businessUnitId, quoteId)
                 .AsNoTracking()
-                .Where(x => x.BusinessUnitId == businessUnitId && x.AggregateType == "QUOTE"
-                    && x.AggregateId == quoteId && x.Status == "OPEN")
-                .Where(impact => !_context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent>()
-                    .Any(audit => audit.BusinessUnitId == businessUnitId
-                        && audit.EventType == "REVISION_IMPACT_RESOLVED"
-                        && audit.CorrelationId == "quote-impact:" + impact.Id))
                 .OrderBy(x => x.Id)
                 .Select(impact => new
                 {

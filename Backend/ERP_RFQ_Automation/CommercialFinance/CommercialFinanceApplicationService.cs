@@ -1172,6 +1172,14 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             .Select(x => (x.SetupCode ?? x.SetupValue ?? string.Empty).ToUpper())
             .SingleOrDefaultAsync();
         if (statusCode is "CONFIRMED" or "COMPLETED" or "SHIPPED" or "DELIVERED") return true;
+        // An order raised from a confirmed Client PO (CustomerAwardApplicationService.ConvertToOrder)
+        // is created DRAFT and nothing on the spine ever confirms it: allocation and despatch do
+        // not, delivery moves it to DELIVERED only once EVERY line is fully accepted, and the first
+        // shipment locks it against any edit ("Order cannot be modified as a shipment has been
+        // created"), status included. So a short or partial delivery left finance refused here
+        // for ever, on an order the customer had accepted in writing. The Client PO IS the
+        // customer's acceptance — the same thing the ACCEPTED quote below stands for.
+        if (order.SourceType == OrderSourceTypes.CustomerAward && order.CustomerAwardId is not null) return true;
         if (!order.QuoteId.HasValue) return false;
 
         return await _context.Quotes.AnyAsync(x => x.Id == order.QuoteId && x.BusinessUnitId == businessUnitId &&

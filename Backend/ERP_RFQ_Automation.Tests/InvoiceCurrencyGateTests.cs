@@ -80,9 +80,27 @@ public sealed class InvoiceCurrencyGateTests
         Assert.Equal(CurrencyId, issued.CurrencyId);
     }
 
+    [Fact]
+    public async Task A_draft_manual_order_is_still_refused_until_it_is_confirmed()
+    {
+        // THE CONTROL for QuoteToCashScenarioRegressionTests.An_order_raised_from_a_confirmed_client_PO_is_invoiceable_while_still_DRAFT:
+        // the relaxation is for orders the customer accepted through a Client PO, not for every
+        // draft. A manual draft carries no such acceptance.
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var order = SeedOrder(db, currencyId: CurrencyId, statusCode: "DRAFT");
+        var service = new CommercialFinanceApplicationService(db);
+
+        var refused = await Assert.ThrowsAsync<FinanceConflictException>(() => service.CreateInvoiceAsync(
+            BusinessUnitId, order.Id, "manual-draft-invoice", new CreateInvoiceRequest(null, null, null), "invoice-maker@test"));
+
+        Assert.Contains("must be confirmed", refused.Message);
+        Assert.Empty(await db.ReceivableDocuments.ToListAsync());
+    }
+
     // ------------------------------------------------------------------------ test plumbing
 
-    private static Order SeedOrder(ErpRfqAutomationContext db, long? currencyId)
+    private static Order SeedOrder(ErpRfqAutomationContext db, long? currencyId, string statusCode = "SHIPPED")
     {
         Seed.EnsureBusinessUnit(db, BusinessUnitId);
         Seed.Customer(db, CustomerId, BusinessUnitId, "AR Customer");
@@ -113,8 +131,8 @@ public sealed class InvoiceCurrencyGateTests
         {
             SetupId = StatusId,
             SetupType = "OrderStatus",
-            SetupCode = "SHIPPED",
-            SetupValue = "Shipped",
+            SetupCode = statusCode,
+            SetupValue = statusCode,
             BusinessUnitId = BusinessUnitId,
             IsActive = true,
             CreatedBy = "test",

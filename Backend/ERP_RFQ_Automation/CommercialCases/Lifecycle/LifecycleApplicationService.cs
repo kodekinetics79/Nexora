@@ -334,6 +334,12 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         aggregate.SetStatus(target.SetupId);
         aggregate.IncrementVersion();
         var now = DateTime.UtcNow;
+        // A quote marked SENT by hand — a rep who emailed it from Outlook, or a buyer who was
+        // handed a printed copy — was SENT with SentOn null: DaysSinceSent stayed null, IsStale
+        // stayed false for ever, and the follow-up sweep never saw it. The delivery worker stamps
+        // SentOn before it transitions; every other route to SENT stamps it here, once.
+        if (aggregateType == QuoteAggregate && targetCode == "SENT")
+            aggregate.StampQuoteSent(now);
         if (recordsLeadLoss)
             aggregate.RecordLeadOutcome(leadOutcomeReasonId, Truncate(Clean(command.ReasonNotes), 500), now);
         else if (reopen && aggregateType == LeadAggregate)
@@ -641,6 +647,15 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             if (_lead != null) _lead.LifecycleVersion = Version;
             else if (_rfq != null) _rfq.LifecycleVersion = Version;
             else _quote!.LifecycleVersion = Version;
+        }
+
+        /// <summary>
+        /// The moment a quote became SENT, recorded once: a quote the delivery worker already
+        /// stamped keeps the earlier, truer time.
+        /// </summary>
+        public void StampQuoteSent(DateTime now)
+        {
+            if (_quote is { SentOn: null }) _quote.SentOn = now;
         }
 
         /// <summary>

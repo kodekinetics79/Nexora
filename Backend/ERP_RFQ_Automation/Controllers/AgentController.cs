@@ -257,6 +257,15 @@ public sealed class AgentController : ControllerBase
 
         var outcome = await _orchestrator.ExecuteApprovedAsync(tool, input, ctx, ct);
 
+        // The tool ran on this same scoped DbContext, and the services it calls run inside the
+        // retrying execution strategy, which starts with ChangeTracker.Clear()
+        // (QuoteService.SendQuoteEmailAsync, QuoteDeliveryStore). That detached the approval
+        // loaded above, so the status written below was never saved: the quote went out, the
+        // hold stayed "pending", and every further Approve executed the send again. Re-read the
+        // row the decision is recorded on.
+        if (_db.Entry(approval).State == EntityState.Detached)
+            approval = await _db.Set<AgentApproval>().FirstAsync(a => a.Id == id, ct);
+
         approval.Status = outcome.Ok ? AgentApprovalStatus.Executed : AgentApprovalStatus.Failed;
         approval.ResultJson = outcome.ResultJson;
         Decide(approval, ctx);

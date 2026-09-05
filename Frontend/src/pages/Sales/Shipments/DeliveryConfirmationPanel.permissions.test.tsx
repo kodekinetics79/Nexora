@@ -24,20 +24,42 @@ vi.mock('../../../api/services/deliveryService', async importOriginal => {
   };
 });
 
-function renderPanel(canEdit: boolean, items: ShipmentItemDTO[] = []) {
+function renderPanel(
+  canEdit: boolean, items: ShipmentItemDTO[] = [], canDecide?: boolean, deliveryStatus = 'DISPATCHED',
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
       <DeliveryConfirmationPanel
         shipmentId={70}
         orderId={80}
-        deliveryStatus="DISPATCHED"
+        deliveryStatus={deliveryStatus}
         items={items}
         canEdit={canEdit}
+        canDecide={canDecide}
       />
     </QueryClientProvider>,
   );
 }
+
+/** A recorded proof with one short line and no decision yet — the state the Decide control lives in. */
+const shortfallProof = {
+  id: 5,
+  shipmentId: 70,
+  shipmentNo: 'SHP-70',
+  outcome: 'DELIVERY_EXCEPTION',
+  receivedByName: 'Amira Cole',
+  receivedOn: '2026-09-04T12:00:00Z',
+  recordedBy: 'clerk',
+  recordedOn: '2026-09-04T12:00:00Z',
+  hasGpsFix: false,
+  lines: [{
+    id: 501, shipmentItemId: 701, orderItemId: 801, productName: 'Synthetic valve',
+    despatchedQuantity: 4, acceptedQuantity: 3, refusedQuantity: 1,
+    exceptionReasonCode: 'SHORT_SHIPMENT', exceptionNote: 'one box missing',
+    commercialDecision: null, commercialDecisionReason: null, commercialDecisionBy: null, commercialDecisionOn: null,
+  }],
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -45,6 +67,35 @@ beforeEach(() => {
   getDeliveredQuantities.mockResolvedValue([]);
   confirm.mockResolvedValue({ id: 1 });
   captureEvidence.mockResolvedValue({ attachmentId: 91 });
+});
+
+describe('shortfall decision control', () => {
+  // The server gates POST /api/delivery/shortfalls/{id}/decision on Shipments:Edit AND
+  // Orders:Edit. The control used to appear on Shipments:Edit alone, so a warehouse clerk typed
+  // a reason and got a 403 — a dead affordance reported by the operator-verbs stream.
+  it('hides Decide and prints the missing permission for a shipment editor without Orders edit', async () => {
+    getConfirmation.mockResolvedValue(shortfallProof);
+    renderPanel(true, [{ id: 701, orderItemId: 801, productName: 'Synthetic valve', quantity: 4 }], false, 'DELIVERY_EXCEPTION');
+
+    expect(await screen.findByText(/one box missing/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Decide' })).not.toBeInTheDocument();
+    expect(screen.getByText(/needs Orders edit permission as well as Shipments edit/i)).toBeInTheDocument();
+  });
+
+  it('offers Decide only when both permissions are held', async () => {
+    getConfirmation.mockResolvedValue(shortfallProof);
+    renderPanel(true, [{ id: 701, orderItemId: 801, productName: 'Synthetic valve', quantity: 4 }], true, 'DELIVERY_EXCEPTION');
+
+    expect(await screen.findByRole('button', { name: 'Decide' })).toBeInTheDocument();
+  });
+
+  it('keeps the read-only wording for viewers', async () => {
+    getConfirmation.mockResolvedValue(shortfallProof);
+    renderPanel(false, [{ id: 701, orderItemId: 801, productName: 'Synthetic valve', quantity: 4 }], false, 'DELIVERY_EXCEPTION');
+
+    expect(await screen.findByText('Awaiting authorized decision')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Decide' })).not.toBeInTheDocument();
+  });
 });
 
 describe('delivery mutation controls', () => {
