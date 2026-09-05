@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import {
   Alert,
@@ -8,175 +8,107 @@ import {
   Button,
   Chip,
   CircularProgress,
-  Dialog,
-  DialogContent,
-  DialogTitle,
   Divider,
-  IconButton,
   List,
-  ListItem,
   ListItemButton,
   ListItemText,
   Paper,
   Stack,
   TextField,
-  Tooltip,
   Typography,
 } from '@mui/material';
 import {
   ArrowForward as DrillDownIcon,
   Refresh as RefreshIcon,
   Schedule as FreshnessIcon,
-  Close as CloseIcon,
+  Handshake as WonIcon,
+  TrendingUp as PipelineIcon,
+  Schedule as WaitingIcon,
+  MarkEmailReadOutlined as RequestsIcon,
 } from '@mui/icons-material';
-import dashboardService, {
-  type Release01KpiDTO,
-  type Release01KpiUnit,
-} from '../../api/services/dashboardService';
+import dashboardService, { type PipelineStageDTO } from '../../api/services/dashboardService';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
-import GrossMarginPanel from './GrossMarginPanel';
 import { useAuth } from '../../context/AuthContext';
+import { formatMoney } from '../../utils/currency';
+import GrossMarginPanel from './GrossMarginPanel';
+import HeroTile from './executive/HeroTile';
+import FunnelPanel from './executive/FunnelPanel';
+import TrendPanel from './executive/TrendPanel';
+import WorkloadPanel from './executive/WorkloadPanel';
+import KpiCard, { drillDownRoute } from './executive/KpiCard';
 
-const formatValue = (kpi: Release01KpiDTO): string => {
-  if (kpi.state === 'insufficient_data' || kpi.value === null) {
-    return 'Insufficient data';
-  }
-
-  if (kpi.unit === 'percentage') return `${kpi.value.toLocaleString('en-US', { maximumFractionDigits: 1 })}%`;
-  const formats: Record<Exclude<Release01KpiUnit, 'percentage'>, Intl.NumberFormatOptions> = {
-    count: { maximumFractionDigits: 0 },
-    currency: { maximumFractionDigits: 2 },
-    hours: { maximumFractionDigits: 1 },
-    score: { maximumFractionDigits: 1 },
-    weighted_work: { maximumFractionDigits: 1 },
-  };
-  const formatted = new Intl.NumberFormat('en-US', formats[kpi.unit]).format(kpi.value);
-  return kpi.unit === 'hours' ? `${formatted} h` : formatted;
+/**
+ * The executive view.
+ *
+ * One screen for the person who reads the numbers rather than works a single deal (owner
+ * decision, 2026-09-05). It is laid out in the order a director scans:
+ *
+ *   1. Four figures at a glance — won, weighted pipeline, waiting on the customer, requests
+ *      received — each a pressable key that opens the records behind it, each with its
+ *      denominator on its face and a sparkline where a series exists.
+ *   2. The funnel and six months of volume against value.
+ *   3. Gross margin with its sample, and who is carrying what (manager tier only).
+ *   4. The verified Release 01 snapshot — the evidence row — and what needs a decision.
+ *
+ * Nothing on this screen is computed here. Every figure is a server aggregate with its own scope
+ * and freshness, and a figure the server cannot state is shown as "not available" with the
+ * server's reason, never as zero and never as a dash. The panels do not fetch through one
+ * another: a failed funnel does not blank the margin.
+ */
+const stageRoute = (stage: PipelineStageDTO): string => {
+  if (stage.key === 'leads') return '/procurement/leads';
+  if (stage.key === 'accepted') return '/procurement/leads';
+  if (stage.key === 'quoted') return '/sales/quotes';
+  return '/sales/quotes';
 };
 
-const drillDownRoute = (recordType: string, recordId: number): string | null => {
-  if (recordType === 'lead') return `/procurement/leads/view/${recordId}`;
-  if (recordType === 'rfq') return `/procurement/rfqs/view/${recordId}`;
-  if (recordType === 'quote') return `/sales/quotes/view/${recordId}`;
-  return null;
-};
-
-const KpiCard = ({ kpi, index = 0 }: { kpi: Release01KpiDTO; index?: number }) => {
-  const navigate = useNavigate();
-  const [drillDownOpen, setDrillDownOpen] = useState(false);
-  const drillDownRecords = kpi.drillDownIdentifiers;
-  const canDrillDown = kpi.state === 'available' && drillDownRecords.length > 0;
-
-  return (
-    <Paper
-      component="article"
-      variant="outlined"
-      className="nx-glass nx-enter"
-      data-decorative-motion="true"
-      style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
-      sx={{
-        p: 2, minHeight: 172, borderRadius: 2, display: 'flex', flexDirection: 'column',
-        transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 180ms ease-out',
-        '&:hover': { transform: 'translateY(-3px)', boxShadow: (theme) => `inset 0 1px 0 rgba(255,255,255,${theme.palette.mode === 'dark' ? 0.08 : 0.9}), 0 22px 44px -22px rgba(15,18,24,${theme.palette.mode === 'dark' ? 0.9 : 0.4})` },
-        '@media (prefers-reduced-motion: reduce)': { transition: 'none', '&:hover': { transform: 'none' } },
-      }}
-    >
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}>
-        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
-          {kpi.label}
-        </Typography>
-        <Chip
-          size="small"
-          label={kpi.state === 'available' ? 'Available' : 'Insufficient data'}
-          color={kpi.state === 'available' ? 'success' : 'default'}
-          variant="outlined"
-        />
-      </Stack>
-      <Typography
-        variant={kpi.state === 'available' ? 'h4' : 'h6'}
-        sx={{ mt: 1.5, fontWeight: 900, color: kpi.state === 'available' ? 'text.primary' : 'text.secondary' }}
-      >
-        {formatValue(kpi)}
-      </Typography>
-      <Tooltip title={kpi.definition} placement="top-start">
-        <Typography
-          variant="body2"
-          sx={{ mt: 1, color: 'text.secondary', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-        >
-          {kpi.definition}
-        </Typography>
-      </Tooltip>
-      {kpi.state === 'insufficient_data' && kpi.insufficientDataReason && (
-        <Typography variant="caption" sx={{ mt: 1, color: 'text.secondary' }}>
-          {kpi.insufficientDataReason}
-        </Typography>
-      )}
-      <Box sx={{ flexGrow: 1 }} />
-      {canDrillDown && (
-        <Button
-          size="small"
-          endIcon={<DrillDownIcon />}
-          onClick={() => setDrillDownOpen(true)}
-          sx={{ alignSelf: 'flex-start', mt: 1, px: 0 }}
-        >
-          View {kpi.drillDownIdentifiers.length} record{kpi.drillDownIdentifiers.length === 1 ? '' : 's'}
-        </Button>
-      )}
-      <Dialog open={drillDownOpen} onClose={() => setDrillDownOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          {kpi.label} records
-          <IconButton aria-label="Close drill-down" onClick={() => setDrillDownOpen(false)}>
-            <CloseIcon />
-          </IconButton>
-        </DialogTitle>
-        <DialogContent dividers>
-          <List disablePadding>
-            {drillDownRecords.map((record) => {
-              const route = drillDownRoute(record.recordType.toLowerCase(), record.recordId);
-              const content = (
-                <ListItemText
-                  primary={record.nexoraSerial}
-                  secondary={`${record.recordType.toUpperCase()} #${record.recordId}${record.classification ? ` | ${record.classification}` : ''}`}
-                />
-              );
-              return route ? (
-                <ListItemButton key={`${record.recordType}-${record.recordId}`} onClick={() => navigate(route)}>
-                  {content}<DrillDownIcon />
-                </ListItemButton>
-              ) : (
-                <ListItem key={`${record.recordType}-${record.recordId}`}>
-                  {content}
-                  <Chip size="small" label="No detail route" variant="outlined" />
-                </ListItem>
-              );
-            })}
-          </List>
-        </DialogContent>
-      </Dialog>
-    </Paper>
-  );
+const scopeWords = (scope: { scope: string; accountTeamIds?: number[] } | undefined): string | null => {
+  if (!scope) return null;
+  if (scope.scope === 'tenant') return 'Company-wide';
+  if (scope.scope === 'managed_scope') return `Your managed scope — ${scope.accountTeamIds?.length ?? 0} account team(s)`;
+  if (scope.scope === 'assigned_accounts') return `Your assigned accounts — ${scope.accountTeamIds?.length ?? 0} account team(s)`;
+  return scope.scope;
 };
 
 export default function DashboardPage() {
   const { hasPermission, userData } = useAuth();
   const navigate = useNavigate();
-  const location = useLocation();
-  const isExecutiveToday = location.pathname === '/executive/today';
   const initialTo = useMemo(() => dayjs().startOf('day').format('YYYY-MM-DD'), []);
   const initialFrom = useMemo(() => dayjs(initialTo).subtract(30, 'day').format('YYYY-MM-DD'), [initialTo]);
   const [from, setFrom] = useState(initialFrom);
   const [to, setTo] = useState(initialTo);
   const invalidWindow = !from || !to || !dayjs(from).isBefore(dayjs(to));
-  const canViewManagementAnalytics = Boolean(
-    userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank,
-  );
+  const managerTier = Boolean(userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank);
+  const businessUnitId = userData.businessUnitId;
 
-  const dashboard = useQuery({
+  const release = useQuery({
     queryKey: ['dashboard', 'release-01', from, to],
     queryFn: () => dashboardService.getRelease01({ from, to }),
     refetchInterval: 60_000,
     retry: 1,
     enabled: !invalidWindow,
+  });
+  const pipeline = useQuery({
+    queryKey: ['dashboard', 'pipeline-analytics'],
+    queryFn: dashboardService.getPipelineAnalytics,
+    refetchInterval: 60_000,
+    retry: 1,
+  });
+  const workload = useQuery({
+    queryKey: ['dashboard', 'team-workload'],
+    queryFn: dashboardService.getTeamWorkload,
+    refetchInterval: 60_000,
+    enabled: managerTier,
+    retry: (failureCount, error: any) => error?.response?.status !== 403 && failureCount < 2,
+  });
+  // The tenant's six-month series (requests priced, order value). A separate, older aggregate:
+  // it feeds the trend chart and the sparklines only, never a headline figure.
+  const series = useQuery({
+    queryKey: ['dashboard', 'monthly-series', businessUnitId],
+    queryFn: () => dashboardService.getDashboard(businessUnitId as number),
+    enabled: typeof businessUnitId === 'number' && businessUnitId > 0,
+    staleTime: 5 * 60_000,
+    retry: 1,
   });
   const salesToday = useQuery({
     queryKey: ['commercial-intelligence', 'sales-today'],
@@ -184,8 +116,27 @@ export default function DashboardPage() {
     retry: 1,
   });
 
-  const data = dashboard.data;
+  const data = release.data;
   const generatedAt = data?.generatedAt ? dayjs(data.generatedAt) : null;
+  const funnel = pipeline.data;
+  const won = funnel?.funnel.find((s) => s.key === 'won');
+  const leadsReceived = data?.kpis.find((k) => k.key === 'leads_received');
+  const evidenceKpis = data?.kpis.filter((k) => k.key !== 'leads_received') ?? [];
+  const monthly = series.data?.volumeTrend ?? [];
+  const valueSeries = monthly.map((m) => m.value);
+  const countSeries = monthly.map((m) => m.count);
+  const workloadForbidden = (workload.error as any)?.response?.status === 403;
+  const attention = salesToday.data?.attentionItems?.slice(0, 5) ?? [];
+
+  const refreshAll = () => {
+    void release.refetch();
+    void pipeline.refetch();
+    if (managerTier) void workload.refetch();
+    void series.refetch();
+    void salesToday.refetch();
+  };
+  const busy = release.isFetching || pipeline.isFetching || series.isFetching;
+
   return (
     <Box sx={{ maxWidth: 1440, mx: 'auto', p: { xs: 1, sm: 2, md: 3 } }}>
       <Stack
@@ -193,26 +144,17 @@ export default function DashboardPage() {
         spacing={2}
         sx={{ alignItems: { md: 'flex-end' }, justifyContent: 'space-between', mb: 2.5 }}
       >
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900 }}>{isExecutiveToday ? 'Executive RFQ-to-Revenue' : 'Dashboard'}</Typography>
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.5, flexWrap: 'wrap' }}>
-            <Chip size="small" label={data?.definitionVersion ?? 'release-01'} variant="outlined" />
-            {data?.roleScope && (
-              // The tier, in words. A raw 'managed_scope' on a board tile tells a director
-              // nothing about whose numbers they are reading.
-              <Chip
-                size="small"
-                variant="outlined"
-                label={
-                  data.roleScope.scope === 'tenant' ? 'Company-wide'
-                    : data.roleScope.scope === 'managed_scope'
-                      ? `Your managed scope — ${data.roleScope.accountTeamIds?.length ?? 0} account team(s)`
-                      : data.roleScope.scope === 'assigned_accounts'
-                        ? `Your assigned accounts — ${data.roleScope.accountTeamIds?.length ?? 0} account team(s)`
-                        : data.roleScope.scope
-                }
-              />
-            )}
+        <Box sx={{ minWidth: 0 }}>
+          <Typography
+            variant="h4"
+            component="h1"
+            sx={{ fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em' }}
+          >
+            Executive view
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.5, flexWrap: 'wrap', gap: 0.5 }}>
+            {data?.roleScope && <Chip size="small" variant="outlined" label={scopeWords(data.roleScope)} />}
+            <Chip size="small" variant="outlined" label={data?.definitionVersion ?? 'release-01'} />
             <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', color: 'text.secondary' }}>
               <FreshnessIcon sx={{ fontSize: 16 }} />
               <Typography variant="caption">
@@ -241,9 +183,9 @@ export default function DashboardPage() {
           />
           <Button
             variant="outlined"
-            startIcon={dashboard.isFetching ? <CircularProgress size={16} /> : <RefreshIcon />}
-            onClick={() => dashboard.refetch()}
-            disabled={dashboard.isFetching || invalidWindow}
+            startIcon={busy ? <CircularProgress size={16} /> : <RefreshIcon />}
+            onClick={refreshAll}
+            disabled={busy || invalidWindow}
           >
             Refresh
           </Button>
@@ -252,64 +194,155 @@ export default function DashboardPage() {
 
       {invalidWindow && <Alert severity="warning" sx={{ mb: 2 }}>The start date must be earlier than the end date.</Alert>}
 
-      {dashboard.isError && (
+      {/* 1. At a glance */}
+      <Box
+        component="section"
+        aria-label="At a glance"
+        sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}
+      >
+        <HeroTile
+          index={0}
+          label="Won"
+          icon={<WonIcon />}
+          value={pipeline.isLoading ? null : won ? (won.value !== null ? formatMoney(won.value, won.valueCurrency) : won.count.toLocaleString('en-US')) : null}
+          basis={won ? `${won.count.toLocaleString('en-US')} won quote${won.count === 1 ? '' : 's'}, all time${won.value === null && won.valueUnavailableReason ? ` · ${won.valueUnavailableReason}` : ''}` : 'Won quotes, all time'}
+          unavailableReason={pipeline.isLoading ? 'Loading…' : pipeline.isError ? 'The funnel could not be loaded.' : undefined}
+          series={valueSeries.some((v) => v > 0) ? valueSeries : null}
+          seriesLabel="Order value by month"
+          definition="Quotes the customer accepted, valued in the tenant's base currency when every one can be converted."
+          onOpen={() => navigate('/sales/quotes')}
+          openLabel="Quotes"
+        />
+        <HeroTile
+          index={1}
+          label="Weighted pipeline"
+          icon={<PipelineIcon />}
+          value={funnel ? (funnel.weightedForecast !== null ? formatMoney(funnel.weightedForecast, funnel.forecastCurrency) : null) : null}
+          basis={funnel ? `${(funnel.awaitingResponseQuotes + funnel.respondedQuotes).toLocaleString('en-US')} open quotes, weighted by stage` : 'Open quotes, weighted by stage'}
+          unavailableReason={pipeline.isLoading ? 'Loading…' : funnel?.forecastUnavailableReason ?? (pipeline.isError ? 'The funnel could not be loaded.' : undefined)}
+          definition="Open quote value multiplied by the likelihood of each stage. Not a forecast of cash."
+          onOpen={() => navigate('/sales/quotes')}
+          openLabel="Quotes"
+        />
+        <HeroTile
+          index={2}
+          label="Waiting on the customer"
+          icon={<WaitingIcon />}
+          value={funnel ? funnel.awaitingResponseQuotes.toLocaleString('en-US') : null}
+          basis={funnel ? (funnel.awaitingResponseValue !== null ? `${formatMoney(funnel.awaitingResponseValue, funnel.forecastCurrency)} on the table` : 'Sent quotes with no answer yet') : 'Sent quotes with no answer yet'}
+          unavailableReason={pipeline.isLoading ? 'Loading…' : pipeline.isError ? 'The funnel could not be loaded.' : undefined}
+          definition="Quotes sent and neither accepted, declined nor expired."
+          onOpen={() => navigate('/sales/quotes?state=sent')}
+          openLabel="Sent quotes"
+        />
+        <HeroTile
+          index={3}
+          label="Requests received"
+          icon={<RequestsIcon />}
+          value={leadsReceived && leadsReceived.state === 'available' && leadsReceived.value !== null ? leadsReceived.value.toLocaleString('en-US') : null}
+          basis={`${dayjs(from).format('D MMM')} – ${dayjs(to).format('D MMM YYYY')}${data?.roleScope ? ` · ${scopeWords(data.roleScope)}` : ''}`}
+          unavailableReason={release.isLoading ? 'Loading…' : leadsReceived?.insufficientDataReason ?? (release.isError ? 'The verified snapshot is unavailable.' : undefined)}
+          series={countSeries.some((v) => v > 0) ? countSeries : null}
+          seriesLabel="Requests priced by month"
+          definition={leadsReceived?.definition}
+          onOpen={() => navigate('/procurement/leads')}
+          openLabel="Leads"
+        />
+      </Box>
+
+      {/* 2. The funnel, and volume against value */}
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: '7fr 5fr' }, gap: 2, mt: 2 }}>
+        <FunnelPanel
+          data={funnel}
+          loading={pipeline.isLoading}
+          error={pipeline.isError}
+          onStage={(stage) => navigate(stageRoute(stage))}
+        />
+        <TrendPanel
+          trend={monthly}
+          loading={series.isLoading}
+          unavailable={series.isError ? 'The monthly series could not be read for this workspace.' : null}
+          currencyCode={funnel?.forecastCurrency ?? null}
+        />
+      </Box>
+
+      {/* 3. The money and the team — manager tier */}
+      {managerTier && !invalidWindow && (
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: workloadForbidden ? '1fr' : '1fr 1fr' }, gap: 2, mt: 2 }}>
+          <GrossMarginPanel from={from} to={to} />
+          <WorkloadPanel
+            data={workload.data}
+            loading={workload.isLoading}
+            forbidden={workloadForbidden}
+            error={workload.isError && !workloadForbidden}
+            onOpen={() => navigate('/dashboard/team')}
+          />
+        </Box>
+      )}
+
+      {/* 4. Evidence and decisions */}
+      {release.isError && (
         <Alert
           severity="error"
-          action={<Button color="inherit" size="small" onClick={() => dashboard.refetch()}>Retry</Button>}
-          sx={{ mb: 2 }}
+          action={<Button color="inherit" size="small" onClick={() => release.refetch()}>Retry</Button>}
+          sx={{ mt: 3 }}
         >
           The verified Release 01 dashboard snapshot is unavailable. No legacy totals are shown in its place.
         </Alert>
       )}
-
-      {salesToday.data?.metrics.length ? (
-        <>
-          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Sales Control</Typography>
-          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, 1fr)' }, gap: 1.5, mb: 3 }}>
-            {salesToday.data.metrics.map((metric) => (
-              <Paper key={metric.key} variant="outlined" sx={{ p: 2 }}>
-                <Typography variant="body2" color="text.secondary">{metric.label}</Typography>
-                <Typography variant="h5" sx={{ fontWeight: 900 }}>{metric.value}</Typography>
-              </Paper>
-            ))}
-          </Box>
-        </>
-      ) : null}
-
-      {dashboard.isLoading ? (
-        <Box sx={{ minHeight: 320, display: 'grid', placeItems: 'center' }}><CircularProgress aria-label="Loading dashboard" /></Box>
-      ) : data?.kpis.length ? (
-        <>
-          {/* The "Commercial Attention" block that used to sit here was seven
-              navigation links laid out as metric tiles — no value, no
-              denominator, no source. A link menu dressed as a dashboard teaches
-              people to read tiles as facts. It is gone; the sidebar already
-              carries every one of those destinations. */}
-          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Verified Performance</Typography>
-          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}>
-            {data.kpis.map((kpi, index) => <KpiCard key={kpi.key} kpi={kpi} index={index} />)}
-          </Box>
-        </>
-      ) : !dashboard.isError ? (
-        <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
-      ) : null}
-
-      <Divider sx={{ my: 3 }} />
-      {/* FR-DSH-02. Its own panel rather than a KPI tile, because the figure only means
-          anything alongside its sample size, its coverage and its cost-basis disclosure, and a
-          tile has room for none of those. */}
-      {!invalidWindow && canViewManagementAnalytics && <GrossMarginPanel from={from} to={to} />}
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: attention.length ? '8fr 4fr' : '1fr' }, gap: 2, mt: 3 }}>
+        <Box component="section" aria-label="Verified performance">
+          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Verified performance</Typography>
+          {release.isLoading ? (
+            <Box sx={{ minHeight: 160, display: 'grid', placeItems: 'center' }}><CircularProgress aria-label="Loading dashboard" /></Box>
+          ) : evidenceKpis.length ? (
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(3, 1fr)' }, gap: 2 }}>
+              {evidenceKpis.map((kpi, index) => <KpiCard key={kpi.key} kpi={kpi} index={index} />)}
+            </Box>
+          ) : !release.isError ? (
+            <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
+          ) : null}
+        </Box>
+        {attention.length > 0 && (
+          <Paper component="section" aria-label="Needs a decision" variant="outlined" className="nx-glass" sx={{ p: { xs: 1.5, sm: 2 }, borderRadius: 3, alignSelf: 'start' }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>Needs a decision</Typography>
+            <List dense disablePadding sx={{ mt: 0.5 }}>
+              {attention.map((item) => {
+                const route = drillDownRoute(item.recordType.toLowerCase(), item.recordId);
+                return (
+                  <ListItemButton
+                    key={item.id}
+                    disabled={!route}
+                    onClick={() => route && navigate(route)}
+                    sx={{ borderRadius: 2, px: 1 }}
+                  >
+                    <ListItemText
+                      primary={`${item.reference}${item.customerName ? ` · ${item.customerName}` : ''}`}
+                      secondary={`${item.reason}${item.dueAt ? ` · due ${dayjs(item.dueAt).format('D MMM')}` : ''}${item.ownerName ? ` · ${item.ownerName}` : ''}`}
+                      slotProps={{ primary: { sx: { fontWeight: 700, fontSize: 14 } }, secondary: { sx: { fontSize: 12 } } }}
+                    />
+                    <DrillDownIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+                  </ListItemButton>
+                );
+              })}
+            </List>
+          </Paper>
+        )}
+      </Box>
 
       <Divider sx={{ my: 3 }} />
       <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1 }}>
         <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/deadlines')} sx={{ fontWeight: 800 }}>
           Deadline board
         </Button>
-        {canViewManagementAnalytics && (
+        {managerTier && (
           <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/brand-demand')} sx={{ fontWeight: 800 }}>
             Brand demand
           </Button>
         )}
+        <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/sales/performance')} sx={{ fontWeight: 800 }}>
+          Performance by rep
+        </Button>
         {hasPermission('Leads') && (
           <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/procurement/extraction/review')} sx={{ fontWeight: 800 }}>
             Extraction review queue

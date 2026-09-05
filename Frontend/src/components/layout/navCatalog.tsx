@@ -137,6 +137,8 @@ export interface PrimaryNavItem {
   icon: ReactNode;
   path: string;
   moduleName?: string;
+  /** Shown to manager-tier readers only; the row's screen is still permission-gated. */
+  managerOnly?: boolean;
   /** Addresses at which this row counts as "here", beyond its own path and its views'. */
   activePrefixes?: string[];
   /** The one level of tabs this destination offers. Absent means the screen has no tabs. */
@@ -155,6 +157,19 @@ export const ADVANCED_ROOT = '/advanced';
  * while the order stays stable across roles.
  */
 export const PRIMARY_NAV: PrimaryNavItem[] = [
+  {
+    // First row for the people who read the numbers rather than work a single deal (owner
+    // decision, 2026-09-05). Manager-tier only, and gated on Dashboard like its route, so a
+    // director opens on the funnel while a rep's rail still begins with the Inbox.
+    key: 'executive',
+    label: 'Executive view',
+    description: 'The funnel, the money and the team at a glance, every figure with its source.',
+    icon: <InsightsIcon />,
+    path: '/dashboard',
+    moduleName: 'Dashboard',
+    managerOnly: true,
+    activePrefixes: ['/dashboard', '/executive/today'],
+  },
   {
     key: 'inbox',
     label: 'Inbox',
