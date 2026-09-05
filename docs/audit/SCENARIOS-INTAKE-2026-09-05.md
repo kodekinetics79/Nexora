@@ -32,6 +32,9 @@ a missing convenience, or a gate that is correct but surprising.
 | F10 | 3 | Decision refusals name the **internal revision-line id** ("Bid revision line 78 requires an active tenant currency"), not the document's line number | P2 | No | S10b |
 | F11 | 1 | `customer_rfq_reference` is not a recognised header, so the reference is dropped and a fresh inquiry lands as `PossibleMatchReviewRequired` against the earlier same-buyer upload instead of `New` | P2 | No | S1c (soft) |
 | F12 | 3 | Promote with no committed decision says "The participation decision does not belong to the current lead revision" — there is no decision at all | P2 | No | walk log |
+| F13 | 1 | A 500-line bid list takes **1–2.5 minutes** to persist (one `SaveChanges` per evidence line; ~10 minutes under a load average of 300) while the batch reads "Processing" | P2 | No | S4i timings |
+| F14 | 7 | `GET /api/LeadIngestion/leads/{id}/revisions` answers **200 `[]`** for a foreign lead id where every sibling verb answers 404 (tenant-scoped query; leaks nothing; inconsistent) | P2 | No | S7b (soft) |
+| F15 | 1 | A 5,000-character description **dead-lettered the whole document** (`CanonicalLineItem` 4,000-character guard reached raw) | P1 | **Yes** — `StructuredEvidenceLedgerPersister` | `AuthoritativeEvidencePostgreSqlTests.OverlongDescription_IsKeptWithinTheLedgerContract…` (fails on old code) |
 
 ### Gates that looked wrong and are right
 
@@ -47,10 +50,47 @@ a missing convenience, or a gate that is correct but surprising.
 
 ## Scenario × run matrix
 
-Three runs, three freshly seeded stacks (`run-intake-scenarios.sh`, `E2E_INTAKE_RUNS=1` each,
-container/ports rotated). `P` pass, `F` fail, `S` pass with a soft (product) finding recorded.
+Three runs, three freshly seeded stacks (`run-intake-scenarios.sh`, `E2E_INTAKE_RUNS=1` each).
+`P` pass, `F` fail, `S` the scenario walked to its end and recorded a soft (product) finding;
+seconds in brackets. The one `F` (S2, run 3) is a strict-mode locator in the spec ("Revision 2"
+appears twice on the lead page), fixed in `c4dc958`; the product behaviour — revision 2 of the
+same Lead with the quantity diff — was asserted through the API and passed in all three runs.
 
-RUN_MATRIX_PLACEHOLDER
+| Scenario | Run 1 | Run 2 | Run 3 | Verdict |
+|---|---|---|---|---|
+| S1 clean CSV becomes one Lead with resolved lines and the same bytes are a Duplicate | P (14s) | P (29s) | P (20s) | pass |
+| S1b the uploader can open the new Lead from the batch page without a detour | S (11s) | S (16s) | S (15s) | finding (soft) |
+| S1c the documented sample shape (customer_rfq_reference,customer_name,part_number,quantity) keeps the reference | S (7s) | S (8s) | S (8s) | finding (soft) |
+| S1d a CSV naming an existing customer by name only is UNRESOLVED with a reason, and linking resolves it | P (8s) | P (14s) | P (7s) | pass |
+| S2 an amendment with changed quantities becomes revision 2 of the same Lead with a visible diff | P (12s) | P (15s) | F (15s) | FLAKY |
+| S3 unknown part numbers produce a Lead whose lines are UnknownProduct and the workbench says what to do | P (12s) | P (15s) | P (12s) | pass |
+| S4a zero quantity is held for a person, never stored as 0 or 1 | P (6s) | P (11s) | P (7s) | pass |
+| S4b negative quantity is held for a person | P (6s) | P (7s) | P (6s) | pass |
+| S4c absurd quantity beyond the persisted contract is held for a person | P (6s) | P (6s) | P (6s) | pass |
+| S4d missing quantity is held for a person | P (6s) | P (7s) | P (7s) | pass |
+| S4e missing unit of measure is flagged before conversion | P (6s) | P (7s) | P (6s) | pass |
+| S4f blank customer name yields an unresolved Lead, never a fabricated customer | P (7s) | P (6s) | P (6s) | pass |
+| S4g a 0-byte file is refused with a plain reason | P (3s) | P (4s) | P (4s) | pass |
+| S4h CSV bytes under a spreadsheet name are refused with a reason that names the fix | P (5s) | P (5s) | P (6s) | pass |
+| S4h-legacy the older /api/ManualUpload/upload door answers an inspection refusal without a 500 | P (4s) | P (4s) | P (4s) | pass |
+| S4i a 500-line CSV becomes one Lead with 500 lines | P (59s) | P (118s) | P (96s) | pass |
+| S4j UTF-8 Arabic descriptions survive intake verbatim | P (8s) | P (9s) | P (8s) | pass |
+| S4k a 5,000-character description does not lose the document | P (6s) | P (9s) | P (6s) | pass |
+| S5a a password-protected PDF ends as a visible password_protected outcome | P (8s) | P (8s) | P (7s) | pass |
+| S5b a corrupt XLSX (valid package, broken sheet) ends as a visible parse failure | P (7s) | P (8s) | P (8s) | pass |
+| S5c random bytes named .xlsx are refused at the door with a reason, and the refusal is recorded | P (5s) | P (6s) | P (5s) | pass |
+| S5d a PDF with no readable content ends as a visible terminal outcome within the retry budget | P (7s) | P (8s) | P (8s) | pass |
+| S6 two concurrent uploads of the same bytes mint exactly one Lead | P (6s) | P (6s) | P (6s) | pass |
+| S7a the denied role gets a 403 with a plain-English reason | P (3s) | P (3s) | P (3s) | pass |
+| S7b another tenant's Lead is invisible to tenant 80101 as a 404, not a 403 | S (10s) | S (12s) | S (10s) | finding (soft) |
+| S8 the stopped-mail queue counts honestly and every stopped upload is findable somewhere an operator looks | P (5s) | P (5s) | P (5s) | pass |
+| S9 approve needs a reason, hops need expectedVersion, and a stale version is a 409 that says so | P (8s) | P (13s) | P (8s) | pass |
+| S10 a bid list with no unit or currency is held for review, refused by field name, and becomes an RFQ once a person supplies both | P (12s) | P (20s) | P (11s) | pass |
+| S10b without the correction the Bid is refused naming unit then currency, and the approval cannot be redone | S (13s) | S (16s) | S (11s) | finding (soft) |
+| S11 a newsletter is rejected as noise with its reason, and an invoice with a PDF is stopped where an operator looks | P (8s) | P (10s) | P (9s) | pass |
+| S12 the same bid list arriving by upload and by e-mail attachment is one Lead, in either order | P (11s) | P (14s) | P (10s) | pass |
+| S13 an editor outside the lead scope gets 404s on the lead, 403 with a sentence on manager verbs, and the screen says where the lead is | P (14s) | P (14s) | P (14s) | pass |
+| S14 with a fallback owner set, an unmatched upload is routed to them and the uploader can open it; cleared, it waits on the queue | P (8s) | P (10s) | P (13s) | pass |
 
 ## The walks (what was done, why it matters, what to do)
 
@@ -153,4 +193,32 @@ queue item. Cleared → the next upload waits on the queue. Nothing is logged (F
 
 ## Run log
 
-RUN_LOG_PLACEHOLDER
+Runs 1–3 are three separate `run-intake-scenarios.sh` invocations, each on a fresh PostgreSQL
+container, migrated database, `AcceptanceFixture` seed, GreenMail sink, real API and Vite (backend
+5205, frontend 5183, PostgreSQL 55443, SMTP/IMAP 33025/33143, container names `nexora-e2e-intake-r<n>`),
+run one after another with no `dotnet build` in flight. Run 1 is a redo on the final spec revision:
+its first pass (and run 3) hit two strict-mode locator bugs in the spec itself ("Revision history"
+matched the heading and its loading sentence; "Revision 2" appears twice) that were fixed in
+`a479c98` / `c4dc958` — no product behaviour differed. A parallel attempt at the three runs was
+discarded (harness notes). Backend suite on the finished code: **5,989 passed, 0 failed, 1
+skipped** (`dotnet build -c Release --no-incremental` then `dotnet test --no-build`, 45 min under
+load). Frontend: `npx tsc --noEmit` clean, `npm run lint:a11y` clean; vitest on `src/pages/Leads`
+270/271 with one pre-existing flake (`QueueAssignment.test.tsx`, untouched by this branch, passes
+alone).
+
+Verbatim first lines of every failure and soft finding across the three runs:
+
+- run 1 · S1b the uploader can open the new Lead from the batch page w · S: Error: F4: the manager who uploaded Lead 21 cannot open it until an owner is assigned (http://127.0.0.1:5183/procurement/leads/view/21)
+- run 1 · S1c the documented sample shape (customer_rfq_reference,cust · S: Error: F7: with its reference dropped the inquiry cannot be told apart from earlier ones: ["Same buyer, overlapping closing dates and matching line items."]
+- run 3 · S2 an amendment with changed quantities becomes revision 2 o · F: Error: expect(locator).toBeVisible() failed
+- run 1 · S4i a 500-line CSV becomes one Lead with 500 lines · note: intake-seconds: scn-MTO0IC4A1-big.csv: 54 s to settle
+- run 2 · S4i a 500-line CSV becomes one Lead with 500 lines · note: intake-seconds: scn-MTNZTHQ01-big.csv: 111 s to settle
+- run 3 · S4i a 500-line CSV becomes one Lead with 500 lines · note: intake-seconds: scn-MTO07RKD1-big.csv: 89 s to settle
+- run 1 · S7b another tenant's Lead is invisible to tenant 80101 as a  · S: Error: F14: a foreign lead id should be a 404 on every verb
+- run 1 · S8 the stopped-mail queue counts honestly and every stopped  · note: email-triage-stopped: totalCount=0
+- run 1 · S8 the stopped-mail queue counts honestly and every stopped  · note: intake-queue-truth: stopped uploads this run: 0; on an operator list: 0; only via batch URL: none
+- run 1 · S10b without the correction the Bid is refused naming unit t · S: Error: F5: one-way gate — the line can never be bid and the approval cannot be redone: 409 {"error":"This lead is no longer awaiting extraction review."}
+- run 1 · S10b without the correction the Bid is refused naming unit t · note: F5-redo-approval: 409 This lead is no longer awaiting extraction review.
+
+Per-run artifacts: `.intake-scenarios-run/run<n>/intake/` (`run-1.json`, `run-1.log`,
+`run-backend.log`, `fixture.log`; ignored by git).
