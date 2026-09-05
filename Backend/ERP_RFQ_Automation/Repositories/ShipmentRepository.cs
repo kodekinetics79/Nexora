@@ -23,6 +23,11 @@ namespace ERP_RFQ_Automation.Repositories
                 .Where(s => s.BusinessUnitId == businessUnitId && s.IsActive)
                 .Include(s => s.Order).ThenInclude(o => o.Currency)
                 .Include(s => s.Status)
+                // The lines travel with the list. Without them the list and the by-order read
+                // answered `items: []` for every shipment while the detail answered the real lines,
+                // and OrderViewPage summed those empty lists to decide whether anything was left to
+                // ship — so a fully despatched order kept offering "Create Shipment".
+                .Include(s => s.ShipmentItems).ThenInclude(si => si.OrderItem).ThenInclude(oi => oi.Product)
                 // FR-DLM-01. The governed region travels with the shipment so the list and the
                 // note read the same mapping rather than each deriving one.
                 .Include(s => s.DeliveryCity).ThenInclude(c => c!.State)
@@ -184,6 +189,7 @@ namespace ERP_RFQ_Automation.Repositories
             return await _context.Shipments
                 .Where(s => s.OrderId == orderId && s.BusinessUnitId == businessUnitId && s.IsActive)
                 .Include(s => s.Status)
+                .Include(s => s.ShipmentItems).ThenInclude(si => si.OrderItem).ThenInclude(oi => oi.Product)
                 .ToListAsync();
         }
     }
