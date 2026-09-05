@@ -61,7 +61,7 @@ const drillDownRoute = (recordType: string, recordId: number): string | null => 
   return null;
 };
 
-const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
+const KpiCard = ({ kpi, index = 0 }: { kpi: Release01KpiDTO; index?: number }) => {
   const navigate = useNavigate();
   const [drillDownOpen, setDrillDownOpen] = useState(false);
   const drillDownRecords = kpi.drillDownIdentifiers;
@@ -71,7 +71,15 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
     <Paper
       component="article"
       variant="outlined"
-      sx={{ p: 2, minHeight: 172, borderRadius: 2, display: 'flex', flexDirection: 'column' }}
+      className="nx-glass nx-enter"
+      data-decorative-motion="true"
+      style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
+      sx={{
+        p: 2, minHeight: 172, borderRadius: 2, display: 'flex', flexDirection: 'column',
+        transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 180ms ease-out',
+        '&:hover': { transform: 'translateY(-3px)', boxShadow: (theme) => `inset 0 1px 0 rgba(255,255,255,${theme.palette.mode === 'dark' ? 0.08 : 0.9}), 0 22px 44px -22px rgba(15,18,24,${theme.palette.mode === 'dark' ? 0.9 : 0.4})` },
+        '@media (prefers-reduced-motion: reduce)': { transition: 'none', '&:hover': { transform: 'none' } },
+      }}
     >
       <Stack direction="row" spacing={1} sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
@@ -279,7 +287,7 @@ export default function DashboardPage() {
               carries every one of those destinations. */}
           <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Verified Performance</Typography>
           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}>
-            {data.kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} />)}
+            {data.kpis.map((kpi, index) => <KpiCard key={kpi.key} kpi={kpi} index={index} />)}
           </Box>
         </>
       ) : !dashboard.isError ? (

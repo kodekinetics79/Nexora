@@ -51,12 +51,12 @@ const Container = styled.div<{ mode: string }>`
   min-height: 100dvh;
   width: 100%;
   box-sizing: border-box;
-  background: ${props => props.mode === 'dark' ? '#07111f' : '#f5f7fa'};
+  background: ${props => props.mode === 'dark' ? '#121418' : '#f5f4f1'};
   font-family: ${(props: any) => props.theme.typography.fontFamily};
   color-scheme: ${props => props.mode};
 
   ::selection {
-    background: ${props => props.mode === 'dark' ? '#20c7b5' : '#075dcc'};
+    background: ${props => props.mode === 'dark' ? '#e0a100' : '#c9931a'};
     color: #ffffff;
   }
 `;
@@ -78,13 +78,13 @@ const EvidencePanel = styled.section`
   min-width: 0;
   padding: clamp(32px, 4vw, 64px);
   background:
-    radial-gradient(circle at 18% 12%, rgba(40, 123, 211, .27), transparent 34%),
-    radial-gradient(circle at 88% 82%, rgba(32, 199, 181, .16), transparent 33%),
-    linear-gradient(145deg, #071424 0%, #081a31 54%, #061321 100%);
+    radial-gradient(circle at 18% 12%, rgba(201, 147, 26, .27), transparent 34%),
+    radial-gradient(circle at 88% 82%, rgba(224, 161, 0, .16), transparent 33%),
+    linear-gradient(145deg, #101317 0%, #14171d 54%, #0e1013 100%);
   color: #f8fafc;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #283b58;
+  border-right: 1px solid #2a2f3a;
   position: relative;
   overflow: hidden;
   isolation: isolate;
@@ -93,7 +93,7 @@ const EvidencePanel = styled.section`
     min-height: 252px;
     padding: 24px 32px;
     border-right: 0;
-    border-bottom: 1px solid #283b58;
+    border-bottom: 1px solid #2a2f3a;
   }
   @media (max-width: 599.95px) {
     display: none;
@@ -104,9 +104,9 @@ const FormSection = styled.main<{ mode: string }>`
   min-width: 0;
   padding: clamp(32px, 5vw, 72px);
   background: ${props => props.mode === 'dark'
-    ? 'radial-gradient(circle at 85% 18%, rgba(42, 109, 190, .17), transparent 30%), radial-gradient(circle at 14% 88%, rgba(32, 199, 181, .09), transparent 28%), #0c1728'
-    : 'radial-gradient(circle at 88% 15%, rgba(69, 133, 216, .14), transparent 32%), radial-gradient(circle at 10% 88%, rgba(32, 199, 181, .10), transparent 28%), linear-gradient(145deg, #f5f8fc 0%, #eef4fb 100%)'};
-  color: ${props => props.mode === 'dark' ? '#f8fafc' : '#0b172a'};
+    ? 'radial-gradient(circle at 85% 18%, rgba(201, 147, 26, .17), transparent 30%), radial-gradient(circle at 14% 88%, rgba(224, 161, 0, .09), transparent 28%), #101317'
+    : 'radial-gradient(circle at 88% 15%, rgba(224, 161, 0, .14), transparent 32%), radial-gradient(circle at 10% 88%, rgba(224, 161, 0, .10), transparent 28%), linear-gradient(145deg, #f7f6f2 0%, #f1efe9 100%)'};
+  color: ${props => props.mode === 'dark' ? '#f8fafc' : '#171a20'};
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -131,12 +131,12 @@ const AuthSurface = styled.div<{ mode: string }>`
   width: 100%;
   margin: 0 auto;
   padding: clamp(32px, 3.4vw, 46px);
-  border: 1px solid ${props => props.mode === 'dark' ? 'rgba(143, 166, 195, .24)' : 'rgba(94, 119, 151, .20)'};
+  border: 1px solid ${props => props.mode === 'dark' ? 'rgba(170, 176, 190, .24)' : 'rgba(95, 102, 115, .20)'};
   border-radius: 22px;
-  background: ${props => props.mode === 'dark' ? 'rgba(8, 20, 36, .86)' : 'rgba(255, 255, 255, .86)'};
+  background: ${props => props.mode === 'dark' ? 'rgba(18, 20, 24, .86)' : 'rgba(255, 255, 255, .86)'};
   box-shadow: ${props => props.mode === 'dark'
-    ? '0 28px 70px -32px rgba(0, 0, 0, .82), 0 10px 30px -24px rgba(32, 199, 181, .32)'
-    : '0 30px 72px -34px rgba(22, 55, 94, .36), 0 12px 32px -26px rgba(7, 93, 204, .34)'};
+    ? '0 28px 70px -32px rgba(0, 0, 0, .82), 0 10px 30px -24px rgba(224, 161, 0, .32)'
+    : '0 30px 72px -34px rgba(15, 18, 24, .36), 0 12px 32px -26px rgba(201, 147, 26, .34)'};
   backdrop-filter: blur(18px) saturate(118%);
 
   &::before {
@@ -146,7 +146,7 @@ const AuthSurface = styled.div<{ mode: string }>`
     left: 38px;
     right: 38px;
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(73, 163, 255, .7), rgba(32, 199, 181, .72), transparent);
+    background: linear-gradient(90deg, transparent, rgba(243, 210, 122, .7), rgba(224, 161, 0, .72), transparent);
   }
 
   @media (max-width: 599.95px) {
@@ -165,24 +165,24 @@ const AuthSurface = styled.div<{ mode: string }>`
 const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: any) => ({
   '& .MuiOutlinedInput-root': {
     minHeight: 58,
-    backgroundColor: mode === 'dark' ? 'rgba(12, 27, 47, .92)' : 'rgba(255, 255, 255, .94)',
+    backgroundColor: mode === 'dark' ? 'rgba(23, 26, 32, .92)' : 'rgba(255, 255, 255, .94)',
     borderRadius: 12,
-    boxShadow: mode === 'dark' ? '0 8px 24px -22px rgba(0, 0, 0, .9)' : '0 10px 26px -24px rgba(20, 54, 94, .55)',
+    boxShadow: mode === 'dark' ? '0 8px 24px -22px rgba(0, 0, 0, .9)' : '0 10px 26px -24px rgba(42, 47, 58, .55)',
     transition: 'border-color 180ms ease-out, box-shadow 180ms ease-out, background-color 180ms ease-out',
-    '& fieldset': { borderColor: mode === 'dark' ? '#52627a' : '#aeb8c7' },
-    '&:hover fieldset': { borderColor: mode === 'dark' ? '#8fa1b8' : '#65758b' },
+    '& fieldset': { borderColor: mode === 'dark' ? '#5f6673' : '#b9bcc4' },
+    '&:hover fieldset': { borderColor: mode === 'dark' ? '#a3a9b5' : '#6b7280' },
     '&.Mui-focused': {
-      backgroundColor: mode === 'dark' ? '#0c1b2f' : '#ffffff',
+      backgroundColor: mode === 'dark' ? '#171a20' : '#ffffff',
       boxShadow: `0 0 0 3px ${theme.palette.primary.main}24, 0 14px 30px -24px ${theme.palette.primary.main}99`,
     },
   },
   '& input': {
     '&::placeholder': {
-      color: mode === 'dark' ? '#b7c4d6' : '#526174',
+      color: mode === 'dark' ? '#cbc7bc' : '#5f6673',
       opacity: 1,
     },
     '&:-webkit-autofill, &:-webkit-autofill:hover, &:-webkit-autofill:focus, &:-webkit-autofill:active': {
-      WebkitBoxShadow: mode === 'dark' ? '0 0 0 30px #131c33 inset !important' : '0 0 0 30px #ffffff inset !important',
+      WebkitBoxShadow: mode === 'dark' ? '0 0 0 30px #1b1f26 inset !important' : '0 0 0 30px #ffffff inset !important',
       WebkitTextFillColor: mode === 'dark' ? '#ffffff !important' : '#000000 !important',
       transition: 'background-color 5000s ease-in-out 0s',
       borderRadius: 0,
@@ -190,17 +190,17 @@ const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: a
   },
   '& .MuiInputLabel-root': {
     fontWeight: 600,
-    color: mode === 'dark' ? '#b7c4d6' : '#506177',
+    color: mode === 'dark' ? '#cbc7bc' : '#5f6673',
   }
 }));
 
 const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) => ({
   minHeight: 58,
-  backgroundColor: mode === 'dark' ? '#0b172a' : '#ffffff',
+  backgroundColor: mode === 'dark' ? '#171a20' : '#ffffff',
   borderRadius: 12,
   transition: 'border-color 160ms ease-out, box-shadow 160ms ease-out',
-  '& fieldset': { borderColor: mode === 'dark' ? '#52627a' : '#aeb8c7' },
-  '&:hover fieldset': { borderColor: mode === 'dark' ? '#8fa1b8' : '#65758b' },
+  '& fieldset': { borderColor: mode === 'dark' ? '#5f6673' : '#b9bcc4' },
+  '&:hover fieldset': { borderColor: mode === 'dark' ? '#a3a9b5' : '#6b7280' },
   '&.Mui-focused': {
     boxShadow: `0 0 0 3px ${theme.palette.primary.main}24`,
   }
@@ -395,12 +395,12 @@ const LoginPage: React.FC = () => {
               height: 330,
               right: -168,
               bottom: -148,
-              border: '1px solid rgba(94, 191, 229, .18)',
+              border: '1px solid rgba(243, 210, 122, .18)',
               borderRadius: '50%',
               '&::before, &::after': {
                 content: '""',
                 position: 'absolute',
-                border: '1px solid rgba(32, 199, 181, .15)',
+                border: '1px solid rgba(224, 161, 0, .15)',
                 borderRadius: '50%',
               },
               '&::before': { inset: 48 },
@@ -436,7 +436,7 @@ const LoginPage: React.FC = () => {
           <Typography
             sx={{
               maxWidth: 500,
-              color: '#b8c9de',
+              color: '#cbc7bc',
               fontSize: { xs: 14, sm: 18 },
               lineHeight: 1.55,
               mb: { xs: 0, sm: 4.5 },
@@ -455,15 +455,15 @@ const LoginPage: React.FC = () => {
               py: 1.25,
               px: 1.5,
               width: 'fit-content',
-              border: '1px solid rgba(109, 156, 205, .32)',
+              border: '1px solid rgba(170, 160, 130, .32)',
               borderRadius: 999,
-              background: 'rgba(8, 25, 47, .55)',
+              background: 'rgba(18, 20, 24, .55)',
               backdropFilter: 'blur(10px)',
             }}
           >
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <IntegrityIcon aria-hidden="true" sx={{ color: '#20c7b5', fontSize: 22 }} />
-              <Typography sx={{ color: '#dce5f0', fontSize: 14, fontWeight: 600 }}>
+              <IntegrityIcon aria-hidden="true" sx={{ color: '#e0a100', fontSize: 22 }} />
+              <Typography sx={{ color: '#e8e4da', fontSize: 14, fontWeight: 600 }}>
                 Illustrative workflow · governed through payment
               </Typography>
             </Box>
@@ -487,7 +487,7 @@ const LoginPage: React.FC = () => {
                 top: 30,
                 bottom: 30,
                 width: '1px',
-                background: 'linear-gradient(#5bc9f2, #20c7b5)',
+                background: 'linear-gradient(#fff1c9, #e0a100)',
                 opacity: .55,
               },
               '&::after': {
@@ -498,8 +498,8 @@ const LoginPage: React.FC = () => {
                 width: 7,
                 height: 7,
                 borderRadius: '50%',
-                background: '#73efe2',
-                boxShadow: '0 0 0 4px rgba(32, 199, 181, .12), 0 0 18px rgba(32, 199, 181, .9)',
+                background: '#f3d27a',
+                boxShadow: '0 0 0 4px rgba(224, 161, 0, .12), 0 0 18px rgba(224, 161, 0, .9)',
                 animation: `${signalTravel} 7s cubic-bezier(.16, 1, .3, 1) infinite`,
               },
               '@media (prefers-reduced-motion: reduce)': {
@@ -526,21 +526,21 @@ const LoginPage: React.FC = () => {
                 <Box sx={{
                   width: 32,
                   height: 32,
-                  border: '1px solid #4edacb',
+                  border: '1px solid #e0a100',
                   borderRadius: '50%',
                   display: 'grid',
                   placeItems: 'center',
-                  background: '#0a2135',
-                  boxShadow: '0 10px 28px -16px rgba(32, 199, 181, .95)',
+                  background: '#14171d',
+                  boxShadow: '0 10px 28px -16px rgba(224, 161, 0, .95)',
                   zIndex: 1,
                 }}>
-                  <CheckIcon aria-hidden="true" sx={{ color: '#20c7b5', fontSize: 18 }} />
+                  <CheckIcon aria-hidden="true" sx={{ color: '#e0a100', fontSize: 18 }} />
                 </Box>
                 <Box>
                   <Typography sx={{ color: '#f8fafc', fontSize: 15, fontWeight: 700, lineHeight: 1.2 }}>
                     {stage.title}
                   </Typography>
-                  <Typography sx={{ color: '#aebfd4', fontSize: 13, mt: .45, lineHeight: 1.25 }}>
+                  <Typography sx={{ color: '#c2bdb1', fontSize: 13, mt: .45, lineHeight: 1.25 }}>
                     {stage.detail}
                   </Typography>
                 </Box>
@@ -555,11 +555,11 @@ const LoginPage: React.FC = () => {
               gap: 1,
               mt: 'auto',
               pt: { xs: 2, sm: 4 },
-              color: '#b8c9de',
+              color: '#cbc7bc',
             }}
           >
-            <IntegrityIcon aria-hidden="true" sx={{ color: '#8fa6c3', fontSize: 18 }} />
-            <Typography sx={{ color: '#b8c9de', fontSize: { xs: 11, sm: 12 }, lineHeight: 1.4 }}>
+            <IntegrityIcon aria-hidden="true" sx={{ color: '#a8a397', fontSize: 18 }} />
+            <Typography sx={{ color: '#cbc7bc', fontSize: { xs: 11, sm: 12 }, lineHeight: 1.4 }}>
               Illustrative workflow · source, owner and timestamp retained at every transition
             </Typography>
           </Box>
@@ -587,11 +587,11 @@ const LoginPage: React.FC = () => {
                 width: 46,
                 height: 46,
                 border: '1px solid',
-                borderColor: mode === 'dark' ? 'rgba(143, 166, 195, .36)' : 'rgba(82, 97, 116, .24)',
+                borderColor: mode === 'dark' ? 'rgba(170, 176, 190, .36)' : 'rgba(82, 97, 116, .24)',
                 borderRadius: '50%',
-                background: mode === 'dark' ? 'rgba(8, 20, 36, .62)' : 'rgba(255, 255, 255, .68)',
+                background: mode === 'dark' ? 'rgba(18, 20, 24, .62)' : 'rgba(255, 255, 255, .68)',
                 backdropFilter: 'blur(12px)',
-                boxShadow: mode === 'dark' ? '0 12px 30px -24px #000' : '0 12px 30px -24px rgba(22, 55, 94, .7)',
+                boxShadow: mode === 'dark' ? '0 12px 30px -24px #000' : '0 12px 30px -24px rgba(15, 18, 24, .7)',
               }}
             >
               {mode === 'dark' ? <SunIcon /> : <MoonIcon />}
@@ -612,7 +612,7 @@ const LoginPage: React.FC = () => {
             >
               Sign in
             </Typography>
-            <Typography variant="body1" sx={{ color: mode === 'dark' ? '#b7c4d6' : '#526174', mb: { xs: 3, sm: 4 }, lineHeight: 1.55, maxWidth: 420, fontSize: { sm: 17 } }}>
+            <Typography variant="body1" sx={{ color: mode === 'dark' ? '#cbc7bc' : '#5f6673', mb: { xs: 3, sm: 4 }, lineHeight: 1.55, maxWidth: 420, fontSize: { sm: 17 } }}>
               Welcome back. Use your work account to access your Nexora workspace.
             </Typography>
 
@@ -742,7 +742,7 @@ const LoginPage: React.FC = () => {
                       to="/forgot-password"
                       variant="text"
                       size="small"
-                      sx={{ color: mode === 'dark' ? '#79b7ff' : '#075dcc', fontWeight: 600, fontSize: 16, textTransform: 'none' }}
+                      sx={{ color: mode === 'dark' ? '#f3d27a' : '#c9931a', fontWeight: 600, fontSize: 16, textTransform: 'none' }}
                     >
                       Forgot password?
                     </Button>
@@ -771,13 +771,13 @@ const LoginPage: React.FC = () => {
                   py: 1.5,
                   fontSize: 16,
                   borderRadius: '12px',
-                  background: 'linear-gradient(110deg, #075dcc 0%, #0879d6 58%, #078fa9 112%)',
+                  background: 'linear-gradient(110deg, #c9931a 0%, #a87a12 58%, #c9931a 112%)',
                   color: '#ffffff',
-                  boxShadow: '0 16px 34px -20px rgba(7, 93, 204, .88)',
+                  boxShadow: '0 16px 34px -20px rgba(201, 147, 26, .88)',
                   transition: 'box-shadow 180ms ease-out, transform 180ms ease-out, filter 180ms ease-out',
                   '&:hover': {
-                    background: 'linear-gradient(110deg, #064da9 0%, #076bc2 58%, #067d96 112%)',
-                    boxShadow: '0 20px 38px -20px rgba(7, 93, 204, .92)',
+                    background: 'linear-gradient(110deg, #a87a12 0%, #c9931a 58%, #a87a12 112%)',
+                    boxShadow: '0 20px 38px -20px rgba(201, 147, 26, .92)',
                     transform: 'translateY(-1px)',
                   },
                   '&:active': { transform: 'translateY(0)' },
@@ -825,7 +825,7 @@ const LoginPage: React.FC = () => {
                   variant="text"
                   size="small"
                   startIcon={<SettingsIcon aria-hidden="true" />}
-                  sx={{ minHeight: 44, color: mode === 'dark' ? '#79b7ff' : '#075dcc', fontSize: 17, fontWeight: 600, textTransform: 'none' }}
+                  sx={{ minHeight: 44, color: mode === 'dark' ? '#f3d27a' : '#c9931a', fontSize: 17, fontWeight: 600, textTransform: 'none' }}
                 >
                   Platform administrator sign-in
                 </Button>
