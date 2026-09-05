@@ -325,7 +325,7 @@ test('S2 an amendment with changed quantities becomes revision 2 of the same Lea
   expect(persisted.leadItems.map((l: any) => Number(l.quantity)).sort((a: number, b2: number) => a - b2)).toEqual([2, 5, 12]);
 
   await page.goto(`/procurement/leads/view/${original.leadId}`);
-  await expect(page.getByText('Revision history')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
   await expect(page.getByText('Revision 2', { exact: true })).toBeVisible();
   await expect(page.getByText('Changes', { exact: true }).first()).toBeVisible();
 });
@@ -657,7 +657,7 @@ test('S8 the stopped-mail queue counts honestly and every stopped upload is find
     test.info().annotations.push({ type: 'email-triage-stopped', description: `totalCount=${body.totalCount}` });
     await page.goto('/procurement/leads/inbound-mail');
     await expect(page.getByRole('button', { name: 'Poll now' })).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByRole('tab', { name: /stopped/i })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /needs a person/i })).toBeVisible();
   }
 
   // Stopped uploads never reach the mail queue (by design: it is the inbound-mail audit). The
@@ -986,10 +986,10 @@ test('S11 a newsletter is rejected as noise with its reason, and an invoice with
       expect(String(component.reasonCode ?? ''), `F2: part ${component.fileName} stopped without a reason code: ${JSON.stringify(component)}`).not.toBe('');
   }
 
-  // And the screen: the Stopped tab is where the operator lands on it.
+  // And the screen: the "Needs a person" tab (the stopped state) is where the operator lands on it.
   await page.goto('/procurement/leads/inbound-mail');
   await expect(page.getByRole('button', { name: 'Poll now' })).toBeVisible({ timeout: 20_000 });
-  await page.getByRole('tab', { name: /stopped/i }).click();
+  await page.getByRole('tab', { name: /needs a person/i }).click();
   await expect(page.getByText(invoiceSubject).first()).toBeVisible({ timeout: 30_000 });
 });
 
