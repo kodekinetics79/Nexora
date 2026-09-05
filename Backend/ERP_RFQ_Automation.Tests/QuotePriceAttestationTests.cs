@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Intelligence.Pricing;
+using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Models;
@@ -126,6 +127,60 @@ public sealed class QuotePriceAttestationTests
 
         Assert.Contains("stale", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(context.QuoteDeliveryRequests.IgnoreQueryFilters());
+    }
+
+    /// <summary>
+    /// The door the refusal above points at has to open. POST /api/Quote/{id}/revision-impact/resolve
+    /// records a REVISION_IMPACT_RESOLVED audit event — the impact table is append-only, so the row's
+    /// Status can never change — and the quote detail already hid the banner on that event. Readiness
+    /// and the send kept reading Status == "OPEN": after "Resolve" the screen said resolved and the
+    /// send said stale, for ever (quote 1 on the 2026-09-05 walk). One predicate for all three now.
+    /// </summary>
+    [Fact]
+    public async Task Resolving_the_customer_revision_impact_reopens_the_send()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        Seed(context);
+        var identity = await new LeadIdentityApplicationService(context).EstablishBaselineRevisionAsync(
+            Tenant, 96_301,
+            new LeadIdentityBaselineRequest("Test", "Establish immutable test revision.",
+                "Service", "tests", "quote-stale-send-resolved"));
+        context.Set<LeadRevisionImpact>().Add(new LeadRevisionImpact
+        {
+            BusinessUnitId = Tenant,
+            LeadId = 96_301,
+            LeadRevisionId = identity.RevisionId!.Value,
+            AggregateType = "QUOTE",
+            AggregateId = QuoteId,
+            ImpactType = "QUOTE_REVISION_REQUIRED",
+            Status = "OPEN",
+            DetailsJson = "{}",
+            CreatedAtUtc = DateTimeOffset.UtcNow
+        });
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+        await new PriceAttestationService(context).AttestAsync(
+            QuoteId, Tenant, PriceAttestationSources.SupplierQuote, "SQ-4471 / Alfa Trading",
+            7, "rep@nexora.invalid", default);
+        var service = new QuoteService(context, new RecordingEmailService(), new StubConfig(new QuoteConfiguration
+        {
+            BusinessUnitId = Tenant, CompanyAddress = "King Fahd Road, Al Khobar 34423",
+            CompanyPhone = "+966 13 800 0000", CompanyEmail = "sales@noorandsons.example"
+        }));
+        Assert.Contains((await service.EvaluateSendReadinessAsync(QuoteId, Tenant)).Blockers,
+            b => b.Code == "CUSTOMER_REVISION_UNRESOLVED");
+
+        await service.ResolveRevisionImpactAsync(QuoteId, Tenant, "reviewer@nexora.invalid", "resolve-once");
+
+        // The row is untouched (append-only), the event exists, and every reader agrees.
+        var row = await context.Set<LeadRevisionImpact>().AsNoTracking().SingleAsync(x => x.AggregateId == QuoteId);
+        Assert.Equal("OPEN", row.Status);
+        Assert.DoesNotContain((await service.EvaluateSendReadinessAsync(QuoteId, Tenant)).Blockers,
+            b => b.Code == "CUSTOMER_REVISION_UNRESOLVED");
+        var result = await service.SendQuoteEmailAsync(QuoteId, Tenant, "buyer@nexora.invalid");
+        Assert.True(result.QueuedForDelivery);
+        Assert.Single(context.QuoteDeliveryRequests.IgnoreQueryFilters());
     }
 
     /// <summary>
@@ -574,5 +629,19 @@ public sealed class QuotePriceAttestationTests
     {
         public Task<EmailDeliveryReceipt?> SendAsync(EmailMessage message, CancellationToken ct = default) =>
             Task.FromResult<EmailDeliveryReceipt?>(new("test", "accepted", DateTimeOffset.UtcNow));
+    }
+
+    /// <summary>Readiness reads the issuer identity; a null repository is a NullReference, not a blocker.</summary>
+    private sealed class StubConfig(QuoteConfiguration? configuration) : IQuoteConfigurationRepository
+    {
+        public Task<QuoteConfiguration?> GetByBusinessUnitIdAsync(long businessUnitId)
+            => Task.FromResult(configuration);
+
+        public Task<QuoteConfiguration> UpsertAsync(QuoteConfiguration configurationToSave)
+            => Task.FromResult(configurationToSave);
+
+        public Task AddAsync(QuoteConfiguration configurationToSave) => Task.CompletedTask;
+
+        public Task UpdateAsync(QuoteConfiguration configurationToSave) => Task.CompletedTask;
     }
 }

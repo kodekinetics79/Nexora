@@ -93,6 +93,28 @@ public class QuoteSendReadinessTests
     }
 
     [Fact]
+    public async Task A_transmitting_mailbox_behind_a_DraftOnly_guard_is_refused_before_the_dialog()
+    {
+        // The containment guard applies to a tenant mailbox as to the platform sender. DraftOnly
+        // logs and discards every message and returns no receipt; QuoteDeliverySender turns that
+        // into an exception, the dispatcher dead-letters it as DeliveryOutcomeUncertain, and the
+        // fixed key bars every future send. TransmitsMail alone said "ready" — the one thing the
+        // readiness answer must never say when the sender will withhold the message.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        var quoteId = SeedQuote(context, currencyId: 98011);
+
+        var readiness = await new QuoteService(context, null!, Configured(),
+            outboundSenders: Sender(transmits: true, OutboundEmailMode.DraftOnly)).EvaluateSendReadinessAsync(quoteId, Tenant);
+
+        Assert.False(readiness.CanSend);
+        var blocker = Assert.Single(readiness.Blockers, x => x.Code == "OUTBOUND_MAIL_DRAFT_ONLY");
+        Assert.Contains("DraftOnly", blocker.Message);
+        Assert.Contains("new revision", blocker.Message);
+        Assert.DoesNotContain(readiness.Blockers, x => x.Code == "OUTBOUND_MAIL_NOT_CONFIGURED");
+    }
+
+    [Fact]
     public async Task An_uncertain_delivery_says_the_customer_may_already_have_it_and_never_offers_a_resend()
     {
         // The restart case, on the customer side. A deploy landing mid-send expires the lease;
@@ -258,9 +280,10 @@ public class QuoteSendReadinessTests
         context.SaveChanges();
     }
 
-    private static IOutboundSenderResolver Sender(bool transmits) => new StubSenderResolver(transmits);
+    private static IOutboundSenderResolver Sender(bool transmits, OutboundEmailMode mode = OutboundEmailMode.Live)
+        => new StubSenderResolver(transmits, mode);
 
-    private sealed class StubSenderResolver(bool transmits) : IOutboundSenderResolver
+    private sealed class StubSenderResolver(bool transmits, OutboundEmailMode mode) : IOutboundSenderResolver
     {
         private static readonly OutboundEmailSettingsSnapshot Platform =
             OutboundEmailSettingsSnapshot.FromOptions(new NotificationsOptions { Provider = "console" });
@@ -269,7 +292,7 @@ public class QuoteSendReadinessTests
             => Task.FromResult(new ResolvedOutboundSender(OutboundSenderOrigin.Platform,
                 new GuardedEmailSender(new ConsoleEmailSender(NullLogger<ConsoleEmailSender>.Instance),
                     Options.Create(new NotificationsOptions()), NullLogger<GuardedEmailSender>.Instance),
-                transmits ? "smtp" : "console", transmits, OutboundEmailMode.Live,
+                transmits ? "smtp" : "console", transmits, mode,
                 "x@y.test", "X", null, null, null, Platform));
 
         public ResolvedOutboundSender ForMailbox(TenantOutboundSender mailbox, OutboundEmailSettingsSnapshot platformSettings)

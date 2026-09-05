@@ -139,14 +139,9 @@ namespace ERP_RFQ_Automation.Repositories
             var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
 
             var dto = MapToDTO(quote, -1, reasonNames, staleDays); // -1 indicates detail view, load all items
-            dto.RevisionImpact = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact>()
+            dto.RevisionImpact = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .OpenQuoteImpacts(_context, businessUnitId, id)
                 .AsNoTracking()
-                .Where(impact => impact.BusinessUnitId == businessUnitId && impact.AggregateType == "QUOTE" && impact.AggregateId == id)
-                .Where(impact => impact.Status == "OPEN" && impact.ResolvedAtUtc == null)
-                .Where(impact => !_context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent>()
-                    .Any(audit => audit.BusinessUnitId == businessUnitId
-                        && audit.EventType == "REVISION_IMPACT_RESOLVED"
-                        && audit.CorrelationId == "quote-impact:" + impact.Id))
                 .OrderByDescending(impact => impact.Id)
                 .Select(impact => impact.ImpactType)
                 .FirstOrDefaultAsync();
