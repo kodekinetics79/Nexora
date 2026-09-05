@@ -1159,6 +1159,186 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
         }
     }
 
+    /// <summary>
+    /// Intake scenario testing 2026-09-04 (docs/audit/SCENARIOS-INTAKE-2026-09-04.md, finding F1).
+    /// A CSV whose quantity cell read "0", "-5" or "100000000000000000000" dead-lettered the WHOLE
+    /// document on the live stack: the normaliser correctly refused the number (line Invalid, Lead
+    /// line null, document NeedsReview), but StructuredEvidenceLedgerPersister still handed the raw
+    /// parsed value to CanonicalLineItem.Create, whose guard threw ArgumentOutOfRangeException
+    /// ("Value must be positive. (Parameter 'quantity')") on every retry until the job was
+    /// dead-lettered. One unusable cell lost an inquiry the Lead path had already persisted. The
+    /// unstructured path guarded this (<c>item.Quantity is > 0 ? item.Quantity : null</c>); the
+    /// structured path did not.
+    ///
+    /// Drives the same wiring the worker uses — ingestion, claim, the real CSV parser, structured
+    /// extraction and LeadPersister.PersistAndCompleteAsync — so the fixture is what production emits.
+    /// </summary>
+    [Theory]
+    [Trait("Category", "PostgreSQL")]
+    [InlineData("0")]
+    [InlineData("-5")]
+    [InlineData("100000000000000000000")]
+    public async Task UnusableQuantity_HoldsTheLineForAPerson_InsteadOfLosingTheDocument(string quantity)
+    {
+        var tenantId = NewTenantId();
+        var bytes = Encoding.UTF8.GetBytes(
+            "RFQ No,Buyer Name,Product Name,Quantity,Unit,Currency,MPN\n" +
+            $"RFQ-QTY-{quantity.Length},ABC Engineering,Ball valve 2IN class 300,{quantity},EA,SAR,CORE-ATP-100\n");
+        var root = NewStorageRoot();
+        try
+        {
+            long jobId;
+            await using (var context = _database.ContextFor(null))
+            {
+                SeedTenant(context, tenantId);
+                await context.SaveChangesAsync();
+
+                var queue = NewQueue(context);
+                var ingestion = NewIngestion(context, queue, root, ClearedInspection());
+                var ingested = await ingestion.IngestAsync(bytes, "unusable-quantity.csv", tenantId,
+                    ExtractionSourceType.ManualUpload, priority: int.MaxValue);
+                jobId = ingested.JobId;
+
+                var job = await queue.ClaimAsync("evidence-qty", TimeSpan.FromMinutes(2), 1);
+                Assert.NotNull(job);
+                Assert.True(await queue.SetStatusAsync(job!.Id, "evidence-qty", job.Attempts, ExtractionStatus.Extracting));
+                Assert.True(await queue.SetStatusAsync(job.Id, "evidence-qty", job.Attempts, ExtractionStatus.Persisting));
+
+                var rows = new NativeSpreadsheetParser().ParseCsv(bytes, "unusable-quantity.csv");
+                var extractor = new ChunkedExtractionService(
+                    new StubLlm(), new CanonicalRfqNormalizer(), new NoopLogger<ChunkedExtractionService>());
+                var extracted = await extractor.ExtractStructuredAsync(rows, tenantId, "unusable-quantity.csv");
+                Assert.Equal(ExtractionOutcomeStatus.NeedsReview, extracted.Status);
+                var outcome = new ChunkedExtractionOutcome
+                {
+                    Status = extracted.Status,
+                    Result = extracted.Result,
+                    ExpectedItemCount = extracted.ExpectedItemCount,
+                    ExtractedItemCount = extracted.ExtractedItemCount,
+                    ReviewReason = extracted.ReviewReason,
+                    Diagnostics = extracted.Diagnostics,
+                    SplitResults = extracted.SplitResults,
+                    CanonicalImport = extracted.CanonicalImport,
+                    AiProviderClass = ERP_RFQ_Automation.AI.AiProviderClass.Local
+                };
+
+                var persister = new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                    leadIdentity: new LeadIdentityApplicationService(context));
+                // Before the fix: ArgumentOutOfRangeException from CanonicalLineItem's guard, and the
+                // worker dead-lettered the job after five attempts.
+                var leadId = await persister.PersistAndCompleteAsync(job, outcome, queue,
+                    "evidence-qty", job.Attempts, TimeSpan.FromMinutes(2));
+                Assert.NotNull(leadId);
+            }
+
+            await using (var context = _database.ContextFor(null))
+            {
+                var job = await context.Set<ExtractionJob>().SingleAsync(x => x.Id == jobId);
+                Assert.Equal(ExtractionStatus.Succeeded, job.Status);
+
+                var lead = await context.Leads.Include(x => x.LeadItems)
+                    .SingleAsync(x => x.BusinessUnitId == tenantId);
+                var item = Assert.Single(lead.LeadItems);
+                Assert.Null(item.Quantity);
+                Assert.True(lead.RequiresCommercialReview);
+
+                var line = await context.Set<CanonicalLineItem>().SingleAsync(x => x.BusinessUnitId == tenantId);
+                Assert.Null(line.Quantity);
+                Assert.Equal(CanonicalValidationStatus.Invalid, line.ValidationStatus);
+                Assert.Contains(quantity, line.RawPayload ?? string.Empty);
+                Assert.Equal(item.Id, line.LeadItemId);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Intake scenario testing 2026-09-05 (docs/audit/SCENARIOS-INTAKE-2026-09-05.md, F15). A
+    /// 5,000-character product description dead-lettered the WHOLE document on the live stack:
+    /// the Lead path persisted it, then StructuredEvidenceLedgerPersister handed the raw text to
+    /// CanonicalLineItem.Create, whose guard threw "Value cannot exceed 4000 characters.
+    /// (Parameter 'description')" on every retry. Same class as the unusable-quantity case: the
+    /// ledger's contract is the ledger's to enforce, never a reason to lose the inquiry.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task OverlongDescription_IsKeptWithinTheLedgerContract_InsteadOfLosingTheDocument()
+    {
+        var tenantId = NewTenantId();
+        var longName = "Long spec " + new string('x', 4_980) + " end";
+        var bytes = Encoding.UTF8.GetBytes(
+            "RFQ No,Buyer Name,Product Name,Quantity,Unit,Currency,MPN\n" +
+            $"RFQ-LONG,ABC Engineering,{longName},2,EA,SAR,CORE-ATP-100\n");
+        var root = NewStorageRoot();
+        try
+        {
+            long jobId;
+            await using (var context = _database.ContextFor(null))
+            {
+                SeedTenant(context, tenantId);
+                await context.SaveChangesAsync();
+
+                var queue = NewQueue(context);
+                var ingestion = NewIngestion(context, queue, root, ClearedInspection());
+                var ingested = await ingestion.IngestAsync(bytes, "overlong-description.csv", tenantId,
+                    ExtractionSourceType.ManualUpload, priority: int.MaxValue);
+                jobId = ingested.JobId;
+
+                var job = await queue.ClaimAsync("evidence-long", TimeSpan.FromMinutes(2), 1);
+                Assert.NotNull(job);
+                Assert.True(await queue.SetStatusAsync(job!.Id, "evidence-long", job.Attempts, ExtractionStatus.Extracting));
+                Assert.True(await queue.SetStatusAsync(job.Id, "evidence-long", job.Attempts, ExtractionStatus.Persisting));
+
+                var rows = new NativeSpreadsheetParser().ParseCsv(bytes, "overlong-description.csv");
+                var extractor = new ChunkedExtractionService(
+                    new StubLlm(), new CanonicalRfqNormalizer(), new NoopLogger<ChunkedExtractionService>());
+                var extracted = await extractor.ExtractStructuredAsync(rows, tenantId, "overlong-description.csv");
+                var outcome = new ChunkedExtractionOutcome
+                {
+                    Status = extracted.Status,
+                    Result = extracted.Result,
+                    ExpectedItemCount = extracted.ExpectedItemCount,
+                    ExtractedItemCount = extracted.ExtractedItemCount,
+                    ReviewReason = extracted.ReviewReason,
+                    Diagnostics = extracted.Diagnostics,
+                    SplitResults = extracted.SplitResults,
+                    CanonicalImport = extracted.CanonicalImport,
+                    AiProviderClass = ERP_RFQ_Automation.AI.AiProviderClass.Local
+                };
+
+                var persister = new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                    leadIdentity: new LeadIdentityApplicationService(context));
+                // Before the fix: ArgumentException from CanonicalLineItem's 4,000-character guard.
+                var leadId = await persister.PersistAndCompleteAsync(job, outcome, queue,
+                    "evidence-long", job.Attempts, TimeSpan.FromMinutes(2));
+                Assert.NotNull(leadId);
+            }
+
+            await using (var context = _database.ContextFor(null))
+            {
+                var job = await context.Set<ExtractionJob>().SingleAsync(x => x.Id == jobId);
+                Assert.Equal(ExtractionStatus.Succeeded, job.Status);
+
+                var lead = await context.Leads.Include(x => x.LeadItems)
+                    .SingleAsync(x => x.BusinessUnitId == tenantId);
+                Assert.Single(lead.LeadItems);
+
+                var line = await context.Set<CanonicalLineItem>().SingleAsync(x => x.BusinessUnitId == tenantId);
+                Assert.True(line.Description.Length <= 4_000, $"ledger description is {line.Description.Length} chars");
+                Assert.StartsWith("Long spec", line.Description);
+                // The full text is not lost: the raw payload still carries what the document said.
+                Assert.Contains(longName, line.RawPayload ?? string.Empty);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static DocumentIngestionService NewIngestion(
         ErpRfqAutomationContext context,
         IExtractionQueue queue,
