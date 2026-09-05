@@ -527,9 +527,13 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
         // viewport width and cannot collide with account/search controls.
         width: { lg: `calc(100% - ${drawerWidth}px)` },
         ml: { lg: `${drawerWidth}px` },
-        boxShadow: 'none',
-        backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.8)' : 'rgba(255, 255, 255, 0.8)',
-        backdropFilter: 'blur(12px)',
+        // Glass over the canvas washes: the page scrolls under it and stays legible above it.
+        boxShadow: mode === 'dark'
+          ? 'inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 30px -22px rgba(0,0,0,0.9)'
+          : 'inset 0 1px 0 rgba(255,255,255,0.9), 0 10px 30px -24px rgba(8,23,42,0.35)',
+        backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.66)' : 'rgba(255, 255, 255, 0.62)',
+        backdropFilter: 'blur(18px) saturate(140%)',
+        WebkitBackdropFilter: 'blur(18px) saturate(140%)',
         borderBottom: '1px solid',
         borderColor: 'divider',
         color: 'text.primary',

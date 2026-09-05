@@ -65,7 +65,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                 width: currentWidth,
                 borderRight: '1px solid',
                 borderColor: 'divider',
-                backgroundColor: 'background.default',
+                // The rail is glass over the canvas washes; its rows are the solid objects.
+                backgroundColor: (theme) => theme.palette.mode === 'dark' ? 'rgba(15, 23, 42, 0.58)' : 'rgba(255, 255, 255, 0.58)',
+                backdropFilter: 'blur(18px) saturate(140%)',
+                WebkitBackdropFilter: 'blur(18px) saturate(140%)',
                 overflowX: 'hidden',
               },
             }}
@@ -117,7 +120,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           boxSizing: 'border-box',
           overflowX: 'hidden',
           minHeight: '100vh',
-          backgroundColor: 'background.default',
+          // Transparent: the body paints the canvas and its washes; painting it again here
+          // would flatten every glass surface on the page.
+          backgroundColor: 'transparent',
         }}
       >
         <Toolbar />

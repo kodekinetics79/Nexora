@@ -167,13 +167,18 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
     // `&.Mui-selected` keeps our colours ahead of MUI's default selected styling in the cascade.
     '&.Mui-selected': {
       backgroundColor: 'primary.main',
+      // The current stage is a solid, lit object on the glass rail: light top edge, shaded
+      // bottom edge, brand-coloured lift. Overlays, not shades, so contrastText's AA holds.
+      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0) 55%, rgba(0,0,0,0.14) 100%)',
       color: 'primary.contrastText',
-      boxShadow: (theme: any) => `0 10px 15px -3px ${alpha(theme.palette.primary.main, 0.3)}`,
+      boxShadow: (theme: any) => `inset 0 1px 0 rgba(255,255,255,0.28), inset 0 -1px 0 rgba(0,0,0,0.2), 0 10px 15px -3px ${alpha(theme.palette.primary.main, 0.35)}`,
     },
     '&.Mui-selected:hover': {
       backgroundColor: 'primary.dark',
       color: 'primary.contrastText',
     },
+    '&:active': { transform: 'translateY(1px)' },
+    '@media (prefers-reduced-motion: reduce)': { '&:active': { transform: 'none' } },
     '&.Mui-focusVisible': {
       outline: (theme: any) => `3px solid ${theme.palette.primary.main}`,
       outlineOffset: 2,

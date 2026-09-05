@@ -112,7 +112,7 @@ The system should remain calm under real operational load. Authentication demons
 - Evidence-led hierarchy with clear ownership, status, and lineage.
 - Cambay display type paired with Source Sans 3 operational text.
 - Navy, white, cobalt, and teal used in stable semantic roles.
-- Restrained flat surfaces, fine rules, and solid actions.
+- Three materials in fixed roles: solid actions you can press, a glass shell you look through, paper records you read.
 - Compact enterprise density without sacrificing 44px targets or visible focus.
 
 ## Colors
@@ -170,17 +170,37 @@ At 1200px and wider, navigation is persistent at 280px and may collapse to an 88
 
 ## Elevation & Depth
 
-Nexora is flat by default. Tonal contrast, one-pixel rules, and deliberate grouping create depth at rest; shadows are reserved for raised menus, selected navigation, and high-emphasis action feedback. No surface uses gradients, glass, or blur as its identity. The shell's translucent top bar is functional chrome, not a pattern to repeat through page content.
+**Direction: Tactile Glass** (owner decision, 2026-09-05; supersedes "flat by default").
+
+Depth in Nexora says what a thing *is*. Actions are solid objects you can press; the shell is
+glass you look through; records are paper you read. Three materials, each in one role:
+
+- **Solid (actions, current navigation stage):** a lit top edge (`inset 0 1px 0 rgba(255,255,255,.28)`),
+  a shaded bottom edge (`inset 0 -1px 0 rgba(0,0,0,.22)`), a bounded light-to-shade overlay
+  (`rgba(255,255,255,.14)` → `rgba(0,0,0,.14)`), and a brand-coloured lift. Hover raises by 1px;
+  press drops by 1px and swaps the lift for an inner shadow. Overlays, never lightened shades, so
+  `contrastText` keeps AA at every point of the gradient on all twelve brand colours.
+- **Glass (app bar, rail, dialogs, menus, tooltips, summary tiles):** `backdrop-filter: blur(18px)
+  saturate(140%)` over a translucent fill (light `rgba(255,255,255,.66)`, dark `rgba(15,23,42,.62)`),
+  a one-pixel edge and a highlight hairline. Dialogs and menus use a denser fill (≥ .88) so the
+  page behind never competes with the form in front. Opt in with the `nx-glass` class on Paper.
+- **Paper (tables, forms, records):** opaque, one-pixel border, no blur. Nothing shimmers behind a
+  figure someone is reading.
+
+The canvas carries two fixed radial washes of cobalt and teal — the "weather" the glass refracts.
+Without them glass is a lighter grey. `prefers-reduced-motion` removes lifts and press travel.
 
 ### Shadow Vocabulary
 
-- **Action Lift** (`0 10px 24px -16px rgba(9, 105, 232, 0.8)`): A restrained lift for the highest-emphasis solid action.
-- **Selected Navigation** (`0 10px 15px -3px rgba(7, 93, 204, 0.3)`): A small state shadow for the current rail item.
-- **Overlay** (`0 10px 40px rgba(0, 0, 0, 0.2)`): Menus and other temporary surfaces above the shell.
+- **Tactile** (`inset 0 1px 0 rgba(255,255,255,.28), inset 0 -1px 0 rgba(0,0,0,.22), 0 1px 2px rgba(8,23,42,.28)`): every solid control.
+- **Brand Lift** (`0 8px 18px -8px alpha(primary, .75)`): the primary action and the current rail stage.
+- **Glass** (`inset 0 1px 0 highlight, 0 14px 36px -20px rgba(8,23,42,.3)`): translucent shell surfaces.
+- **Overlay** (`0 32px 80px -28px rgba(8,23,42,.55)`): dialogs and other temporary surfaces above the shell.
 
 ### Named Rules
 
-**The Flat-by-Default Rule.** If hierarchy can be expressed with spacing, tone, or a fine rule, do not add a shadow.
+**The Three Materials Rule.** Solid presses, glass frames, paper reads. A control that cannot be
+pressed is never solid; a surface someone reads from is never glass.
 
 ## Shapes
 
@@ -191,7 +211,7 @@ Controls use disciplined 8px corners; standard cards use 12px corners; navigatio
 ### Buttons
 
 - **Shape:** Solid and assured, with 8px corners and a 44px minimum target.
-- **Primary:** Governed cobalt with high-contrast white text and no gradient. Full-width task actions may grow taller when the task benefits, while preserving the same radius and type treatment.
+- **Primary:** Governed cobalt with high-contrast white text, finished as a solid tactile object (see Elevation & Depth). Full-width task actions may grow taller when the task benefits, while preserving the same radius and type treatment.
 - **Hover / Focus:** Darken one step on hover. Use a visible three-pixel focus outline or ring, never a color-only shift.
 - **Secondary / Ghost:** Keep the surface flat and the label readable; reserve these variants for recovery, navigation, or lower-priority actions.
 
@@ -229,7 +249,7 @@ The daily rail expresses the seven-stage commercial spine in journey order. Acti
 
 ### Don't:
 
-- **Don't** use gradients, glass effects, animated scanner motifs, or generic AI spectacle.
+- **Don't** use decorative gradients on text or paper, animated scanner motifs, or generic AI spectacle. Depth is reserved for the three materials above.
 - **Don't** turn every evidence group into a floating card when alignment and fine rules are clearer.
 - **Don't** use teal as a general accent or blue as proof of completion.
 - **Don't** copy the login page's split composition into unrelated operational screens.

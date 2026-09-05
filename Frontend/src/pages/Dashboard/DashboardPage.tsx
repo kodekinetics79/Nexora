@@ -71,7 +71,13 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
     <Paper
       component="article"
       variant="outlined"
-      sx={{ p: 2, minHeight: 172, borderRadius: 2, display: 'flex', flexDirection: 'column' }}
+      className="nx-glass"
+      sx={{
+        p: 2, minHeight: 172, borderRadius: 2, display: 'flex', flexDirection: 'column',
+        transition: 'transform 160ms ease-out, box-shadow 160ms ease-out',
+        '&:hover': { transform: 'translateY(-2px)' },
+        '@media (prefers-reduced-motion: reduce)': { transition: 'none', '&:hover': { transform: 'none' } },
+      }}
     >
       <Stack direction="row" spacing={1} sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>

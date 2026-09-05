@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { ThemeProvider, createTheme } from '@mui/material';
 import type { PaletteMode } from '@mui/material';
+import { alpha } from '@mui/material/styles';
 import {
   AA_NON_TEXT_CONTRAST,
   AA_TEXT_CONTRAST,
@@ -47,6 +48,47 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
     // Executive Navy 1.40:1 on dark paper), so derive a readable variant.
     const primaryOnSurface = readableOn(primaryColor, worstCaseSurface, AA_TEXT_CONTRAST);
     const primaryBorderOnSurface = readableOn(primaryColor, worstCaseSurface, AA_NON_TEXT_CONTRAST);
+
+    // Tactile depth — owner decision of 2026-09-05 ("3D" actions, a glass shell; see DESIGN.md
+    // › Elevation & Depth). Every value derives from the mode and from the chosen brand colour,
+    // so all twelve selectable brand colours keep the same finish. Depth is painted as
+    // brand-agnostic light/shade overlays rather than lightened/darkened shades, which keeps
+    // primary.contrastText's AA ratio intact at every point of the gradient: the lightest stop
+    // is a 14% white wash, which on the palest permitted brand colour still clears 4.5:1.
+    const isDark = mode === 'dark';
+    const glassFill = isDark ? 'rgba(15, 23, 42, 0.58)' : 'rgba(255, 255, 255, 0.58)';
+    const glassEdge = isDark ? 'rgba(148, 163, 184, 0.22)' : 'rgba(100, 116, 139, 0.18)';
+    const glassHighlight = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.85)';
+    const glass = {
+      backgroundColor: glassFill,
+      backgroundImage: 'none',
+      backdropFilter: 'blur(18px) saturate(140%)',
+      WebkitBackdropFilter: 'blur(18px) saturate(140%)',
+      border: '1px solid',
+      borderColor: glassEdge,
+      boxShadow: `inset 0 1px 0 ${glassHighlight}, 0 1px 2px rgba(8, 23, 42, ${isDark ? 0.5 : 0.06}), 0 14px 36px -20px rgba(8, 23, 42, ${isDark ? 0.85 : 0.3})`,
+    };
+    // A solid control with a lit top edge, a shaded bottom edge and a lift; the press state
+    // drops it by a pixel and swaps the lift for an inner shadow, so the click reads by hand.
+    const tactile = {
+      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0) 52%, rgba(0,0,0,0.14) 100%)',
+      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.28), inset 0 -1px 0 rgba(0,0,0,0.22), 0 1px 2px rgba(8,23,42,0.28)',
+    };
+    const tactileHover = {
+      backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.20) 0%, rgba(255,255,255,0.02) 52%, rgba(0,0,0,0.16) 100%)',
+      transform: 'translateY(-1px)',
+    };
+    const tactileActive = {
+      backgroundImage: 'linear-gradient(180deg, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.02) 60%, rgba(255,255,255,0.06) 100%)',
+      boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.30), 0 1px 1px rgba(8,23,42,0.18)',
+      transform: 'translateY(1px)',
+    };
+    const reducedMotion = {
+      '@media (prefers-reduced-motion: reduce)': {
+        transition: 'none',
+        '&:hover, &:active': { transform: 'none' },
+      },
+    };
 
     return createTheme({
     palette: {
@@ -113,33 +155,58 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             borderRadius: 8,
             padding: '9px 16px',
             boxShadow: 'none',
+            transition: 'transform 120ms ease-out, box-shadow 160ms ease-out, background-color 160ms ease-out, background-image 160ms ease-out',
             '&:hover': {
               boxShadow: 'none',
             },
+            '&.Mui-focusVisible': {
+              outline: '3px solid',
+              outlineColor: primaryBorderOnSurface,
+              outlineOffset: 2,
+            },
+            ...reducedMotion,
           },
         },
         variants: [
           {
+            // Every solid button is tactile; the primary variant below adds its brand lift.
+            props: { variant: 'contained' },
+            style: {
+              ...tactile,
+              '&:hover': tactileHover,
+              '&:active': tactileActive,
+              '&.Mui-disabled': { backgroundImage: 'none', boxShadow: 'none', transform: 'none' },
+            },
+          },
+          {
             props: { variant: 'contained', color: 'primary' },
             style: {
-              // The gradient used to fade to `${primaryColor}dd` — a 87%-alpha
-              // stop that composites *lighter* over the page, so the right-hand
-              // side of every primary CTA sat below 4.5:1 against its label.
-              // Both stops are now opaque shades that clear AA against
-              // primary.contrastText.
-              background: primaryPalette.main,
+              // The solid colour is opaque and clears AA against primary.contrastText; the
+              // overlays above only lighten or darken it by a bounded amount.
+              backgroundColor: primaryPalette.main,
               color: primaryPalette.contrastText,
-              '&:hover': { background: primaryPalette.dark },
+              boxShadow: `${tactile.boxShadow}, 0 8px 18px -8px ${alpha(primaryPalette.main, 0.75)}`,
+              '&:hover': {
+                ...tactileHover,
+                backgroundColor: primaryPalette.dark,
+                boxShadow: `${tactile.boxShadow}, 0 12px 22px -8px ${alpha(primaryPalette.main, 0.8)}`,
+              },
+              '&:active': { ...tactileActive, backgroundColor: primaryPalette.dark },
             },
           },
           {
             // Outlined/text buttons render the brand colour *as text* on the
             // page surface, where several brand colours fall under 4.5:1
             // (SC 1.4.3). The border keeps the 3:1 non-text floor (SC 1.4.11).
+            // The face is a faint brand-tinted glass so it sits on the canvas as an object.
             props: { variant: 'outlined', color: 'primary' },
             style: {
               color: primaryOnSurface,
               borderColor: primaryBorderOnSurface,
+              backgroundColor: alpha(primaryPalette.main, isDark ? 0.10 : 0.05),
+              boxShadow: isDark ? 'none' : 'inset 0 1px 0 rgba(255,255,255,0.6)',
+              '&:hover': { backgroundColor: alpha(primaryPalette.main, isDark ? 0.16 : 0.10), transform: 'translateY(-1px)' },
+              '&:active': { transform: 'translateY(1px)' },
             },
           },
           {
@@ -167,6 +234,66 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             boxShadow: 'none',
             border: '1px solid',
             borderColor: mode === 'dark' ? 'rgba(148, 163, 184, 0.16)' : 'rgba(100, 116, 139, 0.16)',
+            // Opt-in glass for the shell and summary tiles. Data surfaces (tables, forms) stay
+            // opaque paper: nothing should shimmer behind a figure someone is reading.
+            '&.nx-glass': {
+              ...glass,
+              position: 'relative',
+              overflow: 'hidden',
+              // A hairline of the two brand colours along the lit top edge: the one crafted
+              // detail that tells a glass tile apart from a paper card at a glance.
+              '&::before': {
+                content: '""',
+                position: 'absolute',
+                top: 0, left: 0, right: 0, height: 2,
+                background: 'linear-gradient(90deg, #075dcc 0%, #20c7b5 100%)',
+                opacity: isDark ? 0.85 : 0.7,
+              },
+            },
+          },
+        },
+      },
+      MuiDialog: {
+        styleOverrides: {
+          // Temporary surfaces float: glass, but opaque enough that the page behind never
+          // competes with the form in front.
+          paper: {
+            ...glass,
+            backgroundColor: isDark ? 'rgba(15, 23, 42, 0.88)' : 'rgba(255, 255, 255, 0.90)',
+            boxShadow: `inset 0 1px 0 ${glassHighlight}, 0 32px 80px -28px rgba(8, 23, 42, ${isDark ? 0.9 : 0.55})`,
+          },
+        },
+      },
+      MuiMenu: {
+        styleOverrides: {
+          paper: {
+            ...glass,
+            backgroundColor: isDark ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.90)',
+          },
+        },
+      },
+      MuiPopover: {
+        styleOverrides: {
+          paper: {
+            ...glass,
+            backgroundColor: isDark ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.90)',
+          },
+        },
+      },
+      MuiTooltip: {
+        styleOverrides: {
+          tooltip: {
+            backgroundColor: isDark ? 'rgba(30, 41, 59, 0.92)' : 'rgba(8, 23, 42, 0.92)',
+            backdropFilter: 'blur(10px)',
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.12), 0 8px 24px -12px rgba(8,23,42,0.6)',
+            fontSize: 13,
+          },
+        },
+      },
+      MuiChip: {
+        styleOverrides: {
+          filled: {
+            boxShadow: isDark ? 'inset 0 1px 0 rgba(255,255,255,0.08)' : 'inset 0 1px 0 rgba(255,255,255,0.45), inset 0 -1px 0 rgba(0,0,0,0.06)',
           },
         },
       },
@@ -210,6 +337,14 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             fontVariantNumeric: 'tabular-nums',
           },
           body: {
+            // The canvas has weather: two soft washes of cobalt and teal fixed behind the
+            // page, which is what the glass surfaces above it refract. Without them glass is
+            // just a lighter grey.
+            backgroundColor: isDark ? '#0f172a' : '#f8fafc',
+            backgroundImage: isDark
+              ? 'radial-gradient(1100px 640px at 6% -12%, rgba(7, 93, 204, 0.34), transparent 62%), radial-gradient(900px 540px at 102% -4%, rgba(32, 199, 181, 0.16), transparent 58%), radial-gradient(800px 500px at 90% 110%, rgba(7, 93, 204, 0.16), transparent 60%)'
+              : 'radial-gradient(1100px 640px at 6% -12%, rgba(7, 93, 204, 0.18), transparent 62%), radial-gradient(900px 540px at 102% -4%, rgba(32, 199, 181, 0.16), transparent 58%), radial-gradient(800px 500px at 90% 110%, rgba(7, 93, 204, 0.10), transparent 60%)',
+            backgroundAttachment: 'fixed',
             scrollbarColor: mode === 'dark' ? '#334155 #0f172a' : '#cbd5e1 #f8fafc',
             '&::-webkit-scrollbar, & *::-webkit-scrollbar': {
               width: '8px',
