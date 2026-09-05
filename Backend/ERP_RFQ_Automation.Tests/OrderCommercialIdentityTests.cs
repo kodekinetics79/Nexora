@@ -154,6 +154,54 @@ public sealed class OrderCommercialIdentityTests
         Assert.Equal(OwnCurrencyId, stored.CurrencyId);
     }
 
+    /// <summary>
+    /// The other door that minted currency-less orders: raising one straight from an RFQ. The RFQ
+    /// has no currency of its own, its lines do, so the order inherits the one currency every
+    /// line agrees on and is refused otherwise.
+    /// </summary>
+    [Fact]
+    public async Task An_order_raised_from_an_rfq_inherits_the_currency_its_lines_agree_on()
+    {
+        using var db = new TestDb();
+        var fixture = await ArrangeAsync(db);
+        await PriceRfqLinesAsync(db, fixture, OwnCurrencyId, OwnCurrencyId);
+
+        var created = await fixture.Service.CreateOrderFromRfqAsync(fixture.RfqId, Tenant);
+
+        await using var verify = db.ContextFor(Tenant);
+        var stored = await verify.Orders.SingleAsync(o => o.Id == created.Id);
+        Assert.Equal(OwnCurrencyId, stored.CurrencyId);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(OwnCurrencyId, ForeignCurrencyId)]
+    public async Task An_order_is_not_raised_from_an_rfq_whose_lines_do_not_agree_on_a_currency(long? first, long? second)
+    {
+        using var db = new TestDb();
+        var fixture = await ArrangeAsync(db);
+        await PriceRfqLinesAsync(db, fixture, first, second);
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.CreateOrderFromRfqAsync(fixture.RfqId, Tenant));
+
+        Assert.Contains("currency", failure.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verify = db.ContextFor(Tenant);
+        Assert.Empty(await verify.Orders.ToListAsync());
+    }
+
+    private static async Task PriceRfqLinesAsync(TestDb db, Fixture fixture, long? firstCurrency, long? secondCurrency)
+    {
+        await using var seed = db.ContextFor(null);
+        var rfq = await seed.Rfqs.IgnoreQueryFilters().SingleAsync(r => r.Id == fixture.RfqId);
+        rfq.CustomerId = fixture.CustomerId;
+        var one = AgentSeed.RfqItem(seed, 97_581, fixture.RfqId, "Spine line one", 2);
+        one.UnitPrice = 25m; one.CurrencyId = firstCurrency; one.ProductId = fixture.ProductId;
+        var two = AgentSeed.RfqItem(seed, 97_582, fixture.RfqId, "Spine line two", 1);
+        two.UnitPrice = 40m; two.CurrencyId = secondCurrency; two.ProductId = fixture.ProductId;
+        await seed.SaveChangesAsync();
+    }
+
     [Fact]
     public void An_order_refuses_a_source_document_from_another_tenant()
     {

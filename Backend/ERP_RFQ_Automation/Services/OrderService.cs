@@ -305,6 +305,15 @@ namespace ERP_RFQ_Automation.Services
 
             var orderNo = await _orderRepository.GetNextOrderNumberAsync(businessUnitId);
 
+            // An RFQ has no currency of its own; its lines do. An order raised straight from the
+            // RFQ is invoiced in the currency those lines were priced in, which only means something
+            // when every line agrees. Mixed or missing line currencies are refused here — finance
+            // cannot invoice an order that names no currency, and guessing one is worse.
+            var lineCurrencies = rfq.Rfqitems.Select(item => item.CurrencyId).Distinct().ToList();
+            if (lineCurrencies.Count != 1 || lineCurrencies[0] is not { } rfqCurrencyId)
+                throw new InvalidOperationException(
+                    $"RFQ {rfq.Rfqno} does not price every line in one currency, so an order cannot be raised from it directly. Quote it and award from the quote.");
+
             // Create Order Header
             var order = new Order
             {
@@ -312,6 +321,7 @@ namespace ERP_RFQ_Automation.Services
                 Rfqid = rfq.Id,
                 LeadId = rfq.LeadId,
                 CustomerId = rfq.CustomerId ?? 0,
+                CurrencyId = rfqCurrencyId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
