@@ -19,8 +19,6 @@ import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
 import customerService from '../../../api/services/customerService';
 import productService from '../../../api/services/productService';
-import currencyService, { type CurrencyDTO } from '../../../api/services/currencyService';
-import { createOrderBlockers, defaultCurrencyId } from './createOrderForm';
 import { useSnackbar } from 'notistack';
 import { handleApiError } from '../../../utils/errorHandler';
 import dayjs from 'dayjs';
@@ -58,8 +56,6 @@ const CreateOrderPage: React.FC = () => {
   const rfqId = searchParams.get('rfqId');
 
   const [customerId, setCustomerId] = useState<number | null>(null);
-  const [currencyId, setCurrencyId] = useState<number | null>(null);
-  const [currencyError, setCurrencyError] = useState(false);
   const [orderDate, setOrderDate] = useState(dayjs().format('YYYY-MM-DD'));
   const [deliveryDate, setDeliveryDate] = useState(dayjs().add(7, 'day').format('YYYY-MM-DD'));
   const [notes, setNotes] = useState('');
@@ -82,20 +78,6 @@ const CreateOrderPage: React.FC = () => {
     queryKey: ['products-lookup'],
     queryFn: () => productService.getAll({ businessUnitId, pageSize: 200 }),
   });
-
-  // The currencies this tenant set up. The form starts on the base currency (or the only active
-  // one) and never guesses between several; in edit mode the order's own currency is fixed.
-  const { data: currencies } = useQuery({
-    queryKey: ['currencies-lookup', businessUnitId],
-    queryFn: () => currencyService.getAll({ businessUnitId, pageSize: 100 }).then((r) => r.items.filter((c) => c.isActive !== false)),
-    enabled: !isEditMode,
-  });
-
-  useEffect(() => {
-    if (isEditMode || currencyId !== null) return;
-    const starting = defaultCurrencyId(currencies);
-    if (starting !== null) setCurrencyId(starting);
-  }, [isEditMode, currencies, currencyId]);
 
   // Effect to load data in edit mode or from RFQ/Quote
   useEffect(() => {
@@ -186,29 +168,27 @@ const CreateOrderPage: React.FC = () => {
   const { subtotal, totalDiscount, totalTax, grandTotal } = calculateTotals();
 
   /**
-   * The currency every figure on this screen is stated in. In edit mode it is the order's own and
-   * cannot change here; in create mode it is the one the rep chose (or the tenant's base currency),
-   * and the server refuses an order that names none — finance cannot invoice such an order.
+   * The order's own currency. This screen only ever edits an order (create mode renders the
+   * client-PO notice below), and an order keeps the currency it was raised in — the update DTO
+   * does not carry one. The server now refuses to raise an order that names no currency, because
+   * finance cannot invoice such an order; an older order that predates that gate shows
+   * "Not stated" here so the gap is visible rather than printed as a bare number.
    */
-  const selectedCurrency: CurrencyDTO | null = currencies?.find((c) => c.id === currencyId) ?? null;
-  const currencyCode = isEditMode ? (orderData?.currencyCode ?? null) : (selectedCurrency?.code ?? null);
+  const currencyCode = orderData?.currencyCode ?? null;
 
   const handleSave = () => {
-    const blockers = createOrderBlockers({
-      customerId,
-      currencyId: isEditMode ? (orderData?.currencyId ?? currencyId) : currencyId,
-      itemCount: items.length,
-    });
-    if (blockers.length > 0) {
-      setCustomerError(!customerId);
-      setCurrencyError(!isEditMode && !currencyId);
-      enqueueSnackbar(blockers[0], { variant: 'warning' });
+    if (!customerId) {
+      setCustomerError(true);
+      enqueueSnackbar('Please select a customer', { variant: 'warning' });
+      return;
+    }
+    if (items.length === 0) {
+      enqueueSnackbar('Please add at least one item before saving', { variant: 'warning' });
       return;
     }
 
     const payload = {
       customerId,
-      currencyId: isEditMode ? undefined : currencyId,
       businessUnitId,
       orderDate: dayjs(orderDate).toISOString(),
       deliveryDate: deliveryDate ? dayjs(deliveryDate).toISOString() : null,
@@ -319,36 +299,16 @@ const CreateOrderPage: React.FC = () => {
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 6 }}>
-                {isEditMode ? (
-                  <TextField
-                    label="Currency"
-                    size="small"
-                    fullWidth
-                    value={orderData?.currencyCode ?? 'Not stated'}
-                    disabled
-                    helperText="An order keeps the currency it was raised in."
-                  />
-                ) : (
-                  <Autocomplete
-                    options={currencies ?? []}
-                    getOptionLabel={(option) => `${option.code} — ${option.currencyName}`}
-                    isOptionEqualToValue={(option, value) => option.id === value.id}
-                    value={selectedCurrency}
-                    onChange={(_, newValue) => { setCurrencyId(newValue?.id ?? null); if (newValue) setCurrencyError(false); }}
-                    renderInput={(params) => (
-                      <TextField
-                        {...params}
-                        label="Currency"
-                        required
-                        size="small"
-                        error={currencyError}
-                        helperText={currencyError
-                          ? 'Currency is required'
-                          : 'The customer will be invoiced in this currency.'}
-                      />
-                    )}
-                  />
-                )}
+                <TextField
+                  label="Currency"
+                  size="small"
+                  fullWidth
+                  value={currencyCode ?? 'Not stated'}
+                  disabled
+                  helperText={currencyCode
+                    ? 'An order keeps the currency it was raised in.'
+                    : 'This order was raised before a currency was required. It cannot be invoiced until one is stated.'}
+                />
               </Grid>
               <Grid size={{ xs: 12, md: 3 }}>
                 <TextField
