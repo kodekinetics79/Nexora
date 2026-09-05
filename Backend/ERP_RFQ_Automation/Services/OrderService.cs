@@ -62,6 +62,19 @@ namespace ERP_RFQ_Automation.Services
             if (dto.Items == null || dto.Items.Count == 0)
                 throw new ArgumentException("An order must contain at least one line item.");
 
+            // The order is the document the customer is invoiced from, and finance refuses to
+            // issue an invoice against an order that names no currency. Refuse it here, on the
+            // screen that raised the order, instead of two steps later on the invoice with no
+            // pointer back to the field. The currency must be one of this tenant's own.
+            if (dto.CurrencyId is not { } currencyId)
+                throw new ArgumentException(
+                    "An order must state its currency. Choose the currency the customer will be invoiced in.");
+            var currencyIsOurs = await _context.Currencies.AnyAsync(c =>
+                c.Id == currencyId && c.BusinessUnitId == businessUnitId && c.IsActive != false);
+            if (!currencyIsOurs)
+                throw new ArgumentException(
+                    "The selected currency is not one of this business unit's active currencies.");
+
             // FR-COM-07. The originating document is resolved BEFORE any money is computed, so a
             // request that cannot name its case is rejected outright rather than half-built.
             //
