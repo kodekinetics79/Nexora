@@ -19,6 +19,8 @@ import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
 import customerService from '../../../api/services/customerService';
 import productService from '../../../api/services/productService';
+import currencyService, { type CurrencyDTO } from '../../../api/services/currencyService';
+import { createOrderBlockers, defaultCurrencyId } from './createOrderForm';
 import { useSnackbar } from 'notistack';
 import { handleApiError } from '../../../utils/errorHandler';
 import dayjs from 'dayjs';
@@ -56,6 +58,8 @@ const CreateOrderPage: React.FC = () => {
   const rfqId = searchParams.get('rfqId');
 
   const [customerId, setCustomerId] = useState<number | null>(null);
+  const [currencyId, setCurrencyId] = useState<number | null>(null);
+  const [currencyError, setCurrencyError] = useState(false);
   const [orderDate, setOrderDate] = useState(dayjs().format('YYYY-MM-DD'));
   const [deliveryDate, setDeliveryDate] = useState(dayjs().add(7, 'day').format('YYYY-MM-DD'));
   const [notes, setNotes] = useState('');
@@ -78,6 +82,20 @@ const CreateOrderPage: React.FC = () => {
     queryKey: ['products-lookup'],
     queryFn: () => productService.getAll({ businessUnitId, pageSize: 200 }),
   });
+
+  // The currencies this tenant set up. The form starts on the base currency (or the only active
+  // one) and never guesses between several; in edit mode the order's own currency is fixed.
+  const { data: currencies } = useQuery({
+    queryKey: ['currencies-lookup', businessUnitId],
+    queryFn: () => currencyService.getAll({ businessUnitId, pageSize: 100 }).then((r) => r.items.filter((c) => c.isActive !== false)),
+    enabled: !isEditMode,
+  });
+
+  useEffect(() => {
+    if (isEditMode || currencyId !== null) return;
+    const starting = defaultCurrencyId(currencies);
+    if (starting !== null) setCurrencyId(starting);
+  }, [isEditMode, currencies, currencyId]);
 
   // Effect to load data in edit mode or from RFQ/Quote
   useEffect(() => {
@@ -168,29 +186,29 @@ const CreateOrderPage: React.FC = () => {
   const { subtotal, totalDiscount, totalTax, grandTotal } = calculateTotals();
 
   /**
-   * The order's own currency, in edit mode. In CREATE mode there is none — and that is the honest
-   * state, not an oversight to paper over: `CreateOrderDto.CurrencyId` is on the wire and this
-   * screen, the only one that raises a manual order, has never sent it, so a manually created
-   * order carries no currency at all. `formatMoney` renders a bare number for that case rather
-   * than the literal "$" this screen used to print over records that may be denominated in SAR.
-   * Giving the screen a currency to state is a product decision (which currencies, and what the
-   * default is), not a formatting one.
+   * The currency every figure on this screen is stated in. In edit mode it is the order's own and
+   * cannot change here; in create mode it is the one the rep chose (or the tenant's base currency),
+   * and the server refuses an order that names none — finance cannot invoice such an order.
    */
-  const currencyCode = orderData?.currencyCode ?? null;
+  const selectedCurrency: CurrencyDTO | null = currencies?.find((c) => c.id === currencyId) ?? null;
+  const currencyCode = isEditMode ? (orderData?.currencyCode ?? null) : (selectedCurrency?.code ?? null);
 
   const handleSave = () => {
-    if (!customerId) {
-      setCustomerError(true);
-      enqueueSnackbar('Please select a customer', { variant: 'warning' });
-      return;
-    }
-    if (items.length === 0) {
-      enqueueSnackbar('Please add at least one item before saving', { variant: 'warning' });
+    const blockers = createOrderBlockers({
+      customerId,
+      currencyId: isEditMode ? (orderData?.currencyId ?? currencyId) : currencyId,
+      itemCount: items.length,
+    });
+    if (blockers.length > 0) {
+      setCustomerError(!customerId);
+      setCurrencyError(!isEditMode && !currencyId);
+      enqueueSnackbar(blockers[0], { variant: 'warning' });
       return;
     }
 
     const payload = {
       customerId,
+      currencyId: isEditMode ? undefined : currencyId,
       businessUnitId,
       orderDate: dayjs(orderDate).toISOString(),
       deliveryDate: deliveryDate ? dayjs(deliveryDate).toISOString() : null,
@@ -299,6 +317,38 @@ const CreateOrderPage: React.FC = () => {
                     />
                   )}
                 />
+              </Grid>
+              <Grid size={{ xs: 12, md: 6 }}>
+                {isEditMode ? (
+                  <TextField
+                    label="Currency"
+                    size="small"
+                    fullWidth
+                    value={orderData?.currencyCode ?? 'Not stated'}
+                    disabled
+                    helperText="An order keeps the currency it was raised in."
+                  />
+                ) : (
+                  <Autocomplete
+                    options={currencies ?? []}
+                    getOptionLabel={(option) => `${option.code} — ${option.currencyName}`}
+                    isOptionEqualToValue={(option, value) => option.id === value.id}
+                    value={selectedCurrency}
+                    onChange={(_, newValue) => { setCurrencyId(newValue?.id ?? null); if (newValue) setCurrencyError(false); }}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        label="Currency"
+                        required
+                        size="small"
+                        error={currencyError}
+                        helperText={currencyError
+                          ? 'Currency is required'
+                          : 'The customer will be invoiced in this currency.'}
+                      />
+                    )}
+                  />
+                )}
               </Grid>
               <Grid size={{ xs: 12, md: 3 }}>
                 <TextField
