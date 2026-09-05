@@ -476,6 +476,46 @@ public sealed class AgentAuthorityBoundaryTests
         Assert.Equal(AgentApprovalStatus.Pending, read.Set<AgentApproval>().Single(a => a.Id == approvalId).Status);
     }
 
+    /// <summary>
+    /// The quote-to-cash walk (2026-09-05): the owner approved a below-floor send, the quote went
+    /// out, and the hold stayed "pending" — a second Approve sent it again with 200. The tool ran on
+    /// the controller's own scoped DbContext, and QuoteService.SendQuoteEmailAsync runs inside the
+    /// retrying execution strategy, which starts with ChangeTracker.Clear(): the approval loaded
+    /// before execution was detached, so the status written after it was never saved.
+    /// </summary>
+    [Fact]
+    public async Task ADecisionIsRecordedEvenWhenTheToolClearsTheChangeTracker()
+    {
+        using var db = new TestDb();
+        Seed(db);
+        Guid approvalId;
+        using (var seed = db.ContextFor(null))
+        {
+            var approval = Approval(UserA, "award_rfq");
+            approvalId = approval.Id;
+            seed.Set<AgentApproval>().Add(approval);
+            seed.SaveChanges();
+        }
+
+        var context = db.ContextFor(Bu);
+        var controller = Controller(context, UserB, isManager: true,
+            new TrackerClearingOrchestrator(context), new RecordingTool("award_rfq", isMutation: true));
+
+        var ok = Assert.IsType<OkObjectResult>(await controller.Approve(approvalId, CancellationToken.None));
+        Assert.Contains("executed", ok.Value!.ToString()!, StringComparison.Ordinal);
+
+        using (var read = db.ContextFor(Bu))
+        {
+            var stored = read.Set<AgentApproval>().Single(a => a.Id == approvalId);
+            Assert.Equal(AgentApprovalStatus.Executed, stored.Status);
+            Assert.Equal(UserB, stored.DecidedByUserId);
+        }
+
+        // Decided once: the second Approve is refused rather than executing the send again.
+        var again = Assert.IsType<ConflictObjectResult>(await controller.Approve(approvalId, CancellationToken.None));
+        Assert.Contains("not pending", again.Value!.ToString()!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AnApprovalWithNoRecordedRequester_CannotBeApprovedAtAll()
     {
@@ -670,13 +710,16 @@ public sealed class AgentAuthorityBoundaryTests
     }
 
     private static AgentController Controller(TestDb db, long userId, bool isManager)
+        => Controller(db.ContextFor(Bu), userId, isManager, new UnusedOrchestrator());
+
+    private static AgentController Controller(
+        ErpRfqAutomationContext context, long userId, bool isManager, IAgentOrchestrator orchestrator, params IAgentTool[] tools)
     {
-        var context = db.ContextFor(Bu);
         var authorization = new RecordingAuthorizationService(
             p => p != RequireManagerRoleAttribute.PolicyName || isManager);
 
         return new AgentController(
-            new UnusedOrchestrator(), new AgentToolRegistry([]), new AgentGuardrail(context), context, authorization)
+            orchestrator, new AgentToolRegistry(tools), new AgentGuardrail(context), context, authorization)
         {
             ControllerContext = new ControllerContext
             {
@@ -821,6 +864,24 @@ public sealed class AgentAuthorityBoundaryTests
         public Task<AuthorizationResult> AuthorizeAsync(
             ClaimsPrincipal user, object? resource, IEnumerable<IAuthorizationRequirement> requirements) =>
             Task.FromResult(AuthorizationResult.Failed());
+    }
+
+    /// <summary>
+    /// What the real orchestrator does to the shared scoped context when the approved tool is a
+    /// quote send: the execution strategy clears the tracker before its delegate runs.
+    /// </summary>
+    private sealed class TrackerClearingOrchestrator(ErpRfqAutomationContext context) : IAgentOrchestrator
+    {
+        public IAsyncEnumerable<AgentStreamEvent> RunAsync(
+            Guid? sessionId, string message, AgentToolContext ctx, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<ToolExecutionOutcome> ExecuteApprovedAsync(
+            IAgentTool tool, JsonElement input, AgentToolContext ctx, CancellationToken ct)
+        {
+            context.ChangeTracker.Clear();
+            return Task.FromResult(new ToolExecutionOutcome(true, "sent", "{\"sent\":true}"));
+        }
     }
 
     /// <summary>The read/approval endpoints under test never reach the orchestrator.</summary>
