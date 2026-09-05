@@ -220,7 +220,7 @@ public sealed class QuoteToCashScenarioRegressionTests
     /// The exact row shape ConvertToOrder writes: SourceType CUSTOMER_AWARD with both QuoteId and
     /// CustomerAwardId (CK_Orders_SourceIdentity), status DRAFT, the award's currency.
     /// </summary>
-    private static long SeedAwardBackedDraftOrder(ErpRfqAutomationContext context)
+    internal static long SeedAwardBackedDraftOrder(ErpRfqAutomationContext context)
     {
         const long currencyId = 99_350, purchaseOrderId = 99_351, poLineId = 99_352, awardId = 99_353,
             orderId = 99_354, orderItemId = 99_355, draftStatusId = 99_356, warehouseId = 99_357, productId = 99_358;
@@ -326,9 +326,12 @@ public sealed class QuoteToCashScenarioRegressionTests
         // The RFQ inherits the lead's customer; a lead with no resolved identity has none to give.
         lead.ResolveCommercialIdentity(99_311, null, "MATCHED");
         context.SaveChanges();
+        // CK_RFQ_LeadPromotionLineage (PostgreSQL only): an RFQ that names its lead must carry the whole
+        // promotion lineage. These scenarios are about the quote and the order, so the RFQ inherits the
+        // lead's commercial case without naming the lead — the same shape QuoteRevisionPostgreSqlTests uses.
         var rfq = new Rfq
         {
-            Id = 99_312, Rfqno = "RFQ-SCN-1", RecDate = Now, LeadId = lead.Id, CustomerId = 99_311,
+            Id = 99_312, Rfqno = "RFQ-SCN-1", RecDate = Now, CustomerId = 99_311,
             BusinessUnitId = Tenant, CreatedBy = "tests", CreatedDate = Now
         };
         rfq.InheritCommercialIdentity(lead);
