@@ -205,6 +205,56 @@ public sealed class TenantUserInvitationTests
             (await harness.Invitations.RedeemAsync(second, StrongPassword, "203.0.113.7")).Status);
     }
 
+    // ==== audit 2026-09-04: resend is not a reactivation path ======================================
+
+    [Fact]
+    public async Task Resending_cannot_reactivate_an_account_that_was_created_with_a_password()
+    {
+        using var harness = new Harness();
+        var fixture = await harness.SeedTenantAsync("noor-sons");
+        var controller = harness.Controller(fixture);
+        var request = Request(fixture, activation: "password");
+        request.Password = StrongPassword;
+        var created = Assert.IsType<UserResponseDTO>(Assert.IsType<CreatedAtActionResult>(
+            (await controller.Create(request)).Result).Value);
+        Assert.Empty(harness.Sender.Sent);
+        await DeactivateAsync(harness, created.Id);
+
+        var resend = await controller.ResendInvitation(created.Id);
+
+        // A holder of Users:Create must not be able to undo a deactivation by mailing the
+        // account a link that flips IsActive back on when redeemed.
+        Assert.IsType<ConflictObjectResult>(resend);
+        Assert.Empty(harness.Sender.Sent);
+    }
+
+    [Fact]
+    public async Task Resending_cannot_reactivate_an_invitee_who_already_redeemed_a_link()
+    {
+        using var harness = new Harness();
+        var fixture = await harness.SeedTenantAsync("noor-sons");
+        var controller = harness.Controller(fixture);
+        var created = Assert.IsType<UserResponseDTO>(Assert.IsType<CreatedAtActionResult>(
+            (await controller.Create(Request(fixture, activation: "invite"))).Result).Value);
+        Assert.Equal(TenantActivationStatus.Activated,
+            (await harness.Invitations.RedeemAsync(harness.LastIssuedToken(), StrongPassword, "203.0.113.7")).Status);
+        await DeactivateAsync(harness, created.Id);
+
+        var resend = await controller.ResendInvitation(created.Id);
+
+        Assert.IsType<ConflictObjectResult>(resend);
+        Assert.Single(harness.Sender.Sent);
+    }
+
+    private static async Task DeactivateAsync(Harness harness, long userId)
+    {
+        await using var context = harness.Database.ContextFor(null);
+        Assert.Equal(1, await context.Users.IgnoreQueryFilters().Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(u => u.IsActive, (bool?)false)
+                .SetProperty(u => u.DeactivatedAtUtc, (DateTime?)DateTime.UtcNow)));
+    }
+
     // ==== harness =================================================================================
 
     private static UserCreateRequestDTO Request(Fixture fixture, string? activation) => new()

@@ -355,6 +355,10 @@ namespace ERP_RFQ_Automation.Repositories
            
             _context.Users.Remove(user);
             await _context.SaveChangesAsync();
+            // A deleted row already fails the validator's live check, but the verdict cached
+            // BEFORE the delete would keep the account's tokens alive for the cache TTL. Evict,
+            // exactly as the deactivate and role-change paths do.
+            _sessions?.Evict(id);
         }
 
         public async Task<IEnumerable<RoleResponseDTO>> GetRolesAsync(long businessUnitId)

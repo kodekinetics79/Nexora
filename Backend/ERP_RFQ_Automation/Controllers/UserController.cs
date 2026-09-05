@@ -661,6 +661,9 @@ namespace ERP_RFQ_Automation.Controllers
         /// </summary>
         [HttpPost("{id}/resend-invitation")]
         [RequireModulePermission("Users", PermissionAction.Create)]
+        // Sends mail on every call: bounded by the same per-tenant smtp policy as the anonymous
+        // password-reset request, so a script cannot turn this into a mail flood at a colleague.
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.SmtpPolicy)]
         public async Task<ActionResult> ResendInvitation(long id)
         {
             try
@@ -689,6 +692,21 @@ namespace ERP_RFQ_Automation.Controllers
                 // primary unit) is a filter on an id this caller already proved it may manage.
                 using (PlatformPlaneExecution.Enter())
                 {
+                    // SEC-2026-09-04 (audit P1): "inactive" is not the same as "never activated".
+                    // Redeeming a link sets IsActive = true, so without this check a holder of
+                    // Users:Create could undo an administrator's DEACTIVATION — of a password-
+                    // created account or of an invitee who had already signed in — by mailing the
+                    // account a fresh activation link, bypassing the Users:Edit + seat-limit path
+                    // that reactivation is meant to go through. Only an invitation that was never
+                    // redeemed may be resent; everything else is a reactivation and belongs to Edit.
+                    var history = (await _invitations.ListAsync(tenantId.Value, HttpContext.RequestAborted))
+                        .Where(i => i.UserId == id)
+                        .ToList();
+                    if (history.Count == 0)
+                        return Conflict("This account was not created by invitation. Reactivate it from Edit instead.");
+                    if (history.Any(i => i.RedeemedAtUtc is not null))
+                        return Conflict("This account has already been activated once. Reactivate it from Edit instead.");
+
                     issued = await _invitations.ReissueAsync(tenantId.Value, id, actor, HttpContext.RequestAborted);
                 }
                 if (issued is null) return NotFound("No invitation can be issued for this account.");
