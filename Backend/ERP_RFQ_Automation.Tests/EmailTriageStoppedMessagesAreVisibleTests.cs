@@ -48,14 +48,14 @@ public sealed class EmailTriageStoppedMessagesAreVisibleTests : IDisposable
         var stopped = await service.ListAsync(Bu, outcome: null, page: 1, pageSize: 50,
             ct: default, state: EmailTriageStates.Stopped);
 
-        Assert.Equal(3, stopped.TotalCount);
+        Assert.Equal(4, stopped.TotalCount);
         Assert.Equal(
-            new[] { 8103L, 8104L, 8106L }.OrderBy(x => x),
+            new[] { 8103L, 8104L, 8106L, 8107L }.OrderBy(x => x),
             stopped.Items.Select(x => x.Id).OrderBy(x => x));
 
         // Unfiltered still shows everything: the filter narrows, it does not become the surface.
         var everything = await service.ListAsync(Bu, outcome: null, page: 1, pageSize: 50);
-        Assert.Equal(6, everything.TotalCount);
+        Assert.Equal(7, everything.TotalCount);
     }
 
     [Fact]
@@ -99,6 +99,32 @@ public sealed class EmailTriageStoppedMessagesAreVisibleTests : IDisposable
         Assert.False(byId[8101].StoppedInProcessing);           // rejected as noise: a decision
         Assert.False(byId[8102].StoppedInProcessing);           // finished
         Assert.False(byId[8106].StoppedInProcessing);           // held with a lead-not-produced hold
+        Assert.False(byId[8107].StoppedInProcessing);           // held, assembly speaks for it
+    }
+
+    /// <summary>
+    /// Intake scenario testing 2026-09-05 (docs/audit/SCENARIOS-INTAKE-2026-09-05.md, F1). On a
+    /// tenant with no model authorization, an RFQ e-mail whose CSV attachment extracted cleanly
+    /// still produced nothing: the prose body's job dead-lettered with <c>ai_not_authorized</c>,
+    /// the closure rule (correctly) HELD the message as <c>FailedRecoverable</c> rather than
+    /// quoting against a part nobody read — and the Stopped tab said 0. The hold is job-bound, so
+    /// the sweep leaves it alone; nothing retries it; and the one list an operator opens to ask
+    /// "what stopped?" did not list it. Three live messages were findable only by clicking
+    /// through every outcome tab and reading the ParseStatus column.
+    /// </summary>
+    [Fact]
+    public async Task A_message_held_because_its_job_gave_up_is_stopped()
+    {
+        await SeedCensusAsync();
+        await using var context = _db.ContextFor(Bu);
+        var service = NewService(context);
+
+        var stopped = await service.ListAsync(Bu, outcome: null, page: 1, pageSize: 50,
+            ct: default, state: EmailTriageStates.Stopped);
+
+        var held = Assert.Single(stopped.Items, x => x.Id == 8107);
+        Assert.Equal("FailedRecoverable", held.AssemblyState);
+        Assert.StartsWith("Failed", held.ParseStatus);
     }
 
     [Fact]
@@ -112,7 +138,7 @@ public sealed class EmailTriageStoppedMessagesAreVisibleTests : IDisposable
 
         var page = await service.ListAsync(Bu, outcome: null, page: 1, pageSize: 50,
             ct: default, state: "stoped");
-        Assert.Equal(6, page.TotalCount);
+        Assert.Equal(7, page.TotalCount);
     }
 
     // ------------------------------------------------------------------ fixture
@@ -143,6 +169,11 @@ public sealed class EmailTriageStoppedMessagesAreVisibleTests : IDisposable
         // 8106 — STOPPED: the sharpest shape. Success, Inquiry, every component terminal, held
         // with assembly_lead_not_produced and no lead by either link.
         Ingest(context, 8106, "Inquiry", "Success", "Unnumbered inquiry B quantity changed");
+
+        // 8107 — held: the body's job gave up (ai_not_authorized) and the closure rule held the
+        // whole message so a CSV-only lead is not quoted against a body nobody read. Job-bound,
+        // so the sweep leaves it alone. A person is the only way out; it is stopped.
+        Ingest(context, 8107, "Inquiry", "Failed - extraction dead-lettered", "RFQ SCN-MAIL with bid list attached");
         await context.SaveChangesAsync();
 
         var lead = new Lead
@@ -162,6 +193,9 @@ public sealed class EmailTriageStoppedMessagesAreVisibleTests : IDisposable
         Assembly(context, 8105, EmailInquiryAssemblyStatus.Assembled, null, lead.Id);
         Assembly(context, 8106, EmailInquiryAssemblyStatus.NeedsReview,
             $"{EmailInquiryHoldReasons.LeadNotProduced}: {EmailInquiryHoldReasons.LeadNotProducedDetail}",
+            null);
+        Assembly(context, 8107, EmailInquiryAssemblyStatus.FailedRecoverable,
+            "Part of this message could not be processed because a required service was unavailable. It is held and will resume without re-reading the mailbox.",
             null);
         // 8104 deliberately gets NO assembly row — that is what the dead-lettered population
         // looks like in production, and a fixture that gave it one would exercise a shape the

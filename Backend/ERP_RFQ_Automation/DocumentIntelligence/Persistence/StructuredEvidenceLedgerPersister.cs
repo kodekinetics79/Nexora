@@ -129,8 +129,21 @@ public sealed class StructuredEvidenceLedgerPersister
                 var description = canonical.ProductName.Value;
                 if (string.IsNullOrWhiteSpace(description))
                     description = canonical.ProductName.OriginalValue ?? "[missing product description]";
+                // The ledger line's description is capped at 4,000 characters by its own guard.
+                // A longer cell used to reach that guard raw and dead-letter the whole document
+                // after the Lead had already been persisted (intake scenario audit 2026-09-05,
+                // F15). Keep the head within the contract; the full text stays in RawPayload.
+                if (description.Length > 4_000)
+                    description = description[..3_999] + "…";
+                // The normaliser has already refused a zero, negative or out-of-range quantity
+                // (line Invalid, Lead line null). CanonicalLineItem's guard throws on anything
+                // that is not positive, and before this the raw parsed value was still handed to
+                // it here — so ONE unusable cell dead-lettered the whole document on every retry
+                // (intake scenario audit 2026-09-05, F3). The unstructured path already guards
+                // this; the structured path holds the line for a person the same way.
+                var quantity = ValueOrNull(canonical.Quantity);
                 var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
-                    description, ValueOrNull(canonical.Quantity),
+                    description, quantity is > 0 ? quantity : null,
                     canonical.UnitOfMeasure.Value);
                 line.Enrich(canonical.ManufacturerName.Value, canonical.ManufacturerPartNumber.Value,
                     canonical.Currency.Value, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),

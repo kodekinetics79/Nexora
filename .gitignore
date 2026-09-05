@@ -83,6 +83,7 @@ Thumbs.db
 .e2e-run/
 .enterprise-e2e-run/
 .security-e2e-run/
+.intake-scenarios-run/
 scratch-security-results.json
 # Logs and scratch from scripts/local/run-platform-console.sh
 .local-run/

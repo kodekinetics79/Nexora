@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -56,7 +57,40 @@ public sealed class ManualUploadControllerTrustTests : IDisposable
         Assert.Equal(new long[] { 77_001 }, ingestion.BusinessUnitIds);
     }
 
-    private ManualUploadController CreateController(RecordingIngestion ingestion, long? tenantClaim)
+    /// <summary>
+    /// Scenario testing 2026-09-04 (docs/audit/SCENARIOS-INTAKE-2026-09-04.md, finding F4): CSV bytes
+    /// uploaded under a ".xlsx" name were refused by document inspection — correctly, with a sentence
+    /// naming the fix — and this door answered HTTP 500 "Internal server error", because
+    /// <see cref="DocumentInspectionException"/> is an <see cref="IOException"/> and fell into the
+    /// generic catch. The sibling action <c>UploadCustomerRfqExcel</c> already answered 422 with the
+    /// inspection reason; the multi-file door must say the same thing.
+    /// </summary>
+    [Fact]
+    public async Task InspectionRefusalIsTheCallersOutcomeNotAServerError()
+    {
+        var reason = "The file is named '.xlsx' but its contents are not in that format. Open it in the "
+            + "application that produced it and use Save As to store a real .xlsx file, then upload that.";
+        var batchId = Guid.NewGuid();
+        var ingestion = new RefusingIngestion(new DocumentInspectionException(
+            new FileInspectionResult(FileInspectionStatus.Rejected, null, 12, reason, "not-run", null),
+            sourceDocumentOccurrenceId: 91, batchId: batchId));
+        var controller = CreateController(ingestion, tenantClaim: 77_001);
+
+        var result = await controller.UploadFiles([File("rfqno,qty\nA,1\n", "rfq.xlsx")]);
+
+        var refusal = Assert.IsType<UnprocessableEntityObjectResult>(result);
+        using var body = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(refusal.Value));
+        var root = body.RootElement;
+        Assert.False(root.GetProperty("success").GetBoolean());
+        Assert.Equal(reason, root.GetProperty("message").GetString());
+        Assert.Equal("Rejected", root.GetProperty("outcome").GetString());
+        Assert.Equal("document_rejected", root.GetProperty("errorCode").GetString());
+        Assert.Equal(batchId.ToString(), root.GetProperty("batchId").GetString());
+        Assert.Equal(91, root.GetProperty("sourceDocumentOccurrenceId").GetInt64());
+        Assert.DoesNotContain("Internal server error", root.ToString());
+    }
+
+    private ManualUploadController CreateController(IDocumentIngestion ingestion, long? tenantClaim)
     {
         Directory.CreateDirectory(_root);
         var controller = new ManualUploadController(
@@ -101,6 +135,15 @@ public sealed class ManualUploadControllerTrustTests : IDisposable
                 Outcome = EnqueueOutcome.Enqueued
             });
         }
+    }
+
+    private sealed class RefusingIngestion(Exception failure) : IDocumentIngestion
+    {
+        public Task<IngestedDocument> IngestAsync(
+            byte[] bytes, string fileName, long businessUnitId, ExtractionSourceType sourceType,
+            Guid? batchId = null, int priority = 0, ExtractionJobMetadata? metadata = null,
+            long? emailInquiryComponentId = null,
+            CancellationToken ct = default) => throw failure;
     }
 
     public void Dispose()
