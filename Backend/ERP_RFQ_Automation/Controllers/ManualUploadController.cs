@@ -92,6 +92,27 @@ namespace ERP_RFQ_Automation.Controllers
                 }
                 return Accepted(new { success = true, message = "Files accepted for governed extraction.", data = accepted });
             }
+            catch (DocumentInspectionException ex)
+            {
+                // The file was refused by document inspection — a decision about the caller's
+                // bytes, with a sentence that names the fix. This used to fall into the generic
+                // catch below as "Internal server error" (DocumentInspectionException is an
+                // IOException), so CSV bytes named ".xlsx" looked like an outage. The refusal is
+                // already recorded on its occurrence and batch; say so, exactly as
+                // UploadCustomerRfqExcel does (intake scenario audit 2026-09-04, finding F4).
+                _logger.LogWarning("Upload stopped by document inspection for tenant {BusinessUnitId}: {Status} {Reason}",
+                    targetBUId, ex.Inspection.Status, ex.Inspection.Reason);
+                return UnprocessableEntity(new
+                {
+                    success = false,
+                    outcome = ex.Inspection.IsRetryable ? "AwaitingSecurityScan" : ex.Inspection.Status.ToString(),
+                    errorCode = ex.Inspection.ErrorCode,
+                    message = ex.Inspection.Reason,
+                    batchId = ex.BatchId,
+                    sourceDocumentOccurrenceId = ex.SourceDocumentOccurrenceId,
+                    accepted
+                });
+            }
             catch (Platform.Entitlements.EntitlementDeniedException ex)
             {
                 _logger.LogWarning("Upload denied for tenant {BusinessUnitId}: {Reason}", targetBUId, ex.Message);
