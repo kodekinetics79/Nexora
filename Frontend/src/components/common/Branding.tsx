@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Typography, useTheme } from '@mui/material';
-import logo from '../../assets/img/logo.svg';
+import BrandMark from './BrandMark';
 
 interface BrandingProps {
   fontSize?: number;
@@ -19,26 +19,7 @@ const Branding: React.FC<BrandingProps> = ({
 
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-      <Box
-        sx={{
-          width: logoSize,
-          height: logoSize,
-          borderRadius: 2,
-          backgroundColor: theme.palette.primary.main,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-          boxShadow: '0 4px 12px rgba(13, 71, 161, 0.2)',
-        }}
-      >
-        <img 
-          src={logo} 
-          alt={showText ? '' : 'Nexora'}
-          height={logoSize * 0.6} 
-          style={{ filter: 'brightness(0) invert(1)' }} 
-        />
-      </Box>
+      <BrandMark size={logoSize} tint={theme.palette.primary.main} title={showText ? '' : 'Nexora'} />
       {showText && (
         <Box sx={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
           <Typography
@@ -49,6 +30,8 @@ const Branding: React.FC<BrandingProps> = ({
               fontFamily: '"Cambay", "Source Sans 3", sans-serif',
               letterSpacing: '-1px',
               whiteSpace: 'nowrap',
+              // Letterpress: a hairline of light under the wordmark in light mode only.
+              textShadow: theme.palette.mode === 'dark' ? 'none' : '0 1px 0 rgba(255,255,255,0.7)',
             }}
           >
             NEXORA
