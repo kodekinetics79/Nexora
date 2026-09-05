@@ -82,6 +82,8 @@ Thumbs.db
 # Local E2E run scratch (service logs, generated ids, throwaway credentials)
 .e2e-run/
 .enterprise-e2e-run/
+.security-e2e-run/
+scratch-security-results.json
 # Logs and scratch from scripts/local/run-platform-console.sh
 .local-run/
 
