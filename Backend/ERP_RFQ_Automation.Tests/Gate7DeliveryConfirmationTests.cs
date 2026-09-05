@@ -908,9 +908,19 @@ public sealed class Gate7DeliveryConfirmationTests
         var shipmentId = isPrimary ? ShipmentId : ShipmentId + 1;
         var shipmentItemId = isPrimary ? ShipmentItemId : ShipmentItemId + 1;
 
+        // An invoice must state the currency it is payable in (the gate that stopped
+        // INV-2026-000001 being un-payable), so the order it is raised from carries one. A
+        // per-order id keeps the primary and secondary orders from colliding on it.
+        var currencyId = orderId + 900_000;
+        context.Currencies.Add(new Currency
+        {
+            Id = currencyId, BusinessUnitId = tenant, Code = "SAR", CurrencyName = "Saudi Riyal",
+            CreatedBy = "qa", CreatedOn = Now
+        });
         context.Set<Order>().Add(new Order
         {
             Id = orderId, OrderNo = $"SO-{orderId}", CustomerId = tenant, BusinessUnitId = tenant,
+            CurrencyId = currencyId,
             StatusId = tenant, TotalAmount = 400m, OrderDate = Now, CreatedBy = "qa", CreatedOn = Now,
             IsActive = true
         });
