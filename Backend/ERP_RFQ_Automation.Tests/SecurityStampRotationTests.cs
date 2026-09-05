@@ -101,6 +101,24 @@ public sealed class SecurityStampRotationTests
     }
 
     [Fact]
+    public async Task Deleting_through_the_repository_evicts_the_cached_session()
+    {
+        // Audit 2026-09-04: the row is gone, but the validator's cached verdict from before the
+        // delete would honour the account's tokens for the cache TTL unless it is evicted here.
+        using var db = new TestDb();
+        var (userId, _) = await SeedAsync(db);
+        var sessions = new RecordingSessionCache();
+
+        await using (var ctx = db.ContextFor(null))
+        {
+            var repo = new UserRepository(ctx, sessions);
+            await repo.DeleteAsync(userId, Bu);
+        }
+
+        Assert.Equal([userId], sessions.Evicted);
+    }
+
+    [Fact]
     public void Every_new_user_starts_with_a_distinct_stamp()
     {
         var a = new User();

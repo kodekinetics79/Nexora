@@ -192,6 +192,9 @@ public sealed class MailboxController(
     /// </summary>
     [HttpPost("{id:long}/send-test")]
     [RequireModulePermission(Module, PermissionAction.Edit)]
+    // Puts a real message on the wire through an operator-chosen host on every call: bounded by
+    // the per-tenant smtp policy so it cannot be scripted into a burst at the mailbox's address.
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.SmtpPolicy)]
     public async Task<ActionResult<OutboundEmailProbeResult>> SendTest(long id, [FromBody] MailboxSendTestRequestDTO request)
     {
         if (!ModelState.IsValid) return BadRequest(ModelState);
