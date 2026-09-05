@@ -528,6 +528,63 @@ public sealed class CommercialIntelligenceControllerFocusedTests
         Assert.Equal(2, active.Version);
     }
 
+    /// <summary>
+    /// Intake scenario testing 2026-09-05 (docs/audit/SCENARIOS-INTAKE-2026-09-05.md, F3). A
+    /// manager assigning a queued inquiry without an <c>Idempotency-Key</c> header got HTTP 500
+    /// "Internal server error": <c>IdempotencyKey()</c> throws <see cref="SalesValidationException"/>
+    /// and this action's catch list did not include it. The sentence the helper writes is the
+    /// right one — it must reach the caller as a 400, the way the account-ownership and
+    /// follow-up actions already return it.
+    /// </summary>
+    [Fact]
+    public async Task AssignLead_without_an_idempotency_key_is_refused_with_a_sentence_not_a_server_error()
+    {
+        const long tenant = 86_930;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        var lead = new Lead
+        {
+            Rfqno = "RFQ-IDEMPOTENCY", RecDate = DateTime.UtcNow, LeadSource = "Upload",
+            CreatedBy = "focused-test", CreatedDate = DateTime.UtcNow, BusinessUnitId = tenant
+        };
+        context.Leads.Add(lead);
+        await context.SaveChangesAsync();
+        var decision = new LeadRoutingDecision
+        {
+            BusinessUnitId = tenant, LeadId = lead.Id, MatchStatus = CustomerMatchStatus.NoEvidence,
+            Outcome = RoutingOutcome.Unassigned, MatchConfidence = 0m, DecisionCode = "NO_MATCH_EVIDENCE",
+            Explanation = "No deterministic owner was found.", PolicyVersion = "routing-v1",
+            CorrelationId = "seed-routing", IdempotencyKey = "seed-routing", CreatedOn = DateTime.UtcNow.AddHours(-1)
+        };
+        var item = new UnassignedWorkItem
+        {
+            BusinessUnitId = tenant, LeadId = lead.Id, RoutingDecision = decision, ReasonCode = "NO_MATCH_EVIDENCE",
+            Status = WorkItemStatus.Open, Priority = 90, EnteredOn = DateTime.UtcNow.AddHours(-1),
+            SlaDueOn = DateTime.UtcNow.AddHours(1), RequiredAction = "Assign an eligible owner",
+            IdempotencyKey = "seed-unassigned", Version = 1
+        };
+        context.Add(item);
+        await context.SaveChangesAsync();
+
+        var controller = new CommercialIntelligenceController(context, null!, RoutingService(context), new TestRoleGate(true))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant, 86_931) }
+            }
+        };
+
+        // No Idempotency-Key header. Before the fix: SalesValidationException escapes the action.
+        var response = await controller.AssignLead(item.Id,
+            new AssignRoutingRequest(86_932, item.Version, "Scenario test: assign to an available rep."),
+            CancellationToken.None);
+
+        var refusal = Assert.IsType<BadRequestObjectResult>(response);
+        using var body = JsonDocument.Parse(JsonSerializer.Serialize(refusal.Value));
+        Assert.Equal("Idempotency-Key header is required.", body.RootElement.GetProperty("error").GetString());
+    }
+
     private static ClaimsPrincipal Principal(long tenant, long userId = 1, long roleId = 1) => new(new ClaimsIdentity(
         [new Claim("businessUnitId", tenant.ToString()), new Claim(ClaimTypes.NameIdentifier, userId.ToString()), new Claim("roleId", roleId.ToString())], "focused-test"));
 

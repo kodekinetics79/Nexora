@@ -356,7 +356,7 @@ public sealed class CommercialIntelligenceController(
     public async Task<ActionResult> AssignAccount(long customerId, AssignAccountRequest request, CancellationToken ct)
     {
         var tenant = TenantId();
-        var idempotencyKey = IdempotencyKey();
+        if (!TryIdempotencyKey(out var idempotencyKey)) return IdempotencyKeyRequired();
         var reason = request.Reason?.Trim();
         var strategy = db.Database.CreateExecutionStrategy();
         (CustomerOwnership? Created, bool Conflict) outcome;
@@ -533,6 +533,10 @@ public sealed class CommercialIntelligenceController(
         }
         catch (RoutingNotFoundException ex) { return NotFound(new { error = ex.Message }); }
         catch (RoutingConflictException ex) { return Conflict(new { error = ex.Message }); }
+            // A missing Idempotency-Key used to escape this action as HTTP 500 "Internal server
+            // error" — the one sentence that explains the refusal was thrown and never returned
+            // (intake scenario testing 2026-09-05, F3).
+            catch (SalesValidationException ex) { return BadRequest(new { error = ex.Message }); }
     }
 
     [HttpGet("follow-ups")]
@@ -603,7 +607,7 @@ public sealed class CommercialIntelligenceController(
         // The correlation id is part of what the service compares on an idempotent replay, so it
         // must be the same on the retry as on the first attempt: derived from the key, never from
         // the per-request trace identifier.
-        var idempotencyKey = IdempotencyKey();
+        if (!TryIdempotencyKey(out var idempotencyKey)) return IdempotencyKeyRequired();
         var correlationId = idempotencyKey.Length <= 100 ? idempotencyKey : idempotencyKey[..100];
 
         try
@@ -642,9 +646,10 @@ public sealed class CommercialIntelligenceController(
             if (!assignedTo.HasValue) return NotFound();
             if (!scope.UserIds.Contains(assignedTo.Value)) return Forbid();
         }
+        if (!TryIdempotencyKey(out var completionKey)) return IdempotencyKeyRequired();
         await sales.TransitionFollowUpAsync(tenant, id, new TransitionFollowUpTaskCommand(
             FollowUpStatus.Completed, request.ExpectedVersion, UserId()?.ToString() ?? "authenticated-user",
-            "Completed by user", HttpContext.TraceIdentifier, IdempotencyKey()), ct);
+            "Completed by user", HttpContext.TraceIdentifier, completionKey), ct);
         return NoContent();
     }
 
@@ -846,6 +851,14 @@ public sealed class CommercialIntelligenceController(
         _ => "assigned_to_me"
     };
     private string IdempotencyKey() => Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : throw new SalesValidationException("Idempotency-Key header is required.");
+    /// <summary>The same rule as <see cref="IdempotencyKey"/>, for the actions that read the key
+    /// outside their try block: a missing header is the caller's 400, never a 500.</summary>
+    private bool TryIdempotencyKey(out string key)
+    {
+        key = Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : string.Empty;
+        return key.Length > 0;
+    }
+    private BadRequestObjectResult IdempotencyKeyRequired() => BadRequest(new { error = "Idempotency-Key header is required." });
     private string CorrelationId() => Request.Headers.TryGetValue("X-Correlation-ID", out var value) && !string.IsNullOrWhiteSpace(value)
         ? value.ToString().Trim()
         : HttpContext.TraceIdentifier;
