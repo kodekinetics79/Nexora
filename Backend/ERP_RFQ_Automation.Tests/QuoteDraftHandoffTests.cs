@@ -211,6 +211,17 @@ public sealed class QuoteDraftHandoffTests
         (string? Ref, string? Uom, string Description)[] lines)
     {
         Seed.EnsureBusinessUnit(context, tenant);
+        // A printable quote is a sendable quote, so it carries a currency — the renderer now
+        // refuses a currency-less document rather than printing a "USD" fallback over an unknown
+        // unit (see IssuedQuoteCurrencyTests). Seeded once here so every print test states the
+        // valid shape.
+        var currencyId = baseId + 90;
+        if (!context.Currencies.Any(x => x.Id == currencyId))
+            context.Currencies.Add(new Currency
+            {
+                Id = currencyId, BusinessUnitId = tenant, Code = "SAR",
+                CurrencyName = "Saudi Riyal", CreatedBy = "seed"
+            });
 
         long? rfqId = null;
         if (customerRfqNo != null)
@@ -234,6 +245,7 @@ public sealed class QuoteDraftHandoffTests
             Id = baseId + 3,
             QuoteNo = $"QT-PRINT-{baseId}",
             Rfqid = rfqId,
+            CurrencyId = currencyId,
             BusinessUnitId = tenant,
             QuoteDate = DateTime.UtcNow,
             ValidUntil = DateTime.UtcNow.AddDays(30),

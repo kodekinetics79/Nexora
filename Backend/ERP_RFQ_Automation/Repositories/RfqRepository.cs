@@ -567,7 +567,15 @@ namespace ERP_RFQ_Automation.Repositories
 
             // Update fields
             existing.BuyersName = rfq.BuyersName;
-            existing.RecDate = rfq.RecDate;
+            // RecDate is NOT NULL and RfqUpdateRequestDTO.RecDate is a non-nullable DateTime, so
+            // an update payload that omits it binds to 0001-01-01 and passes validation. The
+            // create path guards this (`rfq.RecDate == default ? DateTime.UtcNow : ...`); this
+            // path copied the sentinel over the real received date, after which every
+            // "hours from RFQ to quote" metric read ~17.7 million hours for that RFQ and the
+            // positivity filter downstream (CommercialLearningService) kept it. An absent date
+            // on an update means "not supplied", never "received at the dawn of time".
+            if (rfq.RecDate != default)
+                existing.RecDate = rfq.RecDate;
             existing.BidClosingDate = rfq.BidClosingDate;
             existing.BiddingDecision = rfq.BiddingDecision;
             existing.AcknowledgmentDate = rfq.AcknowledgmentDate;

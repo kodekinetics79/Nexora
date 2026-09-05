@@ -797,6 +797,10 @@ internal sealed class DownstreamSpine : IDisposable
         var order = new Order
         {
             OrderNo = "SO-SPINE-1", CustomerId = CustomerId, BusinessUnitId = BusinessUnitId,
+            // An invoice must state the currency it is payable in (the gate that stopped
+            // INV-2026-000001 being un-payable), so the order it is raised from carries the
+            // currency ProcurementScenario already seeds for this business unit.
+            CurrencyId = ProcurementTestData.Currency,
             StatusId = OrderStatusId, OrderDate = Now, TotalAmount = quantity * 100m,
             CreatedBy = "qa", CreatedOn = Now, IsActive = true
         };

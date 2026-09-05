@@ -425,24 +425,51 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         DateTime occurredOn,
         CancellationToken ct)
     {
-        if (_sales is null || !quote.Rfqid.HasValue) return;
-        var attribution = await _context.Rfqs.AsNoTracking()
-            .Where(rfq => rfq.BusinessUnitId == quote.BusinessUnitId && rfq.Id == quote.Rfqid.Value)
-            .Select(rfq => new
-            {
-                OwnerUserId = rfq.Lead == null ? null : rfq.Lead.AssignTo,
-                CustomerId = rfq.Lead == null ? quote.CustomerId : rfq.Lead.CustomerId
-            })
-            .SingleOrDefaultAsync(ct);
-        if (attribution?.OwnerUserId is not > 0) return;
+        if (_sales is null) return;
+        var attribution = quote.Rfqid.HasValue
+            ? await _context.Rfqs.AsNoTracking()
+                .Where(rfq => rfq.BusinessUnitId == quote.BusinessUnitId && rfq.Id == quote.Rfqid.Value)
+                .Select(rfq => new
+                {
+                    OwnerUserId = rfq.Lead == null ? null : rfq.Lead.AssignTo,
+                    CustomerId = rfq.Lead == null ? quote.CustomerId : rfq.Lead.CustomerId
+                })
+                .SingleOrDefaultAsync(ct)
+            : null;
+
+        // A won or lost quote is the outcome the whole pipeline exists to record, and it needs a
+        // rep to be credited to. Until now this returned silently whenever the lead had no owner
+        // — on a tenant carrying 230 unassigned leads out of 238, every Won, Lost and
+        // CustomerResponded activity was dropped, the pipeline showed zero wins on deals it had
+        // won, and nothing anywhere said so. (`commercial_activities` is empty on production.)
+        //
+        // The tenant already answers "if nobody owns it, credit ___" for routing
+        // (BusinessUnit.DefaultLeadOwnerUserId); the same answer is used here rather than a
+        // second rule. If the tenant has not set one there is genuinely nobody to credit, and
+        // that is a warning naming the setup gap, not a silent return.
+        var owner = attribution?.OwnerUserId is > 0
+            ? attribution.OwnerUserId.Value
+            : await _context.Set<BusinessUnit>().AsNoTracking()
+                .Where(x => x.Id == quote.BusinessUnitId)
+                .Select(x => x.DefaultLeadOwnerUserId)
+                .SingleOrDefaultAsync(ct) ?? 0;
+        if (owner <= 0)
+        {
+            _logger.LogWarning(
+                "Quote {QuoteId} outcome '{Outcome}' was recorded on business unit {BusinessUnitId} but neither " +
+                "its lead nor the business unit names an owner, so no sales activity was credited. Set a " +
+                "fallback lead owner in Setup so outcomes are always attributed.",
+                quote.Id, outcomeCode, quote.BusinessUnitId);
+            return;
+        }
 
         var eventCode = activityType.ToString().ToUpperInvariant();
         var activityIdentity = activityType is CommercialActivityType.Won or CommercialActivityType.Lost
             ? $"v{quote.LifecycleVersion}:{eventCode}"
             : eventCode;
         await _sales.AppendActivityAsync(quote.BusinessUnitId, new AppendCommercialActivityCommand(
-            attribution.OwnerUserId.Value, activityType, "Quote", quote.Id,
-            attribution.CustomerId ?? quote.CustomerId, null, occurredOn,
+            owner, activityType, "Quote", quote.Id,
+            attribution?.CustomerId ?? quote.CustomerId, null, occurredOn,
             outcomeCode, $"quote:{quote.Id}:{eventCode.ToLowerInvariant()}", actor,
             $"quote:{quote.Id}:commercial-activity",
             $"quote:{quote.Id}:commercial-activity:{activityIdentity}"), ct);

@@ -487,11 +487,20 @@ public sealed class QuotePriceAttestationTests
         };
         rfq.InheritCommercialIdentity(lead);
         context.Rfqs.Add(rfq);
+        // A currency on record: the send/PDF gate now refuses a currency-less quote as a document
+        // (it once printed "USD" for a null currency), so these attestation fixtures must carry one
+        // or they fail on the currency gate before the provenance rule under test is reached.
+        context.Currencies.Add(new Currency
+        {
+            Id = 96_701, BusinessUnitId = Tenant, Code = "SAR", CurrencyName = "Saudi Riyal",
+            CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        });
         context.SaveChanges();
 
         var quote = new Quote
         {
             Id = QuoteId, QuoteNo = "Q-ATTEST-1", BusinessUnitId = Tenant, Rfqid = rfq.Id,
+            CurrencyId = 96_701,
             // Non-draft so the revision test can revise it; the gate itself is status-agnostic.
             StatusId = SentStatusId,
             QuoteDate = DateTime.UtcNow, ValidUntil = DateTime.UtcNow.AddDays(30),
