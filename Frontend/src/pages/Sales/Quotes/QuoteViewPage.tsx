@@ -19,7 +19,7 @@ import {
   EventRepeat as ExtendValidityIcon,
   NotificationsActive as FollowUpIcon
 } from '@mui/icons-material';
-import quoteService, { type PriceAttestationSource } from '../../../api/services/quoteService';
+import quoteService, { describeQuoteSendOutcome, type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import ExtendValidityDialog from './ExtendValidityDialog';
 import FollowUpDialog from './FollowUpDialog';
@@ -151,7 +151,10 @@ const QuoteViewPage: React.FC = () => {
         setHoldInfo(result.message || null);
         toast('Sent for approval — pricing is below your floor. Track it in Approvals.', { icon: '⏳', duration: 6000 });
       } else {
-        toast.success('Quote emailed to the customer');
+        // Queued is not emailed. The server says which it was; the rep is told the same thing.
+        const outcome = describeQuoteSendOutcome(result);
+        if (outcome.delivered) toast.success(outcome.message);
+        else toast(outcome.message, { icon: '📨', duration: 8000 });
         queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
         queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] });
       }

@@ -91,6 +91,18 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 throw new FinanceConflictException("Only an active order with lines can be invoiced.");
             if (!await IsInvoiceEligibleOrderAsync(order, businessUnitId))
                 throw new FinanceConflictException("The order must be confirmed, completed, shipped, or backed by an accepted customer quote before invoicing.");
+            // An invoice inherits the order's currency, and Order.CurrencyId is nullable. Nothing
+            // here checked it, so production issued INV-2026-000001 (order 3, 1,000.00) with
+            // CurrencyId NULL — a legal document that states no currency, and one that can never
+            // be settled: PostPaymentAsync below requires `document.CurrencyId == request.CurrencyId`,
+            // which a NULL can never satisfy. Refuse at the boundary, naming the order, rather
+            // than let the gap surface months later as "Payment and invoice customer/currency
+            // must match" on a receipt somebody is trying to bank.
+            if (order.CurrencyId is null)
+                throw new FinanceConflictException(
+                    $"Order {order.OrderNo} has no currency, so it cannot be invoiced: an invoice must "
+                    + "state the currency it is payable in, and a payment can only be applied to an "
+                    + "invoice in its own currency. Record the order's currency before invoicing it.");
 
             var requested = request.Lines is { Count: > 0 }
                 ? request.Lines.GroupBy(x => x.OrderItemId).ToDictionary(x => x.Key, x => x.Sum(y => y.Quantity))
@@ -334,6 +346,15 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 throw new FinanceConflictException("Only draft documents can be issued.");
             if (document.Lines.Count == 0 || document.TotalAmount <= 0)
                 throw new FinanceConflictException("A document must have positive reconciled lines before issue.");
+            // Guarded again at the point of no return, not only at draft creation: a draft can
+            // be written by any path (backfill, an older build, a direct insert) and issue is
+            // the step that turns it into a numbered legal document. See CreateInvoiceAsync.
+            if (document.CurrencyId is null)
+                throw new FinanceConflictException(
+                    $"This {document.DocumentType.ToLowerInvariant()} has no currency and cannot be issued: "
+                    + "a document that does not state the currency it is payable in can never be paid, "
+                    + "credited or reported against. Cancel the draft and create it from an order that "
+                    + "carries a currency.");
             EnsureDocumentReconciles(document);
             if (document.DocumentType == ReceivableDocumentTypes.Invoice)
                 await EnsureIssueQuantitiesAsync(document, businessUnitId);

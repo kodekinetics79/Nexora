@@ -18,7 +18,7 @@ import {
   EmojiEvents as OutcomeIcon,
   ContentCopy as ReviseIcon,
 } from '@mui/icons-material';
-import quoteService, { type QuoteDTO, type PriceAttestationSource } from '../../../api/services/quoteService';
+import quoteService, { describeQuoteSendOutcome, type QuoteDTO, type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import PriceConfirmationDialog from './PriceConfirmationDialog';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
@@ -232,7 +232,9 @@ const QuotesPage: React.FC = () => {
         });
         return;
       }
-      setSnackbar({ open: true, message: 'Quote emailed to the customer', severity: 'success' });
+      // Queued is not emailed. The server says which it was; the rep is told the same thing.
+      const outcome = describeQuoteSendOutcome(result);
+      setSnackbar({ open: true, message: outcome.message, severity: outcome.delivered ? 'success' : 'info' });
       queryClient.invalidateQueries({ queryKey: ['quotes'] });
     },
     onError: (error: unknown) => setSnackbar({

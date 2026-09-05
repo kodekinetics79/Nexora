@@ -947,12 +947,26 @@ namespace ERP_RFQ_Automation.Services
         internal static string? DraftCompletenessBlocker(
             bool isDraft, long? currencyId, DateTime? validUntil, ICollection<QuoteItem> items)
         {
-            if (!isDraft) return null;
             const string prefix = "Commercial Review Required: ";
+
+            // The currency is checked for EVERY status, not only drafts. This gate used to
+            // return null for any non-draft, on the assumption that a quote past DRAFT had
+            // already passed it on the way out. Backfilled and legacy quotes never took that
+            // path: production holds two EXPIRED quotes with CurrencyID NULL and totals of
+            // 740.00 and 59,200,000.00, and the renderer below filled the gap with a hardcoded
+            // "USD" — so their PDFs printed a US-dollar grand total on the tenant's letterhead.
+            // A price with no currency is not a price; refuse the document rather than invent
+            // the unit. Checked first so the reader is told the one thing that can never be
+            // fixed by editing the lines.
+            if (!currencyId.HasValue)
+                return prefix + (isDraft
+                    ? "this quote has no currency. Set the currency on the quote before sending it."
+                    : "this quote has no currency on record, so its document cannot be produced or sent. "
+                      + "Issue it as a new revision with the currency set.");
+
+            if (!isDraft) return null;
             if (items.Count == 0)
                 return prefix + "this quote has no lines. Add the lines you are quoting for.";
-            if (!currencyId.HasValue)
-                return prefix + "this quote has no currency. Set the currency on the quote before sending it.";
             if (!validUntil.HasValue)
                 return prefix + "this quote has no validity date. Set how long the prices hold before sending it.";
             if (items.Any(item => item.UnitPrice <= 0))
@@ -1254,6 +1268,15 @@ namespace ERP_RFQ_Automation.Services
                 || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
             if (DraftCompletenessBlocker(isDraft, quote.CurrencyId, quote.ValidUntil, quote.QuoteItems) is { } incomplete)
                 throw new InvalidOperationException(incomplete);
+
+            // The gate above proves CurrencyId is set; this proves the id names a currency the
+            // tenant actually has. Resolved once, here, so the renderer never has to choose
+            // between a blank and a guess.
+            var currencyCode = quote.Currency?.Code?.Trim();
+            if (string.IsNullOrWhiteSpace(currencyCode))
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' cannot be issued as a document: its currency "
+                    + $"(id {quote.CurrencyId}) is not on record for this tenant.");
 
             // R5: the completeness check above proves the document CAN be rendered; this one
             // proves it MAY be. Runs second so an incomplete draft gets the more specific and
@@ -1573,7 +1596,11 @@ namespace ERP_RFQ_Automation.Services
                             // Financials (Right)
                             row.RelativeItem(1f).Column(c =>
                             {
-                                var currency = quote.Currency?.Code ?? "USD";
+                                // No fallback. This used to be `quote.Currency?.Code ?? "USD"`,
+                                // which printed a US-dollar grand total on every currency-less
+                                // quote — a 3.75x misstatement of a SAR price. The gate above now
+                                // refuses the document instead, so currencyCode is never blank here.
+                                var currency = currencyCode;
 
                                 void FinancialRow(string label, decimal value, bool isTotal = false)
                                 {

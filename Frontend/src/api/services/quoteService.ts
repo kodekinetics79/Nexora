@@ -145,7 +145,38 @@ export interface QuoteSendOutcome {
    * the difference would come out of the seller's margin.
    */
   taxDerivationRequired?: boolean;
+  /**
+   * The customer HAS the quote: the delivery worker had already completed this send (the server
+   * replayed it). Only this justifies telling the rep "emailed".
+   */
+  delivered?: boolean;
+  /**
+   * A delivery row was written and a background worker will send it later. Nothing has reached
+   * the customer yet, and the worker can still refuse (no transmitting mailbox, a render failure)
+   * — in which case the fixed delivery key makes this quote number permanently unsendable. The
+   * screen must not call this "emailed".
+   */
+  queuedForDelivery?: boolean;
 }
+
+/**
+ * The words a rep is shown for a send the server accepted. Shared by every screen that sends a
+ * quote, so they cannot drift from each other or from the server's own distinction.
+ *
+ * Until this existed, `sendEmail` discarded the 202 body — `{ queuedForDelivery, delivered }` —
+ * and every accepted send was announced as "Quote emailed to the customer". Almost every send is
+ * merely QUEUED: the row is handed to `QuoteDeliveryWorker`, which can dead-letter it minutes
+ * later with nobody watching. A rep who read "emailed" closed the tab; the customer had nothing.
+ */
+export const describeQuoteSendOutcome = (
+  result: Pick<QuoteSendOutcome, 'delivered' | 'queuedForDelivery'>,
+): { delivered: boolean; message: string } =>
+  result.delivered
+    ? { delivered: true, message: 'Quote emailed to the customer' }
+    : {
+        delivered: false,
+        message: 'Quote queued for delivery. It is not with the customer yet — the status changes to Sent once the email is confirmed.',
+      };
 
 // ==== Price-provenance attestation (Decision Register R5) ====
 
@@ -329,8 +360,14 @@ const quoteService = {
    */
   sendEmail: async (id: number, recipientEmail: string): Promise<QuoteSendOutcome> => {
     try {
-      await axiosInstance.post(`/api/Quote/${id}/email`, null, { params: { recipientEmail } });
-      return { held: false };
+      // 202 Accepted carries `{ queuedForDelivery, delivered, replayed }`. Read it: "queued" and
+      // "delivered" are different facts and the rep is told different things for each.
+      const { data } = await axiosInstance.post(`/api/Quote/${id}/email`, null, { params: { recipientEmail } });
+      return {
+        held: false,
+        delivered: data?.delivered === true,
+        queuedForDelivery: data?.queuedForDelivery === true,
+      };
     } catch (error: any) {
       const data = error?.response?.data;
       // Only a string may become user-facing copy — an object here would render as
