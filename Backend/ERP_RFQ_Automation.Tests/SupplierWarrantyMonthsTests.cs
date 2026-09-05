@@ -230,6 +230,41 @@ public sealed class SupplierWarrantyMonthsTests
     }
 
     /// <summary>
+    /// A validity date already in the past is a quote nobody can compare or award. Capture used to
+    /// accept it and report the quote ready for comparison; the projection step then refused it two
+    /// screens later with no pointer back to the field. It is refused here, where the date was keyed.
+    /// Proven the hard way: the fixture in this file once carried a fixed date, and the day it
+    /// passed all four capture tests failed with this exact message.
+    /// </summary>
+    [Fact]
+    public async Task A_validity_date_already_in_the_past_is_refused_at_capture()
+    {
+        var store = new CapturingStore();
+
+        var error = await Assert.ThrowsAsync<SupplierQuoteValidationException>(() =>
+            new SupplierQuoteInboxService(store).CaptureAsync(
+                Command() with { ValidUntil = DateTime.UtcNow.AddDays(-1) }));
+
+        Assert.Contains("already passed", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(store.Revisions);
+    }
+
+    /// <summary>
+    /// The other half of that contract: no date is not an expired date. Null means the validity was
+    /// not captured, which the evidence pass flags for review rather than inventing one, so capture
+    /// must still persist the quote.
+    /// </summary>
+    [Fact]
+    public async Task An_uncaptured_validity_date_is_not_treated_as_expired()
+    {
+        var store = new CapturingStore();
+
+        await new SupplierQuoteInboxService(store).CaptureAsync(Command() with { ValidUntil = null });
+
+        Assert.Single(store.Revisions);
+    }
+
+    /// <summary>
     /// The buyer workbench is the other door onto the same canonical line, and it refuses the same
     /// values — before anything is persisted, and in its own vocabulary rather than by surfacing a
     /// line number the caller never chose.
