@@ -10,6 +10,7 @@ import {
   isTriageUnavailable,
   readPollFailureReport,
   readPollReport,
+  readReprocessResult,
   readTriagePage,
   readTriageRow,
 } from '../../api/services/emailTriageService';
@@ -353,7 +354,18 @@ beforeEach(() => {
   // and not about the plumbing. The obstacle cases set their own fixture.
   getMailboxes.mockResolvedValue([HEALTHY_MAILBOX]);
   listTriage.mockResolvedValue(NOISE_PAGE);
-  reprocess.mockResolvedValue({ id: 41, status: 'Queued', batchId: 'batch-42', replayed: false });
+  // Through the real reader, on the record the endpoint actually returns
+  // (EmailTriageReprocessResult: Id, BatchId, Enqueued, Outcome, Status, Replayed). The fixture
+  // used to omit `enqueued` entirely, which is a shape production never sends and which made the
+  // "queued nothing" branch below unreachable from a test.
+  reprocess.mockResolvedValue(readReprocessResult({
+    id: 41,
+    batchId: '9a1c0f3e-7b28-4c51-9d64-2f0a8e5b7c13',
+    enqueued: 2,
+    outcome: 'Uncertain',
+    status: 'Queued',
+    replayed: false,
+  }));
   pollMailboxes.mockResolvedValue(
     readPollReport({
       message: '2 mailbox(es) polled, 4 message(s) in the poll window, 3 new, 3 captured.',
@@ -483,6 +495,60 @@ describe('InboundMailTriagePage', () => {
     expect(await screen.findByText(/was sent back through extraction as an inquiry/i)).toBeInTheDocument();
   });
 
+  it('saysNothingWasQueuedWhenTheServerQueuedNothing_ratherThanClaimingExtraction', async () => {
+    // The 200 the endpoint returns covers two opposite outcomes. `enqueued: 0` is the branch where
+    // capture re-read the stored original, found nothing it could extract, and wrote the terminal
+    // ParseStatus "Failed - nothing to extract" — no component queued, no worker that will ever
+    // touch it, and (because the row no longer matches the stopped filter in every shape) possibly
+    // no tab left to find it on. Announcing that as a recovery is ING-09 rebuilt in the browser.
+    reprocess.mockResolvedValue(readReprocessResult({
+      id: 41,
+      batchId: '9a1c0f3e-7b28-4c51-9d64-2f0a8e5b7c13',
+      enqueued: 0,
+      outcome: 'Uncertain',
+      status: 'Failed - nothing to extract',
+      replayed: false,
+    }));
+    renderPage();
+    const row = await rowFor(/Automatic reply: Cable tray enquiry/);
+    fireEvent.click(within(row).getByRole('button', { name: /reprocess as inquiry/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/why is this an inquiry/i), {
+      target: { value: 'The enquiry is in the .pptx nobody could open.' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /^reprocess as inquiry$/i }));
+
+    await waitFor(() => expect(reprocess).toHaveBeenCalled());
+    const alert = await screen.findByRole('status');
+    expect(alert).toHaveTextContent(/nothing that can be extracted was found/i);
+    expect(alert).toHaveTextContent(/no extraction work was created/i);
+    // The sentence that was shown here, and that the rep acted on.
+    expect(alert).not.toHaveTextContent(/was sent back through extraction as an inquiry/i);
+    // Warning, not success: the colour is the first thing read and green ends the reader's job.
+    expect(alert.className).toMatch(/MuiAlert-\w*Warning/);
+    // Never a dead end — the one thing a person can still do with the document.
+    expect(within(alert).getByRole('link', { name: 'Upload documents' }))
+      .toHaveAttribute('href', '/procurement/leads/manual-upload');
+  });
+
+  it('keepsTheSuccessWordingOnlyWhenTheServerActuallyQueuedWork', async () => {
+    renderPage();
+    const row = await rowFor(/Automatic reply: Cable tray enquiry/);
+    fireEvent.click(within(row).getByRole('button', { name: /reprocess as inquiry/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/why is this an inquiry/i), {
+      target: { value: 'Real enquiry hidden behind an auto-reply.' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /^reprocess as inquiry$/i }));
+
+    await waitFor(() => expect(reprocess).toHaveBeenCalled());
+    const alert = await screen.findByRole('status');
+    expect(alert).toHaveTextContent(/was sent back through extraction as an inquiry/i);
+    expect(alert.className).toMatch(/MuiAlert-\w*Success/);
+  });
+
   it('sendsOneIdempotencyKeyPerOverride_soADoubleClickIsOneCommand', async () => {
     // The key used to be minted inside the service on every call, so two clicks were two
     // DIFFERENT audited overrides and the second landed on a message the first had moved.
@@ -504,7 +570,14 @@ describe('InboundMailTriagePage', () => {
     const keys = new Set(reprocess.mock.calls.map((call) => call[2]));
     expect(keys.size).toBe(1);
     expect([...keys][0]).toBeTruthy();
-    resolveFirst({ id: 41, status: 'Queued', batchId: 'batch-42', replayed: false });
+    resolveFirst(readReprocessResult({
+      id: 41,
+      batchId: '9a1c0f3e-7b28-4c51-9d64-2f0a8e5b7c13',
+      enqueued: 2,
+      outcome: 'Uncertain',
+      status: 'Queued',
+      replayed: false,
+    }));
   });
 
   it('hidesTheOverrideWhenTheRoleCannotUseIt', async () => {
@@ -1200,6 +1273,27 @@ describe('assembly reading', () => {
     expect(screen.getByText(/original email is retained and verified/i)).toBeInTheDocument();
     expect(screen.getByText(/sender timestamp/i)).toBeInTheDocument();
     expect(screen.getByText(/extraction finished/i)).toBeInTheDocument();
+  });
+});
+
+describe('readReprocessResult', () => {
+  it('readsTheQueuedCount_becauseZeroIsThe200ThatQueuedNothing', () => {
+    const result = readReprocessResult({
+      id: 41,
+      batchId: '9a1c0f3e-7b28-4c51-9d64-2f0a8e5b7c13',
+      enqueued: 0,
+      outcome: 'Uncertain',
+      status: 'Failed - nothing to extract',
+      replayed: false,
+    });
+    expect(result.enqueued).toBe(0);
+    expect(result.status).toBe('Failed - nothing to extract');
+  });
+
+  it('keepsAnUnreportedCountAsAbsence_neverAsZero', () => {
+    // A deployment that predates the field must not be read as "nothing was queued", which would
+    // turn every successful override on it into a warning.
+    expect(readReprocessResult({ id: 41, status: 'Queued' }).enqueued).toBeNull();
   });
 });
 

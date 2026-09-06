@@ -20,6 +20,11 @@ import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import ViewTabs from '../../components/layout/ViewTabs';
 import { useAuth } from '../../context/AuthContext';
 import { formatDateSafe } from '../../utils/dates';
+import emailTriageService, {
+  describeAssemblyState,
+  isTriageUnavailable,
+  TRIAGE_STATE_STOPPED,
+} from '../../api/services/emailTriageService';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import leadService from '../../api/services/leadService';
 import rfqService from '../../api/services/rfqService';
@@ -54,11 +59,13 @@ import {
  *  - A queue that FAILED never renders as empty. `isError` is read from the query, and the whole
  *    section says so — an empty grid on an outage is how a rep concludes the pipeline is dead.
  *  - A queue the user has no permission for is not asked for and not shown.
+ *  - A queue whose CHANNEL this tenant does not have is not shown either. That is what a null
+ *    from `loadQueue` means: not zero work, no such queue here.
  */
 
 interface QueueResult {
   definition: QueueDefinition;
-  query: UseQueryResult<InboxItem[]>;
+  query: UseQueryResult<InboxItem[] | null>;
 }
 
 export interface InboxQueueContext {
@@ -130,7 +137,7 @@ const InboxPage: React.FC = () => {
   const results = useQueries({
     queries: visibleQueues.map((queue) => ({
       queryKey: ['inbox', queue.key, businessUnitId, userData?.id, teamScope] as const,
-      queryFn: (): Promise<InboxItem[]> => loadQueue(queue.key, queueContext),
+      queryFn: (): Promise<InboxItem[] | null> => loadQueue(queue.key, queueContext),
       // The landing screen is opened many times a day; a short stale window keeps it honest
       // without re-firing every queue request on each tab-back.
       staleTime: 30_000,
@@ -138,7 +145,7 @@ const InboxPage: React.FC = () => {
       // in place as well, because a queue that silently vanished reads as "no work".
       meta: { silenceGlobalError: true },
     })),
-  }) as UseQueryResult<InboxItem[]>[];
+  }) as UseQueryResult<InboxItem[] | null>[];
 
   const queues: QueueResult[] = visibleQueues.map((definition, index) => ({
     definition,
@@ -248,7 +255,7 @@ const InboxPage: React.FC = () => {
  * spinner, failure is an `ApiErrorNotice` with a retry, zero is a stated reason plus a button, and
  * rows are rows.
  */
-const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResult<InboxItem[]> }> = ({
+const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResult<InboxItem[] | null> }> = ({
   definition,
   query,
 }) => {
@@ -256,6 +263,11 @@ const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResul
   const { hasPermission } = useAuth();
   const items = query.data ?? [];
   const headingId = `inbox-queue-${definition.key}`;
+
+  // Null is "this tenant does not have this channel", which is not the same claim as "this queue
+  // is empty" and must not be dressed as one. Rendering the section's own empty state here would
+  // tell a tenant with no Email Intake that their mail is all handled.
+  if (query.data === null) return null;
 
   const emptyActionAllowed =
     !definition.emptyAction.moduleName || hasPermission(definition.emptyAction.moduleName);
@@ -395,13 +407,51 @@ const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResul
  *
  * Kept out of the component so the mapping can be tested without rendering, and so it is obvious
  * that every one of these is an endpoint an existing screen already calls.
+ *
+ * Null means the queue does not apply to this tenant at all — see `mail-to-rescue`. An empty
+ * array means it applies and is at zero, and the two must never collapse into each other.
  */
 export async function loadQueue(
   key: QueueKey,
   context: InboxQueueContext = {},
-): Promise<InboxItem[]> {
+): Promise<InboxItem[] | null> {
   const { businessUnitId, userId, teamScope = false } = context;
   switch (key) {
+    case 'mail-to-rescue': {
+      // The same read Inbound Mail opens on: `state=stopped` is the only filter that asks what is
+      // waiting on a person, because every `outcome` value answers what the arrival gate decided
+      // and a message stops long after that.
+      //
+      // Email Intake is an ENTITLEMENT — a plan-level switch, not a role — so a tenant without it
+      // gets a refusal here however its permissions are set. That is neither an outage nor work,
+      // and a permanent red banner on the first screen after sign-in would be a worse lie than
+      // the silence it replaced. Any other failure is a real failure and is rethrown.
+      const page = await emailTriageService
+        .listTriage({ state: TRIAGE_STATE_STOPPED, page: 1, pageSize: 25 })
+        .catch((error: unknown) => {
+          if (isTriageUnavailable(error)) return null;
+          throw error;
+        });
+      if (page === null) return null;
+      return (page.items ?? [])
+        .map((row) => ({
+          id: row.id,
+          reference: row.subject || `Message ${row.id}`,
+          party: row.from || 'Sender not recorded',
+          detail: row.assemblyState
+            ? describeAssemblyState(row.assemblyState).label
+            : row.receivedOn
+              ? `Arrived ${formatDateSafe(row.receivedOn)}`
+              : undefined,
+          // Inbound Mail opens on its "Needs a person" tab, which is this same read — so the row
+          // the rep pressed is on the screen they land on. There is no per-message route yet.
+          path: '/procurement/leads/inbound-mail',
+          actionLabel: 'Open it',
+          sortKey: row.receivedOn,
+        }))
+        .sort(byDateAscending);
+    }
+
     case 'documents-to-check': {
       const page = await extractionReviewService.getNeedsReview({ pageNumber: 1, pageSize: 25 });
       return (page.items ?? [])

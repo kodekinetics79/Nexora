@@ -461,7 +461,14 @@ export default function InboundMailTriagePage() {
   const [target, setTarget] = useState<EmailTriageRow | null>(null);
   const [reason, setReason] = useState('');
   const [reasonError, setReasonError] = useState<string | null>(null);
-  const [confirmation, setConfirmation] = useState<string | null>(null);
+  /**
+   * What the override actually did. Carries its own severity because the endpoint's 200 covers
+   * two opposite outcomes — work queued, and nothing extractable found — and only one of them is
+   * a success the reader can walk away from.
+   */
+  const [confirmation, setConfirmation] = useState<
+    { severity: 'success' | 'warning'; text: string; next?: { label: string; path: string } } | null
+  >(null);
   const [pollReport, setPollReport] = useState<MailPollReport | null>(null);
   /** Minted once per opened dialog — see the reprocess mutation for why it is not per send. */
   const [idempotencyKey, setIdempotencyKey] = useState(() => newIdempotencyKey());
@@ -581,10 +588,33 @@ export default function InboundMailTriagePage() {
       setTarget(null);
       setReason('');
       setReasonError(null);
+      // A 200 is not one outcome. The server re-reads the stored original and counts the
+      // extraction work the override resolved to; when that count is zero it found nothing it
+      // could read, wrote the terminal ParseStatus "Failed - nothing to extract", and queued
+      // nothing — no worker will ever touch the message. Announcing that as "sent back through
+      // extraction" is the ING-09 shape all over again: a recovery with no live mover behind it,
+      // and the rep walks away believing the deal is back. `enqueued` is null on a deployment
+      // that does not report the count, which is not zero and keeps the old wording.
       setConfirmation(
         result.replayed === true
-          ? `Message #${variables.id} was already sent back for extraction. Nothing was queued twice.`
-          : `Message #${variables.id} was sent back through extraction as an inquiry.`,
+          ? {
+            severity: 'success',
+            text: `Message #${variables.id} was already sent back for extraction. Nothing was queued twice.`,
+          }
+          : result.enqueued === 0
+            ? {
+              severity: 'warning',
+              text:
+                `Message #${variables.id} was read again, and nothing that can be extracted was found in `
+                + 'it — so no extraction work was created and no inquiry will appear. Open the message to '
+                + 'see the parts it was made of and why each was skipped. If the enquiry is in a document '
+                + 'the reader could not take, add that document by hand.',
+              next: { label: 'Upload documents', path: '/procurement/leads/manual-upload' },
+            }
+            : {
+              severity: 'success',
+              text: `Message #${variables.id} was sent back through extraction as an inquiry.`,
+            },
       );
       refreshTriage();
     },
@@ -806,8 +836,24 @@ export default function InboundMailTriagePage() {
         </Typography>
 
         {confirmation && (
-          <Alert severity="success" role="status" onClose={() => setConfirmation(null)} sx={{ mb: 2 }}>
-            {confirmation}
+          <Alert
+            severity={confirmation.severity}
+            role="status"
+            onClose={() => setConfirmation(null)}
+            sx={{ mb: 2 }}
+          >
+            {confirmation.text}
+            {confirmation.next && (
+              <Box sx={{ mt: 0.5 }}>
+                <Link
+                  component={RouterLink}
+                  to={confirmation.next.path}
+                  sx={{ fontWeight: 700 }}
+                >
+                  {confirmation.next.label}
+                </Link>
+              </Box>
+            )}
           </Alert>
         )}
 
