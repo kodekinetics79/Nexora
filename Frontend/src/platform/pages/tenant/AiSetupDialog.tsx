@@ -8,6 +8,14 @@ import type {
   AiCloudEgress, AiExtractionReadinessReport, AiPosture, TenantAiEnablementInput, TenantAiPolicy,
 } from '../../types';
 
+/** How permissive a posture is, for comparing an answer against what the plan sells. */
+const RANK: Record<AiPosture, number> = { Off: 0, PrivateOnly: 1, ApprovedCloud: 2 };
+
+/** The posture a plan's package provisions a tenant with. */
+const PACKAGE_POSTURE: Record<string, AiPosture> = {
+  Off: 'Off', Private: 'PrivateOnly', Cloud: 'ApprovedCloud',
+};
+
 /**
  * The guided setup.
  *
@@ -116,19 +124,47 @@ export default function AiSetupDialog({
   const [capped, setCapped] = useState(policy.monthlyHardTokenLimit !== null);
   const [ceiling, setCeiling] = useState(String(policy.monthlyHardTokenLimit ?? 2_000_000));
   const [justification, setJustification] = useState('');
+  const [deviationReason, setDeviationReason] = useState(policy.planDeviationReason ?? '');
 
   const cloud = posture === 'ApprovedCloud';
   const ceilingTokens = Number(ceiling);
   const ceilingValid = Number.isFinite(ceilingTokens) && ceilingTokens > 0;
   const documents = ceilingValid ? Math.floor(ceilingTokens / TOKENS_PER_DOCUMENT) : 0;
 
+  /**
+   * Whether this answer gives the tenant more than its plan sells. Mirrored from the server, which
+   * remains the authority and refuses the write regardless — this exists so the operator is asked
+   * for the approval in the form, rather than meeting a refusal after pressing Apply.
+   *
+   * Only ever MORE permissive counts. Tightening never needs a signature.
+   */
+  const beyondPlan = useMemo(() => {
+    const sold = policy.planAiPackage ? PACKAGE_POSTURE[policy.planAiPackage] : null;
+    if (sold === null || sold === undefined || posture === null) return [];
+    const over: string[] = [];
+    if (RANK[posture] > RANK[sold]) {
+      over.push(`Reads documents with more than the ${policy.planAiPackageName ?? 'plan'} package sells.`);
+    }
+    if (posture !== 'Off' && !policy.planAiAllowanceUnlimited
+      && policy.planAiMonthlyTokenAllowance !== null) {
+      if (!capped) over.push('Has no monthly ceiling, against the allowance the plan sells.');
+      else if (ceilingValid && ceilingTokens > policy.planAiMonthlyTokenAllowance) {
+        over.push(`Has a ceiling above the ${policy.planAiMonthlyTokenAllowance.toLocaleString()} tokens the plan sells.`);
+      }
+    }
+    return over;
+  }, [posture, capped, ceilingValid, ceilingTokens, policy]);
+
   const problem = useMemo(() => {
     if (posture === null) return 'Choose what this tenant\u2019s documents may be read by.';
+    if (beyondPlan.length > 0 && deviationReason.trim().length < 15) {
+      return 'This goes beyond the plan — say who approved it (15 characters or more).';
+    }
     if (posture !== 'Off' && purposes.length === 0) return 'Say what AI may be used for.';
     if (posture !== 'Off' && capped && !ceilingValid) return 'A monthly ceiling must be a number above zero.';
     if (justification.trim().length < 5) return 'A justification of at least 5 characters is required.';
     return null;
-  }, [posture, purposes.length, capped, ceilingValid, justification]);
+  }, [posture, purposes.length, capped, ceilingValid, justification, beyondPlan.length, deviationReason]);
 
   const toggle = (value: string) => setPurposes(
     (current) => current.includes(value) ? current.filter((x) => x !== value) : [...current, value],
@@ -143,6 +179,7 @@ export default function AiSetupDialog({
     grantExpiresOn: null,
     version: policy.version,
     justification: justification.trim(),
+    planDeviationReason: beyondPlan.length > 0 ? deviationReason.trim() : null,
   });
 
   return (
@@ -155,6 +192,23 @@ export default function AiSetupDialog({
       </DialogTitle>
       <DialogContent dividers>
         <Stack spacing={3}>
+          {/* Printed beside the choice, not buried in a plans screen: an operator deciding this
+              needs to know what the customer actually bought, in the words the package defines
+              for itself. */}
+          {policy.planAiPackage && (
+            <Alert severity="info" icon={false} sx={{ py: 0.5 }}>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                Plan {policy.planCode} sells {policy.planAiPackageName}
+                {policy.planAiAllowanceUnlimited
+                  ? ' · uncapped'
+                  : policy.planAiMonthlyTokenAllowance !== null
+                    ? ` · ${policy.planAiMonthlyTokenAllowance.toLocaleString()} tokens/month`
+                    : ' · no allowance decided'}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">{policy.planAiPackageMeans}</Typography>
+            </Alert>
+          )}
+
           <Question number="Q1" ask={`What may ${tenantName}'s documents be read by?`}>
             <Choice title="Nothing — AI off" selected={posture === 'Off'} onSelect={() => setPosture('Off')}>
               Documents are handled by people only. Extraction, BOQ drafting and the assistant are
@@ -290,6 +344,25 @@ export default function AiSetupDialog({
               )}
             </Box>
           </Box>
+
+          {beyondPlan.length > 0 && (
+            <Alert severity="warning">
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>Beyond this tenant's plan</Typography>
+              <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+                {beyondPlan.map((line) => <li key={line}>{line}</li>)}
+              </Box>
+              <TextField
+                label="Who approved going beyond the plan?"
+                placeholder="The person who agreed it, and the reference."
+                value={deviationReason}
+                onChange={(event) => setDeviationReason(event.target.value)}
+                required
+                fullWidth
+                size="small"
+                sx={{ mt: 1.5 }}
+              />
+            </Alert>
+          )}
 
           <TextField
             label="Justification / approval reference"

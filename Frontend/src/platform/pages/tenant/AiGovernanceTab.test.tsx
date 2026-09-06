@@ -29,6 +29,12 @@ const policy: TenantAiPolicy = {
   inputOutputAuditAllowed: false, privacyReviewRequired: true, localComputeCostPerHour: null,
   ocrCostPerPage: null, localCostCurrency: null, version: 2,
   updatedOn: '2026-08-08T12:00:00Z', updatedBy: 'owner@nexora.local',
+  planCode: 'internal-pilot-qa', planAiPackage: 'Private',
+  planAiPackageName: 'Private extraction',
+  planAiPackageMeans: 'AI processing on, external processing OFF, whole-document egress shut.',
+  planAiMonthlyTokenAllowance: 2_000_000, planAiAllowanceUnlimited: false,
+  planDeviations: [], planDeviationReason: null, planDeviationApprovedBy: null,
+  planDeviationApprovedOn: null,
 };
 
 const resolvedProvider = {
@@ -310,11 +316,20 @@ describe('extraction pre-flight', () => {
     fireEvent.click(screen.getByText('The whole document'));
     expect(screen.getByText(/document text leaves their infrastructure/)).toBeVisible();
 
+    // The plan sells Private extraction, so cloud is beyond it — and the dialog says so and asks
+    // who agreed, rather than letting the operator meet a refusal after pressing Apply.
+    expect(screen.getByText("Beyond this tenant's plan")).toBeVisible();
+    expect(screen.getByText(/Plan internal-pilot-qa sells Private extraction/)).toBeVisible();
+
     // Apply stays shut until somebody says who approved it.
     const apply = screen.getByRole('button', { name: 'Apply and re-check' });
     expect(apply).toBeDisabled();
     fireEvent.change(screen.getByLabelText(/Justification/), {
       target: { value: 'Signed DPA ref INTF-2026-114, clause 4.2.' },
+    });
+    expect(apply).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/Who approved going beyond the plan/), {
+      target: { value: 'Pilot extension agreed with Intelliflow IT, ref INTF-114.' },
     });
     expect(apply).toBeEnabled();
     fireEvent.click(apply);
@@ -327,6 +342,7 @@ describe('extraction pre-flight', () => {
       cloudEgress: 'FullDocument',
       purposes: ['RfqExtraction'],
       version: 2,
+      planDeviationReason: 'Pilot extension agreed with Intelliflow IT, ref INTF-114.',
     });
     // The whole point: the destination is the server's to know. One capital letter in a model id
     // used to refuse every document this tenant submitted.

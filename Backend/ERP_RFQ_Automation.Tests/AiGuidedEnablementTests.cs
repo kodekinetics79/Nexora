@@ -165,14 +165,69 @@ public sealed class AiGuidedEnablementTests
         Assert.Null(grant.RevokedOn);
     }
 
+    [Fact]
+    public async Task GoingBeyondThePlansPackage_IsRefusedUntilSomebodyOwnsIt()
+    {
+        // The plan is what the customer bought. Cloud extraction on a plan that sells private
+        // extraction is a deliberate exception, and an exception with nobody's name on it becomes
+        // the permanent configuration nobody can explain.
+        using var harness = new Harness(planPackage: AiPackages.Private, planAllowance: 2_000_000);
+
+        var refused = await harness.Post(Request());
+
+        var bad = Assert.IsType<BadRequestObjectResult>(refused.Result);
+        Assert.Contains("Private extraction", bad.Value!.ToString(), StringComparison.Ordinal);
+        Assert.Empty(await harness.Grants());
+        Assert.False((await harness.Policy()).ExternalProcessingAllowed);
+    }
+
+    [Fact]
+    public async Task AnOwnedException_IsRecordedOnTheRow_AndClearedWhenItEnds()
+    {
+        using var harness = new Harness(planPackage: AiPackages.Private, planAllowance: 2_000_000);
+
+        var granted = await harness.Post(Request(deviationReason: "Pilot extension agreed with Intelliflow IT, ref INTF-114."));
+
+        var body = Assert.IsType<TenantAiEnablementResult>(Assert.IsType<OkObjectResult>(granted.Result).Value);
+        Assert.Contains(body.Policy.PlanDeviations, x => x.Contains("approved cloud provider", StringComparison.Ordinal));
+        var policy = await harness.Policy();
+        Assert.Contains("INTF-114", policy.PlanDeviationReason!, StringComparison.Ordinal);
+        Assert.Equal("info@kodekinetics.com", policy.PlanDeviationApprovedBy);
+        Assert.NotNull(policy.PlanDeviationApprovedOn);
+
+        // Back inside the plan, and the approval goes with it: a stale approver on a tenant that
+        // no longer deviates reads as an approval that is still in force.
+        var back = await harness.Post(Request(posture: AiPostures.Off, version: 2));
+        Assert.IsType<OkObjectResult>(back.Result);
+        var settled = await harness.Policy();
+        Assert.Null(settled.PlanDeviationReason);
+        Assert.Null(settled.PlanDeviationApprovedBy);
+        Assert.Null(settled.PlanDeviationApprovedOn);
+    }
+
+    [Fact]
+    public async Task StayingInsideThePlansPackage_NeedsNoException()
+    {
+        using var harness = new Harness(planPackage: AiPackages.Cloud, planAllowance: 2_000_000);
+
+        var result = await harness.Post(Request());
+
+        var body = Assert.IsType<TenantAiEnablementResult>(Assert.IsType<OkObjectResult>(result.Result).Value);
+        Assert.Empty(body.Policy.PlanDeviations);
+        Assert.Equal(AiPackages.Cloud, body.Policy.PlanAiPackage);
+        Assert.Null((await harness.Policy()).PlanDeviationReason);
+    }
+
     private static TenantAiEnablementRequest Request(
         string posture = AiPostures.ApprovedCloud,
         string? cloudEgress = AiEgressPolicies.FullDocument,
         long? hardLimit = 2_000_000,
         bool noCeiling = false,
         long version = 1,
+        string? deviationReason = null,
         string justification = "Signed DPA ref INTF-2026-114, clause 4.2.") => new()
     {
+        PlanDeviationReason = deviationReason,
         Posture = posture,
         CloudEgress = cloudEgress,
         Purposes = [AiPurposes.RfqExtraction],
@@ -193,14 +248,30 @@ public sealed class AiGuidedEnablementTests
         private readonly ServiceProvider _services;
         private readonly ErpRfqAutomationContext _outer;
 
-        public Harness()
+        public Harness(string? planPackage = null, long? planAllowance = null)
         {
             using (var seed = _db.ContextFor(null))
             {
                 Seed.EnsureBusinessUnit(seed, BusinessUnitId);
+                long? planId = null;
+                if (planPackage is not null)
+                {
+                    var plan = new Plan
+                    {
+                        Code = "internal-pilot-qa",
+                        Name = "Internal Pilot QA",
+                        AiPackage = planPackage,
+                        AiMonthlyTokenAllowance = planAllowance,
+                        AiAllowanceUnlimited = planAllowance is null
+                    };
+                    seed.Set<Plan>().Add(plan);
+                    seed.SaveChanges();
+                    planId = plan.Id;
+                }
                 seed.Set<Tenant>().Add(new Tenant
                 {
                     Id = TenantRowId,
+                    PlanId = planId,
                     Name = "Intelliflow Systems",
                     Slug = "intelliflow",
                     Status = TenantStatus.Active,

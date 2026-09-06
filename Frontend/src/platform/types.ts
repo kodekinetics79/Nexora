@@ -1470,7 +1470,25 @@ export interface CreateSubscriptionInvoiceInput {
   taxJurisdictionCode: string;
 }
 
-export interface TenantAiPolicy {
+/** What the tenant's plan sells. Advisory — the policy row is the authority. */
+export interface TenantAiPlanContext {
+  planCode: string | null;
+  planAiPackage: AiPackage | null;
+  planAiPackageName: string | null;
+  planAiPackageMeans: string | null;
+  planAiMonthlyTokenAllowance: number | null;
+  planAiAllowanceUnlimited: boolean;
+  /** Empty when the tenant is within its plan. Only ever MORE permissive counts. */
+  planDeviations: string[];
+  planDeviationReason: string | null;
+  planDeviationApprovedBy: string | null;
+  planDeviationApprovedOn: string | null;
+}
+
+/** The AI package a plan sells. Maps 1:1 onto a starting posture, and never carries consent. */
+export type AiPackage = 'Off' | 'Private' | 'Cloud';
+
+export interface TenantAiPolicy extends TenantAiPlanContext {
   businessUnitId: string;
   isEnabled: boolean;
   externalProcessingAllowed: boolean;
@@ -1608,6 +1626,8 @@ export interface TenantAiEnablementInput {
   grantExpiresOn: string | null;
   version: number;
   justification: string;
+  /** Required only when the answer gives the tenant more than its plan sells. */
+  planDeviationReason: string | null;
 }
 
 export interface TenantAiEnablementResult {

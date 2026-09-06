@@ -629,6 +629,25 @@ public class TenantStatusChangeRequest
 
 public class TenantAiPolicyDto
 {
+    /// <summary>
+    /// What this tenant's plan sells, and how the tenant currently differs from it. Advisory, in
+    /// exactly the way TenantModuleGrantDto.FromPlanTemplate is advisory: the policy row is the
+    /// authority, the plan is what the customer bought, and an operator needs to see both to know
+    /// which of a tenant's settings are deliberate exceptions.
+    /// </summary>
+    public string? PlanCode { get; set; }
+    public string? PlanAiPackage { get; set; }
+    public string? PlanAiPackageName { get; set; }
+    public string? PlanAiPackageMeans { get; set; }
+    public long? PlanAiMonthlyTokenAllowance { get; set; }
+    public bool PlanAiAllowanceUnlimited { get; set; }
+
+    /// <summary>Empty when the tenant is within its plan. Only ever MORE permissive counts.</summary>
+    public string[] PlanDeviations { get; set; } = [];
+    public string? PlanDeviationReason { get; set; }
+    public string? PlanDeviationApprovedBy { get; set; }
+    public DateTime? PlanDeviationApprovedOn { get; set; }
+
     public long BusinessUnitId { get; set; }
     public bool IsEnabled { get; set; }
     public bool ExternalProcessingAllowed { get; set; }
@@ -719,6 +738,13 @@ public class TenantAiEnablementRequest
 
     /// <summary>When the destination grant lapses. <c>ApprovedCloud</c> only; null never expires.</summary>
     public DateTime? GrantExpiresOn { get; set; }
+
+    /// <summary>
+    /// Required only when the answer gives this tenant MORE than its plan sells. Tightening never
+    /// needs justifying; going beyond what a customer bought does, and the record has to say on
+    /// whose authority.
+    /// </summary>
+    public string? PlanDeviationReason { get; set; }
 
     /// <summary>The policy version this answer was composed against.</summary>
     public long Version { get; set; }
@@ -908,6 +934,19 @@ public class ResetPlatformUserPasswordRequest
 
 public class UpsertPlanRequest
 {
+    /// <summary>
+    /// The AI package this plan sells — one of <see cref="AiPackages"/>. It becomes the STARTING
+    /// posture of every tenant provisioned from the plan afterwards; it never reaches back into
+    /// tenants already created from it.
+    /// </summary>
+    public string AiPackage { get; set; } = AiPackages.Off;
+
+    /// <summary>The monthly AI token ceiling a tenant on this plan starts with.</summary>
+    public long? AiMonthlyTokenAllowance { get; set; }
+
+    /// <summary>Unbounded AI spend, chosen. Never inferred from an omitted allowance.</summary>
+    public bool AiAllowanceUnlimited { get; set; }
+
     [Required]
     public string Code { get; set; } = null!;
 

@@ -708,11 +708,21 @@ public class TenantsController : ControllerBase
                 //
                 // Checked rather than assumed, so this works on both providers: the trigger owns
                 // the row where it exists, and the explicit add covers providers where it does not.
-                var policyExists = await _context.AiProcessingPolicies.IgnoreQueryFilters()
-                    .AnyAsync(p => p.BusinessUnitId == bu.Id, ct);
-                if (!policyExists)
-                    _context.AiProcessingPolicies.Add(
-                        AiProcessingPolicy.CreateSecureDefault(bu.Id, actor, DateTime.UtcNow));
+                var aiPolicy = await _context.AiProcessingPolicies.IgnoreQueryFilters()
+                    .SingleOrDefaultAsync(p => p.BusinessUnitId == bu.Id, ct);
+                if (aiPolicy is null)
+                {
+                    aiPolicy = AiProcessingPolicy.CreateSecureDefault(bu.Id, actor, DateTime.UtcNow);
+                    _context.AiProcessingPolicies.Add(aiPolicy);
+                }
+                // The plan's AI package, applied over whichever of the two defaults created the
+                // row. Neither of them can know it: the trigger runs inside the BusinessUnits
+                // insert with no idea which plan the tenant was sold, and CreateSecureDefault
+                // takes no plan at all. Copied ONCE here, exactly as Entitlements is — editing a
+                // plan afterwards never reaches back into tenants already provisioned from it.
+                AiPackageProvisioning.Apply(
+                    aiPolicy, plan?.AiPackage, plan?.AiMonthlyTokenAllowance,
+                    plan?.AiAllowanceUnlimited ?? false, actor, DateTime.UtcNow);
 
                 // ---- founding Super Administrator ---------------------------------------
                 // The role and its holder are created IN THE SAME TRANSACTION as the tenant,
@@ -1145,7 +1155,12 @@ public class TenantsController : ControllerBase
         var tenantDb = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var policy = await tenantDb.AiProcessingPolicies.AsNoTracking()
             .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
-        return policy is null ? NotFound() : Ok(ToAiPolicyDto(policy));
+        if (policy is null) return NotFound();
+        var plan = tenant.PlanId is long planId
+            ? await _context.Set<Plan>().IgnoreQueryFilters().AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == planId, ct)
+            : null;
+        return Ok(ToAiPolicyDto(policy, plan));
     }
 
     [HttpPut("{id:long}/ai-policy")]
@@ -1464,6 +1479,69 @@ public class TenantsController : ControllerBase
             return Conflict(new { error = "The AI policy changed; reload and try again.", currentVersion = current.Version });
 
         var justification = request.Justification.Trim();
+
+        // The intent, applied in one place so the candidate tested below and the row written
+        // further down cannot drift apart. A deviation check against values the endpoint does not
+        // then write would be theatre.
+        void ApplyIntent(AiProcessingPolicy target)
+        {
+            target.IsEnabled = request.Posture != AiPostures.Off;
+            target.ExternalProcessingAllowed = cloud;
+            target.EgressPolicy = cloud && AiEgressPolicies.PermitsWholeDocument(request.CloudEgress)
+                ? AiEgressPolicies.FullDocument
+                : AiEgressPolicies.RedactedFieldsOnly;
+            // Named from the resolved descriptor, never retyped. Cleared with the posture, so a
+            // tenant turned off does not keep a provider lock nobody can see the reason for.
+            target.AllowedProvider = cloud ? resolved.Provider : null;
+            target.AllowedModel = cloud ? resolved.Model : null;
+            if (request.Posture != AiPostures.Off)
+            {
+                target.AllowedPurposes = string.Join(',', purposes);
+                target.MonthlyHardTokenLimit = request.NoMonthlyCeiling ? null : request.MonthlyHardTokenLimit;
+            }
+            if (cloud)
+            {
+                // The two the policy endpoint already refuses to open external processing without.
+                target.RedactionRequired = true;
+                target.PrivacyReviewRequired = true;
+            }
+        }
+
+        // Checked BEFORE anything is written, against what this request WOULD produce. Running it
+        // after the grant left a refused request with a live authorization behind it — the exact
+        // half-configured tenant this endpoint exists to make unreachable.
+        var plan = tenant.PlanId is long tenantPlanId
+            ? await _context.Set<Plan>().IgnoreQueryFilters().AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == tenantPlanId, ct)
+            : null;
+        var candidate = new AiProcessingPolicy
+        {
+            BusinessUnitId = businessUnitId,
+            IsEnabled = current.IsEnabled,
+            ExternalProcessingAllowed = current.ExternalProcessingAllowed,
+            AllowedPurposes = current.AllowedPurposes,
+            MonthlyHardTokenLimit = current.MonthlyHardTokenLimit
+        };
+        ApplyIntent(candidate);
+
+        // The plan is what the customer bought. Going BEYOND it is an exception somebody has to
+        // own; going below it is a customer who has not finished setting up, or one who tightened
+        // something deliberately — and demanding a reason for that trains operators to type "n/a"
+        // into the field meant to carry the answer.
+        var deviations = plan is null
+            ? []
+            : AiPackageProvisioning.Deviations(
+                candidate, plan.AiPackage, plan.AiMonthlyTokenAllowance, plan.AiAllowanceUnlimited);
+        var deviationReason = request.PlanDeviationReason?.Trim();
+        if (deviations.Count > 0 && (deviationReason is null || deviationReason.Length < MinimumPlanDeviationReasonLength))
+            return BadRequest(new
+            {
+                error = $"This gives the tenant more than the {AiPackages.Resolve(plan!.AiPackage).Name} "
+                    + $"package on plan '{plan.Code}' sells, so a reason of at least "
+                    + $"{MinimumPlanDeviationReasonLength} characters is required.",
+                deviations
+            });
+
         AiExternalProviderAuthorizationView? authorization = null;
 
         // FIRST, and only for the posture that egresses. Nothing this writes opens anything on
@@ -1501,36 +1579,31 @@ public class TenantsController : ControllerBase
             return Conflict(new { error = "The AI policy changed; reload and try again.", currentVersion = policy.Version });
 
         var before = ToAiPolicyDto(policy);
-        policy.IsEnabled = request.Posture != AiPostures.Off;
-        policy.ExternalProcessingAllowed = cloud;
-        policy.EgressPolicy = cloud && AiEgressPolicies.PermitsWholeDocument(request.CloudEgress)
-            ? AiEgressPolicies.FullDocument
-            : AiEgressPolicies.RedactedFieldsOnly;
-        // Named from the resolved descriptor, never retyped. Cleared with the posture, so a
-        // tenant turned off does not keep a provider lock nobody can see the reason for.
-        policy.AllowedProvider = cloud ? resolved.Provider : null;
-        policy.AllowedModel = cloud ? resolved.Model : null;
-        if (request.Posture != AiPostures.Off)
-        {
-            policy.AllowedPurposes = string.Join(',', purposes);
-            policy.MonthlyHardTokenLimit = request.NoMonthlyCeiling ? null : request.MonthlyHardTokenLimit;
-        }
-        if (cloud)
-        {
-            // The two the policy endpoint already refuses to open external processing without.
-            policy.RedactionRequired = true;
-            policy.PrivacyReviewRequired = true;
-        }
+        ApplyIntent(policy);
+
+        // Set together, cleared together — a stale approver sitting on a tenant that no longer
+        // deviates reads as an approval that is still in force.
+        policy.PlanDeviationReason = deviations.Count > 0 ? deviationReason : null;
+        policy.PlanDeviationApprovedBy = deviations.Count > 0
+            ? User.FindFirst("email")?.Value ?? "platform"
+            : null;
+        policy.PlanDeviationApprovedOn = deviations.Count > 0 ? DateTime.UtcNow : null;
+
         policy.Version++;
         policy.UpdatedOn = DateTime.UtcNow;
         policy.UpdatedBy = User.FindFirst("email")?.Value ?? "platform";
-        var after = ToAiPolicyDto(policy);
+        var after = ToAiPolicyDto(policy, plan);
 
         var policyAudit = new PlatformAuditService(
             tenantDb, scope.ServiceProvider.GetRequiredService<ILogger<PlatformAuditService>>());
         await policyAudit.WriteAsync(User, "tenant.ai-enablement.set", nameof(AiProcessingPolicy),
             businessUnitId.ToString(),
-            new { before, after, request.Posture, request.CloudEgress, reason = justification },
+            new
+            {
+                before, after, request.Posture, request.CloudEgress, reason = justification,
+                planCode = plan?.Code, planAiPackage = plan?.AiPackage,
+                planDeviations = deviations, planDeviationReason = deviationReason
+            },
             actAsTenantId: id, httpContext: HttpContext, ct: ct);
 
         // Re-run against what was just written, so the console never renders a verdict from
@@ -2005,6 +2078,32 @@ public class TenantsController : ControllerBase
         DeploymentProfileApprovedOn = t.DeploymentProfileApprovedOn
     };
 
+    /// <summary>
+    /// The policy as it stands, plus what the tenant's plan sells and where the two differ. The
+    /// plan half is advisory — the policy row is the authority — and it is computed live rather
+    /// than stored, exactly as the Modules tab computes FromPlanTemplate, so an operator can see
+    /// at a glance which of a customer's settings are deliberate exceptions to what they bought.
+    /// </summary>
+    private static TenantAiPolicyDto ToAiPolicyDto(AiProcessingPolicy p, Plan? plan)
+    {
+        var dto = ToAiPolicyDto(p);
+        dto.PlanDeviationReason = p.PlanDeviationReason;
+        dto.PlanDeviationApprovedBy = p.PlanDeviationApprovedBy;
+        dto.PlanDeviationApprovedOn = p.PlanDeviationApprovedOn;
+        if (plan is null) return dto;
+
+        var package = AiPackages.Resolve(plan.AiPackage);
+        dto.PlanCode = plan.Code;
+        dto.PlanAiPackage = package.Key;
+        dto.PlanAiPackageName = package.Name;
+        dto.PlanAiPackageMeans = package.WhatItTurnsOn;
+        dto.PlanAiMonthlyTokenAllowance = plan.AiMonthlyTokenAllowance;
+        dto.PlanAiAllowanceUnlimited = plan.AiAllowanceUnlimited;
+        dto.PlanDeviations = AiPackageProvisioning.Deviations(
+            p, plan.AiPackage, plan.AiMonthlyTokenAllowance, plan.AiAllowanceUnlimited).ToArray();
+        return dto;
+    }
+
     private static TenantAiPolicyDto ToAiPolicyDto(AiProcessingPolicy p) => new()
     {
         BusinessUnitId = p.BusinessUnitId,
@@ -2044,6 +2143,12 @@ public class TenantsController : ControllerBase
             .Where(tenant => tenant.Id == tenantId)
             .Select(tenant => tenant.PrimaryBusinessUnitId)
             .SingleOrDefaultAsync(ct);
+
+    /// <summary>
+    /// Long enough to be a sentence. The same bar the module-grant screen sets, for the same
+    /// reason: the audit row is what explains the decision to somebody who was not in the room.
+    /// </summary>
+    private const int MinimumPlanDeviationReasonLength = 15;
 
     private long CurrentPlatformActorId() =>
         long.TryParse(User.FindFirst("sub")?.Value

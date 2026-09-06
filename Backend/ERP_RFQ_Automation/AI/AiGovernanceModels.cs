@@ -179,6 +179,21 @@ public sealed class AiProcessingPolicy
     public decimal? LocalComputeCostPerHour { get; set; }
     public decimal? OcrCostPerPage { get; set; }
     public string? LocalCostCurrency { get; set; }
+    /// <summary>
+    /// Why this tenant's AI settings differ from the package their plan sells, who accepted that,
+    /// and when. Set together and CLEARED together the moment the tenant matches its plan again —
+    /// the same rule the deployment profile uses, because a stale approver sitting on a tenant
+    /// that no longer deviates reads as an approval that is still in force.
+    ///
+    /// <para>The plan stays canonical; this is the exception laid over it. Without a reason on
+    /// the row, an exception granted for one quarter's pilot becomes the permanent configuration
+    /// nobody can explain, and the audit trail is the only place that remembers — which is to say
+    /// nowhere anybody looks.</para>
+    /// </summary>
+    public string? PlanDeviationReason { get; set; }
+    public string? PlanDeviationApprovedBy { get; set; }
+    public DateTime? PlanDeviationApprovedOn { get; set; }
+
     public long Version { get; set; } = 1;
     public DateTime UpdatedOn { get; set; }
     public string UpdatedBy { get; set; } = null!;

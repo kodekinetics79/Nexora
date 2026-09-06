@@ -289,6 +289,26 @@ function SetupStatus({
         <AlertTitle sx={{ fontWeight: 800 }}>{title}</AlertTitle>
         <Typography variant="body2">{body}</Typography>
       </Alert>
+      {/* The same statement the Modules tab makes with its "Added beyond plan" chip: the policy
+          row is the authority, the plan is what the customer bought, and an operator needs both
+          to know which of a tenant's settings are deliberate exceptions. */}
+      {policy.planDeviations.length > 0 && (
+        <Alert severity="warning" variant="outlined">
+          <AlertTitle sx={{ fontWeight: 800 }}>
+            Beyond the {policy.planAiPackageName ?? 'plan'} package on plan {policy.planCode}
+          </AlertTitle>
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {policy.planDeviations.map((line) => <li key={line}><Typography variant="body2">{line}</Typography></li>)}
+          </Box>
+          {policy.planDeviationReason && (
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Approved by {policy.planDeviationApprovedBy}
+              {policy.planDeviationApprovedOn && ` on ${fmtDateTime(policy.planDeviationApprovedOn)}`}
+              : &ldquo;{policy.planDeviationReason}&rdquo;
+            </Typography>
+          )}
+        </Alert>
+      )}
       <Grid container spacing={2}>
         <Grid size={{ xs: 12, sm: 4 }}>
           <Typography variant="caption" color="text.secondary">Reading documents with</Typography>
