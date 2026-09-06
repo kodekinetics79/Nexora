@@ -712,6 +712,10 @@ namespace ERP_RFQ_Automation.Repositories
                 StatusId = await LifecycleStatusCatalog.ResolveIdAsync(
                     _context, rfq.BusinessUnitId, "Quote", "DRAFT"),
                 CreatedBy = approvedBy,
+                // The named owner the scoped pipeline funnel reads. Null when the approver's
+                // actor string does not resolve to exactly one user in this tenant.
+                OwnerUserId = await QuoteOwnerAttribution.ResolveAsync(
+                    _context, rfq.BusinessUnitId, approvedBy),
                 CreatedDate = DateTime.UtcNow,
                 HeaderRemarks = rfq.HeaderRemarks,
                 CurrencyId = headerCurrencyId,

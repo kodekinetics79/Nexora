@@ -319,6 +319,11 @@ namespace ERP_RFQ_Automation.Services
                             HeaderRemarks = ws.Cells[row, 11].Text?.Trim(),
                             FinancialCalculationVersion = 2,
                             CreatedBy = createdBy,
+                            // An imported quotation belongs to the person the sheet was uploaded
+                            // as, when that names exactly one user here; an import run under a
+                            // service identity leaves the quote unowned rather than mis-owned.
+                            OwnerUserId = await QuoteOwnerAttribution.ResolveAsync(
+                                _context, businessUnitId, createdBy),
                             CreatedDate = DateTime.UtcNow,
                             TotalAmount = 0 // Will be calculated
                         };

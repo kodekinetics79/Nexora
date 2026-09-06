@@ -593,8 +593,34 @@ namespace ERP_RFQ_Automation.Repositories
         // WP-B2: pipeline / margin analytics
         // ════════════════════════════════════════════════════════════════════
 
-        public async Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(long businessUnitId)
+        /// <summary>
+        /// The codes the product writes when a quote lapsed on its own rather than because the
+        /// customer decided something. <c>QuoteOutcomeService.ExpireAsync</c> defaults to
+        /// AUTO_EXPIRED and <c>SlaSweepWorker</c> is the only caller that passes it, unattended.
+        /// The set is compared against the tenant's own catalogue codes, so a tenant that renames
+        /// the LABEL keeps the grouping.
+        /// </summary>
+        private static readonly HashSet<string> AutoExpiryReasonCodes =
+            new(StringComparer.OrdinalIgnoreCase) { "AUTO_EXPIRED" };
+
+        public async Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(
+            long businessUnitId,
+            AccountTeamScope scope,
+            DateTime? from = null,
+            DateTime? to = null,
+            CancellationToken cancellationToken = default)
         {
+            ArgumentNullException.ThrowIfNull(scope);
+            if (from.HasValue != to.HasValue)
+                throw new ArgumentException(
+                    "A funnel window needs both ends; one alone cannot be stated on the payload.");
+            if (from >= to)
+                throw new ArgumentException("The funnel window must start before it ends.");
+
+            var windowed = from.HasValue;
+            var windowFrom = from ?? DateTime.MinValue;
+            var windowTo = to ?? DateTime.MaxValue;
+
             var now = DateTime.UtcNow;
             var acceptedLeadStatusIds = await ResolveStatusIdsAsync("LeadStatus", "ACCEPTED", "Accepted", legacyId: 24);
             var sentQuoteStatusIds = await ResolveStatusIdsAsync("QuoteStatus", "SENT", "Sent", legacyId: 43);
@@ -605,12 +631,56 @@ namespace ERP_RFQ_Automation.Repositories
                 .Concat(await ResolveStatusIdsAsync("QuoteStatus", "EXPIRED", "Expired", legacyId: null))
                 .Distinct().ToList();
 
+            // ── Who this reader may be told about ────────────────────────────────────────────
+            // FR-DSH-05's three tiers, read through the SAME predicate the release-01 dashboard,
+            // the customer list and the quick search use, so a rep cannot be shown one population
+            // on one screen and another here. Leads are scoped on their assignee or on the
+            // accounts of the teams the caller is on; quotes are scoped on their named owner.
+            //
+            // The scope is applied INSIDE the queries below rather than checked afterwards,
+            // because the failure this endpoint used to be one deleted attribute away from is
+            // company-wide money arriving under a personal heading — a filter applied to a total
+            // that has already been summed cannot prevent that.
+            var accountCustomerIds = AccountTeamReadFilter.CustomerIdsInScope(
+                _context, businessUnitId, scope, now);
+            var scopeUserIds = scope.UserIds;
+
+            var scopedLeads = _context.Leads.AsNoTracking()
+                .Where(l => l.BusinessUnitId == businessUnitId);
+
+            // Taken in C#, not inside the expression tree: a null check on a subquery does not
+            // translate to SQL and would drop the whole query to client evaluation — which on a
+            // lead table means loading the tenant into memory to decide who may see it.
+            if (accountCustomerIds is not null)
+                scopedLeads = scopedLeads.Where(l =>
+                    (l.AssignTo != null && scopeUserIds.Contains(l.AssignTo.Value))
+                    || (l.CustomerId != null && accountCustomerIds.Contains(l.CustomerId.Value)));
+
+            if (windowed)
+                scopedLeads = scopedLeads.Where(l => l.CreatedDate >= windowFrom && l.CreatedDate < windowTo);
+
+            var scopedQuotes = _context.Quotes.AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId);
+
+            // A quote belongs to the person named on it. Ownership is NOT inferred from the
+            // customer's account team here: an account can carry work from several reps, and
+            // reading one rep's revenue under another's heading is the exact failure this scope
+            // exists to prevent. Unowned quotes are handled explicitly below.
+            if (!scope.IsTenantWide)
+                scopedQuotes = scopedQuotes.Where(q =>
+                    q.OwnerUserId != null && scopeUserIds.Contains(q.OwnerUserId.Value));
+
+            // A quote with no CreatedDate cannot be placed in a window, so a windowed funnel
+            // cannot count it. Every write path stamps it and the column defaults to now(), so
+            // this excludes legacy rows only.
+            if (windowed)
+                scopedQuotes = scopedQuotes.Where(q => q.CreatedDate >= windowFrom && q.CreatedDate < windowTo);
+
             // ── Stage 1+2: leads received / leads accepted (counts + priced-line value) ──
-            var totalLeads = await _context.Leads.CountAsync(l => l.BusinessUnitId == businessUnitId);
-            var acceptedLeads = await _context.Leads.CountAsync(l =>
-                l.BusinessUnitId == businessUnitId
-                && l.LeadStatusId != null && acceptedLeadStatusIds.Contains(l.LeadStatusId.Value)
-                && l.LeadRejectedReasonId == null);
+            var totalLeads = await scopedLeads.CountAsync(cancellationToken);
+            var acceptedLeads = await scopedLeads.CountAsync(l =>
+                l.LeadStatusId != null && acceptedLeadStatusIds.Contains(l.LeadStatusId.Value)
+                && l.LeadRejectedReasonId == null, cancellationToken);
 
             // FX: LeadItem carries a FREE-TEXT currency code with no FK to Currency, so codes are
             // mapped to currency ids for this business unit; an unrecognised or blank code yields
@@ -626,9 +696,12 @@ namespace ERP_RFQ_Automation.Repositories
                     ? id
                     : (long?)null;
 
-            // Value estimates from the leads' own priced lines (UnitPrice × Quantity).
+            // Value estimates from the leads' own priced lines (UnitPrice × Quantity), over the
+            // same scoped-and-windowed lead set the counts above came from — a line whose lead the
+            // reader may not see must not reach the reader's money figure either.
+            var scopedLeadIds = scopedLeads.Select(l => l.Id);
             var leadLines = await _context.LeadItems.AsNoTracking()
-                .Where(li => li.Lead.BusinessUnitId == businessUnitId && li.UnitPrice > 0 && li.Quantity > 0)
+                .Where(li => scopedLeadIds.Contains(li.LeadId) && li.UnitPrice > 0 && li.Quantity > 0)
                 .Select(li => new
                 {
                     li.UnitPrice,
@@ -649,10 +722,28 @@ namespace ERP_RFQ_Automation.Repositories
                     .Select(li => new FxAmount(li.UnitPrice!.Value * li.Quantity!.Value, MapCode(li.Currency))).ToArray(), now);
 
             // ── Stage 3+4: quoted / won (quote totals) ──
-            var pipelineQuotes = await _context.Quotes.AsNoTracking()
-                .Where(q => q.BusinessUnitId == businessUnitId)
+            var pipelineQuotes = await scopedQuotes
                 .Select(q => new { q.TotalAmount, q.CurrencyId, q.StatusId, q.OutcomeReasonId, q.RespondedOn })
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
+
+            // Quotes nobody owns, on accounts this reader holds. They are OUT of every figure
+            // above, because attributing them would mean inventing an owner, and a wrong owner
+            // puts one rep's revenue under another's name. Stating the number keeps the exclusion
+            // visible: "some of your book is unattributed" is the actionable form of it, and the
+            // fix is to name an owner, not to fold the money in silently. Zero at tenant scope,
+            // where nothing is excluded.
+            var unownedQuotesExcluded = 0;
+            if (accountCustomerIds is not null)
+            {
+                var unownedInScope = _context.Quotes.AsNoTracking()
+                    .Where(q => q.BusinessUnitId == businessUnitId
+                                && q.OwnerUserId == null
+                                && q.CustomerId != null && accountCustomerIds.Contains(q.CustomerId.Value));
+                if (windowed)
+                    unownedInScope = unownedInScope.Where(q =>
+                        q.CreatedDate >= windowFrom && q.CreatedDate < windowTo);
+                unownedQuotesExcluded = await unownedInScope.CountAsync(cancellationToken);
+            }
 
             var quotedCount = pipelineQuotes.Count;
             var quotedFx = await fx.TotalAsync(businessUnitId,
@@ -678,22 +769,52 @@ namespace ERP_RFQ_Automation.Repositories
             }
 
             var reasonIds = lostGroups.Where(g => g.ReasonId.HasValue).Select(g => g.ReasonId!.Value).Distinct().ToList();
-            var reasonNames = reasonIds.Count == 0
-                ? new Dictionary<long, string>()
-                : await _context.SetupMasters.AsNoTracking()
-                    .Where(s => reasonIds.Contains(s.SetupId))
-                    .ToDictionaryAsync(s => s.SetupId, s => s.Description ?? s.SetupValue);
+            var reasons = reasonIds.Count == 0
+                ? new Dictionary<long, (string? Code, string Name)>()
+                : (await _context.SetupMasters.AsNoTracking()
+                        .Where(s => reasonIds.Contains(s.SetupId))
+                        .Select(s => new { s.SetupId, s.SetupCode, s.Description, s.SetupValue })
+                        .ToListAsync(cancellationToken))
+                    .ToDictionary(s => s.SetupId, s => (s.SetupCode, s.Description ?? s.SetupValue));
 
+            // Why the split is made HERE and not on the client. The reason catalogue is governed
+            // per-tenant data (SetupMaster "QuoteOutcomeReason"), and one of its rows is written
+            // by a background sweep rather than by anybody who spoke to the customer. Ranked by
+            // count alone, that row can head the list and be read as "the market rejects our
+            // prices" when it means "nobody chased these". Which codes are which is a fact about
+            // the tenant's catalogue and about the sweep; a client that decided it would have to
+            // duplicate both and would drift from them.
             var lossReasons = lostGroups
-                .Select(g => new PipelineLossReasonDTO
+                .Select(g =>
                 {
-                    Reason = g.ReasonId.HasValue && reasonNames.TryGetValue(g.ReasonId.Value, out var name)
-                        ? name
-                        : "No reason recorded",
-                    Count = g.Count,
-                    Value = g.Fx.Total,
-                    ValueCurrency = g.Fx.TargetCurrencyCode,
-                    ValueUnavailableReason = g.Fx.UnavailableReason
+                    var resolved = g.ReasonId.HasValue && reasons.TryGetValue(g.ReasonId.Value, out var row)
+                        ? row
+                        : default((string? Code, string Name)?);
+
+                    // Three cases, and only the middle one can claim the customer told us
+                    // anything: no reason at all; a reason we can name; and a reason whose
+                    // catalogue row is gone, where something WAS recorded but we cannot evidence
+                    // what — which is not a stated reason either.
+                    var code = g.ReasonId.HasValue
+                        ? resolved?.Code is { Length: > 0 } setupCode
+                            ? setupCode.Trim().ToUpperInvariant()
+                            : $"REASON_{g.ReasonId.Value}"
+                        : PipelineLossReasonDTO.UnrecordedCode;
+
+                    return new PipelineLossReasonDTO
+                    {
+                        Code = code,
+                        Reason = !g.ReasonId.HasValue
+                            ? "No reason recorded"
+                            : resolved?.Name ?? "Reason no longer in the tenant's catalogue",
+                        Group = resolved is not null && !AutoExpiryReasonCodes.Contains(code)
+                            ? PipelineLossReasonDTO.CustomerStatedGroup
+                            : PipelineLossReasonDTO.NeverEstablishedGroup,
+                        Count = g.Count,
+                        Value = g.Fx.Total,
+                        ValueCurrency = g.Fx.TargetCurrencyCode,
+                        ValueUnavailableReason = g.Fx.UnavailableReason
+                    };
                 })
                 .OrderByDescending(r => r.Count)
                 .ToList();
@@ -759,7 +880,23 @@ namespace ERP_RFQ_Automation.Repositories
                 AwaitingResponseValue = awaitingFx.Total,
                 RespondedQuotes = responded.Count,
                 RespondedValue = respondedFx.Total,
-                FunnelScope = PipelineAnalyticsDTO.AllTimeScope,
+                // Stated, not assumed: a client draws its "period applied" seal from this pair,
+                // so a window the server did not honour cannot be presented as one it did.
+                FunnelScope = windowed ? PipelineAnalyticsDTO.WindowScope : PipelineAnalyticsDTO.AllTimeScope,
+                WindowFrom = from,
+                WindowTo = to,
+                RoleScope = new DashboardRelease01RoleScopeDTO
+                {
+                    Scope = scope.ScopeName,
+                    OwnerUserId = scope.IsTenantWide ? null : scope.UserId,
+                    AccountTeamIds = scope.TeamIds.ToList(),
+                    ScopedUserIds = scope.IsTenantWide ? new List<long>() : scope.UserIds.ToList()
+                },
+                UnownedQuotesExcluded = unownedQuotesExcluded,
+                UnownedQuotesExcludedReason = unownedQuotesExcluded > 0
+                    ? "These quotes carry no named owner, so they cannot be attributed to you. "
+                      + "Set an owner on them to bring them into your figures."
+                    : null,
                 GeneratedAt = now
             };
         }

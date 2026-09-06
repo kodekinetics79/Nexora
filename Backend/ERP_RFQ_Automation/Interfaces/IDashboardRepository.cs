@@ -10,8 +10,26 @@ namespace ERP_RFQ_Automation.Interfaces
         /// <summary>WP-B1: per-rep open/overdue leads + sent/stale quotes, plus an unassigned bucket row.</summary>
         Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId);
 
-        /// <summary>WP-B2: stage funnel, loss reasons, weighted forecast and quoted-vs-floor margin proxy.</summary>
-        Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(long businessUnitId);
+        /// <summary>
+        /// WP-B2: stage funnel, loss reasons and weighted forecast, restricted to the rows
+        /// <paramref name="scope"/> admits and optionally to a window.
+        ///
+        /// <para>The scope is a REQUIRED parameter rather than an optional one on purpose. This
+        /// endpoint is the sole source of the funnel, Won and the weighted pipeline; when the
+        /// scope was absent the only thing standing between a sales representative and
+        /// company-wide money under a personal heading was an authorization attribute on the
+        /// action. Making it required means a caller that forgets it does not compile.</para>
+        ///
+        /// <para><paramref name="from"/> and <paramref name="to"/> are supplied together or not at
+        /// all; absent, the funnel keeps its historical all-time behaviour, and the payload says
+        /// which of the two it was.</para>
+        /// </summary>
+        Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(
+            long businessUnitId,
+            ERP_RFQ_Automation.Authorization.AccountTeamScope scope,
+            DateTime? from = null,
+            DateTime? to = null,
+            CancellationToken cancellationToken = default);
 
         /// <summary>Pilot analytics: open enquiries bucketed by days to bid closing date, with line counts.</summary>
         Task<DeadlineBoardDTO> GetDeadlineBoardAsync(

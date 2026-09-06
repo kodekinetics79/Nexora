@@ -15232,6 +15232,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("OutcomeReasonId")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("OwnerUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("OwnerUserID");
+
                     b.Property<DateTime?>("QuoteDate")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp without time zone")
@@ -15299,6 +15303,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("DiscountTypeId");
 
+                    b.HasIndex("OwnerUserId");
+
                     b.HasIndex("StatusId");
 
                     b.HasIndex("BusinessUnitId", "ExternalQuoteReference")
@@ -15324,6 +15330,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_Quotes_BusinessUnitID_CommercialCaseID");
 
                     b.HasIndex(new[] { "BusinessUnitId", "NexoraSerial" }, "IX_Quotes_BusinessUnitID_NexoraSerial");
+
+                    b.HasIndex(new[] { "BusinessUnitId", "OwnerUserId" }, "IX_Quotes_BusinessUnitID_OwnerUserID");
 
                     b.HasIndex(new[] { "Rfqid", "CustomerId", "StatusId" }, "IX_Quotes_Helper");
 
@@ -26110,6 +26118,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .WithMany("QuoteDiscountTypes")
                         .HasForeignKey("DiscountTypeId")
                         .HasConstraintName("FK_Quote_DiscountType");
+
+                    b.HasOne("ERP_RFQ_Automation.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerUserId")
+                        .HasConstraintName("FK_Quotes_OwnerUser");
 
                     b.HasOne("ERP_RFQ_Automation.Models.Rfq", "Rfq")
                         .WithMany("Quotes")
