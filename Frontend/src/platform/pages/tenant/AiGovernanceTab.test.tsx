@@ -19,6 +19,7 @@ import AiGovernanceTab from './AiGovernanceTab';
  */
 
 const policy: TenantAiPolicy = {
+  deploymentRateSummary: '0.27 in / 1.10 out per 1M tokens USD (rate 2026-09). Set for the whole deployment, not per tenant.',
   businessUnitId: '4', isEnabled: true, externalProcessingAllowed: false,
   allowedPurposes: ['RfqExtraction'], allowedProvider: null, allowedModel: null,
   monthlySoftTokenLimit: 10_000, monthlyHardTokenLimit: 20_000, maxTokensPerDocument: 2_000,
@@ -319,20 +320,39 @@ describe('extraction pre-flight', () => {
   });
 
   /**
-   * The second refusal, which used to be invisible until the first was fixed: a rate with no
-   * currency and no pricing version is a number nobody can reproduce a bill from.
+   * The rate fields are gone, so the refusals they generated are gone with them.
+   *
+   * Six of them were on this dialog — input and output cost per million, currency, pricing
+   * version, local compute per hour, OCR per page — retyped for every customer. None is a fact
+   * about a customer: a million deepseek-v4-pro tokens cost the same for all of them. Asking
+   * produced a tenant carrying the currency "1", which passed the API's "not empty" check,
+   * violated the database's ^[A-Z]{3}$ constraint, and came back as "An unexpected error
+   * occurred". The rate is now one setting for the deployment, and this dialog shows it.
    */
-  it('asks for the currency and pricing version as soon as an external rate is typed', async () => {
+  it('does not ask an operator what a million tokens cost', async () => {
     renderTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
     const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
 
-    fireEvent.change(dialog.getByLabelText('External input cost / 1M'), { target: { value: '12' } });
-    fireEvent.change(dialog.getByLabelText(/Change reason/), { target: { value: 'Recording external rates' } });
+    for (const gone of [
+      'External input cost / 1M', 'External output cost / 1M', 'External cost currency',
+      'External pricing version', 'Local compute cost / hour', 'OCR cost / page',
+      'Local cost currency',
+    ]) {
+      expect(dialog.queryByLabelText(gone)).not.toBeInTheDocument();
+    }
 
-    expect(dialog.getByRole('alert')).toHaveTextContent(/External cost currency/);
-    expect(dialog.getByRole('alert')).toHaveTextContent(/External pricing version/);
-    expect(dialog.getByRole('button', { name: 'Save policy' })).toBeDisabled();
+    // What it rations is still asked, because that IS a per-customer commercial term.
+    expect(dialog.getByLabelText('Monthly hard token limit')).toBeVisible();
+    expect(dialog.getByLabelText('Monthly soft token limit')).toBeVisible();
+    expect(dialog.getByLabelText('Document token limit')).toBeVisible();
+  });
+
+  it('shows the rate the deployment pays, instead of asking for it', async () => {
+    renderTab();
+
+    expect(await screen.findByText('What AI costs on this deployment')).toBeVisible();
+    expect(screen.getByText(/per 1M tokens USD \(rate 2026-09\)/)).toBeVisible();
   });
 
   /** Zero is a kill switch wearing a budget's clothes, and the field says so where it is typed. */

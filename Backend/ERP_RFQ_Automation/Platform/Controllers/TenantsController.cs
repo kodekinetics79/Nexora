@@ -1145,7 +1145,11 @@ public class TenantsController : ControllerBase
         var tenantDb = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var policy = await tenantDb.AiProcessingPolicies.AsNoTracking()
             .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
-        return policy is null ? NotFound() : Ok(ToAiPolicyDto(policy));
+        if (policy is null) return NotFound();
+        var dto = ToAiPolicyDto(policy);
+        dto.DeploymentRateSummary = DescribeRateCard(
+            scope.ServiceProvider.GetRequiredService<IAiRateCardProvider>().Current);
+        return Ok(dto);
     }
 
     [HttpPut("{id:long}/ai-policy")]
@@ -1177,17 +1181,6 @@ public class TenantsController : ControllerBase
         if (request.ExternalProcessingAllowed && (!request.RedactionRequired || !request.PrivacyReviewRequired
             || string.IsNullOrWhiteSpace(request.AllowedProvider) || string.IsNullOrWhiteSpace(request.AllowedModel)))
             return BadRequest(new { error = "External processing requires redaction, privacy review, provider and model." });
-        if ((request.ExternalInputCostPerMillionTokens.HasValue || request.ExternalOutputCostPerMillionTokens.HasValue)
-            && (request.ExternalInputCostPerMillionTokens is null or < 0
-                || request.ExternalOutputCostPerMillionTokens is null or < 0
-                || string.IsNullOrWhiteSpace(request.ExternalCostCurrency)
-                || string.IsNullOrWhiteSpace(request.ExternalPricingVersion)))
-            return BadRequest(new { error = "External rates require input/output rates, currency and pricing version." });
-        if ((request.LocalComputeCostPerHour.HasValue || request.OcrCostPerPage.HasValue)
-            && (request.LocalComputeCostPerHour is null or < 0 || request.OcrCostPerPage is null or < 0
-                || string.IsNullOrWhiteSpace(request.LocalCostCurrency)))
-            return BadRequest(new { error = "Local rates require compute/OCR rates and currency." });
-
         var allowedPurposeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent };
         var purposes = (request.AllowedPurposes ?? [])
@@ -1225,10 +1218,12 @@ public class TenantsController : ControllerBase
         policy.MonthlySoftTokenLimit = request.MonthlySoftTokenLimit;
         policy.MonthlyHardTokenLimit = request.MonthlyHardTokenLimit;
         policy.MaxTokensPerDocument = request.MaxTokensPerDocument;
-        policy.ExternalInputCostPerMillionTokens = request.ExternalInputCostPerMillionTokens;
-        policy.ExternalOutputCostPerMillionTokens = request.ExternalOutputCostPerMillionTokens;
-        policy.ExternalCostCurrency = Normalize(request.ExternalCostCurrency)?.ToUpperInvariant();
-        policy.ExternalPricingVersion = Normalize(request.ExternalPricingVersion);
+        // What AI costs is NOT a tenant setting. It is one rate card for the deployment
+        // (Ai:RateCard, beside Ollama:BaseUrl, which names the endpoint whose prices they are),
+        // read by the token ledger at settle time. These six columns are left where they are and
+        // no longer written: they were retyped for every customer until one of them held the
+        // currency "1", which passed this endpoint's "not empty" check, violated the database's
+        // ^[A-Z]{3}$ constraint, and reached the operator as "An unexpected error occurred".
         policy.ExternalDependencyCeilingPercent = request.ExternalDependencyCeilingPercent;
         policy.RedactionRequired = request.RedactionRequired;
         policy.AllowedDataClassifications = request.AllowedDataClassifications.Trim();
@@ -1237,9 +1232,6 @@ public class TenantsController : ControllerBase
         policy.RetentionDays = request.RetentionDays;
         policy.InputOutputAuditAllowed = request.InputOutputAuditAllowed;
         policy.PrivacyReviewRequired = request.PrivacyReviewRequired;
-        policy.LocalComputeCostPerHour = request.LocalComputeCostPerHour;
-        policy.OcrCostPerPage = request.OcrCostPerPage;
-        policy.LocalCostCurrency = Normalize(request.LocalCostCurrency)?.ToUpperInvariant();
         policy.Version++;
         policy.UpdatedOn = DateTime.UtcNow;
         policy.UpdatedBy = User.FindFirst("email")?.Value ?? "platform";
@@ -1806,6 +1798,25 @@ public class TenantsController : ControllerBase
         DeploymentProfileApprovedBy = t.DeploymentProfileApprovedBy,
         DeploymentProfileApprovedOn = t.DeploymentProfileApprovedOn
     };
+
+    /// <summary>
+    /// The deployment's rate card as one readable sentence. An unpriced deployment says so plainly
+    /// rather than showing blanks an operator would try to fill in — which is how six cost fields
+    /// ended up being typed per tenant in the first place.
+    /// </summary>
+    private static string DescribeRateCard(AiRateCard card)
+    {
+        if (!card.CanPriceExternal)
+            return "No rate card is configured for this deployment, so AI calls are recorded "
+                + "without a cost. Set Ai:RateCard in the service configuration.";
+
+        var local = card.LocalComputeCostPerHour is { } compute && card.OcrCostPerPage is { } ocr
+            ? $"; local {compute} per compute-hour and {ocr} per OCR page"
+            : string.Empty;
+        return $"{card.ExternalInputCostPerMillionTokens} in / "
+            + $"{card.ExternalOutputCostPerMillionTokens} out per 1M tokens {card.Currency} "
+            + $"(rate {card.PricingVersion}){local}. Set for the whole deployment, not per tenant.";
+    }
 
     private static TenantAiPolicyDto ToAiPolicyDto(AiProcessingPolicy p) => new()
     {

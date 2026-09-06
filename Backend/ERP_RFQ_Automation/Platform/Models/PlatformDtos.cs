@@ -628,6 +628,13 @@ public class TenantStatusChangeRequest
 
 public class TenantAiPolicyDto
 {
+    /// <summary>
+    /// What this DEPLOYMENT pays for AI, in one sentence, read-only. Shown so an operator can see
+    /// the rate their tenant's calls are priced at without being asked to supply it — it is the
+    /// same rate for every tenant calling the same endpoint.
+    /// </summary>
+    public string DeploymentRateSummary { get; set; } = string.Empty;
+
     public long BusinessUnitId { get; set; }
     public bool IsEnabled { get; set; }
     public bool ExternalProcessingAllowed { get; set; }
@@ -659,6 +666,10 @@ public class TenantAiPolicyDto
 
 public class UpdateTenantAiPolicyRequest
 {
+    // No cost fields. What AI costs is one rate card for the deployment (Ai:RateCard) — the same
+    // number for every tenant that calls the same endpoint — not something an operator retypes per
+    // customer and gets wrong.
+
     public bool IsEnabled { get; set; } = true;
     public bool ExternalProcessingAllowed { get; set; }
     public string[] AllowedPurposes { get; set; } = [];
@@ -667,10 +678,6 @@ public class UpdateTenantAiPolicyRequest
     public long? MonthlySoftTokenLimit { get; set; }
     public long? MonthlyHardTokenLimit { get; set; }
     public long? MaxTokensPerDocument { get; set; }
-    public decimal? ExternalInputCostPerMillionTokens { get; set; }
-    public decimal? ExternalOutputCostPerMillionTokens { get; set; }
-    public string? ExternalCostCurrency { get; set; }
-    public string? ExternalPricingVersion { get; set; }
     public decimal ExternalDependencyCeilingPercent { get; set; }
     public bool RedactionRequired { get; set; } = true;
     public string AllowedDataClassifications { get; set; } = "Public,Internal";
@@ -679,9 +686,6 @@ public class UpdateTenantAiPolicyRequest
     public int RetentionDays { get; set; } = 30;
     public bool InputOutputAuditAllowed { get; set; }
     public bool PrivacyReviewRequired { get; set; } = true;
-    public decimal? LocalComputeCostPerHour { get; set; }
-    public decimal? OcrCostPerPage { get; set; }
-    public string? LocalCostCurrency { get; set; }
     public long Version { get; set; }
 
     [Required]

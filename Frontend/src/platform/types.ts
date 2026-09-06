@@ -1505,6 +1505,8 @@ export interface CreateSubscriptionInvoiceInput {
 }
 
 export interface TenantAiPolicy {
+  /** What this DEPLOYMENT pays for AI, read-only. Shown, never asked for. */
+  deploymentRateSummary: string;
   businessUnitId: string;
   isEnabled: boolean;
   externalProcessingAllowed: boolean;
@@ -1534,7 +1536,15 @@ export interface TenantAiPolicy {
   updatedBy: string;
 }
 
-export type UpdateTenantAiPolicyInput = Omit<TenantAiPolicy, 'businessUnitId' | 'updatedOn' | 'updatedBy'> & {
+/**
+ * No cost fields. What AI costs is one rate card for the deployment, not a per-tenant setting —
+ * the same number for every tenant calling the same endpoint.
+ */
+export type UpdateTenantAiPolicyInput = Omit<TenantAiPolicy,
+  'businessUnitId' | 'updatedOn' | 'updatedBy' | 'deploymentRateSummary'
+  | 'externalInputCostPerMillionTokens' | 'externalOutputCostPerMillionTokens'
+  | 'externalCostCurrency' | 'externalPricingVersion'
+  | 'localComputeCostPerHour' | 'ocrCostPerPage' | 'localCostCurrency'> & {
   reason: string;
 };
 

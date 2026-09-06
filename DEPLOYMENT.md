@@ -257,8 +257,36 @@ secrets, and rotate the credentials through the application before customer use.
 | `CommercialFinance__ContactVerificationSecret` | HMAC secret for trusted finance-contact verification assertions (**use a distinct secret**; ≥32 bytes) |
 | `CommercialFinance__AuditActorSecret` | HMAC secret binding authenticated actors to governed database mutations (**use a distinct secret**; ≥32 bytes) |
 | `Ollama__BaseUrl` / `Ollama__ApiKey` | AI extraction provider (until the Claude migration, ADR-0001) |
+| `Ai__RateCard__*` | **What this deployment pays for AI.** See below. Optional — without it every AI call is still governed and metered, it is simply recorded with no cost (`RateUnavailable` on the ledger row). |
 | `Cors__AllowedOrigins__0..n` | allowed frontend origins (the Vercel URL) |
 | `ASPNETCORE_ENVIRONMENT` | `Production` (set by the Dockerfile) |
+
+## What AI costs (`Ai:RateCard:*`)
+
+These six values used to be **fields on every tenant's AI policy screen**, retyped by an operator
+for each customer. None of them is a fact about a customer: a million `deepseek-v4-pro` tokens cost
+the same at `https://ollama.com` whoever is being billed, and the cost of an OCR page is a property
+of the hardware. Asking produced a tenant carrying `ExternalCostCurrency = "1"` — which passed the
+API's "not empty" check, violated the database's `^[A-Z]{3}$` constraint, and reached the operator
+as *"An unexpected error occurred"*.
+
+They now live here, beside `Ollama__BaseUrl`, which names the endpoint whose prices they are.
+
+| Key (env form) | Example | Purpose |
+|---|---|---|
+| `Ai__RateCard__ExternalInputCostPerMillionTokens` | `0.27` | Priced against input tokens at settle time |
+| `Ai__RateCard__ExternalOutputCostPerMillionTokens` | `1.10` | Priced against output tokens |
+| `Ai__RateCard__Currency` | `USD` | **Exactly three uppercase letters** — the database enforces `^[A-Z]{3}$` |
+| `Ai__RateCard__PricingVersion` | `ollama-2026-09` | Stamped on every priced ledger row, so a cost can be traced to the rate that produced it after the rate moves on |
+| `Ai__RateCard__LocalComputeCostPerHour` | `1.85` | Optional; local inference |
+| `Ai__RateCard__OcrCostPerPage` | `0.004` | Optional; OCR |
+
+**All four external values or none.** Half a rate card prices nothing: the ledger writes
+`RateUnavailable` and says so, rather than inventing a partial number. The tenant's AI governance
+tab shows the resulting rate read-only — it never asks for it.
+
+**What stays per tenant:** the monthly soft and hard token limits and the per-document token limit.
+Those ration what a customer may spend, which *is* a commercial term agreed per customer.
 
 ## Security reminders before a real pilot
 - **Rotate** the 3 original secrets (old SQL `sa` / JWT / Ollama) — `SECURITY.md`.

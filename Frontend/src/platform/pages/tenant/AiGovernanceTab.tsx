@@ -91,23 +91,6 @@ const policyProblems = (draft: TenantAiPolicy, reason: string): PolicyProblems =
   if (blank(draft.egressPolicy)) problems.egressPolicy = 'Required.';
   if (blank(draft.dataResidency)) problems.dataResidency = 'Required.';
 
-  // A rate with no currency and no pricing version is a number nobody can reproduce a bill from.
-  const anyExternalRate = draft.externalInputCostPerMillionTokens != null
-    || draft.externalOutputCostPerMillionTokens != null;
-  if (anyExternalRate) {
-    if (draft.externalInputCostPerMillionTokens == null) problems.externalInputCostPerMillionTokens = 'Required once either external rate is set.';
-    if (draft.externalOutputCostPerMillionTokens == null) problems.externalOutputCostPerMillionTokens = 'Required once either external rate is set.';
-    if (blank(draft.externalCostCurrency)) problems.externalCostCurrency = 'Required once an external rate is set.';
-    if (blank(draft.externalPricingVersion)) problems.externalPricingVersion = 'Required once an external rate is set — a rate nobody can date is a bill nobody can reproduce.';
-  }
-
-  const anyLocalRate = draft.localComputeCostPerHour != null || draft.ocrCostPerPage != null;
-  if (anyLocalRate) {
-    if (draft.localComputeCostPerHour == null) problems.localComputeCostPerHour = 'Required once either local rate is set.';
-    if (draft.ocrCostPerPage == null) problems.ocrCostPerPage = 'Required once either local rate is set.';
-    if (blank(draft.localCostCurrency)) problems.localCostCurrency = 'Required once a local rate is set.';
-  }
-
   return problems;
 };
 
@@ -125,13 +108,6 @@ const FIELD_LABELS: Record<string, string> = {
   allowedDataClassifications: 'Data classifications',
   egressPolicy: 'Egress policy',
   dataResidency: 'Data residency',
-  externalInputCostPerMillionTokens: 'External input cost / 1M',
-  externalOutputCostPerMillionTokens: 'External output cost / 1M',
-  externalCostCurrency: 'External cost currency',
-  externalPricingVersion: 'External pricing version',
-  localComputeCostPerHour: 'Local compute cost / hour',
-  ocrCostPerPage: 'OCR cost / page',
-  localCostCurrency: 'Local cost currency',
 };
 
 const STATUS_TONE: Record<AiReadinessStatus, 'success' | 'error' | 'neutral' | 'warning'> = {
@@ -440,8 +416,9 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
           <Grid size={{ xs: 12, md: 4 }}>{field('Privacy controls', `Redaction ${policy.redactionRequired ? 'required' : 'optional'}; review ${policy.privacyReviewRequired ? 'required' : 'optional'}`)}</Grid>
           <Grid size={{ xs: 12, md: 4 }}>{field('Classification / egress', `${policy.allowedDataClassifications} / ${policy.egressPolicy}`)}</Grid>
           <Grid size={{ xs: 12, md: 4 }}>{field('Residency / retention', `${policy.dataResidency} / ${policy.retentionDays} days`)}</Grid>
-          <Grid size={{ xs: 12, md: 4 }}>{field('External pricing', `${policy.externalInputCostPerMillionTokens ?? '—'} / ${policy.externalOutputCostPerMillionTokens ?? '—'} ${policy.externalCostCurrency ?? ''} (${policy.externalPricingVersion ?? 'unversioned'})`)}</Grid>
-          <Grid size={{ xs: 12, md: 4 }}>{field('Local pricing', `${policy.localComputeCostPerHour ?? '—'} compute/hour; ${policy.ocrCostPerPage ?? '—'} OCR/page ${policy.localCostCurrency ?? ''}`)}</Grid>
+          {/* Shown, never asked for. The rate is a property of the endpoint this deployment
+              calls, identical for every tenant on it. */}
+          <Grid size={{ xs: 12, md: 8 }}>{field('What AI costs on this deployment', policy.deploymentRateSummary)}</Grid>
           <Grid size={{ xs: 12, md: 4 }}>{field('Version', `v${policy.version}, ${fmtDateTime(policy.updatedOn)} by ${policy.updatedBy}`)}</Grid>
         </Grid>
       </PageSection>
@@ -463,10 +440,13 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
           <Grid container spacing={2}>
             <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth label="Allowed provider" required={draft.externalProcessingAllowed} value={draft.allowedProvider ?? ''} error={Boolean(problems.allowedProvider)} helperText={problems.allowedProvider ?? ' '} onChange={(e) => setDraft({ ...draft, allowedProvider: e.target.value || null })} /></Grid>
             <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth label="Allowed model" required={draft.externalProcessingAllowed} value={draft.allowedModel ?? ''} error={Boolean(problems.allowedModel)} helperText={problems.allowedModel ?? ' '} onChange={(e) => setDraft({ ...draft, allowedModel: e.target.value || null })} /></Grid>
-            {([['Monthly soft token limit', 'monthlySoftTokenLimit'], ['Monthly hard token limit', 'monthlyHardTokenLimit'], ['Document token limit', 'maxTokensPerDocument'], ['External input cost / 1M', 'externalInputCostPerMillionTokens'], ['External output cost / 1M', 'externalOutputCostPerMillionTokens'], ['Local compute cost / hour', 'localComputeCostPerHour'], ['OCR cost / page', 'ocrCostPerPage']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: optionalNumber(e.target.value) })} /></Grid>)}
+            {/* Token limits stay: they ration what a tenant may spend, which IS a per-customer
+                commercial term. The four rate fields that used to sit beside them do not — what a
+                million tokens cost is one number for the whole deployment. */}
+            {([['Monthly soft token limit', 'monthlySoftTokenLimit'], ['Monthly hard token limit', 'monthlyHardTokenLimit'], ['Document token limit', 'maxTokensPerDocument']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: optionalNumber(e.target.value) })} /></Grid>)}
             <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="External dependency ceiling (%)" value={draft.externalDependencyCeilingPercent} error={Boolean(problems.externalDependencyCeilingPercent)} helperText={problems.externalDependencyCeilingPercent ?? ' '} onChange={(e) => setDraft({ ...draft, externalDependencyCeilingPercent: Number(e.target.value) })} slotProps={{ htmlInput: { min: 0, max: 10 } }} /></Grid>
             <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="Retention days" value={draft.retentionDays} error={Boolean(problems.retentionDays)} helperText={problems.retentionDays ?? ' '} onChange={(e) => setDraft({ ...draft, retentionDays: Number(e.target.value) })} /></Grid>
-            {([['Data classifications', 'allowedDataClassifications'], ['Egress policy', 'egressPolicy'], ['Data residency', 'dataResidency'], ['External cost currency', 'externalCostCurrency'], ['External pricing version', 'externalPricingVersion'], ['Local cost currency', 'localCostCurrency']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: e.target.value || null })} /></Grid>)}
+            {([['Data classifications', 'allowedDataClassifications'], ['Egress policy', 'egressPolicy'], ['Data residency', 'dataResidency']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: e.target.value || null })} /></Grid>)}
           </Grid>
           <FormControlLabel control={<Checkbox checked={draft.inputOutputAuditAllowed} onChange={(_, value) => setDraft({ ...draft, inputOutputAuditAllowed: value })} />} label="Input/output audit content permitted" />
           <TextField label="Change reason" value={policyReason} onChange={(e) => setPolicyReason(e.target.value)} required multiline minRows={2} error={Boolean(problems.reason)} helperText={problems.reason ?? ' '} />
