@@ -73,10 +73,18 @@ const manifest: PlatformDataBoundaryManifest = {
     backupPolicyReference: 'neon-pitr-7d', backupPolicyVersion: 3,
   },
   boundaries: [], defects: [], configurationKey: 'Platform:DataBoundaries',
+  source: 'console',
+  observation: {
+    host: 'ep-super-sea.c-2.us-east-1.aws.neon.tech', providerName: 'Neon',
+    opaqueProviderReference: 'neon-ep-super-sea', region: 'us-east-1',
+    basis: 'Read from the database host this process is connected to.', isUsable: true,
+  },
+  recordedBy: 'owner@nexora.app', recordedOn: '2026-09-06T10:00:00Z', recordedBasis: 'observed-and-confirmed',
 };
 
 const undeclared: PlatformDataBoundaryManifest = {
-  ...manifest, configured: false, primaryPostgreSqlScope: null,
+  ...manifest, configured: false, source: 'none', primaryPostgreSqlScope: null,
+  recordedBy: null, recordedOn: null, recordedBasis: null,
 };
 
 beforeEach(() => {
@@ -115,14 +123,14 @@ describe('DataStorageTab', () => {
    * And where it has not, the manual form is still the whole product — but the operator is told
    * why they are being asked, and which four keys end the asking.
    */
-  it('names the configuration that would end the manual form', async () => {
+  it('offers what the server read about its own database rather than a form', async () => {
     vi.spyOn(platformApi, 'listTenantDataAssets').mockResolvedValue([]);
     vi.spyOn(platformApi, 'getTenantActivationDataDecision').mockResolvedValue(blocked);
     renderTab();
 
-    expect(await screen.findByRole('button', { name: 'Register boundary' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Use this for every tenant' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Register from this deployment' })).toBeNull();
-    expect(screen.getByText(/has not declared its own database/i)).toBeVisible();
+    expect(screen.getByText(/Nexora read its own database/i)).toBeVisible();
   });
 
   it('shows the authoritative blocker and decision boundary without invented storage totals', async () => {

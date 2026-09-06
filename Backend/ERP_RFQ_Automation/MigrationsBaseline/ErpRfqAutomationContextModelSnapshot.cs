@@ -19374,6 +19374,62 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("Tenants", "platform");
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.DataAssets.PlatformDataBoundarySettings", b =>
+                {
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("BackupPolicyReference")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("BackupPolicyVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Basis")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ObservedHost")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("OpaqueProviderReference")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("RecordedBy")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<DateTime>("RecordedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Region")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("PlatformDataBoundarySettings", "platform", t =>
+                        {
+                            t.HasCheckConstraint("CK_PlatformDataBoundarySettings_Singleton", "\"Id\" = 1");
+                        });
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Platform.Notifications.PlatformEmailSettings", b =>
                 {
                     b.Property<long>("Id")

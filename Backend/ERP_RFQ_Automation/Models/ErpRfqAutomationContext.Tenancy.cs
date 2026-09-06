@@ -886,6 +886,9 @@ public partial class ErpRfqAutomationContext
         // ==== Platform outbound email identity (Platform/Notifications/) ====
         modelBuilder.ApplyPlatformEmailModel();
 
+        // ==== What this deployment's own database is (Platform/DataAssets/) ====
+        modelBuilder.ApplyPlatformDataBoundarySettingsModel();
+
         // ==== Server-authoritative platform MFA enforcement (Platform/Auth/) ====
         // The singleton policy row plus the browser-trust ledger. Spliced here rather than declared
         // inline with the other platform entities above so the security module owns its own model,

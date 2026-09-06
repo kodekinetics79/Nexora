@@ -109,7 +109,9 @@ public sealed class ProvisioningHarness : IDisposable
         // existing test rather than one only a dedicated test ever sees.
         services.AddSingleton<IConfiguration>(Configuration);
         services.AddScoped<TenantDataAssetRegistryService>();
-        services.AddSingleton<IPlatformDataBoundaryManifest, PlatformDataBoundaryManifest>();
+        services.AddSingleton<PlatformDataBoundaryManifest>();
+        services.AddScoped<IPlatformDataBoundaryManifest, ResolvedPlatformDataBoundaryManifest>();
+        services.AddScoped<IDatabaseSelfObserver, DatabaseSelfObserver>();
         services.AddScoped<ITenantPostgreSqlScopeProbe, TenantPostgreSqlScopeProbe>();
         services.AddScoped<IPlatformDataBoundaryProvisioner, PlatformDataBoundaryProvisioner>();
         services.AddScoped<IPlatformDataBoundaryApplier, PlatformDataBoundaryApplier>();

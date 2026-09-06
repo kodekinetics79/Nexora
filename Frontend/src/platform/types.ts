@@ -368,14 +368,48 @@ export interface PlatformDataBoundary {
   backupPolicyVersion: number;
 }
 
+/**
+ * What the running server can read about its OWN database — the Neon endpoint id and region an
+ * operator would otherwise have to know. Always present; `isUsable` is false when the host shape
+ * says nothing (a self-hosted box, an IP), and then `basis` is the sentence explaining what was
+ * read and why nothing could be taken from it.
+ */
+export interface DatabaseSelfObservation {
+  host: string | null;
+  providerName: string | null;
+  opaqueProviderReference: string | null;
+  region: string | null;
+  basis: string;
+  isUsable: boolean;
+}
+
 export interface PlatformDataBoundaryManifest {
   /** False when this deployment has declared nothing, which is what keeps the manual form. */
   configured: boolean;
+  /** Where the answer came from: an Owner in the console, deployment configuration, or nowhere. */
+  source: 'console' | 'configuration' | 'none';
   primaryPostgreSqlScope: PlatformDataBoundary | null;
   boundaries: PlatformDataBoundary[];
   /** Declarations the server refused, with the reason. Empty is the normal case. */
   defects: { assetType: string; reason: string }[];
+  observation: DatabaseSelfObservation;
+  recordedBy: string | null;
+  recordedOn: string | null;
+  /** `observed-and-confirmed` when an Owner accepted what the server read; `entered` when typed. */
+  recordedBasis: string | null;
   configurationKey: string;
+}
+
+/**
+ * Recording it. Provider reference and region are omitted on the one-click path, which means
+ * "what the server observed" and is recorded as such; sending them means the Owner typed them.
+ */
+export interface RecordPlatformDataBoundaryInput {
+  opaqueProviderReference?: string | null;
+  region?: string | null;
+  backupPolicyReference: string;
+  backupPolicyVersion: number;
+  reason?: string | null;
 }
 
 /** What applying the manifest to one tenant actually did. */

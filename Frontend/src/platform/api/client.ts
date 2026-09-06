@@ -6,6 +6,7 @@ import type {
   ApplyPlatformDataBoundariesResult,
   PlatformDataBoundary,
   PlatformDataBoundaryManifest,
+  RecordPlatformDataBoundaryInput,
   AuditEntry,
   AiExtractionReadinessReport,
   AiProviderAuthorization,
@@ -217,8 +218,13 @@ export interface PlatformApi {
   markTenantPastDue(id: string, reason: string): Promise<Tenant>;
   resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
-  /** What this DEPLOYMENT declares its own infrastructure to be. Read-only, deployment-wide. */
+  /**
+   * What this DEPLOYMENT declares its own infrastructure to be — and, when nobody has declared
+   * anything, what the running server read off its own database connection.
+   */
   getPlatformDataBoundaries(): Promise<PlatformDataBoundaryManifest>;
+  /** Records it once for the whole platform. Owner-only and audited on the server. */
+  recordPlatformDataBoundary(input: RecordPlatformDataBoundaryInput): Promise<PlatformDataBoundaryManifest>;
   /**
    * Registers and verifies the tenant's boundaries from that declaration, with a live probe of the
    * running database. No body: nothing in it is an operator's decision.
@@ -1158,6 +1164,18 @@ const httpPlatformApi: PlatformApi = {
   getPlatformDataBoundaries: async () =>
     normalizePlatformDataBoundaryManifest(
       (await platformHttp.get<WireRecord>('/api/platform/data-boundaries')).data,
+    ),
+  recordPlatformDataBoundary: async (input) =>
+    normalizePlatformDataBoundaryManifest(
+      (await platformHttp.put<WireRecord>('/api/platform/data-boundaries', {
+        // Sent as null rather than omitted so "use what you observed" is an explicit statement on
+        // the wire, not the absence of one.
+        opaqueProviderReference: input.opaqueProviderReference ?? null,
+        region: input.region ?? null,
+        backupPolicyReference: input.backupPolicyReference,
+        backupPolicyVersion: input.backupPolicyVersion,
+        reason: input.reason ?? null,
+      })).data,
     ),
   applyPlatformDataBoundaries: async (tenantId) => {
     const wire = (await platformHttp.post<WireRecord>(
