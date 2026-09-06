@@ -112,6 +112,7 @@ public sealed class ProvisioningHarness : IDisposable
         services.AddSingleton<IPlatformDataBoundaryManifest, PlatformDataBoundaryManifest>();
         services.AddScoped<ITenantPostgreSqlScopeProbe, TenantPostgreSqlScopeProbe>();
         services.AddScoped<IPlatformDataBoundaryProvisioner, PlatformDataBoundaryProvisioner>();
+        services.AddScoped<IPlatformDataBoundaryApplier, PlatformDataBoundaryApplier>();
 
         services.AddSingleton<ITenantProvisioningRunner, TenantProvisioningRunner>();
 
@@ -175,7 +176,7 @@ public sealed class ProvisioningHarness : IDisposable
 
     public static ProvisionTenantRequest Request(
         string slug, string email, long planId, string? activation = null, string? password = null,
-        string? dataRegion = null)
+        string? dataRegion = null, string? deploymentProfile = null, string? deploymentProfileReason = null)
         => new()
         {
             Name = $"Tenant {slug}",
@@ -186,6 +187,10 @@ public sealed class ProvisioningHarness : IDisposable
             // Null by default, matching every existing fixture: a tenant with no contractual data
             // region is exactly the tenant data.residency-isolation is supposed to refuse.
             DataRegion = dataRegion,
+            // Null by default: PRODUCTION is what every existing fixture asks for by saying
+            // nothing, and it must keep meaning that.
+            DeploymentProfile = deploymentProfile,
+            DeploymentProfileReason = deploymentProfileReason,
             AdminEmail = email,
             AdminFirstName = "Ada",
             AdminLastName = "Lovelace",

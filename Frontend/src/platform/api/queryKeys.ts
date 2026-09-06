@@ -68,6 +68,9 @@ export const platformKeys = {
   // has to be re-read after either of them changes.
   tenantAiReadiness: (tenantId: string) => [...platformKeys.all, 'ai-readiness', tenantId] as const,
   tenantDataAssets: (tenantId: string) => [...platformKeys.all, 'data-assets', tenantId] as const,
+  // Deployment-wide rather than per-tenant: it is process configuration, so it is read once and
+  // shared by every tenant screen that needs to know whether the platform can describe itself.
+  platformDataBoundaries: () => [...platformKeys.all, 'data-boundaries'] as const,
   tenantActivationDataDecision: (tenantId: string) =>
     [...platformKeys.all, 'data-assets', tenantId, 'activation-decision'] as const,
   tenantActivationDecision: (tenantId: string) =>

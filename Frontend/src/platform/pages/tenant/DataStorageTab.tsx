@@ -12,7 +12,9 @@ import { fmtDateTime } from '../../components/format';
 import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
-import type { RegisterTenantDataAssetInput, Tenant, TenantDataAsset, VerifyTenantDataAssetInput } from '../../types';
+import type {
+  PlatformDataBoundary, RegisterTenantDataAssetInput, Tenant, TenantDataAsset, VerifyTenantDataAssetInput,
+} from '../../types';
 import DataRecoveryPanel from './DataRecoveryPanel';
 
 const LOGICAL_KEY = 'postgresql.primary' as const;
@@ -21,14 +23,21 @@ const CLASSIFICATION = 'CustomerData' as const;
 const DISPOSITION = 'BackupRetainedUntilExpiryThenDestroy' as const;
 const opaque = (value: string) => value.trim().length > 0 && !/[\s@=?]|:\/\//.test(value);
 
-const blankRegister = (tenant: Tenant): RegisterTenantDataAssetInput => ({
+/**
+ * Seeded from the deployment's declaration when there is one — the manual form is then a way to
+ * EDIT what the platform already knows, not a memory test. The reason stays blank either way:
+ * that one is the operator's own words and nothing may suggest it.
+ */
+const blankRegister = (
+  tenant: Tenant, declared: PlatformDataBoundary | null,
+): RegisterTenantDataAssetInput => ({
   logicalKey: LOGICAL_KEY,
-  opaqueProviderReference: '',
-  region: tenant.dataRegion ?? '',
+  opaqueProviderReference: declared?.opaqueProviderReference ?? '',
+  region: tenant.dataRegion ?? declared?.region ?? '',
   classification: CLASSIFICATION,
   disposition: DISPOSITION,
-  backupPolicyReference: '',
-  backupPolicyVersion: 1,
+  backupPolicyReference: declared?.backupPolicyReference ?? '',
+  backupPolicyVersion: declared?.backupPolicyVersion ?? 1,
   reason: '',
 });
 
@@ -54,6 +63,12 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
     queryKey: platformKeys.tenantActivationDataDecision(tenant.id),
     queryFn: () => platformApi.getTenantActivationDataDecision(tenant.id),
   });
+  // What the DEPLOYMENT declares its own database to be. Where it has said, the two forms below
+  // are asking an operator to retype configuration the server is already holding.
+  const manifestQuery = useQuery({
+    queryKey: platformKeys.platformDataBoundaries(),
+    queryFn: () => platformApi.getPlatformDataBoundaries(),
+  });
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: platformKeys.tenantDataAssets(tenant.id) });
     queryClient.invalidateQueries({ queryKey: platformKeys.tenantActivationDataDecision(tenant.id) });
@@ -70,8 +85,24 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
     onSuccess: () => { setVerify(null); invalidate(); enqueueSnackbar('PostgreSQL tenant scope verified', { variant: 'success' }); },
     onError: onError('Verification was refused'),
   });
+  const applyMutation = useMutation({
+    mutationFn: () => platformApi.applyPlatformDataBoundaries(tenant.id),
+    onSuccess: (result) => {
+      invalidate();
+      // A tenant with no contractual region has one recorded by this action, and the header and
+      // Profile & access both read it off the tenant row.
+      queryClient.invalidateQueries({ queryKey: platformKeys.tenant(tenant.id) });
+      enqueueSnackbar(
+        result.decision.dataGateReady
+          ? 'Data boundaries registered and verified from the platform configuration'
+          : 'Boundaries registered, but the data gate is still blocked',
+        { variant: result.decision.dataGateReady ? 'success' : 'warning' },
+      );
+    },
+    onError: onError('The registration was refused'),
+  });
 
-  if (assetsQuery.isLoading || decisionQuery.isLoading) return <LoadingState label="Reading the tenant data boundary…" />;
+  if (assetsQuery.isLoading || decisionQuery.isLoading || manifestQuery.isLoading) return <LoadingState label="Reading the tenant data boundary…" />;
   if (assetsQuery.isError || decisionQuery.isError || !assetsQuery.data || !decisionQuery.data) {
     const error = assetsQuery.error ?? decisionQuery.error;
     return (
@@ -88,6 +119,9 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
   const otherAssets = assetsQuery.data.filter((asset) => asset.id !== primary?.id);
   const inconsistent = assetsQuery.data.filter((asset) => asset.logicalKey === LOGICAL_KEY).length > 1;
   const decision = decisionQuery.data;
+  const declared = manifestQuery.data?.primaryPostgreSqlScope ?? null;
+  const manifestDefect = (manifestQuery.data?.defects ?? [])
+    .find((defect) => defect.assetType === ASSET_TYPE)?.reason ?? null;
   const registerValid = Boolean(register
     && opaque(register.opaqueProviderReference)
     && register.region.trim()
@@ -141,12 +175,51 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
             <Typography variant="h6" sx={{ fontWeight: 800 }}>Primary PostgreSQL tenant scope</Typography>
             <Typography variant="body2" color="text.secondary">Logical key {LOGICAL_KEY}. This inventory stores opaque references, never credentials.</Typography>
           </Box>
-          {!primary ? (
-            <Button variant="contained" disabled={inconsistent} onClick={() => setRegister(blankRegister(tenant))}>Register boundary</Button>
-          ) : primary.status !== 'Verified' ? (
-            <Button variant="contained" disabled={inconsistent} onClick={() => setVerify({ asset: primary, input: blankVerify(primary) })}>Verify boundary</Button>
+          {!primary || primary.status !== 'Verified' ? (
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ flexShrink: 0 }}>
+              {declared && (
+                <Button
+                  variant="contained"
+                  disabled={inconsistent || applyMutation.isPending}
+                  onClick={() => applyMutation.mutate()}
+                >
+                  {applyMutation.isPending
+                    ? 'Working…'
+                    : primary ? 'Verify from this deployment' : 'Register from this deployment'}
+                </Button>
+              )}
+              <Button
+                variant={declared ? 'text' : 'contained'}
+                color={declared ? 'inherit' : 'primary'}
+                disabled={inconsistent || applyMutation.isPending}
+                onClick={() => (primary
+                  ? setVerify({ asset: primary, input: blankVerify(primary) })
+                  : setRegister(blankRegister(tenant, declared)))}
+              >
+                {primary ? 'Verify by hand' : declared ? 'Register by hand' : 'Register boundary'}
+              </Button>
+            </Stack>
           ) : null}
         </Stack>
+        {declared ? (
+          <Alert severity="info" sx={{ mt: 2 }}>
+            <AlertTitle sx={{ fontWeight: 800 }}>This deployment declares its own database</AlertTitle>
+            <code>{declared.opaqueProviderReference}</code> · {declared.region} · backup policy{' '}
+            <code>{declared.backupPolicyReference}</code> v{declared.backupPolicyVersion}. Registering
+            from it writes exactly that and verifies the scope against the running database — a probe
+            that disagrees refuses the whole action rather than registering half of it.
+          </Alert>
+        ) : (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            <AlertTitle sx={{ fontWeight: 800 }}>This deployment has not declared its own database</AlertTitle>
+            {manifestDefect ?? (
+              <>Set <code>Platform__DataBoundaries__PostgreSqlTenantScope__OpaqueProviderReference</code>,{' '}
+                <code>__Region</code>, <code>__BackupPolicyReference</code> and <code>__BackupPolicyVersion</code>{' '}
+                on the API service and every tenant registers and verifies itself. Until then the forms
+                below are the only way, once per tenant.</>
+            )}
+          </Alert>
+        )}
         {!primary ? <Alert severity="warning" sx={{ mt: 2 }}>No primary PostgreSQL tenant-scope asset is registered.</Alert> : (
           <Stack spacing={1.25} sx={{ mt: 2 }}>
             <Row label="Status"><SoftChip label={primary.status} tone={primary.status === 'Verified' ? 'success' : 'warning'} /></Row>

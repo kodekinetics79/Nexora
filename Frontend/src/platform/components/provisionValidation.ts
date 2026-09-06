@@ -9,12 +9,13 @@
 
 import { isPasswordAcceptable, PASSWORD_MAX_LENGTH, passwordProblem } from '../../utils/passwordPolicy';
 import { COUNTRY_CODES, isValidLocale } from './localeData';
-import { BILLING_MODES } from '../types';
+import { BILLING_MODES, TENANT_DEPLOYMENT_PROFILES } from '../types';
 import type {
   AdminActivationMode,
   BillingMode,
   ProvisionTenantInput,
   ProvisionTenantRequestBody,
+  TenantDeploymentProfile,
 } from '../types';
 
 /**
@@ -60,6 +61,8 @@ export interface ProvisionDraft {
   timeZoneId: string;
   locale: string;
   dataRegion: string;
+  deploymentProfile: TenantDeploymentProfile;
+  deploymentProfileReason: string;
 
   // Step 3 — founding administrator
   adminFirstName: string;
@@ -184,6 +187,10 @@ export const emptyDraft = (defaults: Partial<ProvisionDraft> = {}): ProvisionDra
   timeZoneId: '',
   locale: 'en-SA',
   dataRegion: '',
+  // The strictest profile, always, unless somebody says otherwise: it is the one that defers
+  // nothing, and a default that relaxed activation gates would be a default nobody chose.
+  deploymentProfile: 'PRODUCTION',
+  deploymentProfileReason: '',
 
   adminFirstName: '',
   adminLastName: '',
@@ -308,6 +315,15 @@ function validateCommercial(draft: ProvisionDraft): FieldErrors {
 
   if (isBlank(draft.locale)) errors.locale = 'Select the tenant language and region.';
   else if (!isValidLocale(draft.locale)) errors.locale = 'Enter a valid language tag, for example en-US.';
+
+  // Same floor and the same reasoning as the billing-mode giveaway above: a non-production
+  // profile is a decision that this tenant's production prerequisites may be deferred, and it is
+  // recorded on the tenant as the approval. The server refuses under 15 characters, so the form
+  // must refuse it here rather than let the operator discover it on submit.
+  if (draft.deploymentProfile !== 'PRODUCTION' && trimmed(draft.deploymentProfileReason).length < 15) {
+    errors.deploymentProfileReason =
+      `Explain why this workspace is ${draft.deploymentProfile} rather than a production tenant (at least 15 characters).`;
+  }
 
   return errors;
 }
@@ -434,6 +450,10 @@ export const draftFromRequestBody = (payload: ProvisionTenantRequestBody): Provi
     timeZoneId: asText(payload.timeZoneId),
     locale: asText(payload.locale) || 'en-SA',
     dataRegion: asText(payload.dataRegion),
+    deploymentProfile: TENANT_DEPLOYMENT_PROFILES.includes(asText(payload.deploymentProfile) as TenantDeploymentProfile)
+      ? asText(payload.deploymentProfile) as TenantDeploymentProfile
+      : 'PRODUCTION',
+    deploymentProfileReason: asText(payload.deploymentProfileReason),
 
     adminFirstName: asText(payload.adminFirstName),
     adminLastName: asText(payload.adminLastName),
@@ -487,6 +507,11 @@ export const toProvisionInput = (draft: ProvisionDraft): ProvisionTenantInput =>
   timeZoneId: trimmed(draft.timeZoneId),
   locale: trimmed(draft.locale),
   dataRegion: trimmed(draft.dataRegion),
+  deploymentProfile: draft.deploymentProfile,
+  // Carried only where it means something. A reason left behind by an abandoned DEMO selection
+  // would be an approval recorded for a decision the operator backed out of.
+  deploymentProfileReason: draft.deploymentProfile === 'PRODUCTION'
+    ? null : trimmed(draft.deploymentProfileReason),
 
   adminFirstName: trimmed(draft.adminFirstName),
   adminLastName: trimmed(draft.adminLastName),

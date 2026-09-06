@@ -285,6 +285,42 @@ services:
       - key: Platform__BootstrapOwnerPassword
         sync: false
       # -----------------------------------------------------------------------
+      # WHAT THIS DEPLOYMENT'S OWN DATABASE IS.
+      #
+      # Every tenant on this service lives in the same Neon database, in the same
+      # region, under the same backup policy. Until these four are set the platform
+      # cannot say so — and data.residency-isolation makes an operator hand-type the
+      # provider reference, region and backup policy into a form for EVERY new
+      # tenant, then hand-hash an evidence document about a database Nexora runs
+      # itself. With them set, provisioning registers the boundary and verifies it
+      # from a live probe, and a tenant provisioned before they existed is repaired
+      # from the activation screen with one button and no fields.
+      #
+      # sync: false on purpose: the region is a residency claim about a customer's
+      # data and the provider reference names this estate. Neither is something this
+      # file gets to assert on a deployment's behalf — set them on the service.
+      #
+      #   ...__OpaqueProviderReference  an opaque id for the database; the Neon
+      #     endpoint id is the natural one (e.g. neon-ep-super-sea-admna6dt). Never
+      #     a URL, connection string or credential — the registry refuses anything
+      #     containing :// @ = ? or whitespace.
+      #   ...__Region  must EQUAL every tenant's contractual DataRegion (the Neon
+      #     host's own region, e.g. us-east-1). A disagreement fails the probe on
+      #     purpose rather than rewriting the claim.
+      #   ...__BackupPolicyReference / ...__BackupPolicyVersion  name the retention
+      #     policy this deployment actually pays for, and its version.
+      #
+      # The other eight boundary types (ObjectStorage, Cache, …) are optional here:
+      # they are read by deletion certification, not by activation. See DEPLOYMENT.md.
+      - key: Platform__DataBoundaries__PostgreSqlTenantScope__OpaqueProviderReference
+        sync: false
+      - key: Platform__DataBoundaries__PostgreSqlTenantScope__Region
+        sync: false
+      - key: Platform__DataBoundaries__PostgreSqlTenantScope__BackupPolicyReference
+        sync: false
+      - key: Platform__DataBoundaries__PostgreSqlTenantScope__BackupPolicyVersion
+        sync: false
+      # -----------------------------------------------------------------------
       - key: CommercialFinance__DunningProviderWebhookSecret
         sync: false
       - key: CommercialFinance__ContactVerificationSecret

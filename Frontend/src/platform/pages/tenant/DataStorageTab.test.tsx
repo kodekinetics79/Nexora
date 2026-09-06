@@ -4,8 +4,8 @@ import { SnackbarProvider } from 'notistack';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { platformApi } from '../../api/client';
 import type {
-  Tenant, TenantActivationDataDecision, TenantActivationDecision, TenantDataAsset,
-  TenantDeletionCertificationDecision,
+  PlatformDataBoundaryManifest, Tenant, TenantActivationDataDecision, TenantActivationDecision,
+  TenantDataAsset, TenantDeletionCertificationDecision,
 } from '../../types';
 import DataStorageTab from './DataStorageTab';
 
@@ -63,14 +63,68 @@ const renderTab = () => render(
   </QueryClientProvider>,
 );
 
+/** A deployment that has declared what its own database is. */
+const manifest: PlatformDataBoundaryManifest = {
+  configured: true,
+  primaryPostgreSqlScope: {
+    assetType: 'PostgreSqlTenantScope', logicalKey: 'postgresql.primary',
+    opaqueProviderReference: 'neon-project-nexora-prod', region: 'us-east-1',
+    classification: 'CustomerData', disposition: 'BackupRetainedUntilExpiryThenDestroy',
+    backupPolicyReference: 'neon-pitr-7d', backupPolicyVersion: 3,
+  },
+  boundaries: [], defects: [], configurationKey: 'Platform:DataBoundaries',
+};
+
+const undeclared: PlatformDataBoundaryManifest = {
+  ...manifest, configured: false, primaryPostgreSqlScope: null,
+};
+
 beforeEach(() => {
   vi.restoreAllMocks();
+  // Undeclared by default, which is what every test written before the manifest existed assumed.
+  vi.spyOn(platformApi, 'getPlatformDataBoundaries').mockResolvedValue(undeclared);
   vi.spyOn(platformApi, 'getTenantActivationDecision').mockResolvedValue(activationBlocked);
   vi.spyOn(platformApi, 'listTenantRecoveryEvidence').mockResolvedValue([]);
   vi.spyOn(platformApi, 'getTenantDeletionCertificationDecision').mockResolvedValue(deletionBlocked);
 });
 
 describe('DataStorageTab', () => {
+  /**
+   * The forms on this screen ask an operator for this deployment's own provider reference, region
+   * and backup policy — and then for a SHA-256 of an evidence document about a database Nexora
+   * runs itself. Where the deployment has declared its estate, none of that is a question anybody
+   * should be asked, and the screen offers the answer the server is already holding.
+   */
+  it('registers from the deployment when the deployment has declared its own database', async () => {
+    vi.spyOn(platformApi, 'listTenantDataAssets').mockResolvedValue([]);
+    vi.spyOn(platformApi, 'getTenantActivationDataDecision').mockResolvedValue(blocked);
+    vi.spyOn(platformApi, 'getPlatformDataBoundaries').mockResolvedValue(manifest);
+    const apply = vi.spyOn(platformApi, 'applyPlatformDataBoundaries').mockResolvedValue({
+      dataRegionRecorded: null, primaryScopeState: 'verified', evidenceReference: 'probe-abc',
+      registeredLogicalKeys: ['postgresql.primary'], alreadyRegisteredLogicalKeys: [],
+      decision: { ...blocked, dataGateReady: true, decision: 'DataGateReady', blockers: [] },
+    });
+    renderTab();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Register from this deployment' }));
+    await waitFor(() => expect(apply).toHaveBeenCalledWith('9'));
+    expect(screen.getByText(/neon-project-nexora-prod/)).toBeVisible();
+  });
+
+  /**
+   * And where it has not, the manual form is still the whole product — but the operator is told
+   * why they are being asked, and which four keys end the asking.
+   */
+  it('names the configuration that would end the manual form', async () => {
+    vi.spyOn(platformApi, 'listTenantDataAssets').mockResolvedValue([]);
+    vi.spyOn(platformApi, 'getTenantActivationDataDecision').mockResolvedValue(blocked);
+    renderTab();
+
+    expect(await screen.findByRole('button', { name: 'Register boundary' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Register from this deployment' })).toBeNull();
+    expect(screen.getByText(/has not declared its own database/i)).toBeVisible();
+  });
+
   it('shows the authoritative blocker and decision boundary without invented storage totals', async () => {
     vi.spyOn(platformApi, 'listTenantDataAssets').mockResolvedValue([]);
     vi.spyOn(platformApi, 'getTenantActivationDataDecision').mockResolvedValue(blocked);

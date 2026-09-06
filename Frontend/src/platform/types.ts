@@ -350,6 +350,45 @@ export interface TenantDataAsset {
   version: number;
 }
 
+/**
+ * One data boundary as the DEPLOYMENT declares it in `Platform:DataBoundaries`.
+ *
+ * Not a per-tenant fact and not editable from the console: it describes the estate this
+ * installation runs on, it is identical for every tenant, and it is the answer the register form
+ * used to ask an operator to remember.
+ */
+export interface PlatformDataBoundary {
+  assetType: TenantDataAsset['assetType'];
+  logicalKey: string;
+  opaqueProviderReference: string;
+  region: string;
+  classification: TenantDataAsset['classification'];
+  disposition: TenantDataAsset['disposition'];
+  backupPolicyReference: string;
+  backupPolicyVersion: number;
+}
+
+export interface PlatformDataBoundaryManifest {
+  /** False when this deployment has declared nothing, which is what keeps the manual form. */
+  configured: boolean;
+  primaryPostgreSqlScope: PlatformDataBoundary | null;
+  boundaries: PlatformDataBoundary[];
+  /** Declarations the server refused, with the reason. Empty is the normal case. */
+  defects: { assetType: string; reason: string }[];
+  configurationKey: string;
+}
+
+/** What applying the manifest to one tenant actually did. */
+export interface ApplyPlatformDataBoundariesResult {
+  /** Non-null when the tenant carried no region and the deployment's was recorded. */
+  dataRegionRecorded: string | null;
+  primaryScopeState: string | null;
+  evidenceReference: string | null;
+  registeredLogicalKeys: string[];
+  alreadyRegisteredLogicalKeys: string[];
+  decision: TenantActivationDataDecision;
+}
+
 export interface TenantActivationDataDecision {
   tenantId: string;
   dataGateReady: boolean;
@@ -966,6 +1005,17 @@ export interface ProvisionTenantInput extends TenantCompanyProfile {
   dataRegion: string | null;
 
   /**
+   * Which activation gates this tenant is held to. Null means PRODUCTION, where nothing is
+   * deferrable — the only safe default. Anything else is Owner-only on the server and needs
+   * `deploymentProfileReason`, because it decides that catalogued production prerequisites
+   * (a customer's storage estate, their identity provider, a tax authority) may be recorded as
+   * deferred rather than blocking.
+   */
+  deploymentProfile: TenantDeploymentProfile | null;
+  /** The approval recorded on the tenant. Required for every profile except PRODUCTION. */
+  deploymentProfileReason: string | null;
+
+  /**
    * The tenant's founding Super Administrator. Required: a tenant without one is a shell
    * nobody can log into, which is the state every portal-provisioned tenant used to land in.
    */
@@ -1050,6 +1100,8 @@ export interface ProvisionTenantResult {
  */
 export interface ProvisionTenantRequestBody {
   name: string;
+  deploymentProfile?: string | null;
+  deploymentProfileReason?: string | null;
   slug: string | null;
   legalName: string | null;
   registrationNumber: string | null;

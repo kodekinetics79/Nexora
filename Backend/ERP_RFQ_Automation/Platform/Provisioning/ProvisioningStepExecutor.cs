@@ -92,6 +92,7 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
     private readonly ITenantBaselineSeeder _baseline;
     private readonly ITenantAdminInvitationService _invitations;
     private readonly IPlatformDataBoundaryProvisioner? _dataBoundaries;
+    private readonly IPlatformDataBoundaryManifest? _manifest;
 
     /// <param name="dataBoundaries">
     /// OPTIONAL, and a null one degrades to today's manual data-boundary registration rather than
@@ -101,11 +102,13 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
     /// </param>
     public ProvisioningStepExecutor(
         ITenantBaselineSeeder baseline, ITenantAdminInvitationService invitations,
-        IPlatformDataBoundaryProvisioner? dataBoundaries = null)
+        IPlatformDataBoundaryProvisioner? dataBoundaries = null,
+        IPlatformDataBoundaryManifest? manifest = null)
     {
         _baseline = baseline;
         _invitations = invitations;
         _dataBoundaries = dataBoundaries;
+        _manifest = manifest;
     }
 
     public Task<string?> ExecuteAsync(
@@ -187,6 +190,11 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
         var adminEmail = execution.AdminEmail;
         var now = DateTime.UtcNow;
 
+        // Absent or unparseable is PRODUCTION, deliberately, and without failing the step: TryParse
+        // yields Production on both, the value came through a door that already refused anything
+        // unrecognised, and the safe reading of a profile nobody can parse is the strictest one.
+        TenantDeploymentProfiles.TryParse(request.DeploymentProfile, out var requestedProfile);
+
         var tenant = new Tenant
         {
             Name = execution.Name,
@@ -221,7 +229,31 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
             BaseCurrencyCode = Normalize(request.BaseCurrencyCode)?.ToUpperInvariant(),
             TimeZoneId = Normalize(request.TimeZoneId),
             Locale = Normalize(request.Locale),
-            DataRegion = Normalize(request.DataRegion),
+            // Left blank by the operator means "wherever this deployment puts tenants", not "no
+            // residency claim": every tenant lives in the database this deployment declares, and
+            // the console has no better answer to type in than the one the deployment already
+            // holds. A blank column, by contrast, is fatal — the residency control reads its
+            // presence and the scope probe has nothing to agree with, so a tenant provisioned
+            // without it can never be activated until somebody edits it back in through a
+            // governed endpoint. A submitted region is never overridden, and a deployment that
+            // declares nothing still records exactly what was typed, including nothing.
+            DataRegion = Normalize(request.DataRegion)
+                         ?? _manifest?.For(TenantDataAssetTypes.PostgreSqlTenantScope)?.Region,
+
+            // Recorded here rather than left to a second Owner call on a screen the operator has
+            // not opened yet. The AUTHORITY for it was checked at the door — both provisioning
+            // endpoints run PlatformDeploymentProfileAuthority, which refuses a non-production
+            // profile to anyone but an Owner and refuses it to an Owner without a reason — so by
+            // the time the step runs, an unparseable or unauthorised profile cannot be here. A
+            // stored payload naming one anyway is treated as PRODUCTION: the strict profile is the
+            // only safe reading of a value whose provenance is unknown.
+            DeploymentProfile = requestedProfile,
+            DeploymentProfileReason = requestedProfile == TenantDeploymentProfile.Production
+                ? null : Normalize(request.DeploymentProfileReason),
+            DeploymentProfileApprovedBy = requestedProfile == TenantDeploymentProfile.Production
+                ? null : actor,
+            DeploymentProfileApprovedOn = requestedProfile == TenantDeploymentProfile.Production
+                ? null : now,
 
             BillingMode = billingMode,
             BillingModeReason = Normalize(request.BillingModeReason),

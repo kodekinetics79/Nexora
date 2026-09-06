@@ -3,6 +3,9 @@ import platformHttp from './platformHttp';
 import { BILLING_MODES, TENANT_DEPLOYMENT_PROFILES } from '../types';
 import type { EmailProviderCapability, MailConnectionTestResult } from '../../email/types';
 import type {
+  ApplyPlatformDataBoundariesResult,
+  PlatformDataBoundary,
+  PlatformDataBoundaryManifest,
   AuditEntry,
   AiExtractionReadinessReport,
   AiProviderAuthorization,
@@ -214,6 +217,13 @@ export interface PlatformApi {
   markTenantPastDue(id: string, reason: string): Promise<Tenant>;
   resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
+  /** What this DEPLOYMENT declares its own infrastructure to be. Read-only, deployment-wide. */
+  getPlatformDataBoundaries(): Promise<PlatformDataBoundaryManifest>;
+  /**
+   * Registers and verifies the tenant's boundaries from that declaration, with a live probe of the
+   * running database. No body: nothing in it is an operator's decision.
+   */
+  applyPlatformDataBoundaries(tenantId: string): Promise<ApplyPlatformDataBoundariesResult>;
   getTenantActivationDataDecision(tenantId: string): Promise<TenantActivationDataDecision>;
   registerTenantDataAsset(tenantId: string, input: RegisterTenantDataAssetInput): Promise<TenantDataAsset>;
   verifyTenantDataAsset(
@@ -725,6 +735,12 @@ export const toProvisionRequestBody = (input: ProvisionTenantInput): ProvisionTe
   timeZoneId: orNull(input.timeZoneId),
   locale: orNull(input.locale),
   dataRegion: orNull(input.dataRegion),
+  // Omitted entirely on the ordinary path. PRODUCTION is the server's default and sending it
+  // explicitly would put a profile decision in the audit record of every routine tenant.
+  deploymentProfile: input.deploymentProfile === null || input.deploymentProfile === 'PRODUCTION'
+    ? null : input.deploymentProfile,
+  deploymentProfileReason: input.deploymentProfile === null || input.deploymentProfile === 'PRODUCTION'
+    ? null : orNull(input.deploymentProfileReason),
 
   planId: input.planId == null ? null : Number(input.planId),
   billingMode: input.billingMode,
@@ -789,6 +805,12 @@ const normalizeTenantDataAsset = (wire: WireRecord): TenantDataAsset => ({
   id: asId(wire.id as string | number),
   tenantId: asId(wire.tenantId as string | number),
   verifiedBusinessUnitId: asIdOrNull(wire.verifiedBusinessUnitId as string | number | null),
+});
+
+const normalizePlatformDataBoundaryManifest = (wire: WireRecord): PlatformDataBoundaryManifest => ({
+  ...(wire as unknown as PlatformDataBoundaryManifest),
+  boundaries: (wire.boundaries as PlatformDataBoundary[]) ?? [],
+  defects: (wire.defects as { assetType: string; reason: string }[]) ?? [],
 });
 
 const normalizeTenantActivationDataDecision = (wire: WireRecord): TenantActivationDataDecision => ({
@@ -1133,6 +1155,21 @@ const httpPlatformApi: PlatformApi = {
   listTenantDataAssets: async (tenantId) =>
     (await platformHttp.get<WireRecord[]>(`/api/platform/tenants/${tenantId}/data-assets`))
       .data.map(normalizeTenantDataAsset),
+  getPlatformDataBoundaries: async () =>
+    normalizePlatformDataBoundaryManifest(
+      (await platformHttp.get<WireRecord>('/api/platform/data-boundaries')).data,
+    ),
+  applyPlatformDataBoundaries: async (tenantId) => {
+    const wire = (await platformHttp.post<WireRecord>(
+      `/api/platform/tenants/${tenantId}/data-assets/apply-platform-manifest`,
+    )).data;
+    return {
+      ...(wire as unknown as ApplyPlatformDataBoundariesResult),
+      registeredLogicalKeys: (wire.registeredLogicalKeys as string[]) ?? [],
+      alreadyRegisteredLogicalKeys: (wire.alreadyRegisteredLogicalKeys as string[]) ?? [],
+      decision: normalizeTenantActivationDataDecision(wire.decision as WireRecord),
+    };
+  },
   getTenantActivationDataDecision: async (tenantId) =>
     normalizeTenantActivationDataDecision(
       (await platformHttp.get<WireRecord>(

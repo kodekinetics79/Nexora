@@ -35,6 +35,7 @@ public class TenantsController : ControllerBase
     private readonly Onboarding.ITenantAdminInvitationService _invitations;
     private readonly Entitlements.ITenantAccessService? _tenantAccess;
     private readonly ITenantActivationPolicyService? _activationPolicy;
+    private readonly DataAssets.IPlatformDataBoundaryManifest? _dataBoundaries;
 
     /// <summary>
     /// <paramref name="baseline"/> and <paramref name="invitations"/> are REQUIRED dependencies,
@@ -50,7 +51,8 @@ public class TenantsController : ControllerBase
         ITenantBaselineSeeder baseline,
         Onboarding.ITenantAdminInvitationService invitations,
         Entitlements.ITenantAccessService? tenantAccess = null,
-        ITenantActivationPolicyService? activationPolicy = null)
+        ITenantActivationPolicyService? activationPolicy = null,
+        DataAssets.IPlatformDataBoundaryManifest? dataBoundaries = null)
     {
         _context = context;
         _audit = audit;
@@ -61,6 +63,7 @@ public class TenantsController : ControllerBase
         _invitations = invitations;
         _tenantAccess = tenantAccess;
         _activationPolicy = activationPolicy;
+        _dataBoundaries = dataBoundaries;
     }
 
     // GET /api/platform/tenants
@@ -475,6 +478,16 @@ public class TenantsController : ControllerBase
             return StatusCode(StatusCodes.Status403Forbidden,
                 new { error = Auth.PlatformCommercialAuthority.DescribeRefusal(levers) });
 
+        // Same rule as the durable door. A profile is the one lever that lets a tenant activate
+        // with production prerequisites outstanding, and this endpoint is support-level.
+        var deploymentProfile = Auth.PlatformDeploymentProfileAuthority.Validate(
+            request.DeploymentProfile, request.DeploymentProfileReason, User,
+            out var profileRefusal, out var profileForbidden);
+        if (profileRefusal is not null)
+            return profileForbidden
+                ? StatusCode(StatusCodes.Status403Forbidden, new { error = profileRefusal })
+                : BadRequest(new { error = profileRefusal });
+
         if (ValidateCompanyProfile(request) is string profileError)
             return BadRequest(new { error = profileError });
 
@@ -632,7 +645,24 @@ public class TenantsController : ControllerBase
                     BaseCurrencyCode = Normalize(request.BaseCurrencyCode)?.ToUpperInvariant(),
                     TimeZoneId = Normalize(request.TimeZoneId),
                     Locale = Normalize(request.Locale),
-                    DataRegion = Normalize(request.DataRegion),
+                    // Blank means "wherever this deployment puts tenants". A blank column is fatal:
+                    // data.residency-isolation reads its presence and the scope probe has nothing
+                    // to agree with, so a tenant created without one can never be activated. A
+                    // submitted region is never overridden, and a deployment that declares nothing
+                    // still records exactly what was typed, including nothing.
+                    DataRegion = Normalize(request.DataRegion)
+                                 ?? _dataBoundaries?.For(DataAssets.TenantDataAssetTypes.PostgreSqlTenantScope)?.Region,
+
+                    // Approved by whoever submitted it, at this instant, for the stated reason —
+                    // all three, because DeploymentProfilePolicy.IsApproved requires all three and
+                    // a non-production profile missing any of them defers nothing.
+                    DeploymentProfile = deploymentProfile,
+                    DeploymentProfileReason = deploymentProfile == TenantDeploymentProfile.Production
+                        ? null : Normalize(request.DeploymentProfileReason),
+                    DeploymentProfileApprovedBy = deploymentProfile == TenantDeploymentProfile.Production
+                        ? null : actor,
+                    DeploymentProfileApprovedOn = deploymentProfile == TenantDeploymentProfile.Production
+                        ? null : DateTime.UtcNow,
 
                     BillingMode = billingMode,
                     BillingModeReason = Normalize(request.BillingModeReason),
