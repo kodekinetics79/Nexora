@@ -11,6 +11,7 @@ import VerdictBand from './glance/VerdictBand';
 import ClosingBand from './glance/ClosingBand';
 import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
+import KpiCard from './executive/KpiCard';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
 
 /**
@@ -149,6 +150,20 @@ export default function DashboardPage() {
     : series.isError
       ? presentableErrorMessage(series.error, undefined, 'list')
       : null;
+
+  /**
+   * The Release 01 snapshot, shared with VerdictBand by key so react-query serves one request. Only
+   * the rows the server marks available are ever rendered as figures; the rest are counted, because
+   * a KPI that can never become available is not a pending figure, it is a definition.
+   */
+  const release = useQuery({
+    queryKey: ['glance', 'release-01', applied.from, applied.to],
+    queryFn: () => dashboardService.getRelease01({ from: applied.from, to: applied.to }),
+    retry: 1,
+    meta: { silenceGlobalError: true, errorLabel: 'the verified snapshot' },
+  });
+  const verified = (release.data?.kpis ?? []).filter((k) => k.state === 'available' && k.value !== null);
+  const notYetMeasurable = (release.data?.kpis ?? []).length - verified.length;
 
   const scopeSentence = (() => {
     if (words) return { words, gloss: SCOPE_GLOSS[words] };
@@ -309,6 +324,38 @@ export default function DashboardPage() {
           index={4}
         />
       </Stack>
+
+      {/*
+        The measured half of the Release 01 snapshot, and only that half.
+
+        Fourteen of its eighteen KPIs are hardcoded insufficient and can never become available — the
+        win rate's own reason says quote outcomes bypass the governed event spine — so rendering all
+        eighteen as cards is how a screen becomes furniture by week three. But four CAN be measured,
+        they are scoped per reader and windowed by the period control above, and dropping them with
+        the other fourteen would have quietly removed the only governed figures on the page. So the
+        available ones are stated, the rest are counted in a sentence, and neither pretends to be the
+        other. This shares VerdictBand's query key, so it costs no second request.
+
+        KpiCard rather than a plainer figure on purpose: it carries the drill-down to the exact records
+        a KPI counted, and the rule this whole screen is held to is that a figure which cannot open
+        its own rows does not ship.
+      */}
+      {verified.length > 0 && (
+        <Box sx={{ mt: 3 }}>
+          <Typography variant="h6" component="h2" sx={{ fontWeight: 700, fontSize: 15 }}>
+            Verified performance
+          </Typography>
+          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 2, mt: 1 }}>
+            {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
+          </Stack>
+          {notYetMeasurable > 0 && (
+            <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 1 }}>
+              {notYetMeasurable} further measures are defined but not yet reportable. They are listed
+              on the performance screen with the server&apos;s reason for each.
+            </Typography>
+          )}
+        </Box>
+      )}
 
       {/*
         The screens behind the bands, each shown only when the reader's own module grant would let
