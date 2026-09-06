@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Accordion, AccordionDetails, AccordionSummary,
   Alert, AlertTitle, Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle,
   FormControlLabel, Grid, Paper, Switch, Table, TableBody, TableCell, TableHead, TableRow,
   TextField, Typography,
 } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { useSnackbar } from 'notistack';
 import Stack from '../../components/Flex';
 import PageSection from '../../components/PageSection';
@@ -15,9 +17,10 @@ import { fmtDateTime } from '../../components/format';
 import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
+import AiSetupDialog from './AiSetupDialog';
 import type {
   AiExtractionReadinessCheck, AiExtractionReadinessReport, AiReadinessStatus,
-  AuthorizeAiProviderInput, Tenant, TenantAiPolicy,
+  AuthorizeAiProviderInput, Tenant, TenantAiEnablementInput, TenantAiPolicy,
 } from '../../types';
 
 const optionalNumber = (value: string): number | null => value.trim() === '' ? null : Number(value);
@@ -32,10 +35,12 @@ const optionalNumber = (value: string): number | null => value.trim() === '' ? n
  * log said the call had been allowed right up to the token ledger refusing it for a capital
  * letter. This panel reports all of them at once, in the order they fire.
  *
- * <b>It diagnoses and nothing else.</b> There is deliberately no button here that opens a
- * control. Letting a customer's document text leave their infrastructure stays an explicit,
- * attributable human act with a written justification and an expiry — the two Owner controls
- * further down this tab, which each row names.
+ * <b>The report diagnoses and nothing else</b>, and it is no longer the first thing anybody
+ * meets. It sits behind "Technical detail"; above it is one sentence of status and one guided
+ * setup. That is a change of audience, not of authority: letting a customer's document text
+ * leave their infrastructure is still an explicit, attributable human act with a written
+ * justification, it is simply asked for in a form a salesperson can complete rather than as a
+ * route template only an engineer can execute.
  */
 
 /**
@@ -307,9 +312,130 @@ function ReadinessReport({ report }: { report: AiExtractionReadinessReport }) {
   );
 }
 
+/**
+ * What the tab opens on.
+ *
+ * The fourteen-control report is good incident triage and a poor first screen: it addressed a
+ * salesperson with three denial codes and told them to fix it with an HTTP verb. It is still
+ * here, one disclosure down. This is one sentence and one button.
+ */
+function SetupStatus({
+  policy, report, tenantName, onSetup,
+}: {
+  policy: TenantAiPolicy;
+  report: AiExtractionReadinessReport | undefined;
+  tenantName: string;
+  onSetup: () => void;
+}) {
+  const provider = report?.resolvedProvider;
+  const whole = policy.egressPolicy === 'FullDocument';
+
+  const state = (): { severity: 'success' | 'warning' | 'error' | 'info'; title: string; body: string } => {
+    if (!policy.isEnabled) {
+      return {
+        severity: 'info',
+        title: 'Document reading is off',
+        body: `Nobody has said what ${tenantName}'s documents may be read by. Setting it up takes about a minute.`,
+      };
+    }
+    if (!report) {
+      return {
+        severity: 'warning',
+        title: 'Whether documents will extract is unknown',
+        body: 'The pre-flight could not be read. That is not the same as the tenant being ready.',
+      };
+    }
+    if (!report.ready) {
+      return {
+        severity: 'error',
+        title: `Document reading is not working — ${report.blockingCount} setting${report.blockingCount === 1 ? '' : 's'} to change`,
+        body: 'Setup was never finished. The guided setup below sets every one of them in one audited step.',
+      };
+    }
+    if (!policy.externalProcessingAllowed) {
+      return {
+        severity: 'success',
+        title: 'Document reading is on — private mode',
+        body: `Nothing leaves ${tenantName}'s own infrastructure.`,
+      };
+    }
+    return {
+      severity: report.warningCount > 0 ? 'warning' : 'success',
+      title: `Document reading is on — ${whole ? 'whole documents' : 'redacted fields only'} sent to ${provider?.provider ?? 'the approved provider'}`,
+      body: `${provider?.endpoint ?? 'The approved endpoint'} · ${provider?.model ?? 'its model'}.`
+        + (report.warningCount > 0
+          ? ' One thing is still undecided — see the rows marked "Needs a decision".'
+          : ''),
+    };
+  };
+
+  const { severity, title, body } = state();
+  const allowance = policy.monthlyHardTokenLimit === null
+    ? 'No ceiling set'
+    : `${policy.monthlyHardTokenLimit.toLocaleString()} tokens / month`;
+
+  return (
+    <Stack spacing={1.5}>
+      <Alert
+        severity={severity}
+        action={<Button variant="contained" size="small" onClick={onSetup}>
+          {policy.isEnabled && report?.ready ? 'Change AI setup' : 'Set up AI'}
+        </Button>}
+      >
+        <AlertTitle sx={{ fontWeight: 800 }}>{title}</AlertTitle>
+        <Typography variant="body2">{body}</Typography>
+      </Alert>
+      {/* The same statement the Modules tab makes with its "Added beyond plan" chip: the policy
+          row is the authority, the plan is what the customer bought, and an operator needs both
+          to know which of a tenant's settings are deliberate exceptions. */}
+      {policy.planDeviations.length > 0 && (
+        <Alert severity="warning" variant="outlined">
+          <AlertTitle sx={{ fontWeight: 800 }}>
+            Beyond the {policy.planAiPackageName ?? 'plan'} package on plan {policy.planCode}
+          </AlertTitle>
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {policy.planDeviations.map((line) => <li key={line}><Typography variant="body2">{line}</Typography></li>)}
+          </Box>
+          {policy.planDeviationReason && (
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Approved by {policy.planDeviationApprovedBy}
+              {policy.planDeviationApprovedOn && ` on ${fmtDateTime(policy.planDeviationApprovedOn)}`}
+              : &ldquo;{policy.planDeviationReason}&rdquo;
+            </Typography>
+          )}
+        </Alert>
+      )}
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, sm: 4 }}>
+          <Typography variant="caption" color="text.secondary">Reading documents with</Typography>
+          <Typography variant="body2" sx={{ fontWeight: 650 }}>
+            {provider ? `${provider.provider} · ${provider.model || 'no model'}` : 'Unresolved'}
+          </Typography>
+        </Grid>
+        <Grid size={{ xs: 12, sm: 4 }}>
+          <Typography variant="caption" color="text.secondary">Monthly allowance</Typography>
+          <Typography
+            variant="body2"
+            sx={{ fontWeight: 650, color: policy.monthlyHardTokenLimit === null ? 'warning.main' : undefined }}
+          >
+            {allowance}
+          </Typography>
+        </Grid>
+        <Grid size={{ xs: 12, sm: 4 }}>
+          <Typography variant="caption" color="text.secondary">Last changed</Typography>
+          <Typography variant="body2" sx={{ fontWeight: 650 }}>
+            {fmtDateTime(policy.updatedOn)} by {policy.updatedBy}
+          </Typography>
+        </Grid>
+      </Grid>
+    </Stack>
+  );
+}
+
 export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
   const client = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const [setupOpen, setSetupOpen] = useState(false);
   const [policyOpen, setPolicyOpen] = useState(false);
   const [draft, setDraft] = useState<TenantAiPolicy | null>(null);
   const [policyReason, setPolicyReason] = useState('');
@@ -350,6 +476,22 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
   const fail = (fallback: string) => (error: unknown) =>
     enqueueSnackbar(platformErrorMessage(error, fallback), { variant: 'error' });
 
+  const enable = useMutation({
+    mutationFn: (input: TenantAiEnablementInput) => platformApi.setTenantAiEnablement(tenant.id, input),
+    onSuccess: (result) => {
+      // The server re-ran the pre-flight against what it just wrote, so the outcome is stated
+      // rather than assumed — an operator never has to resubmit a document to find out.
+      enqueueSnackbar(
+        result.readiness.ready
+          ? 'AI setup applied — documents will extract'
+          : `AI setup applied — ${result.readiness.blockingCount} setting(s) still to change`,
+        { variant: result.readiness.ready ? 'success' : 'warning' },
+      );
+      setSetupOpen(false);
+      invalidate();
+    },
+    onError: fail('The AI setup change was refused'),
+  });
   const updatePolicy = useMutation({
     mutationFn: () => platformApi.updateTenantAiPolicy(tenant.id, {
       ...draft!,
@@ -410,12 +552,12 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
       <Alert severity="info">Owner authority only. Changes are version-checked, attributed, and written to the platform audit trail.</Alert>
 
       <PageSection
-        title="Will documents extract?"
-        subtitle="Every control that must agree before an unstructured RFQ document can be read by AI, in the order it fires. Read-only."
+        title="AI document reading"
+        subtitle="Whether this tenant's documents are read by AI, what may be sent where, and what it may spend."
       >
         {readinessQuery.isLoading && <LoadingState label="Running the extraction pre-flight…" minHeight={120} />}
-        {/* An unreadable pre-flight never hides the policy and grant editors below it: the
-            operator can still act, they just do not get told what to act on. */}
+        {/* An unreadable pre-flight never hides the editors below it: the operator can still
+            act, they just do not get told what to act on. */}
         {readinessQuery.isError && (
           <Alert
             severity="warning"
@@ -426,7 +568,36 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
             {' '}Nothing can be said about whether documents will extract — this is not the same as them being ready.
           </Alert>
         )}
-        {readinessQuery.data && <ReadinessReport report={readinessQuery.data} />}
+        {!readinessQuery.isLoading && (
+          <SetupStatus
+            policy={policy}
+            report={readinessQuery.data}
+            tenantName={tenant.name}
+            onSetup={() => setSetupOpen(true)}
+          />
+        )}
+        {/* Kept verbatim, one disclosure down. It is designed to be pasted into an incident
+            ticket, and it is the wrong thing to meet a salesperson with. */}
+        {readinessQuery.data && (
+          <Accordion
+            disableGutters
+            elevation={0}
+            sx={{ mt: 2, border: 1, borderColor: 'divider' }}
+            /* Unmounted while shut, not merely hidden: fourteen rows of denial codes sitting
+               invisibly in the DOM are still there for anything that reads the page. */
+            slotProps={{ transition: { unmountOnExit: true } }}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="body2" sx={{ fontWeight: 650 }}>
+                Technical detail — {readinessQuery.data.checks.length} enforcement controls, in the
+                order they fire
+              </Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <ReadinessReport report={readinessQuery.data} />
+            </AccordionDetails>
+          </Accordion>
+        )}
       </PageSection>
 
       <PageSection title="Effective AI policy" actions={<Button variant="outlined" onClick={() => { setDraft(policy); setPolicyReason(''); setPolicyOpen(true); }}>Edit policy</Button>}>
@@ -455,6 +626,16 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
           {trust.authorizations.length === 0 && <TableRow><TableCell colSpan={5} align="center">No provider authorizations recorded.</TableCell></TableRow>}
         </TableBody></Table>
       </PageSection>
+
+      <AiSetupDialog
+        open={setupOpen}
+        tenantName={tenant.name}
+        policy={policy}
+        readiness={readinessQuery.data}
+        busy={enable.isPending}
+        onClose={() => setSetupOpen(false)}
+        onApply={(input) => enable.mutate(input)}
+      />
 
       <Dialog open={policyOpen} onClose={() => !updatePolicy.isPending && setPolicyOpen(false)} fullWidth maxWidth="md">
         <DialogTitle>Edit tenant AI policy</DialogTitle><DialogContent dividers>{draft && <Stack spacing={2}>

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Platform.Models;
 
@@ -628,6 +629,25 @@ public class TenantStatusChangeRequest
 
 public class TenantAiPolicyDto
 {
+    /// <summary>
+    /// What this tenant's plan sells, and how the tenant currently differs from it. Advisory, in
+    /// exactly the way TenantModuleGrantDto.FromPlanTemplate is advisory: the policy row is the
+    /// authority, the plan is what the customer bought, and an operator needs to see both to know
+    /// which of a tenant's settings are deliberate exceptions.
+    /// </summary>
+    public string? PlanCode { get; set; }
+    public string? PlanAiPackage { get; set; }
+    public string? PlanAiPackageName { get; set; }
+    public string? PlanAiPackageMeans { get; set; }
+    public long? PlanAiMonthlyTokenAllowance { get; set; }
+    public bool PlanAiAllowanceUnlimited { get; set; }
+
+    /// <summary>Empty when the tenant is within its plan. Only ever MORE permissive counts.</summary>
+    public string[] PlanDeviations { get; set; } = [];
+    public string? PlanDeviationReason { get; set; }
+    public string? PlanDeviationApprovedBy { get; set; }
+    public DateTime? PlanDeviationApprovedOn { get; set; }
+
     public long BusinessUnitId { get; set; }
     public bool IsEnabled { get; set; }
     public bool ExternalProcessingAllowed { get; set; }
@@ -686,6 +706,70 @@ public class UpdateTenantAiPolicyRequest
 
     [Required]
     public string Reason { get; set; } = null!;
+}
+
+public class TenantAiEnablementRequest
+{
+    /// <summary>One of <see cref="AiPostures"/>.</summary>
+    [Required]
+    public string Posture { get; set; } = null!;
+
+    /// <summary>
+    /// <c>ApprovedCloud</c> only: <c>RedactedFieldsOnly</c> or <c>FullDocument</c>. This is the
+    /// consent decision — scanned and PDF RFQs need the whole document, and the whole document
+    /// is the customer's text leaving their infrastructure.
+    /// </summary>
+    public string? CloudEgress { get; set; }
+
+    /// <summary>What AI may be used for. Ignored when the posture is <c>Off</c>.</summary>
+    public string[] Purposes { get; set; } = [];
+
+    /// <summary>
+    /// A positive monthly ceiling, or null with <see cref="NoMonthlyCeiling"/> set. Zero is
+    /// refused: it reads open everywhere and silently refuses every document.
+    /// </summary>
+    public long? MonthlyHardTokenLimit { get; set; }
+
+    /// <summary>
+    /// Unbounded AI spend, chosen deliberately. Required rather than inferred from a null
+    /// ceiling, so that "nobody decided" and "we decided not to cap it" are different answers.
+    /// </summary>
+    public bool NoMonthlyCeiling { get; set; }
+
+    /// <summary>When the destination grant lapses. <c>ApprovedCloud</c> only; null never expires.</summary>
+    public DateTime? GrantExpiresOn { get; set; }
+
+    /// <summary>
+    /// Required only when the answer gives this tenant MORE than its plan sells. Tightening never
+    /// needs justifying; going beyond what a customer bought does, and the record has to say on
+    /// whose authority.
+    /// </summary>
+    public string? PlanDeviationReason { get; set; }
+
+    /// <summary>The policy version this answer was composed against.</summary>
+    public long Version { get; set; }
+
+    /// <summary>
+    /// The customer's approval, in the operator's words — a DPA reference, an email, a ticket.
+    /// It is written to the platform audit trail and, for <c>ApprovedCloud</c>, onto the grant
+    /// itself, where the tenant can be shown it.
+    /// </summary>
+    [Required]
+    public string Justification { get; set; } = null!;
+}
+
+public class TenantAiEnablementResult
+{
+    public TenantAiPolicyDto Policy { get; set; } = null!;
+
+    /// <summary>
+    /// The pre-flight re-run against what was just written, so the console never has to guess
+    /// whether the answer took, and never shows a verdict from before the change.
+    /// </summary>
+    public AiExtractionReadinessReport Readiness { get; set; } = null!;
+
+    /// <summary>The destination grant, when the posture created or refreshed one.</summary>
+    public AiExternalProviderAuthorizationView? Authorization { get; set; }
 }
 
 // ---- Impersonation -------------------------------------------------------
@@ -850,6 +934,19 @@ public class ResetPlatformUserPasswordRequest
 
 public class UpsertPlanRequest
 {
+    /// <summary>
+    /// The AI package this plan sells — one of <see cref="AiPackages"/>. It becomes the STARTING
+    /// posture of every tenant provisioned from the plan afterwards; it never reaches back into
+    /// tenants already created from it.
+    /// </summary>
+    public string AiPackage { get; set; } = AiPackages.Off;
+
+    /// <summary>The monthly AI token ceiling a tenant on this plan starts with.</summary>
+    public long? AiMonthlyTokenAllowance { get; set; }
+
+    /// <summary>Unbounded AI spend, chosen. Never inferred from an omitted allowance.</summary>
+    public bool AiAllowanceUnlimited { get; set; }
+
     [Required]
     public string Code { get; set; } = null!;
 

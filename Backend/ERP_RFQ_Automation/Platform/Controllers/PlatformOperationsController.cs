@@ -223,6 +223,9 @@ public class PlatformOperationsController(
             MaxSeats = request.MaxSeats,
             MonthlyPriceUsd = request.MonthlyPriceUsd,
             Features = features,
+            AiPackage = AI.AiPackages.Resolve(request.AiPackage).Key,
+            AiMonthlyTokenAllowance = request.AiMonthlyTokenAllowance,
+            AiAllowanceUnlimited = request.AiAllowanceUnlimited,
             IsActive = request.IsActive,
             CreatedOn = DateTime.UtcNow
         };
@@ -277,6 +280,9 @@ public class PlatformOperationsController(
         plan.MaxSeats = request.MaxSeats;
         plan.MonthlyPriceUsd = request.MonthlyPriceUsd;
         plan.Features = features;
+        plan.AiPackage = AI.AiPackages.Resolve(request.AiPackage).Key;
+        plan.AiMonthlyTokenAllowance = request.AiMonthlyTokenAllowance;
+        plan.AiAllowanceUnlimited = request.AiAllowanceUnlimited;
         plan.IsActive = request.IsActive;
 
         var after = new
@@ -423,7 +429,15 @@ public class PlatformOperationsController(
         seatQuota = (int?)plan.MaxSeats,
         priceMonthlyUsd = plan.MonthlyPriceUsd,
         isActive = plan.IsActive,
-        entitlements = ReadEnabledFeatures(plan.Features)
+        entitlements = ReadEnabledFeatures(plan.Features),
+        aiPackage = plan.AiPackage,
+        aiMonthlyTokenAllowance = plan.AiMonthlyTokenAllowance,
+        aiAllowanceUnlimited = plan.AiAllowanceUnlimited,
+        // Shipped with the plan rather than duplicated in the console: a package whose meaning is
+        // not printed next to it is an opaque label, and the operator ends up guessing what they
+        // sold. One source, rendered wherever the package is chosen.
+        aiPackageMeans = AI.AiPackages.Resolve(plan.AiPackage).WhatItTurnsOn,
+        aiPackageSoldAs = AI.AiPackages.Resolve(plan.AiPackage).SoldAs
     };
 
     private static string? ValidatePlanRequest(UpsertPlanRequest request, out string code, out string features)
@@ -452,6 +466,31 @@ public class PlatformOperationsController(
         // twelve controls green, provisioning succeeded, and the block pointed at a plan nobody
         // had touched since. Completing here costs nothing and cannot enable anything.
         features = Entitlements.TypedEntitlementCatalog.Complete(features);
+
+        if (!AI.AiPackages.IsKnown(request.AiPackage))
+            return "AI package must be one of: "
+                + string.Join(", ", AI.AiPackages.All.Select(x => x.Key)) + ".";
+
+        if (!string.Equals(request.AiPackage, AI.AiPackages.Off, StringComparison.OrdinalIgnoreCase))
+        {
+            // An incoherent plan, caught where it is typed rather than where a tenant's documents
+            // stop extracting three weeks later. Selling an AI package while withholding the
+            // capability that reaches AI at all provisions a tenant whose every control reads open
+            // and whose every request is refused by the entitlement gate.
+            if (!Entitlements.TypedEntitlementCatalog.IsEnabled(features, "capability.ai"))
+                return "A plan selling an AI package must also grant capability.ai — otherwise "
+                    + "every AI request from a tenant on this plan is refused by the entitlement gate.";
+
+            // The same rule the tenant's own setup uses: "nobody decided" and "we decided not to
+            // cap it" are different answers, and only one of them is a decision.
+            if (request.AiAllowanceUnlimited == request.AiMonthlyTokenAllowance.HasValue)
+                return "Give this plan a monthly AI token allowance, or mark it deliberately "
+                    + "uncapped. Exactly one of the two.";
+            if (request.AiMonthlyTokenAllowance is <= 0)
+                return "A monthly AI token allowance must be above zero. Zero refuses every "
+                    + "document while every other control reads open; to sell no AI, use the Off package.";
+        }
+
         return null;
     }
 

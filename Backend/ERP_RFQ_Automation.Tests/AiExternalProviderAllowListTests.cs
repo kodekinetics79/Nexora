@@ -939,6 +939,116 @@ public sealed class AiExternalProviderAllowListTests
         Assert.False(descriptor.IsResolved);
     }
 
+    // ---- the deployment does not consent on a tenant's behalf -------------
+    //
+    // Both callers of this gate — the token ledger's AuthorizeExternalAsync and the
+    // conversational extraction gate — reach it only when the resolved provider class is
+    // External. So every grant the auto-authorization path can write is a decision to send one
+    // tenant's document text to a host they do not control. It shipped defaulting to ON, wrote
+    // those rows as "system:auto-internal", and the read-only pre-flight performs no writes and
+    // so could not model it: the console went on reporting the very controls closed that a
+    // submitted document had already opened.
+
+    [Fact]
+    public async Task DeploymentAutoAuthorization_IsOffByDefault_AndThePreFlightThenAgreesWithTheGate()
+    {
+        using var database = new TestDb();
+        const long tenantId = 91_401;
+        SeedSecureDefaultPolicy(database, tenantId);
+
+        // Configuration is PRESENT — this is a composed application, not a bare unit test —
+        // and simply does not mention the auto-authorization key.
+        var configuration = OllamaConfiguration();
+        var resolver = new AiProviderEndpointResolver(
+            configuration, new NoopLogger<AiProviderEndpointResolver>());
+        using var db = database.ContextFor(tenantId);
+        var trust = new AiExternalProviderTrustService(
+            db, new StubTenant(tenantId), resolver,
+            new NoopLogger<AiExternalProviderTrustService>(), configuration);
+
+        var decision = await trust.EvaluateAsync(
+            tenantId, resolver.Current, AiPurposes.RfqExtraction, unstructuredPayload: true, default);
+
+        Assert.Equal(AiProviderClass.External, resolver.Current.ProviderClass);
+        Assert.False(decision.Allowed);
+        Assert.Equal(AiExternalProviderTrustReasons.PolicyExternalProcessingDenied, decision.Reason);
+
+        // Nothing was decided on the tenant's behalf: no grant exists, and the policy still
+        // says exactly what provisioning wrote.
+        using (var check = database.ContextFor(null))
+        {
+            Assert.Empty(await check.AiExternalProviderAuthorizations.IgnoreQueryFilters().ToListAsync());
+            var policy = await check.AiProcessingPolicies.IgnoreQueryFilters()
+                .SingleAsync(x => x.BusinessUnitId == tenantId);
+            Assert.False(policy.ExternalProcessingAllowed);
+            Assert.Equal(AiEgressPolicies.RedactedFieldsOnly, policy.EgressPolicy);
+            Assert.Equal("test", policy.UpdatedBy);
+        }
+
+        // The property the whole pre-flight exists for: what an operator is shown and what a
+        // document actually meets are the same statement.
+        var report = await new AiExtractionReadinessService(db, trust, resolver)
+            .EvaluateAsync(tenantId, default);
+        Assert.False(report.Ready);
+        Assert.Equal(decision.Reason, report.FirstBlockingReason);
+    }
+
+    [Fact]
+    public async Task DeploymentAutoAuthorization_WhenExplicitlyTurnedOn_WritesARealRevocableGrant()
+    {
+        // A single-tenant installation whose deployer IS the customer may still opt in. It gets
+        // real rows rather than a short circuit, so revocation, the Trust Center and the ledger
+        // all keep working on the evidence they always used — the grant simply names the
+        // deployment, and its justification names the key that authorised it.
+        using var database = new TestDb();
+        const long tenantId = 91_402;
+        SeedSecureDefaultPolicy(database, tenantId);
+
+        var configuration = OllamaConfiguration(
+            (AiExternalProviderTrustService.AutoProvisionConfigKey, "true"));
+        var resolver = new AiProviderEndpointResolver(
+            configuration, new NoopLogger<AiProviderEndpointResolver>());
+        using var db = database.ContextFor(tenantId);
+        var trust = new AiExternalProviderTrustService(
+            db, new StubTenant(tenantId), resolver,
+            new NoopLogger<AiExternalProviderTrustService>(), configuration);
+
+        var decision = await trust.EvaluateAsync(
+            tenantId, resolver.Current, AiPurposes.RfqExtraction, unstructuredPayload: true, default);
+
+        Assert.True(decision.Allowed);
+        using var check = database.ContextFor(null);
+        var grant = Assert.Single(
+            await check.AiExternalProviderAuthorizations.IgnoreQueryFilters().ToListAsync());
+        Assert.Equal(AiExternalProviderTrustService.AutoProvisionActor, grant.AuthorizedBy);
+        Assert.Contains(AiExternalProviderTrustService.AutoProvisionConfigKey, grant.Justification,
+            StringComparison.Ordinal);
+        var policy = await check.AiProcessingPolicies.IgnoreQueryFilters()
+            .SingleAsync(x => x.BusinessUnitId == tenantId);
+        Assert.True(policy.ExternalProcessingAllowed);
+        Assert.Equal(AiEgressPolicies.FullDocument, policy.EgressPolicy);
+    }
+
+    private static IConfiguration OllamaConfiguration(params (string Key, string Value)[] extra)
+    {
+        var values = new Dictionary<string, string?>
+        {
+            ["Ollama:BaseUrl"] = AuthorizedEndpoint + "/",
+            ["Ollama:Model"] = AuthorizedModel
+        };
+        foreach (var (key, value) in extra) values[key] = value;
+        return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+    }
+
+    private static void SeedSecureDefaultPolicy(TestDb database, long tenantId)
+    {
+        using var seed = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(seed, tenantId);
+        seed.AiProcessingPolicies.Add(
+            AiProcessingPolicy.CreateSecureDefault(tenantId, "test", DateTime.UtcNow));
+        seed.SaveChanges();
+    }
+
     // ---- fixture ----------------------------------------------------------
 
     private static DocumentExtractionInput Doc(long tenantId, int rows) => new()

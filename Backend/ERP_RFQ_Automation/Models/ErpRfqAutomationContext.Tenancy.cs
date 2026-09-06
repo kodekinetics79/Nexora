@@ -744,6 +744,11 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.Name).IsRequired().HasMaxLength(128);
             e.Property(x => x.Features).HasColumnType("jsonb").HasDefaultValue("{}");
             e.Property(x => x.MonthlyPriceUsd).HasPrecision(10, 2);
+            // Off, not null: a plan is always selling SOME answer about AI, and "no value" is the
+            // one state that would make a tenant's starting posture depend on which code path
+            // provisioned it.
+            e.Property(x => x.AiPackage).IsRequired().HasMaxLength(32)
+                .HasDefaultValue(ERP_RFQ_Automation.AI.AiPackages.Off);
         });
         modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.Tenant>(e =>
         {

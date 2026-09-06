@@ -386,16 +386,35 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
         // it, because SQLite has no such trigger. Checked rather than assumed, so this works on
         // both providers: the trigger owns the row where it exists, and the explicit add covers
         // providers where it does not.
-        var exists = await db.AiProcessingPolicies.IgnoreQueryFilters()
-            .AnyAsync(p => p.BusinessUnitId == businessUnitId, ct);
-        if (exists)
-            return Detail(new { businessUnitId, createdByTrigger = true });
+        var policy = await db.AiProcessingPolicies.IgnoreQueryFilters()
+            .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
+        var createdByTrigger = policy is not null;
+        if (policy is null)
+        {
+            policy = AiProcessingPolicy.CreateSecureDefault(businessUnitId, actor, DateTime.UtcNow);
+            db.AiProcessingPolicies.Add(policy);
+        }
 
-        db.AiProcessingPolicies.Add(
-            AiProcessingPolicy.CreateSecureDefault(businessUnitId, actor, DateTime.UtcNow));
+        // The same one-time copy the synchronous path makes. Kept in step with it deliberately:
+        // a starting posture that depends on which provisioning path ran is not a starting posture.
+        // Read through the tenant rather than the request: by this step the tenant row exists and
+        // carries the plan it was actually created with, which is the one thing that cannot have
+        // drifted between the request being submitted and this step running.
+        var plan = await db.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Where(t => t.PrimaryBusinessUnitId == businessUnitId && t.PlanId != null)
+            .Join(db.Set<Plan>().IgnoreQueryFilters().AsNoTracking(),
+                t => t.PlanId, x => x.Id, (_, x) => x)
+            .FirstOrDefaultAsync(ct);
+        AiPackageProvisioning.Apply(
+            policy, plan?.AiPackage, plan?.AiMonthlyTokenAllowance,
+            plan?.AiAllowanceUnlimited ?? false, actor, DateTime.UtcNow);
         await db.SaveChangesAsync(ct);
 
-        return Detail(new { businessUnitId, createdByTrigger = false });
+        return Detail(new
+        {
+            businessUnitId, createdByTrigger,
+            aiPackage = AiPackages.Resolve(plan?.AiPackage).Key
+        });
     }
 
     // ---- 5. the founding role -------------------------------------------------------------

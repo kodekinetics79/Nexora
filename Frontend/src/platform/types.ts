@@ -1504,7 +1504,25 @@ export interface CreateSubscriptionInvoiceInput {
   taxJurisdictionCode: string;
 }
 
-export interface TenantAiPolicy {
+/** What the tenant's plan sells. Advisory — the policy row is the authority. */
+export interface TenantAiPlanContext {
+  planCode: string | null;
+  planAiPackage: AiPackage | null;
+  planAiPackageName: string | null;
+  planAiPackageMeans: string | null;
+  planAiMonthlyTokenAllowance: number | null;
+  planAiAllowanceUnlimited: boolean;
+  /** Empty when the tenant is within its plan. Only ever MORE permissive counts. */
+  planDeviations: string[];
+  planDeviationReason: string | null;
+  planDeviationApprovedBy: string | null;
+  planDeviationApprovedOn: string | null;
+}
+
+/** The AI package a plan sells. Maps 1:1 onto a starting posture, and never carries consent. */
+export type AiPackage = 'Off' | 'Private' | 'Cloud';
+
+export interface TenantAiPolicy extends TenantAiPlanContext {
   businessUnitId: string;
   isEnabled: boolean;
   externalProcessingAllowed: boolean;
@@ -1618,6 +1636,39 @@ export interface AiExtractionReadinessReport {
   warningCount: number;
   evaluatedOnUtc: string;
   checks: AiExtractionReadinessCheck[];
+}
+
+/**
+ * What a tenant has decided their documents may be read by, as one answer.
+ *
+ * The policy row and the destination grant hold sixteen fields between them that encode this.
+ * The operator answers the posture; the server turns it back into fields, taking the endpoint
+ * and the model from the resolved provider so that nobody types the case-sensitive model id.
+ */
+export type AiPosture = 'Off' | 'PrivateOnly' | 'ApprovedCloud';
+
+export type AiCloudEgress = 'RedactedFieldsOnly' | 'FullDocument';
+
+export interface TenantAiEnablementInput {
+  posture: AiPosture;
+  /** `ApprovedCloud` only. `FullDocument` is the customer's text leaving their infrastructure. */
+  cloudEgress: AiCloudEgress | null;
+  purposes: string[];
+  monthlyHardTokenLimit: number | null;
+  /** Unbounded spend, chosen. Distinct from "nobody decided", which the server refuses. */
+  noMonthlyCeiling: boolean;
+  grantExpiresOn: string | null;
+  version: number;
+  justification: string;
+  /** Required only when the answer gives the tenant more than its plan sells. */
+  planDeviationReason: string | null;
+}
+
+export interface TenantAiEnablementResult {
+  policy: TenantAiPolicy;
+  /** The pre-flight re-run against what was just written, so the tab never shows a stale verdict. */
+  readiness: AiExtractionReadinessReport;
+  authorization: AiProviderAuthorization | null;
 }
 
 export interface AuthorizeAiProviderInput {
