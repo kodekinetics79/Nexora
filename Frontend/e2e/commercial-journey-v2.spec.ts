@@ -1010,11 +1010,15 @@ test('34 role Today surfaces expose persisted operational work', async ({ page }
   await expect(page).toHaveURL(/\/inventory\/demand$/);
 
   await page.goto('/executive/today');
-  // /executive/today and /dashboard are the same screen now: the executive view, with the
-  // verified Release 01 snapshot as its evidence row beneath the glance.
-  await expect(page.getByRole('heading', { name: 'Executive view' })).toBeVisible();
+  // /executive/today and /dashboard are the same screen, and it is no longer the "Executive view":
+  // it is one dashboard a rep, a manager and a director all read, so the heading is plain and the
+  // rail row is open to everyone holding the module. The verified Release 01 snapshot survives the
+  // redesign but only its MEASURED rows are stated as figures — the fourteen that can never become
+  // available are counted in a sentence instead of rendered as fourteen permanent "not available"
+  // cards. The route into the full board is still here, under the words it actually offers.
+  await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Verified performance' })).toBeVisible();
-  await page.getByRole('button', { name: 'Deadline board' }).click();
+  await page.getByRole('button', { name: 'Every deadline in full' }).click();
   await expect(page).toHaveURL(/\/analytics\/deadlines$/);
 
   const users = await jsonOk<{ totalCount: number }>(await api(page, token, 'get', '/api/User?pageSize=500'));
