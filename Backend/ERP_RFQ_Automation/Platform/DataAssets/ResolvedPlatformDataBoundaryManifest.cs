@@ -51,11 +51,16 @@ public sealed class ResolvedPlatformDataBoundaryManifest(
                 _settings = db.Set<PlatformDataBoundarySettings>().AsNoTracking()
                     .SingleOrDefault(x => x.Id == PlatformDataBoundarySettings.SingletonId);
             }
-            catch (Exception)
+            // A deployment whose migration has not run yet still has a working configuration path
+            // and a working manual path, and failing here would take both down over a table that is
+            // allowed not to exist. That forgiveness stops at the edge of somebody else's
+            // transaction: PostgreSQL aborts the WHOLE transaction on a failed statement, so
+            // swallowing the error inside the provisioning step's unit of work would turn one
+            // legible failure — a missing table, a missing GRANT — into a cascade of unrelated
+            // "current transaction is aborted" errors several steps later, with nothing naming the
+            // cause. Inside a transaction the error is left to travel.
+            catch (Exception) when (db.Database.CurrentTransaction is null)
             {
-                // A deployment whose migration has not run yet still has a working configuration
-                // path and a working manual path. Failing here would take both down over a table
-                // that is allowed not to exist.
                 _settings = null;
             }
 

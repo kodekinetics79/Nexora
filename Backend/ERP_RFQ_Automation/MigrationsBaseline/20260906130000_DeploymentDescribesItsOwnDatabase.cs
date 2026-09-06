@@ -58,11 +58,43 @@ namespace ERP_RFQ_Automation.Migrations
                     table.PrimaryKey("PK_PlatformDataBoundarySettings", x => x.Id);
                     table.CheckConstraint("CK_PlatformDataBoundarySettings_Singleton", "\"Id\" = 1");
                 });
+
+            // A new table in this database is readable by NOBODY until it is said so: every table
+            // in the platform schema is granted per table in 09_privileges.sql, and the runtime
+            // roles are least-privilege. The control plane serves under nexora_pipeline_app, so
+            // that role — and only that role — gets to read and write this row. No DELETE: the
+            // deployment's database is corrected, never withdrawn, and a TRUNCATE on a singleton
+            // is indistinguishable from "this deployment has never said where its data lives".
+            //
+            // The tenant and identity roles are deliberately absent. Unlike PlatformEmailSettings,
+            // which they read column-by-column because outbound mail is composed on their paths,
+            // nothing on a tenant or identity path has any business knowing which database the
+            // platform runs on.
+            // Guarded rather than returned on, unlike the pure-SQL migrations: the CreateTable
+            // above has to run on every provider, and roles and GRANTs exist only on PostgreSQL.
+            if (migrationBuilder.ActiveProvider != "Npgsql.EntityFrameworkCore.PostgreSQL") return;
+
+            migrationBuilder.Sql("""
+                DO $security$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_pipeline_app') THEN
+                        GRANT SELECT, INSERT, UPDATE
+                            ON TABLE platform."PlatformDataBoundarySettings"
+                            TO nexora_pipeline_app;
+
+                        REVOKE TRUNCATE, DELETE
+                            ON TABLE platform."PlatformDataBoundarySettings"
+                            FROM nexora_pipeline_app;
+                    END IF;
+                END
+                $security$;
+                """);
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // The grants go with the table; dropping it drops them.
             migrationBuilder.DropTable(
                 name: "PlatformDataBoundarySettings",
                 schema: "platform");
