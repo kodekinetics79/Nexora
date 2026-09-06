@@ -32,13 +32,19 @@ public sealed class CommercialIntelligenceController(
             .Where(x => x.BusinessUnitId == tenant && x.Status != FollowUpStatus.Completed && x.Status != FollowUpStatus.Cancelled);
         if (!scope.IsTenantWide)
             followUpQuery = followUpQuery.Where(x => scope.UserIds.Contains(x.AssignedToUserId));
+        // The metrics are counts of the whole book of work; the list below is only the first page
+        // of it. Counting the materialised page instead capped the open figure at the page size, so
+        // a rep carrying 400 follow-ups read exactly 100 and never more, and the overdue figure was
+        // taken from the earliest hundred rows rather than from everything that is late. Both are
+        // counted in the database, before the page is taken.
+        var openFollowUpCount = await followUpQuery.CountAsync(ct);
+        var overdue = await followUpQuery.Where(x => x.DueAtUtc < now).CountAsync(ct);
         var followUps = await followUpQuery
-            .OrderBy(x => x.DueAtUtc).Take(100).ToListAsync(ct);
+            .OrderBy(x => x.DueAtUtc).Take(AttentionItemLimit).ToListAsync(ct);
         var unassigned = scope.Tier is AccountScopeTier.ManagedScope or AccountScopeTier.Tenant
             ? await db.Set<UnassignedWorkItem>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == tenant && x.Status == WorkItemStatus.Open).CountAsync(ct)
             : 0;
-        var overdue = followUps.Count(x => x.DueAtUtc < now);
         var quoteIds = followUps.Where(x => x.AggregateType == "Quote").Select(x => x.AggregateId).Distinct().ToArray();
         var leadIds = followUps.Where(x => x.AggregateType == "Lead").Select(x => x.AggregateId).Distinct().ToArray();
         var quotes = await db.Quotes.AsNoTracking().Include(x => x.Customer).Include(x => x.Rfq).ThenInclude(x => x.Lead)
@@ -66,11 +72,14 @@ public sealed class CommercialIntelligenceController(
             reason = x.task.PurposeCode, dueAt = (DateTime?)x.task.DueAtUtc,
             priority = x.task.DueAtUtc < now ? "Critical" : "Due"
         }).ToArray();
+        // A caller shown fewer rows than the metric counts is told so here, rather than being left
+        // to read the short list as the whole of the work.
         return Ok(new { generatedAt = now, scope = ScopeWireName(scope), metrics = new[] {
-            Metric("open-follow-ups", "Open follow-ups", followUps.Count),
+            Metric("open-follow-ups", "Open follow-ups", openFollowUpCount),
             Metric("overdue-follow-ups", "Overdue follow-ups", overdue),
             Metric("unassigned-leads", "Unassigned leads", unassigned)
-        }, attentionItems = items });
+        }, attentionItems = items, attentionItemLimit = AttentionItemLimit,
+            attentionItemsTruncated = openFollowUpCount > followUps.Count });
     }
 
     [HttpGet("team-overview")]
@@ -287,16 +296,14 @@ public sealed class CommercialIntelligenceController(
                 priority = "Recorded", evidence.ActionRoute, evidence.RequiredModule
             };
         }).ToArray();
+        var repConversion = Conversion(performance?.WonCount ?? 0, performance?.LostCount ?? 0);
         return Ok(new {
             summary.UserId, summary.Name, summary.Email, summary.RoleName, summary.ActiveLeads,
             summary.OverdueLeads, summary.OpenRfqs, summary.DraftQuotes, summary.FollowUpsDue,
             summary.PipelineGroups, accountCount,
             wonValueGroups = performance?.RevenueByCurrency.Select(x => new CurrencyAmountGroup(x.CurrencyCode, x.WeightedRevenueAmount)).ToArray()
                 ?? Array.Empty<CurrencyAmountGroup>(),
-            decidedQuotes = (performance?.WonCount ?? 0) + (performance?.LostCount ?? 0),
-            conversionEligible = (performance?.WonCount ?? 0) + (performance?.LostCount ?? 0) >= MinimumConversionSample,
-            conversionRate = (performance?.WonCount ?? 0) + (performance?.LostCount ?? 0) >= MinimumConversionSample
-                ? performance?.WinRatePercent : null,
+            repConversion.DecidedQuotes, repConversion.ConversionEligible, repConversion.ConversionRate,
             performanceFrom = fromUtc, performanceTo = toUtc, recentActivity = activity
         });
     }
@@ -710,6 +717,7 @@ public sealed class CommercialIntelligenceController(
         }
         var reps = await BuildRepSummaries(tenant, ct, scope);
         var rows = from rep in reps join result in results on rep.UserId equals result.SalesRepUserId into resultRows from result in resultRows.DefaultIfEmpty()
+            let conversion = Conversion(result?.WonCount ?? 0, result?.LostCount ?? 0)
             select new { rep.UserId, rep.Name, rep.Email, rep.RoleName, rep.ActiveLeads, rep.OverdueLeads, rep.OpenRfqs,
                 rep.DraftQuotes, rep.FollowUpsDue, rep.PipelineGroups,
                 wonQuotes = result?.WonCount ?? 0, lostQuotes = result?.LostCount ?? 0,
@@ -721,15 +729,17 @@ public sealed class CommercialIntelligenceController(
                 opportunities = result?.OpportunityCount ?? 0,
                 quoteSent = result?.QuoteSentCount ?? 0,
                 customerResponses = result?.CustomerResponseCount ?? 0,
-                decidedQuotes = (result?.WonCount ?? 0) + (result?.LostCount ?? 0),
-                conversionEligible = (result?.WonCount ?? 0) + (result?.LostCount ?? 0) >= MinimumConversionSample,
-                conversionRate = (result?.WonCount ?? 0) + (result?.LostCount ?? 0) >= MinimumConversionSample
-                    ? result?.WinRatePercent : null,
+                conversion.DecidedQuotes, conversion.ConversionEligible, conversion.ConversionRate,
                 averageResponseHours = result?.AverageResponseHours,
                 revenueByCurrency = result?.RevenueByCurrency.Select(x => new CurrencyAmountGroup(x.CurrencyCode, x.WeightedRevenueAmount)).ToArray()
                     ?? Array.Empty<CurrencyAmountGroup>() };
+        // The scope's own conversion rate, computed from the rows this caller is allowed to see —
+        // a rep's from their own outcomes, a manager's from their team's — and suppressed by the
+        // same sample floor as the per-representative rates above.
+        var scopeConversion = Conversion(results.Sum(x => x.WonCount), results.Sum(x => x.LostCount));
         return Ok(new { generatedAt = DateTime.UtcNow, from = fromUtc, to = toUtc,
             scope = ScopeWireName(scope), minimumConversionSample = MinimumConversionSample,
+            scopeConversion.DecidedQuotes, scopeConversion.ConversionEligible, scopeConversion.ConversionRate,
             outcomeReconciliation = new {
                 recordedOutcomes = recordedOutcomeCount,
                 attributedOutcomes = attributedOutcomeIds.Length,
@@ -738,7 +748,7 @@ public sealed class CommercialIntelligenceController(
                 isTenantComplete = tenantWide
             },
             metrics = new[] { Metric("won", "Won", results.Sum(x => x.WonCount)), Metric("lost", "Lost", results.Sum(x => x.LostCount)),
-                Metric("decided", "Decided outcomes", results.Sum(x => x.WonCount + x.LostCount)) }, representatives = rows });
+                Metric("decided", "Decided outcomes", scopeConversion.DecidedQuotes) }, representatives = rows });
     }
 
     private async Task<List<RepSummary>> BuildRepSummaries(
@@ -783,6 +793,23 @@ public sealed class CommercialIntelligenceController(
 
     private static object Metric(string key, string label, decimal value) => new { key, label, value, unit = "count" };
     private const int MinimumConversionSample = 5;
+    private const int AttentionItemLimit = 100;
+
+    /// <summary>
+    /// The conversion figures for a set of outcomes: how many quotes were decided, whether that is
+    /// a large enough sample to state a rate, and the rate when it is. Below the floor there is no
+    /// rate to state, so it is null and <c>conversionEligible</c> says why the payload is empty.
+    /// Every scope publishes its own figure through here — a caller left to divide won by decided
+    /// itself gets a rate from whatever sample it happens to hold, which is exactly the suppression
+    /// this floor exists to apply.
+    /// </summary>
+    private static ConversionFigures Conversion(int won, int lost)
+    {
+        var decided = won + lost;
+        return decided >= MinimumConversionSample
+            ? new(decided, true, decimal.Round(won * 100m / decided, 2))
+            : new(decided, false, null);
+    }
     private static string Name(User user) => $"{user.FirstName} {user.LastName}".Trim();
     private static DateTime NormalizeUtc(DateTime value) => value.Kind switch
     {
@@ -873,6 +900,7 @@ public sealed record RepSummary(long UserId, string Name, string? Email, string?
 public sealed record CurrencyPipelineGroup(long? CurrencyId, string? CurrencyCode, int QuoteCount,
     decimal PipelineValue, decimal WeightedPipeline);
 public sealed record CurrencyAmountGroup(string CurrencyCode, decimal Value);
+public readonly record struct ConversionFigures(int DecidedQuotes, bool ConversionEligible, decimal? ConversionRate);
 public sealed record ActivityEvidence(string? NexoraSerial, string? Reference, string? CustomerName,
     long? CustomerId, string? ActionRoute, string? RequiredModule);
 
