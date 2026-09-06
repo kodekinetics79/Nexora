@@ -126,6 +126,36 @@ re-authentication inside the window above, on top of the existing typed confirma
 gates. Changing the MFA policy itself always requires Owner, current-password re-authentication, a
 reason of at least 20 characters, a mandatory bounded expiry and a typed confirmation phrase.
 
+## External AI egress consent (`Ai:ExternalProvider:AutoAuthorizeInternalDeployment`)
+
+Whether a tenant's document text may leave their infrastructure is a **persisted, versioned,
+audited decision** — a row in `"AiProcessingPolicies"` plus a per-destination grant in
+`"AiExternalProviderAuthorizations"` naming the exact origin, model, purposes and expiry, each
+written by a named platform Owner with a justification. Configuration decides one thing only:
+whether this deployment may write those rows **on the tenant's behalf, with no human**.
+
+| Key (env form) | Default | What it does |
+| --- | --- | --- |
+| `Ai:ExternalProvider:AutoAuthorizeInternalDeployment` (`Ai__ExternalProvider__AutoAuthorizeInternalDeployment`) | `false` | On the first governed call for a tenant, opens `IsEnabled`, `ExternalProcessingAllowed`, `EgressPolicy = FullDocument` and the extraction purposes, and writes a grant for the deployment's own inference endpoint authored by `system:auto-internal`. |
+
+**It ships off, and the default is the control.** The gate that triggers this path is reached only
+for an `External` provider class — both callers, the token ledger's `AuthorizeExternalAsync` and
+the conversational extraction gate, test that first — so every row it can write is a decision to
+send one customer's documents to a host they do not control. It is legitimate for a **single-tenant
+installation whose deployer is also the customer**: there is no self-service tenant admin, and the
+person who chose the endpoint is the person whose data goes to it. It is not legitimate for a
+multi-tenant deployment, where it would take that decision for every tenant at once, silently, on
+the first document each of them submitted.
+
+Turning it on has one further consequence worth stating plainly: the extraction readiness
+pre-flight (`GET /api/platform/tenants/{id}/ai-readiness`) performs **no writes** and therefore
+cannot model it, so the operator console will go on reporting those controls closed while
+documents egress successfully. Report and enforcement only agree while this key is off.
+
+With it off, a tenant that should use an external provider is set up through the platform console
+— the AI governance tab's policy and provider-authorization dialogs — which produce the same rows
+with a real actor, a real justification and an expiry.
+
 ## Configuration pattern (how secrets are supplied now)
 
 `appsettings.json` is a **committed template containing only placeholders**

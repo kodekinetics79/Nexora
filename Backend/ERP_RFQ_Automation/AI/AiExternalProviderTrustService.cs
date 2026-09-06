@@ -47,11 +47,12 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
     internal const string AutoProvisionActor = "system:auto-internal";
 
     internal const string AutoProvisionJustification =
-        "Auto-provisioned for an internal-only deployment: the configured inference endpoint "
-        + "is the one this installation was deployed with, and no self-service tenant exists "
-        + "to author a grant for it. Set "
+        "Auto-provisioned for a single-tenant installation that explicitly set "
         + AutoProvisionConfigKey
-        + "=false to require an explicit, human-authored authorization instead.";
+        + "=true: whoever deployed this installation chose the inference endpoint and is also "
+        + "the party whose documents egress to it, and no self-service tenant admin exists to "
+        + "author a grant for it. Unset that key to require an explicit, human-authored "
+        + "authorization with a named approver instead.";
 
     private readonly ErpRfqAutomationContext _db;
     private readonly ITenantContext _tenantContext;
@@ -75,15 +76,22 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
         _db = db;
         _tenantContext = tenantContext;
         _log = log;
-        // Defaults to TRUE wherever configuration exists at all. This build ships as an
-        // internal-use application: the inference endpoint is chosen by whoever deploys it,
-        // and there is no self-service tenant admin to go and author a grant for that
-        // endpoint. Requiring one by default did not make the deployment safer — it made
-        // every AI extraction dead-letter on a fresh tenant, behind a refusal an operator
-        // could only diagnose by reading this file. See the class remarks: that same failure
-        // mode already cost the 2026-08 pilot days of dead-lettered documents.
+        // Defaults to FALSE, and the default is the whole point of the flag.
+        //
+        // It shipped defaulting to TRUE on the reasoning that this is an internal-use build
+        // whose endpoint is chosen by whoever deploys it, and that requiring a grant only made
+        // fresh tenants dead-letter every document. Both halves of that are true and neither
+        // survives contact with a multi-tenant deployment: the only caller of the gate is the
+        // EXTERNAL branch of the ledger and of the extraction path (see the remarks below), so
+        // every run of this method is a decision to send one tenant's document text to a host
+        // they do not control — taken with no human, no named approver, no justification a
+        // customer could be shown, and invisible to the read-only pre-flight, which performs no
+        // writes and therefore goes on reporting those very controls closed while documents
+        // egress. A product sold on governance cannot make that decision by default. The
+        // dead-lettering it was added to prevent is a real problem and belongs to the operator
+        // console: one guided action that issues the same audited calls a person signs.
         _autoProvisionInternal = configuration is not null
-            && (configuration.GetValue<bool?>(AutoProvisionConfigKey) ?? true);
+            && (configuration.GetValue<bool?>(AutoProvisionConfigKey) ?? false);
         ResolvedProvider = endpointResolver.Current;
         KnownProviders = endpointResolver.All;
     }
@@ -116,6 +124,15 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
     /// exactly one of them — the endpoint — because every other default is the secure one.
     /// The result is not a warning: it is <c>EXTRACTION_AI_NOT_AUTHORIZED</c> on every
     /// document, which reads to an operator as "the extractor is broken".</para>
+    ///
+    /// <para><b>Off unless a deployment asks for it, and it is always about egress.</b> The
+    /// gate this hangs off is reached only when the resolved provider class is
+    /// <see cref="AiProviderClass.External"/> — both callers, the token ledger's
+    /// <c>AuthorizeExternalAsync</c> and the conversational extraction gate, test that first —
+    /// so there is no benign local case here: every row this writes widens one tenant's consent
+    /// to send document text off their own infrastructure. That is a decision for a named human
+    /// on the record, so <see cref="AutoProvisionConfigKey"/> defaults to FALSE and only a
+    /// single-tenant installation whose deployer IS the customer should turn it on.</para>
     ///
     /// <para><b>What it will and will not do.</b> It only ever fills an ABSENT decision. It
     /// never overrides a REVOKED grant — revocation is a deliberate act and is respected, so
