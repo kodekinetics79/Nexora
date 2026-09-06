@@ -287,6 +287,162 @@ public class EmailInquiryStrandingInvariantTests
             + "message resting in one of them is lost: " + string.Join(", ", orphaned));
     }
 
+    // =====================================================================================
+    // 2b. AND SO DOES EVERY ASSEMBLY STATE
+    // =====================================================================================
+
+    private static readonly EmailInquiryAssemblyStatus[] AllAssemblyStatuses =
+        Enum.GetValues<EmailInquiryAssemblyStatus>();
+
+    /// <summary>
+    /// The states a message is SUPPOSED to end in, and the only ones allowed to have no way out.
+    ///
+    /// <para><see cref="EmailInquiryAssemblyStatus.NoInquiry"/> is deliberately not here even
+    /// though it reads like a terminal triage verdict: it is a MACHINE's decision that a human
+    /// must be able to overturn, and the audited triage reopen is that door. Listing it here
+    /// would excuse the door being removed.</para>
+    /// </summary>
+    private static readonly EmailInquiryAssemblyStatus[] TerminalByDesign =
+    [
+        // The message produced its Lead. Anything further is an amendment, which is a different
+        // message with its own assembly.
+        EmailInquiryAssemblyStatus.Assembled,
+        // Absorbing on purpose: malware is not "retry later", and a human reverses it by an
+        // explicit act that creates its own record.
+        EmailInquiryAssemblyStatus.RejectedSecurity
+    ];
+
+    /// <summary>
+    /// STATES WHOSE ONLY MOVER IS MISSING — recorded in code, dated, and asserted to still be
+    /// missing, rather than left to be discovered by a product owner looking at a screen.
+    ///
+    /// <para><b><see cref="EmailInquiryAssemblyStatus.NeedsReview"/>, recorded 2026-09-05.</b> A
+    /// message held by <c>EmailInquiryLeadAssembler</c> — a cross-component commercial conflict,
+    /// an unreadable result, a merge that named no requestable line — has every part terminal and
+    /// no extraction job left to recover. The only writer of NeedsReview -> Assembled is
+    /// <c>LeadIdentityApplicationService.ResolveHeldEmailAssemblyAsync</c>, which is reachable
+    /// only from a match-review decision that carries an ExtractionJobId, and a message held for
+    /// any of those reasons has no such decision to make. The governed scheduling reopen does
+    /// accept NeedsReview, but it needs a part that is FailedRecoverable holding no job — and
+    /// that part is not terminal, so it is a message still being worked rather than one at rest.
+    /// The operator escape hatch is with the product owner.</para>
+    ///
+    /// <para>The list is asserted in BOTH directions. An entry that gains a mover fails this test
+    /// as loudly as a state that loses one, so the exception has to be deleted when the door is
+    /// built instead of quietly outliving the gap it describes.</para>
+    /// </summary>
+    private static readonly EmailInquiryAssemblyStatus[] MoverKnownMissing =
+    [
+        EmailInquiryAssemblyStatus.NeedsReview
+    ];
+
+    /// <summary>
+    /// THE PARTITION THAT WAS MISSING, and the reason two stranding defects survived three
+    /// audits of a file that calls itself the guardian of this rule. Everything above partitions
+    /// <see cref="EmailInquiryComponentStatus"/>; nothing partitioned
+    /// <see cref="EmailInquiryAssemblyStatus"/>, so an assembly state with no implemented mover
+    /// passed every test in the suite — including, by construction, the ones written to catch it.
+    ///
+    /// <para>The question asked of each state is the governing rule at the level of the MESSAGE:
+    /// once no part of it is still being worked, is there anything in this deployment that moves
+    /// it? See <see cref="MoversAtRest"/> — every mover is named and every one is decided by a
+    /// production predicate, not by a list kept alongside one.</para>
+    /// </summary>
+    [Fact]
+    public void Every_assembly_state_is_terminal_by_design_or_has_a_mover()
+    {
+        var orphaned = new List<EmailInquiryAssemblyStatus>();
+
+        foreach (var status in AllAssemblyStatuses)
+        {
+            if (TerminalByDesign.Contains(status)) continue;
+            if (MoversAtRest(status).Count > 0) continue;
+            orphaned.Add(status);
+        }
+
+        var unexpected = orphaned.Except(MoverKnownMissing).ToArray();
+        Assert.True(unexpected.Length == 0,
+            "These assembly states are neither terminal by design nor reachable by anything that "
+            + "moves a message, so a message resting in one of them is lost and nothing in this "
+            + "suite would have said so: " + string.Join(", ", unexpected));
+
+        // The other direction. A recorded exception that has quietly been fixed must be deleted,
+        // or the list becomes a place where a real gap can be hidden by an old one.
+        var fixedSince = MoverKnownMissing.Except(orphaned).ToArray();
+        Assert.True(fixedSince.Length == 0,
+            "These assembly states are recorded above as having no mover and now have one. Delete "
+            + "them from MoverKnownMissing so the exception cannot outlive the gap: "
+            + string.Join(", ", fixedSince));
+    }
+
+    /// <summary>
+    /// Everything this deployment has that will move a message OUT of an assembly state once the
+    /// message has come to rest there — no part still being worked, no queue row anybody will
+    /// claim. Named rather than counted, so a failure says which door is missing.
+    ///
+    /// <para><b>"At rest" is the whole point.</b> Two of the three declared governed authorities
+    /// are shaped around a PART rather than a message:
+    /// <c>CanGovernedExtractionRecoveryTransition</c> needs the component's ExtractionJobId, and
+    /// <c>CanGovernedSchedulingRecoveryTransition</c> needs a part that is FailedRecoverable
+    /// holding no job. Both of those parts are non-terminal, so a message either of them can help
+    /// is a message the component sweep is already claiming — counted below as exactly that, and
+    /// not a second time. Crediting a state for an authority whose precondition it does not meet
+    /// is how NeedsReview looked covered while its real population had nowhere to go.</para>
+    /// </summary>
+    private static IReadOnlyList<string> MoversAtRest(EmailInquiryAssemblyStatus status)
+    {
+        var movers = new List<string>();
+
+        // PHASE 1 of the recovery sweep, reached through the state machine rather than asserted:
+        // if EVERY component configuration that evaluates to this status still holds a part the
+        // sweep claims, the message is being worked and will be re-evaluated when that part
+        // closes. Vacuity is the trap — a status Evaluate cannot produce earns nothing from an
+        // empty set — so the configurations must exist as well as qualify.
+        var configurations = CombinationsUpTo(AllComponentStatuses, maxSize: 2)
+            .Where(c => EmailInquiryAssemblyStateMachine.Evaluate(c.Count, c).Status == status)
+            .ToList();
+        if (configurations.Count > 0 && configurations.All(StillHeldByTheComponentSweep))
+            movers.Add("the component sweep (every configuration reaching this status still "
+                + "holds a part it claims)");
+
+        // CAPTURED is the one status Evaluate never produces — capture itself writes it — so its
+        // mover is derived from what capture can leave behind instead: every at-capture
+        // configuration either still holds a part the sweep claims, or is one the barrier moves
+        // the message straight out of. The capture grace is what keeps the two apart in time.
+        if (status == EmailInquiryAssemblyStatus.Captured
+            && CombinationsUpTo(ReachableAtCapture, maxSize: 3).All(c =>
+                StillHeldByTheComponentSweep(c)
+                || EmailInquiryAssemblyStateMachine.Evaluate(c.Count, c).Status != status))
+            movers.Add("the component sweep (every at-capture configuration either holds a part "
+                + "it claims or evaluates straight out of Captured)");
+
+        // PHASE 2: the sweep's one query about the assembly itself rather than its parts, and the
+        // only mover here that needs neither a live part nor a person.
+        if (status == EmailInquiryAssemblyRecoveryService.SweptWhenOwedALead)
+            movers.Add("the recovery sweep's assembly phase (owed a Lead)");
+
+        // The audited manual triage reopen, offered on the Inbound Mail screen. The ONLY declared
+        // authority whose precondition a message at rest can actually meet.
+        if (EmailInquiryAssemblyStateMachine.CanGovernedTriageReopenTransition(status))
+            movers.Add("the audited triage reopen");
+
+        return movers;
+    }
+
+    /// <summary>
+    /// Whether a component configuration still contains a part the sweep will look at WHATEVER
+    /// its job says.
+    ///
+    /// <para><see cref="EmailInquiryAssemblyRecoveryService.SweptOnlyWithoutJob"/> deliberately
+    /// does not count. It is claimed only when the part holds no job, and the same state holding
+    /// a job — what the sweep itself writes when it closes a part on an infrastructure fault — is
+    /// claimed by nothing. A conditional claim is not a mover, and treating it as one is how a
+    /// held message's ledger row went on reporting progress over work that had stopped.</para>
+    /// </summary>
+    private static bool StillHeldByTheComponentSweep(
+        IReadOnlyCollection<EmailInquiryComponentStatus> configuration)
+        => configuration.Any(EmailInquiryAssemblyRecoveryService.SweptRegardlessOfJob.Contains);
+
     /// <summary>
     /// The mirror assertion, and the one that stops the partition above being satisfied by
     /// declaring everything sweepable: a TERMINAL state must not be swept, or every finished
@@ -360,6 +516,9 @@ public class EmailInquiryStrandingInvariantTests
     [Fact]
     public void An_assembly_still_in_the_pipeline_is_left_to_the_sweeps_that_own_it()
     {
+        // FailedRecoverable belongs in this list only while a part of the message is still owed a
+        // sweep, which is the default the four-argument form expresses — see the test below for
+        // the same hold once nothing is coming for it.
         foreach (var status in new[]
                  {
                      EmailInquiryAssemblyStatus.Captured,
@@ -372,6 +531,39 @@ public class EmailInquiryStrandingInvariantTests
             Assert.Null(EmailInquiryLedgerReconciliation.StatusFor(
                 "Queued", status, hasRunnableJob: false, hasStoppedJob: true));
         }
+    }
+
+    /// <summary>
+    /// A HOLD THAT NOTHING IS COMING FOR IS NOT PROGRESS, and this is the exact shape the sweep
+    /// produces itself: it closes a part whose job dead-lettered on an infrastructure fault, the
+    /// barrier holds the message, and the part keeps its job id — so no sweep ever queries it
+    /// again and no worker will claim its queue row. The message's only remaining mover is an
+    /// operator, and the operator finds it through the Inbound Mail "Stopped" tab, which matches
+    /// on this prefix. A row still reading "Queued" is invisible there.
+    /// </summary>
+    [Fact]
+    public void A_hold_no_sweep_will_look_at_again_stops_claiming_the_message_is_in_flight()
+    {
+        var corrected = EmailInquiryLedgerReconciliation.StatusFor(
+            "Queued", EmailInquiryAssemblyStatus.FailedRecoverable,
+            hasRunnableJob: false, hasStoppedJob: true, hasSweepableComponent: false);
+
+        Assert.Equal(ERP_RFQ_Automation.Extraction.ExtractionWorker.DeadLetterParseStatus, corrected);
+        Assert.False(EmailInquiryLedgerReconciliation.ClaimsInFlight(corrected));
+
+        // The screen this exists for finds it by prefix, not by equality.
+        Assert.StartsWith(
+            ERP_RFQ_Automation.Ingestion.Triage.EmailTriageStates.GaveUpParseStatusPrefix,
+            corrected, StringComparison.Ordinal);
+
+        // And the correction is still about durable state, not about the hold: a part the sweep
+        // will look at, or a job a worker will still run, both outrank it.
+        Assert.Null(EmailInquiryLedgerReconciliation.StatusFor(
+            "Queued", EmailInquiryAssemblyStatus.FailedRecoverable,
+            hasRunnableJob: false, hasStoppedJob: true, hasSweepableComponent: true));
+        Assert.Null(EmailInquiryLedgerReconciliation.StatusFor(
+            "Queued", EmailInquiryAssemblyStatus.FailedRecoverable,
+            hasRunnableJob: true, hasStoppedJob: false, hasSweepableComponent: false));
     }
 
     [Fact]
