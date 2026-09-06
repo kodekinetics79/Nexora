@@ -76,6 +76,40 @@ public static class AiErrorCodes
 /// destination may receive. Both must agree. Anything unrecognised reads as the strict
 /// value: fail closed.</para>
 /// </summary>
+/// <summary>
+/// What a tenant has decided their documents may be read by, as one answer.
+///
+/// <para>The policy row and the destination grant between them hold sixteen fields that encode
+/// this. Nobody outside this file should be asked to set those fields one at a time: the
+/// combination that extracts is not guessable, the combination that half-extracts is silent, and
+/// the operator who has to choose is a salesperson with a customer on the phone. A posture is the
+/// question they can actually answer, and <c>POST /api/platform/tenants/{id}/ai-enablement</c> is
+/// the only thing that turns it back into fields.</para>
+/// </summary>
+public static class AiPostures
+{
+    /// <summary>Nothing is read by AI. <c>IsEnabled = false</c>, and no egress of any kind.</summary>
+    public const string Off = "Off";
+
+    /// <summary>
+    /// A model on infrastructure the tenant controls. Nothing egresses, so no destination grant
+    /// and no customer consent artefact are involved. Requires this installation to actually
+    /// have a local inference destination — otherwise it is <see cref="Off"/> with extra steps
+    /// and every document refuses.
+    /// </summary>
+    public const string PrivateOnly = "PrivateOnly";
+
+    /// <summary>
+    /// The external endpoint this installation resolves, named in a grant with an expiry. The
+    /// only posture that sends a customer's document text off their own infrastructure, and the
+    /// only one that requires a justification naming their approval.
+    /// </summary>
+    public const string ApprovedCloud = "ApprovedCloud";
+
+    public static bool IsKnown(string? value) =>
+        value is Off or PrivateOnly or ApprovedCloud;
+}
+
 public static class AiEgressPolicies
 {
     /// <summary>Only reduced field/row payloads may egress. The secure default.</summary>

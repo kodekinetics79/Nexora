@@ -1348,6 +1348,204 @@ public class TenantsController : ControllerBase
         catch (PlatformGovernanceNotFoundException ex) { return NotFound(new { error = ex.Message }); }
     }
 
+    /// <summary>
+    /// Turn AI document reading on for one tenant, as the four answers an operator can give.
+    ///
+    /// <para><b>Why this is not the two endpoints above it.</b> Opening extraction for an
+    /// external destination takes a policy update AND a destination grant. Those are separate
+    /// endpoints behind separate dialogs, the prominent control is the grant, and a grant alone
+    /// permits nothing — so the reliably reachable state is a tenant carrying a live
+    /// authorization, a policy nobody edited, and a console reporting blocking controls. That is
+    /// the state the pilot tenant is in. One call, one justification, one verdict.</para>
+    ///
+    /// <para><b>What it will not accept.</b> No endpoint, no model id, no egress enum and no
+    /// purpose string comes from the caller. The destination comes from the resolved provider
+    /// descriptor and the fields come from <see cref="AiPostures"/> — which is what retires the
+    /// ORDINAL, case-sensitive <c>AllowedModel</c> comparison that refuses every document over
+    /// one capital letter, because no human types the value again.</para>
+    ///
+    /// <para><b>Ordering, deliberately, rather than a transaction.</b> Two aggregates and two
+    /// audited acts: the grant is written first and the policy second. A grant with a closed
+    /// policy permits nothing, so a failure between them leaves the tenant CLOSED rather than
+    /// half-open, and re-running is safe — the grant upserts under the same Idempotency-Key and
+    /// the policy is a set of absolute values behind a version check.</para>
+    /// </summary>
+    [HttpPost("{id:long}/ai-enablement")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public async Task<ActionResult<TenantAiEnablementResult>> SetAiEnablement(
+        long id, [FromBody] TenantAiEnablementRequest request, CancellationToken ct)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Justification)
+            || request.Justification.Trim().Length < 5)
+            return BadRequest(new { error = "A justification of at least 5 characters is required." });
+        if (!AiPostures.IsKnown(request.Posture))
+            return BadRequest(new { error = "Posture must be Off, PrivateOnly or ApprovedCloud." });
+
+        var cloud = request.Posture == AiPostures.ApprovedCloud;
+        if (cloud && !AiEgressPolicies.IsRecognised(request.CloudEgress))
+            return BadRequest(new
+            {
+                error = "CloudEgress must be RedactedFieldsOnly or FullDocument when documents "
+                    + "may be read by an approved cloud provider."
+            });
+
+        // "Nobody decided" and "we decided not to cap it" are different answers, and only one of
+        // them is a decision. Making the caller say which is what stops an unbounded ceiling
+        // arriving as an omitted field.
+        if (request.Posture != AiPostures.Off)
+        {
+            if (request.NoMonthlyCeiling == request.MonthlyHardTokenLimit.HasValue)
+                return BadRequest(new
+                {
+                    error = "Give a monthly token ceiling, or set NoMonthlyCeiling to accept "
+                        + "unbounded spend deliberately. Exactly one of the two."
+                });
+            if (request.MonthlyHardTokenLimit is <= 0)
+                return BadRequest(new
+                {
+                    error = "A monthly ceiling must be above zero. Zero refuses every document "
+                        + "while every other control reads open; to stop AI, use the Off posture."
+                });
+        }
+
+        var allowedPurposes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent };
+        var purposes = (request.Purposes ?? [])
+            .Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (purposes.Any(x => !allowedPurposes.Contains(x)))
+            return BadRequest(new { error = "One or more AI purposes are invalid." });
+        if (request.Posture != AiPostures.Off && purposes.Length == 0)
+            return BadRequest(new { error = "Say what AI may be used for: at least one purpose." });
+        if (request.GrantExpiresOn is { } expiry && expiry <= DateTime.UtcNow)
+            return BadRequest(new { error = "A grant expiry must be in the future." });
+
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .FirstOrDefaultAsync(t => t.Id == id, ct);
+        if (tenant?.PrimaryBusinessUnitId is not long businessUnitId)
+            return NotFound();
+
+        using var tenantScope = _tenantScope.Push(businessUnitId);
+        using var scope = _scopeFactory.CreateScope();
+        var resolver = scope.ServiceProvider.GetRequiredService<IAiProviderEndpointResolver>();
+        var resolved = resolver.Current;
+
+        // A posture this installation cannot honour is refused here rather than written and then
+        // reported as a broken extractor. "Private only" on a deployment whose every inference
+        // destination is off-host is Off with extra steps: it refuses every document, under a
+        // code that reads like a fault.
+        if (cloud && (!resolved.IsResolved || resolved.ProviderClass != AiProviderClass.External))
+            return BadRequest(new
+            {
+                error = resolved.IsResolved
+                    ? $"This installation's inference endpoint ({resolved.Endpoint}) is local, so "
+                        + "there is no cloud provider to approve. Use PrivateOnly."
+                    : $"This installation has no usable inference endpoint ({resolved.ClassificationReason}), "
+                        + "so no destination can be approved."
+            });
+        if (request.Posture == AiPostures.PrivateOnly
+            && !resolver.All.Any(x => x.IsResolved && x.ProviderClass == AiProviderClass.Local))
+            return BadRequest(new
+            {
+                error = $"This installation has no local inference destination — it resolves "
+                    + $"{resolved.Endpoint}, which is off-host — so PrivateOnly would refuse every "
+                    + "document. Approve the cloud provider, or use Off."
+            });
+
+        // Read untracked, and only to fail early: AuthorizeAsync below clears the change
+        // tracker on this very context, so the row this method mutates has to be loaded AFTER
+        // the grant or its edits are silently dropped on save.
+        var tenantDb = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var current = await tenantDb.AiProcessingPolicies.AsNoTracking()
+            .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
+        if (current is null)
+            return Conflict(new { error = "The tenant AI policy has not been provisioned." });
+        if (current.Version != request.Version)
+            return Conflict(new { error = "The AI policy changed; reload and try again.", currentVersion = current.Version });
+
+        var justification = request.Justification.Trim();
+        AiExternalProviderAuthorizationView? authorization = null;
+
+        // FIRST, and only for the posture that egresses. Nothing this writes opens anything on
+        // its own: the policy below is what a document is actually tested against.
+        if (cloud)
+        {
+            try
+            {
+                var trust = scope.ServiceProvider.GetRequiredService<AiExternalProviderTrustService>();
+                var scopedAudit = scope.ServiceProvider.GetRequiredService<IPlatformAuditService>();
+                var granted = await trust.AuthorizeAsync(
+                    businessUnitId, CurrentPlatformActorId(), IdempotencyKey(),
+                    new AuthorizeAiExternalProviderCommand(
+                        resolved.Provider, resolved.Endpoint, resolved.Model,
+                        string.Join(',', purposes),
+                        UnstructuredDocumentsAllowed: AiEgressPolicies.PermitsWholeDocument(request.CloudEgress),
+                        justification, request.GrantExpiresOn),
+                    ct,
+                    (row, innerCt) => scopedAudit.WriteAsync(User,
+                        "tenant.ai-provider.authorize", nameof(AiExternalProviderAuthorization),
+                        row.Id.ToString(), new { tenantId = id, row.Provider, row.Endpoint, row.Model,
+                            justification, via = "ai-enablement" },
+                        actAsTenantId: id, httpContext: HttpContext, ct: innerCt));
+                authorization = granted.Authorization;
+            }
+            catch (PlatformGovernanceValidationException ex) { return BadRequest(new { error = ex.Message }); }
+            catch (PlatformGovernanceConflictException ex) { return Conflict(new { error = ex.Message }); }
+        }
+
+        var policy = await tenantDb.AiProcessingPolicies
+            .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
+        if (policy is null)
+            return Conflict(new { error = "The tenant AI policy has not been provisioned." });
+        if (policy.Version != request.Version)
+            return Conflict(new { error = "The AI policy changed; reload and try again.", currentVersion = policy.Version });
+
+        var before = ToAiPolicyDto(policy);
+        policy.IsEnabled = request.Posture != AiPostures.Off;
+        policy.ExternalProcessingAllowed = cloud;
+        policy.EgressPolicy = cloud && AiEgressPolicies.PermitsWholeDocument(request.CloudEgress)
+            ? AiEgressPolicies.FullDocument
+            : AiEgressPolicies.RedactedFieldsOnly;
+        // Named from the resolved descriptor, never retyped. Cleared with the posture, so a
+        // tenant turned off does not keep a provider lock nobody can see the reason for.
+        policy.AllowedProvider = cloud ? resolved.Provider : null;
+        policy.AllowedModel = cloud ? resolved.Model : null;
+        if (request.Posture != AiPostures.Off)
+        {
+            policy.AllowedPurposes = string.Join(',', purposes);
+            policy.MonthlyHardTokenLimit = request.NoMonthlyCeiling ? null : request.MonthlyHardTokenLimit;
+        }
+        if (cloud)
+        {
+            // The two the policy endpoint already refuses to open external processing without.
+            policy.RedactionRequired = true;
+            policy.PrivacyReviewRequired = true;
+        }
+        policy.Version++;
+        policy.UpdatedOn = DateTime.UtcNow;
+        policy.UpdatedBy = User.FindFirst("email")?.Value ?? "platform";
+        var after = ToAiPolicyDto(policy);
+
+        var policyAudit = new PlatformAuditService(
+            tenantDb, scope.ServiceProvider.GetRequiredService<ILogger<PlatformAuditService>>());
+        await policyAudit.WriteAsync(User, "tenant.ai-enablement.set", nameof(AiProcessingPolicy),
+            businessUnitId.ToString(),
+            new { before, after, request.Posture, request.CloudEgress, reason = justification },
+            actAsTenantId: id, httpContext: HttpContext, ct: ct);
+
+        // Re-run against what was just written, so the console never renders a verdict from
+        // before the change and the operator never has to guess whether the answer took.
+        var readiness = await scope.ServiceProvider.GetRequiredService<AiExtractionReadinessService>()
+            .EvaluateAsync(businessUnitId, ct);
+
+        return Ok(new TenantAiEnablementResult
+        {
+            Policy = after,
+            Readiness = readiness,
+            Authorization = authorization
+        });
+    }
+
     // POST /api/platform/tenants/{id}/suspend
     [HttpPost("{id:long}/suspend")]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
