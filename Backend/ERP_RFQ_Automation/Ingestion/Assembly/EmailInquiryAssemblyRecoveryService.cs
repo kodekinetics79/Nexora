@@ -259,11 +259,26 @@ public static class EmailInquiryLedgerReconciliation
     /// <param name="assemblyStatus">Null when the message predates the assembly barrier.</param>
     /// <param name="hasRunnableJob">A queue row a worker will still claim.</param>
     /// <param name="hasStoppedJob">A queue row that exists and has stopped trying.</param>
+    /// <param name="hasSweepableComponent">
+    /// Whether any part of this message is still in a state the component sweep claims — one of
+    /// <see cref="EmailInquiryAssemblyRecoveryService.SweptRegardlessOfJob"/>, or
+    /// <see cref="EmailInquiryAssemblyRecoveryService.SweptOnlyWithoutJob"/> holding no job. It is
+    /// the difference between a hold that is being worked and a hold that has come to rest, and it
+    /// is consulted only for a held assembly.
+    ///
+    /// <para>Defaults to the conservative answer — assume a sweep is still coming — because a
+    /// caller that cannot see the component rows must not be the one to declare a message
+    /// finished. The recovery sweep reads the parts and passes what they actually say;
+    /// <c>EmailService</c>'s stranded-ingest pass has no assembly parts in hand and keeps the
+    /// default. Leaving a row alone for another cycle costs a cycle. Reporting live work as
+    /// stopped is the same lie this class exists to remove, pointing the other way.</para>
+    /// </param>
     public static string? StatusFor(
         string? parseStatus,
         EmailInquiryAssemblyStatus? assemblyStatus,
         bool hasRunnableJob,
-        bool hasStoppedJob)
+        bool hasStoppedJob,
+        bool hasSweepableComponent = true)
     {
         // Only a claim of progress can be wrong in the way this fixes. Every other value is a
         // decision something else made with more information.
@@ -280,6 +295,22 @@ public static class EmailInquiryLedgerReconciliation
             EmailInquiryAssemblyStatus.NeedsReview => NeedsReview,
             EmailInquiryAssemblyStatus.NoInquiry => Rejected,
             EmailInquiryAssemblyStatus.RejectedSecurity => Rejected,
+
+            // HELD, WITH NOTHING LEFT TO HOLD IT FOR. A hold belongs to the component sweep, and
+            // the sweep can only own a part it queries: one of SweptRegardlessOfJob, or a held
+            // part carrying no job. When no part of the message is either of those the hold has
+            // come to rest — which is the ordinary shape the moment the sweep itself closes a
+            // JOB-BOUND part as an infrastructure fault, because a held part that keeps its job
+            // id is never looked at again by any sweep.
+            //
+            // Saying nothing here was the ten-day failure repeated one layer up: the sweep
+            // counted the message as recovered while its ledger row went on reading "Queued", so
+            // the Inbound Mail "Stopped" tab — which matches on the "Failed" prefix and exists to
+            // answer exactly this question — counted it as zero. The operator IS the mover for a
+            // rested hold, through the audited triage reopen, and they cannot be the mover for a
+            // message the screen is still reporting as in flight.
+            EmailInquiryAssemblyStatus.FailedRecoverable when !hasSweepableComponent =>
+                ERP_RFQ_Automation.Extraction.ExtractionWorker.DeadLetterParseStatus,
 
             // Still genuinely in the pipeline. The component sweep and the assembly sweep own
             // these, and a ledger correction here would report a message as finished while the
@@ -368,6 +399,14 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
     /// </summary>
     public const EmailInquiryComponentStatus SweptOnlyWithoutJob =
         EmailInquiryComponentStatus.FailedRecoverable;
+
+    /// <summary>
+    /// The one ASSEMBLY state this sweep claims in its own right — phase 2's whole query, minus
+    /// the null-lead predicate. Declared here and used by that query for the same reason the
+    /// component lists are: the state a test asserts about has to be the state production reads.
+    /// </summary>
+    public const EmailInquiryAssemblyStatus SweptWhenOwedALead =
+        EmailInquiryAssemblyStatus.ReadyForAssembly;
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITenantScopeAccessor _tenantScope;
@@ -985,7 +1024,7 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         var candidates = await context.EmailInquiryAssemblies
             .AsNoTracking()
             .Where(a => a.BusinessUnitId == businessUnitId
-                        && a.Status == EmailInquiryAssemblyStatus.ReadyForAssembly
+                        && a.Status == SweptWhenOwedALead
                         && a.AssembledLeadId == null
                         && (a.UpdatedAtUtc <= cutoff || alsoConsider.Contains(a.Id)))
             .OrderBy(a => a.UpdatedAtUtc).ThenBy(a => a.Id)
@@ -1120,11 +1159,28 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
             ct.ThrowIfCancellationRequested();
             try
             {
-                var assemblyStatus = await context.EmailInquiryAssemblies
+                var assembly = await context.EmailInquiryAssemblies
                     .AsNoTracking()
                     .Where(a => a.BusinessUnitId == businessUnitId && a.EmailIngestId == candidate.Id)
-                    .Select(a => (EmailInquiryAssemblyStatus?)a.Status)
+                    .Select(a => new { a.Id, a.Status })
                     .FirstOrDefaultAsync(ct);
+                var assemblyStatus = assembly is null
+                    ? (EmailInquiryAssemblyStatus?)null
+                    : assembly.Status;
+
+                // Whether a PART of this message is still owed a sweep, asked with the sweep's
+                // own declared lists rather than a copy of them — the same reason those lists are
+                // public at all. It is what separates a hold that is being worked from a hold
+                // that has stopped, and without it the ledger left every job-bound hold reading
+                // "Queued" for as long as the row existed.
+                var hasSweepableComponent = assembly is not null
+                    && await context.EmailInquiryComponents
+                        .AsNoTracking()
+                        .AnyAsync(c => c.BusinessUnitId == businessUnitId
+                                       && c.AssemblyId == assembly.Id
+                                       && (SweptRegardlessOfJob.Contains(c.Status)
+                                           || (c.Status == SweptOnlyWithoutJob
+                                               && c.ExtractionJobId == null)), ct);
 
                 // The message's jobs, found the way the ledger itself joins them: every extraction
                 // occurrence recorded under this message's logical group key. It is the ONE link
@@ -1148,7 +1204,8 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
                 var hasStoppedJob = jobStates.Count > 0 && !hasRunnableJob;
 
                 var corrected = EmailInquiryLedgerReconciliation.StatusFor(
-                    candidate.ParseStatus, assemblyStatus, hasRunnableJob, hasStoppedJob);
+                    candidate.ParseStatus, assemblyStatus, hasRunnableJob, hasStoppedJob,
+                    hasSweepableComponent);
                 if (corrected is null)
                 {
                     outcome = outcome with { StillMoving = outcome.StillMoving + 1 };

@@ -1521,6 +1521,12 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
         Normalize(x.ProductShortDescription ?? x.ItemText), x.Quantity, NormalizeUom(x.UnitOfMeasure), x.BidClosingDateLine?.ToUniversalTime().ToString("O"));
 
+    // The notes this system writes into HeaderRemarks. ExtractionWorker composes the remark as
+    // reviewNote + splitNote + sourceNote; all three are ours, and none of them may reach the
+    // identity hash. Kept beside the stripper that consumes them so the two cannot drift.
+    private const string NeedsReviewMarker = "[NEEDS REVIEW]";
+    private const string SplitNotePrefix = "Split from a multi-inquiry document";
+
     private static string? IdentityHeaderRemarks(Lead lead, string? sourceSender = null, string? sourceSubject = null)
     {
         if (string.IsNullOrWhiteSpace(lead.HeaderRemarks)) return null;
@@ -1535,11 +1541,54 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         // text and cannot consume an extracted commercial remark that happens to follow it.
         var prefix = $"Email: From {sourceSender}, Subject: {sourceSubject}.";
         var prefixIndex = trimmed.IndexOf(prefix, StringComparison.Ordinal);
-        if (prefixIndex < 0) return trimmed;
+        if (prefixIndex < 0) return StripLeadingProcessingNote(trimmed);
+        // The envelope is not the only note we write into this field. ExtractionWorker composes
+        // the remark as reviewNote + splitNote + sourceNote, so everything AHEAD of the envelope
+        // is our own processing commentary too — and it must be excluded for the same reason the
+        // envelope is. Leaving it in let a "[NEEDS REVIEW] …" marker change the customer's
+        // inquiry fingerprint, so the same enquiry hashed differently depending on how confident
+        // extraction happened to be and minted a phantom revision over the canonical lead.
+        var head = trimmed[..prefixIndex];
+        var machineHead = StripLeadingProcessingNote(head) is null;
         var withoutEnvelope = string.Concat(
-            trimmed.AsSpan(0, prefixIndex),
+            machineHead ? ReadOnlySpan<char>.Empty : head.AsSpan(),
             trimmed.AsSpan(prefixIndex + prefix.Length)).Trim();
         return withoutEnvelope.Length == 0 ? null : withoutEnvelope;
+    }
+
+    /// <summary>
+    /// Drops a leading run of the notes THIS SYSTEM writes into <c>HeaderRemarks</c> — the
+    /// review marker and the multi-inquiry split note — so that none of them reaches the
+    /// identity hash. Returns null when nothing but our own commentary was there.
+    ///
+    /// <para>The doors disagree about when the marker is written — the upload and folder doors
+    /// have always passed the extractor's real status to the persister — so a remark that
+    /// carries it is not evidence the customer wrote anything different.</para>
+    /// </summary>
+    private static string? StripLeadingProcessingNote(string? remarks)
+    {
+        var text = remarks?.Trim();
+        if (string.IsNullOrEmpty(text)) return null;
+
+        for (var progressed = true; progressed;)
+        {
+            progressed = false;
+            if (text.StartsWith(NeedsReviewMarker, StringComparison.OrdinalIgnoreCase))
+            {
+                // "[NEEDS REVIEW] {reason} " — the reason is machine prose that runs to the next
+                // note, so the whole segment goes rather than the marker alone.
+                var next = text.IndexOf(SplitNotePrefix, NeedsReviewMarker.Length, StringComparison.Ordinal);
+                text = (next < 0 ? string.Empty : text[next..]).Trim();
+                progressed = text.Length > 0;
+            }
+            else if (text.StartsWith(SplitNotePrefix, StringComparison.Ordinal))
+            {
+                var end = text.IndexOf(". ", SplitNotePrefix.Length, StringComparison.Ordinal);
+                text = (end < 0 ? string.Empty : text[(end + 2)..]).Trim();
+                progressed = text.Length > 0;
+            }
+        }
+        return text.Length == 0 ? null : text;
     }
     private static string LineFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(ItemSnapshot(x)));
     private static string LineIdentityFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(new
