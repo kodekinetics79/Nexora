@@ -94,9 +94,12 @@ public sealed class DatabaseSelfObserver : IDatabaseSelfObserver
             return new DatabaseSelfObservation(null, null, null, null,
                 "This process reports no database host, so nothing could be read from it.");
 
-        // Strip a port if one rode along, and lower-case: hosts are case-insensitive and the
-        // registry stores references lower-cased anyway.
-        var bare = host.Split(',')[0].Split(':')[0].Trim().ToLowerInvariant();
+        var bare = HostOf(host);
+        if (bare is null)
+            return new DatabaseSelfObservation(host, null, null, null,
+                $"The database connection reports '{host}', which does not contain a host name this "
+                + "deployment can read, so the database has to be named by hand.");
+
         var labels = bare.Split('.', StringSplitOptions.RemoveEmptyEntries);
 
         // Neon: <endpoint-id>[-pooler].<something>.<region>.<cloud>.neon.tech
@@ -136,11 +139,72 @@ public sealed class DatabaseSelfObserver : IDatabaseSelfObserver
     }
 
     /// <summary>
-    /// A bare IP or "localhost" names a machine, not a database anybody can refer to later. The
-    /// registry would accept "db-10" as an opaque reference and it would mean nothing to the
-    /// auditor who reads it, so nothing is offered.
+    /// The host, out of whatever shape the provider chose to describe its connection in.
+    ///
+    /// <para><b>The defect this fixes.</b> This was <c>DataSource.Split(':')[0]</c>, which is right
+    /// for a bare <c>host:5432</c> and catastrophic for what Npgsql actually returns on a pooled
+    /// connection: <c>tcp://ep-super-sea-admna6dt.c-2.us-east-1.aws.neon.tech:5432</c>. The split
+    /// took the SCHEME. Production was told its database was called <c>db-tcp</c>, in an unreadable
+    /// region, and the operator was asked to correct it by hand — which is the exact experience
+    /// this whole feature exists to remove, delivered with more confidence than the form it
+    /// replaced. A wrong answer offered for confirmation is worse than no answer, because a
+    /// plausible-looking one gets confirmed.</para>
+    ///
+    /// <para>Returns null rather than a fragment when there is no host to be had. The connection
+    /// STRING is deliberately never read here: it carries the password, and a parser that has never
+    /// seen a credential cannot leak one.</para>
+    /// </summary>
+    private static string? HostOf(string dataSource)
+    {
+        var value = dataSource.Trim();
+
+        // A scheme means the rest is a URI, and the host is a component of it rather than the text
+        // before the first colon.
+        var schemeAt = value.IndexOf("://", StringComparison.Ordinal);
+        if (schemeAt >= 0) value = value[(schemeAt + 3)..];
+
+        // Multi-host connection strings list alternates; the first is the one in hand.
+        value = value.Split(',')[0];
+
+        // Anything after the authority — a database path, a query — is not the host.
+        var pathAt = value.IndexOfAny(['/', '?']);
+        if (pathAt >= 0) value = value[..pathAt];
+
+        // user:password@host, when a URI carried credentials. Everything before the last @ is not
+        // the host and is not this method's business.
+        var credentialsAt = value.LastIndexOf('@');
+        if (credentialsAt >= 0) value = value[(credentialsAt + 1)..];
+
+        // IPv6 literals are bracketed, and their colons are not port separators.
+        if (value.StartsWith('['))
+        {
+            var close = value.IndexOf(']');
+            return close > 1 ? value[1..close].ToLowerInvariant() : null;
+        }
+
+        // Now, and only now, a colon means a port.
+        var portAt = value.IndexOf(':');
+        if (portAt >= 0) value = value[..portAt];
+
+        value = value.Trim().ToLowerInvariant();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    /// <summary>
+    /// Whether the host names a machine rather than a database anybody could refer to later.
+    ///
+    /// <para>An IP, "localhost", or a single unqualified label — a Docker service called
+    /// <c>postgres</c>, a Kubernetes service called <c>db</c>. The registry would happily accept
+    /// "db-postgres" as this deployment's opaque provider reference and it would mean nothing to
+    /// the auditor who reads it six months later, so nothing is offered and the operator names it.
+    /// The single-label case is here because of what a truncated one cost once: the parser handed
+    /// the console "db-tcp" — from a connection URI's scheme — and the console offered it for
+    /// confirmation in its own confident voice. A suggestion is only worth making when being wrong
+    /// about it is obvious to the person confirming it.</para>
     /// </summary>
     private static bool LooksLikeAnAddress(string host) =>
         host is "localhost" or "127.0.0.1" or "::1"
-        || host.All(c => char.IsDigit(c) || c == '.');
+        || !host.Contains('.')
+        || host.All(c => char.IsDigit(c) || c == '.')
+        || host.Contains(':');
 }

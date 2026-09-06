@@ -43,6 +43,19 @@ public sealed class DeploymentDescribesItsOwnDatabaseTests
         new StubTenant(null));
 
     [Theory]
+    /*
+     * THE SHAPE THAT ACTUALLY REACHED PRODUCTION, and the reason this theory now carries four
+     * spellings of one host. Npgsql describes a pooled connection as a URI —
+     * "tcp://<host>:5432" — and the first version of this parser did DataSource.Split(':')[0],
+     * which is correct for a bare "host:5432" and takes the SCHEME out of a URI. The console then
+     * told an Owner, in its own confident words, that this deployment's database was called
+     * "db-tcp" and asked them to correct the region by hand: the exact experience the feature
+     * exists to remove, delivered with more authority than the form it replaced. A wrong answer
+     * offered for confirmation is worse than no answer, because a plausible one gets confirmed.
+     */
+    [InlineData("tcp://ep-super-sea-admna6dt.c-2.us-east-1.aws.neon.tech:5432", "neon-ep-super-sea-admna6dt", "us-east-1")]
+    [InlineData("tcp://ep-super-sea-admna6dt-pooler.c-2.us-east-1.aws.neon.tech:5432", "neon-ep-super-sea-admna6dt", "us-east-1")]
+    [InlineData("ep-super-sea-admna6dt.c-2.us-east-1.aws.neon.tech:5432", "neon-ep-super-sea-admna6dt", "us-east-1")]
     // The shape Nexora's own production runs on, pooled and direct.
     [InlineData("ep-super-sea-admna6dt-pooler.c-2.us-east-1.aws.neon.tech", "neon-ep-super-sea-admna6dt", "us-east-1")]
     [InlineData("ep-super-sea-admna6dt.c-2.us-east-1.aws.neon.tech", "neon-ep-super-sea-admna6dt", "us-east-1")]
@@ -56,8 +69,12 @@ public sealed class DeploymentDescribesItsOwnDatabaseTests
         Assert.Equal("Neon", observed.ProviderName);
         Assert.True(observed.IsUsable);
         // Every value carries where it was read from: "us-east-1" alone is a claim, "us-east-1,
-        // read from the host this process is connected to" is evidence.
-        Assert.Contains(host, observed.Basis);
+        // read from the host this process is connected to" is evidence. What it names is the HOST,
+        // not the connection wrapper it arrived in — an operator reading "tcp://…:5432" back would
+        // be looking at plumbing rather than at an address they can check.
+        Assert.NotNull(observed.Host);
+        Assert.Contains(observed.Host!, observed.Basis, StringComparison.Ordinal);
+        Assert.DoesNotContain("tcp://", observed.Basis, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -86,9 +103,34 @@ public sealed class DeploymentDescribesItsOwnDatabaseTests
         Assert.Contains("region", observed.Basis, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The other spellings a connection can arrive in. None of them may leave a scheme, a port, a
+    /// credential or a path anywhere in what the console shows an operator.
+    /// </summary>
+    [Theory]
+    [InlineData("postgres://nexora:secret@db01.internal.example.com:5432/neondb", "db01.internal.example.com")]
+    [InlineData("tcp://db01.internal.example.com:5432", "db01.internal.example.com")]
+    [InlineData("db01.internal.example.com,db02.internal.example.com", "db01.internal.example.com")]
+    [InlineData("DB01.Internal.Example.COM", "db01.internal.example.com")]
+    public void The_host_is_read_out_of_whatever_shape_the_connection_arrives_in(string dataSource, string expected)
+    {
+        var observed = Observe(dataSource);
+
+        Assert.Equal(expected, observed.Host);
+        // And nothing from the wrapper leaks into what an auditor would read.
+        Assert.DoesNotContain("tcp", observed.OpaqueProviderReference ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", observed.Basis, StringComparison.Ordinal);
+        Assert.DoesNotContain("5432", observed.Basis, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("localhost")]
     [InlineData("127.0.0.1")]
+    [InlineData("tcp://127.0.0.1:5432")]
+    // A Docker or Kubernetes service name. Legitimate, and still not a name an auditor could ever
+    // resolve to a database — "db-postgres" as a residency reference means nothing to anybody.
+    [InlineData("postgres")]
+    [InlineData("tcp://db:5432")]
     public void A_bare_address_names_a_machine_rather_than_a_database_so_nothing_is_offered(string host)
     {
         var observed = Observe(host);
