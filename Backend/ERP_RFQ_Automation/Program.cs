@@ -581,6 +581,8 @@ builder.Services.AddScoped<IAiGovernanceService, AiGovernanceService>();
 // configuration once and logged at startup, so the resolution can never again be
 // discoverable only by reading source.
 builder.Services.AddSingleton<IAiProviderEndpointResolver, AiProviderEndpointResolver>();
+// What this deployment pays for AI, beside the settings that name the endpoint it pays it to.
+builder.Services.AddSingleton<IAiRateCardProvider, AiRateCardProvider>();
 // Per-tenant allow-list of external inference endpoints (AI/AiExternalProviderTrustService.cs).
 // Scoped: it reads the tenant-filtered ErpRfqAutomationContext. Its ABSENCE is a refusal,
 // so a missing registration degrades to today's fail-closed behaviour, never to open egress.
