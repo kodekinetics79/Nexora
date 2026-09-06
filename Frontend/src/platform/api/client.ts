@@ -4,6 +4,7 @@ import { BILLING_MODES, TENANT_DEPLOYMENT_PROFILES } from '../types';
 import type { EmailProviderCapability, MailConnectionTestResult } from '../../email/types';
 import type {
   ApplyPlatformDataBoundariesResult,
+  DatabaseSelfObservation,
   PlatformDataBoundary,
   PlatformDataBoundaryManifest,
   RecordPlatformDataBoundaryInput,
@@ -813,10 +814,38 @@ const normalizeTenantDataAsset = (wire: WireRecord): TenantDataAsset => ({
   verifiedBusinessUnitId: asIdOrNull(wire.verifiedBusinessUnitId as string | number | null),
 });
 
+/**
+ * Every field the console reads is defaulted here, including the ones a NEWER console expects and
+ * an OLDER server does not send.
+ *
+ * <p>Vercel and Render deploy independently, and the frontend is the faster of the two: for the
+ * minutes between a merge and the backend restarting, a new console is talking to the previous
+ * API. When `observation` arrived, the panel read `manifest.observation.isUsable` straight off the
+ * payload, the old server did not send it, and the whole Activation tab went to the error boundary
+ * — an operator saw "Something went wrong" on the screen whose entire job is to explain what is
+ * wrong. A field a deployed server might not send is an optional field, whatever the type says, so
+ * the shape is completed once here rather than guarded at each of the places that read it.</p>
+ */
 const normalizePlatformDataBoundaryManifest = (wire: WireRecord): PlatformDataBoundaryManifest => ({
   ...(wire as unknown as PlatformDataBoundaryManifest),
   boundaries: (wire.boundaries as PlatformDataBoundary[]) ?? [],
   defects: (wire.defects as { assetType: string; reason: string }[]) ?? [],
+  source: (wire.source as PlatformDataBoundaryManifest['source'])
+    ?? (wire.configured ? 'configuration' : 'none'),
+  observation: (wire.observation as DatabaseSelfObservation) ?? {
+    host: null,
+    providerName: null,
+    opaqueProviderReference: null,
+    region: null,
+    // Said plainly, because it is true and it is temporary: this server has not been asked, and
+    // the operator's next move is to wait a minute rather than to start typing.
+    basis: 'This deployment has not been asked what its own database is — the server is running a '
+      + 'version that predates the question. Reload in a minute, or record it by hand below.',
+    isUsable: false,
+  },
+  recordedBy: (wire.recordedBy as string | null) ?? null,
+  recordedOn: (wire.recordedOn as string | null) ?? null,
+  recordedBasis: (wire.recordedBasis as string | null) ?? null,
 });
 
 const normalizeTenantActivationDataDecision = (wire: WireRecord): TenantActivationDataDecision => ({
