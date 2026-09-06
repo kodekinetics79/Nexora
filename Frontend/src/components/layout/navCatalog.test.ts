@@ -138,10 +138,18 @@ const reachablePaths = new Set<string>([
   ALL_SCREENS_ENTRY.path,
 ]);
 
+/**
+ * The rail a role actually sees. `PRIMARY_NAV` is the catalogue; the Sidebar shows an entry only
+ * when the reader is manager-tier or the entry is not manager-only, and these tests assert the
+ * SEEN rail rather than the catalogue for the same reason the Sidebar filters it — "seven rows" was
+ * never a fact about the array, it was a promise about what a working day looks like.
+ */
+const railFor = (isManager: boolean) => PRIMARY_NAV.filter((item) => !item.managerOnly || isManager);
+
 describe('the rail exposes the complete commercial spine', () => {
-  it('carries no more than seven role-filtered commercial destinations in journey order', () => {
-    expect(PRIMARY_NAV).toHaveLength(7);
-    expect(PRIMARY_NAV.map((item) => item.key)).toEqual([
+  it('carries no more than seven commercial destinations, in journey order, for the people who work deals', () => {
+    expect(railFor(false)).toHaveLength(7);
+    expect(railFor(false).map((item) => item.key)).toEqual([
       'inbox',
       'leads',
       'rfqs',
@@ -152,16 +160,36 @@ describe('the rail exposes the complete commercial spine', () => {
     ]);
   });
 
+  /**
+   * The executive row is an EIGHTH row and only for manager-tier readers (owner decision,
+   * 2026-09-05). Asserted as an addition on top of the seven rather than by relaxing the count,
+   * because the constraint the seven exist to enforce — a rep's rail does not grow — is exactly
+   * what a bare `toHaveLength(8)` would stop protecting.
+   */
+  it('adds the executive row for manager-tier readers and for nobody else', () => {
+    expect(railFor(true)).toHaveLength(8);
+    expect(railFor(true)[0].key).toBe('executive');
+    expect(railFor(false).map((item) => item.key)).not.toContain('executive');
+  });
+
   it('opens on the work queue, not on a chooser of modules', () => {
-    expect(PRIMARY_NAV[0].path).toBe('/inbox');
+    expect(railFor(false)[0].path).toBe('/inbox');
+  });
+
+  /** A director opens on the numbers; the queue is still their second row, not a lost one. */
+  it('opens a manager on the funnel, with the queue still one row down', () => {
+    expect(railFor(true)[0].path).toBe('/dashboard');
+    expect(railFor(true)[1].path).toBe('/inbox');
   });
 
   it('accounts for all 69 old destinations across four surfaces', () => {
     // These are the numbers the before/after rests on, so they are asserted rather than counted by
-    // hand: 7 commercial rows + 15 tabs + 57 directory cards + 25 Setup entries + the directory door.
-    expect(PRIMARY_NAV).toHaveLength(7);
+    // hand: 7 commercial rows + 15 tabs + 56 directory cards + 25 Setup entries + the directory door.
+    // The directory lost one card and the rail gained one row when the Dashboard became the
+    // Executive view: the destination moved, so the accounting still balances.
+    expect(railFor(false)).toHaveLength(7);
     expect(PRIMARY_VIEWS).toHaveLength(15);
-    expect(ADVANCED_ENTRIES).toHaveLength(57);
+    expect(ADVANCED_ENTRIES).toHaveLength(56);
     expect(ADVANCED_GROUPS).toHaveLength(10);
     expect(SETUP_ENTRIES).toHaveLength(25);
   });

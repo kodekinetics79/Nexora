@@ -7,7 +7,6 @@ import {
   Settings as SetupIcon,
   Apps as AllScreensIcon,
   // Advanced groups
-  Dashboard as DashboardIcon,
   InsightsOutlined as InsightsIcon,
   CalendarMonth as DeadlineIcon,
   QueryStats as PerformanceIcon,
@@ -429,16 +428,12 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         moduleName: 'Leads',
         keywords: ['deadline', 'closing date', 'due', 'overdue', 'board'],
       },
-      {
-        key: 'dashboard-overview',
-        label: 'Dashboard',
-        labelKey: 'dashboard',
-        description: 'Headline KPIs for the workspace. Reads "insufficient data" until there is enough history.',
-        path: '/dashboard',
-        icon: <DashboardIcon />,
-        moduleName: 'Dashboard',
-        keywords: ['kpi', 'home', 'overview', 'stats'],
-      },
+      // '/dashboard' is NOT listed here any more: it is the Executive view, the first row of the
+      // rail for manager-tier users. Leaving the old Dashboard card in the directory would put one
+      // destination behind two doors — the exact defect this file's "one door per destination"
+      // tests were written for after Users and Integration Hub each appeared twice — and the card's
+      // own description ("headline KPIs... insufficient data") no longer describes the screen.
+      // The destination did not disappear from the product; it moved up into the rail.
       {
         key: 'dashboard-team',
         label: 'Team workload',
