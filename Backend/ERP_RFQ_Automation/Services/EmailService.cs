@@ -502,9 +502,11 @@ namespace ERP_RFQ_Automation.Services
                     _logger.LogInformation(
                         "Finished process for configuration: {Email} ({Downloaded} new message(s), "
                         + "{AlreadyIngested} already in the ingestion ledger, {Deferred} deferred "
-                        + "to the next bounded attempt).",
+                        + "to the next bounded attempt, {NotAcknowledged} left unread because "
+                        + "nothing durable could be written).",
                         handle.EmailAddress, outcome.MessagesDownloaded,
-                        outcome.MessagesAlreadyIngested, outcome.MessagesDeferred);
+                        outcome.MessagesAlreadyIngested, outcome.MessagesDeferred,
+                        outcome.MessagesNotAcknowledged);
                 }
                 else
                 {
@@ -611,8 +613,13 @@ namespace ERP_RFQ_Automation.Services
         /// ING-08: persists the mailbox's poll ledger. This is the durable, operator-visible
         /// half of the fix: <c>LastSuccessfulPollOn</c> is what the next lookback window is
         /// derived from, and <c>LastPollError</c> is the reason an operator reads.
+        ///
+        /// <para><b>Internal, not private.</b> Whether the checkpoint moves is decided here, and
+        /// in production this is reachable only through a live IMAP session — so the one
+        /// behaviour that loses a customer's mail, advancing the recovery point past a message
+        /// this cycle could not store, could not be asserted at all.</para>
         /// </summary>
-        private async Task RecordPollOutcomeAsync(
+        internal async Task RecordPollOutcomeAsync(
             ErpRfqAutomationContext context, EmailConfiguration config, MailboxPollOutcome outcome,
             CancellationToken cancellationToken)
         {
@@ -652,8 +659,19 @@ namespace ERP_RFQ_Automation.Services
             }
         }
 
+        /// <summary>
+        /// Deferral is not the only way work can still be on the server. A message that was
+        /// downloaded and could NOT be stored — the raw .eml write failed, the ingest insert was
+        /// rejected — is left unread and counted in
+        /// <see cref="MailboxPollOutcome.MessagesNotAcknowledged"/>, and it is exactly as
+        /// unhandled as one that was never fetched. The checkpoint used to move past it anyway:
+        /// within a day the window floor (<c>now - MinLookbackDays</c>) passed its sent date,
+        /// SENTSINCE stopped matching it, and it was gone — no ingest row, no assembly, nothing
+        /// to replay, and a mailbox reporting a successful poll on every cycle while it happened.
+        /// </summary>
         internal static bool ShouldAdvanceRecoveryPoint(MailboxPollOutcome outcome)
-            => outcome.Succeeded && outcome.MessagesDeferred == 0;
+            => outcome.Succeeded && outcome.MessagesDeferred == 0
+               && outcome.MessagesNotAcknowledged == 0;
 
         /// <summary>
         /// SEC-ING-01: takes the caller's ALREADY tenant-scoped provider instead of creating its
@@ -764,7 +782,9 @@ namespace ERP_RFQ_Automation.Services
                     return envelopeId is null || !ledger.Contains(envelopeId);
                 }).OrderBy(summary => summary.UniqueId.Id).ToList();
                 alreadyIngested = summaries.Count - unhandled.Count;
-                var batch = unhandled.Take(_maxNewMessagesPerMailboxAttempt).ToList();
+                var batch = SelectBoundedBatch(
+                    unhandled, summary => summary.Envelope?.MessageId,
+                    _maxNewMessagesPerMailboxAttempt);
                 var deferred = unhandled.Count - batch.Count;
                 if (deferred > 0)
                 {
@@ -956,6 +976,43 @@ namespace ERP_RFQ_Automation.Services
                 .ToListAsync(cancellationToken);
             return new HashSet<string>(known, StringComparer.Ordinal);
         }
+
+        /// <summary>
+        /// The messages this bounded attempt will download: oldest UID first, as before, but with
+        /// the envelopes the ledger can actually answer for taken FIRST.
+        ///
+        /// <para>The envelope stage and the ingest write do not share an identity, and cannot.
+        /// <see cref="ResolveIngestKey"/> falls back to a CONTENT hash whenever the Message-Id is
+        /// missing or longer than the 255-char key space, and no content exists before the
+        /// message is downloaded — so such an envelope is "unhandled" on every cycle for as long
+        /// as it stays in the window, however durably it was ingested. On its own that is merely
+        /// wasteful. Inside a bounded batch it is fatal: scanner and ERP-gateway mail routinely
+        /// arrives with the header stripped, and once <c>MaxNewMessagesPerMailboxAttempt</c> of
+        /// them sit in the window they are the oldest unhandled envelopes forever. They took
+        /// every slot, every cycle, and no new customer enquiry was ever downloaded again, while
+        /// the mailbox reported success and the health check stayed green.</para>
+        ///
+        /// <para>This is ORDERING, not exclusion. An envelope with no usable Message-Id may
+        /// equally be a real RFQ nobody has seen, so it keeps its place in the queue and still
+        /// counts as deferred work that holds the recovery checkpoint back; it simply cannot push
+        /// out a message whose absence from the ledger is PROOF of unhandled work. LINQ's OrderBy
+        /// is stable, so oldest-first survives inside each group.</para>
+        /// </summary>
+        internal static List<T> SelectBoundedBatch<T>(
+            IReadOnlyList<T> unhandled, Func<T, string?> envelopeMessageId, int maxNewMessages)
+            => unhandled
+                .OrderBy(candidate => LedgerCanAnswerFor(envelopeMessageId(candidate)) ? 0 : 1)
+                .Take(maxNewMessages)
+                .ToList();
+
+        /// <summary>
+        /// Whether the ingest ledger can be asked about this envelope at all. Mirrors
+        /// <see cref="ResolveIngestKey"/>: a message with no Message-Id, or with one too long for
+        /// the key space, is stored under a content hash no envelope can reproduce, so its
+        /// absence from the ledger is not evidence that it is unhandled.
+        /// </summary>
+        internal static bool LedgerCanAnswerFor(string? envelopeMessageId)
+            => NormalizeMessageId(envelopeMessageId) is { Length: <= 255 };
 
         private async Task<T> WithNetworkDeadlineAsync<T>(
             string operation,
@@ -1255,9 +1312,17 @@ namespace ERP_RFQ_Automation.Services
                 ingest = new EmailIngest
                 {
                     MessageId = messageId,
-                    EmailSubject = subject,
-                    FromEmail = from,
-                    ToEmail = to,
+                    // EmailSubject is varchar(500) and From/To are varchar(255); an RFC 5322
+                    // address header is bounded by nothing. PostgreSQL raises 22001 on overflow
+                    // rather than truncating, so one tender issued to a dozen vendors — roughly
+                    // 400 characters of To, and the most valuable mail this product receives —
+                    // failed this insert, left no row at all, and was re-downloaded and
+                    // re-failed on every cycle while the mailbox went on reporting success.
+                    // These columns are a denormalised copy for the triage screen; the raw .eml
+                    // keeps every header verbatim.
+                    EmailSubject = Truncate(subject, 500) ?? subject,
+                    FromEmail = ClipAddressHeader(message.From, 255),
+                    ToEmail = ClipAddressHeader(message.To, 255),
                     EmailConfigurationId = config.Id,
                     CreatedOn = DateTime.UtcNow,
                     ParseStatus = STATUS_PENDING,
@@ -1701,7 +1766,7 @@ namespace ERP_RFQ_Automation.Services
                 SenderPartyType = senderPartyType,
                 HasInReplyTo = !string.IsNullOrWhiteSpace(message.InReplyTo),
                 HasReferences = message.References?.Count > 0,
-                HasAttachments = message.Attachments.Any(),
+                HasAttachments = CarriesDocumentPart(message),
                 BodyEmptyAfterStrip = parts.BodyEmptyAfterStrip,
                 AutoSubmitted = Header(message, "Auto-Submitted"),
                 XAutoreply = Header(message, "X-Autoreply"),
@@ -1712,6 +1777,39 @@ namespace ERP_RFQ_Automation.Services
                 ContentClass = Header(message, "Content-Class")
             };
         }
+
+        /// <summary>
+        /// Whether the message carries a part a person would call a document.
+        ///
+        /// <para>Deliberately NOT <c>message.Attachments</c>. That is not the MIME tree — it
+        /// yields only entities whose Content-Disposition literally says "attachment" — so a PDF
+        /// sent <c>inline; filename="RFQ.pdf"</c>, a part carrying no disposition header at all,
+        /// and an embedded <c>message/rfc822</c> forward from Outlook or Gmail all answered
+        /// FALSE. The gate then read "the sender added no new words and attached nothing" and
+        /// stopped the single most common shape of a real RFQ in this segment as noise, while the
+        /// triage screen showed the attachment it had just said did not exist. The manifest
+        /// planner deleted the same idiom for the same reason; this asks the question its
+        /// <c>IsCandidatePart</c> asks, so the gate and the planner cannot disagree about whether
+        /// a message carries a document.</para>
+        ///
+        /// <para>A cid-referenced inline image small enough to be decoration under the planner's
+        /// own bar is deliberately not a document: a signature logo must not be the reason an
+        /// autoreply looks like an enquiry. Everything uncertain counts as a document, because a
+        /// wrongly-processed logo costs one empty extraction job and a wrongly-stopped enquiry
+        /// costs the deal.</para>
+        /// </summary>
+        private static bool CarriesDocumentPart(MimeMessage message)
+            => message.BodyParts.Any(entity => entity switch
+            {
+                MessagePart => true,
+                MimePart part =>
+                    !EmailInquiryManifestPlanner.IsIgnorableInlineAsset(part, EmailInquiryLimits.Default)
+                    && (part.ContentDisposition?.IsAttachment == true
+                        || !string.IsNullOrWhiteSpace(part.FileName)
+                        || (!part.ContentType.IsMimeType("text", "plain")
+                            && !part.ContentType.IsMimeType("text", "html"))),
+                _ => false
+            });
 
         private static string? Header(MimeMessage message, string name)
         {
@@ -2698,6 +2796,40 @@ namespace ERP_RFQ_Automation.Services
         {
             if (string.IsNullOrEmpty(value)) return null;
             return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
+        }
+        /// <summary>
+        /// An address header clipped to fit its column WITHOUT quietly shortening the recipient
+        /// list. Display names go first — the address is the fact this system acts on, the name
+        /// is decoration — and when whole addresses still have to go the stored value says how
+        /// many it is not showing, because "who else was invited to bid this" is exactly what a
+        /// person reading a stranded tender needs to know. Nothing is actually lost: the raw
+        /// .eml is retained and the triage surface replays the header verbatim.
+        /// </summary>
+        private string ClipAddressHeader(InternetAddressList? addresses, int maxLength)
+        {
+            var rendered = addresses?.ToString() ?? string.Empty;
+            if (rendered.Length <= maxLength) return rendered;
+
+            var mailboxes = (addresses?.Mailboxes ?? Enumerable.Empty<MailboxAddress>())
+                .Select(mailbox => mailbox.Address)
+                .Where(address => !string.IsNullOrWhiteSpace(address))
+                .ToList();
+            var bare = string.Join(", ", mailboxes);
+            if (bare.Length > 0 && bare.Length <= maxLength) return bare;
+
+            var kept = new List<string>();
+            foreach (var address in mailboxes)
+            {
+                var suffix = $" (+{mailboxes.Count - kept.Count - 1} more)";
+                var candidate = string.Join(", ", kept.Append(address));
+                if (candidate.Length + suffix.Length > maxLength) break;
+                kept.Add(address);
+            }
+            return kept.Count == 0
+                // A single address longer than the whole column: pathological, and there is
+                // nothing to count off. Clipped like every other overlong value in this file.
+                ? Truncate(rendered, maxLength)!
+                : string.Join(", ", kept) + $" (+{mailboxes.Count - kept.Count} more)";
         }
         // Shared with every other ingestion door — see RfqDateParser for why this is no longer
         // a per-service copy. This path previously had no sentinel-year guard, so an extracted
