@@ -1,391 +1,383 @@
 import { useMemo, useState } from 'react';
-import { Collapse } from '@mui/material';
+import { Alert, Box, Button, Chip, Stack, TextField, Typography } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import dayjs from 'dayjs';
-import {
-  Alert,
-  Box,
-  Button,
-  Chip,
-  CircularProgress,
-  Divider,
-  List,
-  ListItemButton,
-  ListItemText,
-  Paper,
-  Stack,
-  TextField,
-  Typography,
-} from '@mui/material';
-import {
-  ArrowForward as DrillDownIcon,
-  Refresh as RefreshIcon,
-  Schedule as FreshnessIcon,
-  Handshake as WonIcon,
-  TrendingUp as PipelineIcon,
-  Schedule as WaitingIcon,
-  MarkEmailReadOutlined as RequestsIcon,
-} from '@mui/icons-material';
-import dashboardService, { type PipelineStageDTO } from '../../api/services/dashboardService';
+import dayjs, { type Dayjs } from 'dayjs';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
+import dashboardService from '../../api/services/dashboardService';
 import { useAuth } from '../../context/AuthContext';
-import { formatMoney } from '../../utils/currency';
-import GrossMarginPanel from './GrossMarginPanel';
-import HeroTile from './executive/HeroTile';
-import FunnelPanel from './executive/FunnelPanel';
-import TrendPanel from './executive/TrendPanel';
-import WorkloadPanel from './executive/WorkloadPanel';
-import KpiCard, { drillDownRoute } from './executive/KpiCard';
+import { presentableErrorMessage } from '../../utils/apiErrors';
+import VerdictBand from './glance/VerdictBand';
+import ClosingBand from './glance/ClosingBand';
+import TodayBand from './glance/TodayBand';
+import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
+import KpiCard from './executive/KpiCard';
+import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
 
 /**
- * The executive view.
+ * The dashboard, read top to bottom as one sentence.
  *
- * One screen for the person who reads the numbers rather than works a single deal (owner
- * decision, 2026-09-05). It is laid out in the order a director scans:
+ *   0  whose numbers          the scope strip below the title
+ *   1  did we win             VerdictBand
+ *   2  what's out there       NOT BUILT — see the seam below
+ *   3  why we lost            NOT BUILT — see the seam below
+ *   4  what's closing on us   ClosingBand
+ *   5  what needs you today   TodayBand
+ *   6  the last six months    SixMonthsBand
  *
- *   1. Four figures at a glance — won, weighted pipeline, waiting on the customer, requests
- *      received — each a pressable key that opens the records behind it, each with its
- *      denominator on its face and a sparkline where a series exists.
- *   2. The funnel and six months of volume against value.
- *   3. Gross margin with its sample, and who is carrying what (manager tier only).
- *   4. The verified Release 01 snapshot — the evidence row — and what needs a decision.
+ * One screen for three audiences. A representative, their manager and a director all get the same
+ * bands in the same order with the same marks; what differs is the DATA, which every endpoint
+ * scopes server-side, and each band prints the scope it was given on its own seal. That is why the
+ * rail row is no longer manager-only (navCatalog.tsx): there is nothing here to keep from a rep,
+ * and the route was admitting them by URL anyway.
  *
- * Nothing on this screen is computed here. Every figure is a server aggregate with its own scope
- * and freshness, and a figure the server cannot state is shown as "not available" with the
- * server's reason, never as zero and never as a dash. The panels do not fetch through one
- * another: a failed funnel does not blank the margin.
+ * Every band fetches on its own query and fails on its own. There is no composite endpoint and no
+ * shared "load the dashboard" call, so a band that cannot load shows its own Alert and leaves its
+ * neighbours' figures on the screen — asserted in DashboardPage.test.tsx rather than left as an
+ * intention. Nothing is computed here: this file passes a window and renders bands, and the only
+ * arithmetic in it is turning a chosen preset into two dates.
  */
-const stageRoute = (stage: PipelineStageDTO): string => {
-  if (stage.key === 'leads') return '/procurement/leads';
-  if (stage.key === 'accepted') return '/procurement/leads';
-  if (stage.key === 'quoted') return '/sales/quotes';
-  return '/sales/quotes';
+type PeriodKey = '30d' | '90d' | 'ytd' | 'custom';
+
+const PERIOD_CHOICES: readonly { key: PeriodKey; label: string }[] = Object.freeze([
+  { key: '30d', label: 'Last 30 days' },
+  { key: '90d', label: 'Last 90 days' },
+  { key: 'ytd', label: 'This year' },
+  { key: 'custom', label: 'Custom…' },
+]);
+
+/**
+ * Both ends inclusive, matching how the endpoints read `from`/`to` and how the kit's `priorWindow`
+ * derives the comparison period — so "last 30 days" is today and the twenty-nine before it, and
+ * the ghost row under band 1 is exactly the thirty days before that with no shared day.
+ */
+const presetRange = (key: Exclude<PeriodKey, 'custom'>, today: Dayjs): GlanceWindow => {
+  const to = today.format('YYYY-MM-DD');
+  if (key === 'ytd') return { from: today.startOf('year').format('YYYY-MM-DD'), to };
+  return { from: today.subtract((key === '90d' ? 90 : 30) - 1, 'day').format('YYYY-MM-DD'), to };
 };
 
-const scopeWords = (scope: { scope: string; accountTeamIds?: number[] } | undefined): string | null => {
-  if (!scope) return null;
-  if (scope.scope === 'tenant') return 'Company-wide';
-  if (scope.scope === 'managed_scope') return `Your managed scope — ${scope.accountTeamIds?.length ?? 0} account team(s)`;
-  if (scope.scope === 'assigned_accounts') return `Your assigned accounts — ${scope.accountTeamIds?.length ?? 0} account team(s)`;
-  return scope.scope;
+const isValidWindow = (from: string, to: string): boolean => {
+  const start = dayjs(from);
+  const end = dayjs(to);
+  return start.isValid() && end.isValid() && !start.startOf('day').isAfter(end.startOf('day'));
+};
+
+/**
+ * What each scope word means, in one clause a salesperson does not have to be taught. The word
+ * itself is the server's; the clause after it only says what that word covers, so the strip never
+ * asserts anything the server did not.
+ */
+const SCOPE_GLOSS: Readonly<Record<GlanceScopeWords, string>> = Object.freeze({
+  'Company-wide': 'every account in this workspace',
+  'Your managed scope': 'the accounts your teams own',
+  'Your assigned accounts': 'only the accounts assigned to you',
+});
+
+const day = (value: string): string => {
+  const parsed = dayjs(value);
+  return parsed.isValid() ? parsed.format('D MMM YYYY') : value;
 };
 
 export default function DashboardPage() {
   const { hasPermission, userData } = useAuth();
   const navigate = useNavigate();
-  const initialTo = useMemo(() => dayjs().startOf('day').format('YYYY-MM-DD'), []);
-  const initialFrom = useMemo(() => dayjs(initialTo).subtract(30, 'day').format('YYYY-MM-DD'), [initialTo]);
-  const [from, setFrom] = useState(initialFrom);
-  const [to, setTo] = useState(initialTo);
-  const invalidWindow = !from || !to || !dayjs(from).isBefore(dayjs(to));
-  const managerTier = Boolean(userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank);
-  const businessUnitId = userData.businessUnitId;
+  const today = useMemo(() => dayjs().startOf('day'), []);
 
-  const release = useQuery({
-    queryKey: ['dashboard', 'release-01', from, to],
-    queryFn: () => dashboardService.getRelease01({ from, to }),
-    refetchInterval: 60_000,
+  const [period, setPeriod] = useState<PeriodKey>('30d');
+  const [applied, setApplied] = useState<GlanceWindow>(() => presetRange('30d', today));
+  const [customFrom, setCustomFrom] = useState(applied.from);
+  const [customTo, setCustomTo] = useState(applied.to);
+  const customValid = isValidWindow(customFrom, customTo);
+
+  const choosePeriod = (key: PeriodKey) => {
+    setPeriod(key);
+    if (key === 'custom') return;
+    const range = presetRange(key, today);
+    setApplied(range);
+    // Custom opens on whatever is currently on screen rather than on a stale pair of dates, so the
+    // first thing a reader sees in the fields is the window they are already looking at.
+    setCustomFrom(range.from);
+    setCustomTo(range.to);
+  };
+
+  // A half-typed date is not a window. The bands keep the last window that was actually valid, and
+  // the strip says so, rather than being sent to refetch on every keystroke of "2026-0…".
+  const changeCustom = (next: GlanceWindow) => {
+    setCustomFrom(next.from);
+    setCustomTo(next.to);
+    if (isValidWindow(next.from, next.to)) setApplied(next);
+  };
+
+  /**
+   * Whose numbers, from the server that states it.
+   *
+   * Deliberately the same query key and function band 1 uses, so react-query serves both from one
+   * cache entry and one request. That is not a shared fetch in the sense rule 5 forbids: nothing
+   * on this screen waits on it, and when it fails the strip says the scope is not stated while
+   * band 1 shows its own Alert — no other band notices.
+   */
+  const scope = useQuery({
+    queryKey: ['glance', 'performance', applied.from, applied.to],
+    queryFn: () => commercialIntelligenceService.getPerformance(applied.from, applied.to),
     retry: 1,
-    enabled: !invalidWindow,
+    meta: { silenceGlobalError: true, errorLabel: 'whose numbers these are' },
   });
-  const pipeline = useQuery({
-    queryKey: ['dashboard', 'pipeline-analytics'],
-    queryFn: dashboardService.getPipelineAnalytics,
-    refetchInterval: 60_000,
-    retry: 1,
-  });
-  const workload = useQuery({
-    queryKey: ['dashboard', 'team-workload'],
-    queryFn: dashboardService.getTeamWorkload,
-    refetchInterval: 60_000,
-    enabled: managerTier,
-    retry: (failureCount, error: any) => error?.response?.status !== 403 && failureCount < 2,
-  });
-  // The tenant's six-month series (requests priced, order value). A separate, older aggregate:
-  // it feeds the trend chart and the sparklines only, never a headline figure.
+  const words = scopeWords(scope.data?.scope);
+
+  /**
+   * Band 6's series. It is fetched here because `SixMonthsBand` is presentational — it draws the
+   * points it is handed — but it is still its own query with its own key and its own failure, and
+   * no other band reads it.
+   *
+   * `/api/Dashboard/{businessUnitId}` addresses a business unit rather than the caller, so with no
+   * unit on the sign-in there is no request to make. That is stated as an inability to load, with
+   * the reason, and no Retry: retrying would ask the same unanswerable question.
+   */
+  const businessUnitId = userData.businessUnitId;
+  const canRequestSeries = typeof businessUnitId === 'number' && businessUnitId > 0;
   const series = useQuery({
-    queryKey: ['dashboard', 'monthly-series', businessUnitId],
+    queryKey: ['glance', 'six-months', businessUnitId],
     queryFn: () => dashboardService.getDashboard(businessUnitId as number),
-    enabled: typeof businessUnitId === 'number' && businessUnitId > 0,
+    enabled: canRequestSeries,
     staleTime: 5 * 60_000,
     retry: 1,
+    meta: { silenceGlobalError: true, errorLabel: 'the last six months' },
   });
-  const salesToday = useQuery({
-    queryKey: ['commercial-intelligence', 'sales-today'],
-    queryFn: commercialIntelligenceService.getSalesToday,
+  const points: SixMonthPoint[] | null = series.data ? series.data.volumeTrend ?? [] : null;
+  const seriesError = !canRequestSeries
+    ? 'This sign-in carries no business unit, so the six-month history cannot be requested for it.'
+    : series.isError
+      ? presentableErrorMessage(series.error, undefined, 'list')
+      : null;
+
+  /**
+   * The Release 01 snapshot, shared with VerdictBand by key so react-query serves one request. Only
+   * the rows the server marks available are ever rendered as figures; the rest are counted, because
+   * a KPI that can never become available is not a pending figure, it is a definition.
+   */
+  const release = useQuery({
+    queryKey: ['glance', 'release-01', applied.from, applied.to],
+    queryFn: () => dashboardService.getRelease01({ from: applied.from, to: applied.to }),
     retry: 1,
+    meta: { silenceGlobalError: true, errorLabel: 'the verified snapshot' },
   });
+  const verified = (release.data?.kpis ?? []).filter((k) => k.state === 'available' && k.value !== null);
+  const notYetMeasurable = (release.data?.kpis ?? []).length - verified.length;
 
-  const data = release.data;
-  const generatedAt = data?.generatedAt ? dayjs(data.generatedAt) : null;
-  const funnel = pipeline.data;
-  const won = funnel?.funnel.find((s) => s.key === 'won');
-  const leadsReceived = data?.kpis.find((k) => k.key === 'leads_received');
-  const evidenceKpis = data?.kpis.filter((k) => k.key !== 'leads_received') ?? [];
-  const monthly = series.data?.volumeTrend ?? [];
-  const valueSeries = monthly.map((m) => m.value);
-  const countSeries = monthly.map((m) => m.count);
-  const workloadForbidden = (workload.error as any)?.response?.status === 403;
-  const funnelForbidden = (pipeline.error as any)?.response?.status === 403;
-  const funnelDown = pipeline.isLoading ? 'Loading…' : funnelForbidden ? 'Available to managers and administrators.' : pipeline.isError ? 'The funnel could not be loaded.' : undefined;
-  const measurable = evidenceKpis.filter((k) => k.state === 'available');
-  const notYet = evidenceKpis.filter((k) => k.state !== 'available');
-  const [showNotYet, setShowNotYet] = useState(false);
-  const attention = salesToday.data?.attentionItems?.slice(0, 5) ?? [];
-
-  const refreshAll = () => {
-    void release.refetch();
-    void pipeline.refetch();
-    if (managerTier) void workload.refetch();
-    void series.refetch();
-    void salesToday.refetch();
-  };
-  const busy = release.isFetching || pipeline.isFetching || series.isFetching;
+  const scopeSentence = (() => {
+    if (words) return { words, gloss: SCOPE_GLOSS[words] };
+    if (scope.isLoading) return { words: 'Working out whose numbers these are…', gloss: null };
+    if (scope.isError) return { words: SCOPE_UNRESOLVED, gloss: presentableErrorMessage(scope.error, undefined, 'list') };
+    return { words: SCOPE_UNRESOLVED, gloss: 'The server did not name a scope for these figures.' };
+  })();
 
   return (
-    <Box sx={{ maxWidth: 1440, mx: 'auto', p: { xs: 1, sm: 2, md: 3 } }}>
-      <Stack
-        direction={{ xs: 'column', md: 'row' }}
-        spacing={2}
-        sx={{ alignItems: { md: 'flex-end' }, justifyContent: 'space-between', mb: 2.5 }}
+    <Box sx={{ maxWidth: 1280, mx: 'auto', p: { xs: 1, sm: 2, md: 3 } }}>
+      <Typography
+        variant="h4"
+        component="h1"
+        sx={{ fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em' }}
+      >
+        Dashboard
+      </Typography>
+
+      {/*
+        0 · Whose numbers, and over what period.
+
+        A strip, not a card: no glass, no rim, no elevation. Everything below it is a band, and if
+        this looked like one it would read as a figure. The scope on the left is the server's own
+        word in plain text — never a control, because the reader cannot choose their scope and a
+        thing that looks pressable says they can. The period on the right is chips rather than two
+        date inputs: picking "Last 90 days" is one press, and typing two ISO dates to see a quarter
+        was a day-one defect on the screen this replaces.
+      */}
+      <Box
+        component="section"
+        aria-label="Whose numbers, and over what period"
+        sx={{
+          minHeight: 56,
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 1.5,
+          py: 1,
+        }}
       >
         <Box sx={{ minWidth: 0 }}>
-          <Typography
-            variant="h4"
-            component="h1"
-            sx={{ fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em' }}
-          >
-            Executive view
+          <Typography data-testid="scope-sentence" variant="body2" sx={{ fontWeight: 700 }}>
+            {scopeSentence.words}
+            {scopeSentence.gloss && (
+              <Box component="span" sx={{ fontWeight: 400, color: 'text.secondary' }}>
+                {` — ${scopeSentence.gloss}`}
+              </Box>
+            )}
           </Typography>
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.5, flexWrap: 'wrap', gap: 0.5 }}>
-            {data?.roleScope && <Chip size="small" variant="outlined" label={scopeWords(data.roleScope)} />}
-            <Chip size="small" variant="outlined" label={data?.definitionVersion ?? 'release-01'} />
-            <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', color: 'text.secondary' }}>
-              <FreshnessIcon sx={{ fontSize: 16 }} />
-              <Typography variant="caption">
-                {generatedAt?.isValid() ? `Generated ${generatedAt.format('DD MMM YYYY, HH:mm')}` : 'Awaiting a verified snapshot'}
-              </Typography>
-            </Stack>
-          </Stack>
+          {/*
+            This word comes from ONE aggregate (/performance) and is not a fact about the whole
+            screen: the six-month history is company-wide for every reader, and the deadline board
+            publishes no scope word at all. Saying so here is the difference between a heading and
+            a claim, and it points at the seal that carries the truth band by band.
+          */}
+          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
+            Each band states its own scope and freshness on its seal.
+          </Typography>
         </Box>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
+
+        <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
+          {/*
+            Which bands these dates actually move. A period control that silently governs one band
+            out of four is the same lie as one that claims to govern all of them, so the strip names
+            the band by the title the reader can see, and the seals repeat it band by band.
+          */}
+          <Typography
+            variant="caption"
+            title="Steps 4, 5 and 6 have their own fixed windows, set by the server."
+            sx={{
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+              fontSize: 11,
+              fontWeight: 700,
+              color: 'text.secondary',
+            }}
+          >
+            Dates govern · Did we win
+          </Typography>
+          <Stack direction="row" spacing={0.75} role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
+            {PERIOD_CHOICES.map((choice) => (
+              <Chip
+                key={choice.key}
+                label={choice.label}
+                size="small"
+                clickable
+                aria-pressed={period === choice.key}
+                variant={period === choice.key ? 'filled' : 'outlined'}
+                color={period === choice.key ? 'primary' : 'default'}
+                onClick={() => choosePeriod(choice.key)}
+                sx={{ fontWeight: 700 }}
+              />
+            ))}
+          </Stack>
+        </Stack>
+      </Box>
+
+      {period === 'custom' && (
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5, alignItems: { sm: 'center' } }}>
           <TextField
             type="date"
             label="From"
             size="small"
-            value={from}
-            onChange={(event) => setFrom(event.target.value)}
+            value={customFrom}
+            onChange={(event) => changeCustom({ from: event.target.value, to: customTo })}
             slotProps={{ inputLabel: { shrink: true } }}
           />
           <TextField
             type="date"
             label="To"
             size="small"
-            value={to}
-            onChange={(event) => setTo(event.target.value)}
-            error={invalidWindow}
+            value={customTo}
+            error={!customValid}
+            onChange={(event) => changeCustom({ from: customFrom, to: event.target.value })}
             slotProps={{ inputLabel: { shrink: true } }}
           />
-          <Button
-            variant="outlined"
-            startIcon={busy ? <CircularProgress size={16} aria-label="Refreshing" /> : <RefreshIcon />}
-            onClick={refreshAll}
-            disabled={busy || invalidWindow}
-          >
-            Refresh
-          </Button>
+          <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+            {`Showing ${day(applied.from)} – ${day(applied.to)}`}
+          </Typography>
         </Stack>
-      </Stack>
-
-      {invalidWindow && <Alert severity="warning" sx={{ mb: 2 }}>The start date must be earlier than the end date.</Alert>}
-
-      {/* 1. At a glance */}
-      <Box
-        component="section"
-        aria-label="At a glance"
-        sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}
-      >
-        <HeroTile
-          index={0}
-          label="Won"
-          icon={<WonIcon />}
-          value={pipeline.isLoading ? null : won ? (won.value !== null ? formatMoney(won.value, won.valueCurrency) : won.count.toLocaleString('en-US')) : null}
-          basis={won ? `${won.count.toLocaleString('en-US')} won quote${won.count === 1 ? '' : 's'}, all time${won.value === null && won.valueUnavailableReason ? ` · ${won.valueUnavailableReason}` : ''}` : 'Won quotes, all time'}
-          unavailableReason={funnelDown}
-          series={valueSeries.some((v) => v > 0) ? valueSeries : null}
-          seriesLabel="Order value by month"
-          definition="Quotes the customer accepted, valued in the tenant's base currency when every one can be converted."
-          onOpen={() => navigate('/sales/quotes')}
-          openLabel="Quotes"
-        />
-        <HeroTile
-          index={1}
-          label="Weighted pipeline"
-          icon={<PipelineIcon />}
-          value={funnel ? (funnel.weightedForecast !== null ? formatMoney(funnel.weightedForecast, funnel.forecastCurrency) : null) : null}
-          basis={funnel ? `${(funnel.awaitingResponseQuotes + funnel.respondedQuotes).toLocaleString('en-US')} open quotes, weighted by stage` : 'Open quotes, weighted by stage'}
-          unavailableReason={funnelDown ?? funnel?.forecastUnavailableReason ?? undefined}
-          definition="Open quote value multiplied by the likelihood of each stage. Not a forecast of cash."
-          onOpen={() => navigate('/sales/quotes')}
-          openLabel="Quotes"
-        />
-        <HeroTile
-          index={2}
-          label="Waiting on the customer"
-          icon={<WaitingIcon />}
-          value={funnel ? funnel.awaitingResponseQuotes.toLocaleString('en-US') : null}
-          basis={funnel ? (funnel.awaitingResponseValue !== null ? `${formatMoney(funnel.awaitingResponseValue, funnel.forecastCurrency)} on the table` : 'Sent quotes with no answer yet') : 'Sent quotes with no answer yet'}
-          unavailableReason={funnelDown}
-          definition="Quotes sent and neither accepted, declined nor expired."
-          onOpen={() => navigate('/sales/quotes?state=sent')}
-          openLabel="Sent quotes"
-        />
-        <HeroTile
-          index={3}
-          label="Requests received"
-          icon={<RequestsIcon />}
-          value={leadsReceived && leadsReceived.state === 'available' && leadsReceived.value !== null ? leadsReceived.value.toLocaleString('en-US') : null}
-          basis={`${dayjs(from).format('D MMM')} – ${dayjs(to).format('D MMM YYYY')}${data?.roleScope ? ` · ${scopeWords(data.roleScope)}` : ''}`}
-          unavailableReason={release.isLoading ? 'Loading…' : leadsReceived?.insufficientDataReason ?? (release.isError ? 'The verified snapshot is unavailable.' : undefined)}
-          series={countSeries.some((v) => v > 0) ? countSeries : null}
-          seriesLabel="Requests priced by month"
-          definition={leadsReceived?.definition}
-          onOpen={() => navigate('/procurement/leads')}
-          openLabel="Leads"
-        />
-      </Box>
-
-      {/* 2. The funnel, and volume against value */}
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: '7fr 5fr' }, gap: 2, mt: 2 }}>
-        <FunnelPanel
-          data={funnel}
-          loading={pipeline.isLoading}
-          error={pipeline.isError && !funnelForbidden}
-          forbidden={funnelForbidden}
-          onStage={(stage) => navigate(stageRoute(stage))}
-        />
-        <TrendPanel
-          trend={monthly}
-          loading={series.isLoading}
-          unavailable={series.isError ? 'The monthly series could not be read for this workspace.' : null}
-          currencyCode={funnel?.forecastCurrency ?? null}
-        />
-      </Box>
-
-      {/* 3. The money and the team — manager tier */}
-      {managerTier && !invalidWindow && (
-        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: workloadForbidden ? '1fr' : '1fr 1fr' }, gap: 2, mt: 2 }}>
-          <GrossMarginPanel from={from} to={to} />
-          <WorkloadPanel
-            data={workload.data}
-            loading={workload.isLoading}
-            forbidden={workloadForbidden}
-            error={workload.isError && !workloadForbidden}
-            onOpen={() => navigate('/dashboard/team')}
-          />
-        </Box>
       )}
-
-      {/* 4. Evidence and decisions */}
-      {release.isError && (
-        <Alert
-          severity="error"
-          action={<Button color="inherit" size="small" onClick={() => release.refetch()}>Retry</Button>}
-          sx={{ mt: 3 }}
-        >
-          The verified Release 01 dashboard snapshot is unavailable. No legacy totals are shown in its place.
+      {period === 'custom' && !customValid && (
+        <Alert severity="warning" sx={{ mb: 1.5 }}>
+          {`These dates are not being used: the start date must be on or before the end date. The bands still show ${day(applied.from)} – ${day(applied.to)}.`}
         </Alert>
       )}
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: attention.length ? '8fr 4fr' : '1fr' }, gap: 2, mt: 3 }}>
-        <Box component="section" aria-label="Verified performance">
-          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Verified performance</Typography>
-          {release.isLoading ? (
-            <Box sx={{ minHeight: 160, display: 'grid', placeItems: 'center' }}><CircularProgress aria-label="Loading dashboard" /></Box>
-          ) : evidenceKpis.length ? (
-            <>
-              {measurable.length > 0 ? (
-                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(3, 1fr)' }, gap: 2 }}>
-                  {measurable.map((kpi, index) => <KpiCard key={kpi.key} kpi={kpi} index={index} />)}
-                </Box>
-              ) : (
-                <Alert severity="info">Nothing in the verified snapshot can be measured yet for this window and scope.</Alert>
-              )}
-              {/* The figures the snapshot cannot yet state are one line, not a wall of grey cards:
-                  the reason each is unmeasurable is worth reading once, not at every glance. */}
-              {notYet.length > 0 && (
-                <Box sx={{ mt: 1.5 }}>
-                  <Button size="small" onClick={() => setShowNotYet((v) => !v)} sx={{ fontWeight: 700, px: 1 }}>
-                    {showNotYet ? 'Hide' : 'Show'} {notYet.length} not yet measurable
-                  </Button>
-                  <Collapse in={showNotYet}>
-                    <Box component="dl" sx={{ mt: 1, mb: 0, display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'auto 1fr' }, columnGap: 2, rowGap: 0.75 }}>
-                      {notYet.map((kpi) => (
-                        <Box key={kpi.key} sx={{ display: 'contents' }}>
-                          <Typography component="dt" variant="body2" sx={{ fontWeight: 700 }}>{kpi.label}</Typography>
-                          <Typography component="dd" variant="body2" sx={{ m: 0, color: 'text.secondary' }}>{kpi.insufficientDataReason ?? kpi.definition}</Typography>
-                        </Box>
-                      ))}
-                    </Box>
-                  </Collapse>
-                </Box>
-              )}
-            </>
-          ) : !release.isError ? (
-            <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
-          ) : null}
-        </Box>
-        {attention.length > 0 && (
-          <Paper component="section" aria-label="Needs a decision" variant="outlined" className="nx-glass" sx={{ p: { xs: 1.5, sm: 2 }, borderRadius: 3, alignSelf: 'start' }}>
-            <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>Needs a decision</Typography>
-            <List dense disablePadding sx={{ mt: 0.5 }}>
-              {attention.map((item) => {
-                const route = drillDownRoute(item.recordType.toLowerCase(), item.recordId);
-                return (
-                  <ListItemButton
-                    key={item.id}
-                    disabled={!route}
-                    onClick={() => route && navigate(route)}
-                    sx={{ borderRadius: 2, px: 1 }}
-                  >
-                    <ListItemText
-                      primary={`${item.reference}${item.customerName ? ` · ${item.customerName}` : ''}`}
-                      secondary={`${item.reason}${item.dueAt ? ` · due ${dayjs(item.dueAt).format('D MMM')}` : ''}${item.ownerName ? ` · ${item.ownerName}` : ''}`}
-                      slotProps={{ primary: { sx: { fontWeight: 700, fontSize: 14 } }, secondary: { sx: { fontSize: 12 } } }}
-                    />
-                    <DrillDownIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-                  </ListItemButton>
-                );
-              })}
-            </List>
-          </Paper>
-        )}
-      </Box>
 
-      <Divider sx={{ my: 3 }} />
-      <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1 }}>
-        <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/deadlines')} sx={{ fontWeight: 800 }}>
-          Deadline board
-        </Button>
-        {managerTier && (
-          <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/brand-demand')} sx={{ fontWeight: 800 }}>
-            Brand demand
+      <Stack spacing={2}>
+        <VerdictBand from={applied.from} to={applied.to} index={1} />
+
+        {/*
+          SEAM — bands 2 and 3 belong HERE, in this order, and are not in this pass.
+
+            2 · "What's out there, and where it stops" — the funnel. It needs a server aggregate
+                that states each stage's count with its own scope and freshness; the existing
+                /pipeline-analytics carries `weightedForecast`, which is removed from this screen
+                (an unmeasured 0.3/0.5 heuristic presented as instruction), and no stage-level
+                figure on it is scoped per reader.
+            3 · "Why we lost" — loss reasons. There is no aggregate at all today: /performance
+                publishes won/lost/decided and nothing about cause.
+
+          Nothing is rendered in their place ON PURPOSE. A greyed card labelled "coming soon" reads
+          as a band that failed to load, which is exactly the state rule 3 spends its effort making
+          distinguishable. When the aggregates exist, the bands drop in at this point and the
+          numerals on steps 4, 5 and 6 already leave room for them.
+        */}
+
+        <ClosingBand step="4" index={2} />
+
+        <TodayBand index={3} />
+
+        <SixMonthsBand
+          points={points}
+          loading={canRequestSeries && series.isLoading}
+          error={seriesError}
+          onRetry={canRequestSeries ? () => void series.refetch() : undefined}
+          index={4}
+        />
+      </Stack>
+
+      {/*
+        The measured half of the Release 01 snapshot, and only that half.
+
+        Fourteen of its eighteen KPIs are hardcoded insufficient and can never become available — the
+        win rate's own reason says quote outcomes bypass the governed event spine — so rendering all
+        eighteen as cards is how a screen becomes furniture by week three. But four CAN be measured,
+        they are scoped per reader and windowed by the period control above, and dropping them with
+        the other fourteen would have quietly removed the only governed figures on the page. So the
+        available ones are stated, the rest are counted in a sentence, and neither pretends to be the
+        other. This shares VerdictBand's query key, so it costs no second request.
+
+        KpiCard rather than a plainer figure on purpose: it carries the drill-down to the exact records
+        a KPI counted, and the rule this whole screen is held to is that a figure which cannot open
+        its own rows does not ship.
+      */}
+      {verified.length > 0 && (
+        <Box sx={{ mt: 3 }}>
+          <Typography variant="h6" component="h2" sx={{ fontWeight: 700, fontSize: 15 }}>
+            Verified performance
+          </Typography>
+          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 2, mt: 1 }}>
+            {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
+          </Stack>
+          {notYetMeasurable > 0 && (
+            <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 1 }}>
+              {notYetMeasurable} further measures are defined but not yet reportable. They are listed
+              on the performance screen with the server&apos;s reason for each.
+            </Typography>
+          )}
+        </Box>
+      )}
+
+      {/*
+        The screens behind the bands, each shown only when the reader's own module grant would let
+        the route open — a link that lands on "Access denied" is worse than no link.
+      */}
+      <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1, mt: 2.5 }}>
+        {hasPermission('Leads') && (
+          <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={{ fontWeight: 700 }}>
+            Every deadline in full
           </Button>
         )}
-        <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/sales/performance')} sx={{ fontWeight: 800 }}>
-          Performance by rep
-        </Button>
+        {hasPermission('Dashboard') && (
+          <Button size="small" onClick={() => navigate('/sales/performance')} sx={{ fontWeight: 700 }}>
+            Performance by rep
+          </Button>
+        )}
         {hasPermission('Leads') && (
-          <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/procurement/extraction/review')} sx={{ fontWeight: 800 }}>
-            Extraction review queue
+          <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={{ fontWeight: 700 }}>
+            Documents to check
           </Button>
         )}
       </Stack>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
-        Nexora does not publish an extraction accuracy figure. Accuracy is measured from your reviewers' own corrections and
-        published per field once enough approved documents exist for your tenant. Until then every extraction is reviewed by your
-        team.
-      </Typography>
     </Box>
   );
 }

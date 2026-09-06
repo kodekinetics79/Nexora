@@ -40,7 +40,14 @@ export interface DashboardStatsDTO {
 export interface MonthlyTrendDTO {
   month: string;
   count: number;
-  value: number;
+  /**
+   * Null — not zero — when the business unit has no single active base currency, which is the
+   * default state of a new tenant. A reader that treats null as 0 draws a line along the axis and
+   * calls it a measurement; treat it as "the server could not state this" and show the reason.
+   */
+  value: number | null;
+  valueCurrency?: string | null;
+  valueUnavailableReason?: string | null;
 }
 
 export interface CategoryDistributionDTO {
@@ -320,6 +327,58 @@ export interface BrandDemandParams {
   to?: string;
 }
 
+// ─── GET /api/dashboard/deadline-board ──────────────────────────────────────
+// Forward-looking workload: every open enquiry the caller may see, bucketed by how many days
+// are left until its bid closing date, with the line-item count each bucket carries.
+//
+// These interfaces MUST mirror DeadlineBoardDTO / DeadlineBucketDTO / DeadlineLeadDTO in
+// Backend/.../DTOs/Dashboard/PilotAnalyticsDTOs.cs. The endpoint has been live since the pilot
+// analytics work but had no client here: DeadlineBoardPage bucketises leadService.getAll() in
+// the browser instead, which is why it caps at 500 rows and why its buckets are its own. This
+// method exists so a screen can read the SERVER's buckets, over the server's own scope.
+//
+// The window is fixed by the endpoint: it takes no from/to, only how many lead rows to return
+// alongside the counts. Callers that draw the buckets never need the rows.
+
+export interface DeadlineBucketDTO {
+  /** Stable key, in server order: overdue | today | days_1_3 | days_4_7 | days_8_30 | later | unknown. */
+  key: string;
+  label: string;
+  /** Open leads in this bucket. */
+  leads: number;
+  /** Line items across those leads — the work the bucket actually represents. */
+  lineItems: number;
+}
+
+export interface DeadlineLeadDTO {
+  leadId: number;
+  rfqno: string | null;
+  buyersName: string | null;
+  bidClosingDate: string | null;
+  /** Whole days to the deadline; null when the enquiry states no usable closing date. */
+  daysLeft: number | null;
+  bucket: string;
+  lineItems: number;
+  awaitingReview: boolean;
+  lateIngested: boolean;
+}
+
+export interface DeadlineBoardDTO {
+  generatedAt: string;
+  openLeads: number;
+  openLineItems: number;
+  /** Open leads carrying no usable closing date — a data gap, not a comfortable deadline. */
+  leadsWithoutClosingDate: number;
+  /**
+   * Open leads that reached Nexora AFTER their own closing date. They sit in the overdue bucket
+   * but are not a handling failure, so the count is published separately rather than inferred.
+   */
+  lateIngestedExcludedLeads: number;
+  buckets: DeadlineBucketDTO[];
+  /** Most urgent first, capped by `maxLeads`. Undated leads sort last but are never hidden. */
+  leads: DeadlineLeadDTO[];
+}
+
 // ─── Service ────────────────────────────────────────────────────────────────
 
 const dashboardService = {
@@ -407,6 +466,17 @@ const dashboardService = {
       }
       throw error;
     }
+  },
+
+  /**
+   * Open enquiries bucketed by time left to their bid closing date, scoped server-side to the
+   * caller's account team. `maxLeads` caps only the `leads` array; the bucket counts are always
+   * over every open enquiry in scope, so a caller drawing only the buckets can ask for the
+   * smallest page and still receive complete figures.
+   */
+  getDeadlineBoard: async (params: { maxLeads?: number } = {}): Promise<DeadlineBoardDTO> => {
+    const r = await axiosInstance.get<DeadlineBoardDTO>('/api/dashboard/deadline-board', { params });
+    return { ...r.data, buckets: r.data.buckets ?? [], leads: r.data.leads ?? [] };
   },
 };
 
