@@ -225,8 +225,23 @@ export interface PipelineStageDTO {
   valueUnavailableReason: string | null;
 }
 
+/**
+ * Why one group of quotes was lost.
+ *
+ * `group` is the field the loss band draws from, and it is a fact about how the loss was learned
+ * rather than about the market: 'customer_stated' is a reason the buyer actually gave us, and
+ * 'never_established' covers everything we never found out — no reason recorded, no response, an
+ * auto-expiry. They must never be ranked together in one list, because an auto-expiry at the top
+ * of a single ranking reads as the market rejecting us when it means nobody followed up.
+ *
+ * `code` is the stable key: 'UNRECORDED' where the quote carries no reason at all, 'REASON_{id}'
+ * where the catalogue row behind it has been deleted, and otherwise the tenant's own SetupCode.
+ * `reason` is the display string and changes with the tenant's wording, so nothing is keyed on it.
+ */
 export interface PipelineLossReasonDTO {
+  code: string;
   reason: string;
+  group: 'customer_stated' | 'never_established' | string;
   count: number;
   value: number | null;
   valueCurrency: string | null;
@@ -235,6 +250,7 @@ export interface PipelineLossReasonDTO {
 
 export interface PipelineAnalyticsDTO {
   funnel: PipelineStageDTO[];
+  /** Ordered by count descending across BOTH groups; a reader groups them, never a ranking. */
   lossReasons: PipelineLossReasonDTO[];
   weightedForecast: number | null;
   forecastCurrency: string | null;
@@ -243,9 +259,37 @@ export interface PipelineAnalyticsDTO {
   awaitingResponseValue: number | null;
   respondedQuotes: number;
   respondedValue: number | null;
-  /** 'all_time' — this funnel has never been date-filtered, and now says so. */
-  funnelScope: string;
+  /**
+   * 'window' when the endpoint was given a from/to pair and applied it, 'all_time' when it was
+   * not. This is what tells a band whether the screen's period control actually reached it, so
+   * the seal is drawn from this rather than from whether the caller passed dates.
+   */
+  funnelScope: 'all_time' | 'window' | string;
+  /** The window the server actually used — exclusive at `windowTo`. Both null on 'all_time'. */
+  windowFrom: string | null;
+  windowTo: string | null;
+  /** Same three tiers, same shape, as `Release01DashboardDTO.roleScope`. */
+  roleScope: {
+    scope: 'tenant' | 'managed_scope' | 'assigned_accounts' | string;
+    ownerUserId?: number | null;
+    accountTeamIds?: number[];
+    scopedUserIds?: number[];
+  };
+  /**
+   * Quotes deliberately left out of every figure above because no owner places them in the
+   * caller's scope. Always 0 at tenant scope. A screen that draws the funnel must disclose this
+   * count with its reason: it is work the reader can see the absence of nowhere else.
+   */
+  unownedQuotesExcluded: number;
+  /** Null if and only if `unownedQuotesExcluded` is 0. */
+  unownedQuotesExcludedReason: string | null;
   generatedAt: string;
+}
+
+export interface PipelineAnalyticsParams {
+  /** ISO-8601 UTC. Both or neither: one alone is a 400 from the endpoint. */
+  from?: string;
+  to?: string;
 }
 
 // ─── GET /api/dashboard/gross-margin ────────────────────────────────────────
@@ -427,10 +471,17 @@ const dashboardService = {
     return r.data;
   },
 
-  /** WP-B2: stage funnel, loss reasons and weighted forecast. */
-  getPipelineAnalytics: async (): Promise<PipelineAnalyticsDTO> => {
-    const r = await axiosInstance.get<PipelineAnalyticsDTO>('/api/dashboard/pipeline-analytics');
-    return r.data;
+  /**
+   * WP-B2: stage funnel, loss reasons and the sent book, scoped to the caller.
+   *
+   * `from`/`to` are sent only as a complete pair. The endpoint answers a lone bound with a 400,
+   * and a half-window silently dropped would leave a band drawing all-time figures under a seal
+   * that says otherwise.
+   */
+  getPipelineAnalytics: async (params: PipelineAnalyticsParams = {}): Promise<PipelineAnalyticsDTO> => {
+    const windowed = params.from && params.to ? { from: params.from, to: params.to } : undefined;
+    const r = await axiosInstance.get<PipelineAnalyticsDTO>('/api/dashboard/pipeline-analytics', { params: windowed });
+    return { ...r.data, funnel: r.data.funnel ?? [], lossReasons: r.data.lossReasons ?? [] };
   },
 
   /**

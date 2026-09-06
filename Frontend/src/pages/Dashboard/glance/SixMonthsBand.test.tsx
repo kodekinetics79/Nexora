@@ -58,9 +58,9 @@ describe('SixMonthsBand populated', () => {
   });
 
   /**
-   * The bug this band exists to fix. TrendPanel tests `value === 0`, so a partly-null series went
-   * down the "we have data" path and joined the points either side of the gap — a slope nobody
-   * measured. Here the line breaks and the skipped month is named in words.
+   * The bug this band exists to fix. The executive panel it replaces tested `value === 0`, so a
+   * partly-null series went down the "we have data" path and joined the points either side of the
+   * gap — a slope nobody measured. Here the line breaks and the skipped month is named in words.
    */
   it('breaks the line across a month the server would not state, and names it', () => {
     const gapped = populated.map((p, i) => (

@@ -51,9 +51,13 @@ const item = (over: Partial<CommercialAttentionItem> = {}): CommercialAttentionI
 const payload = (items: CommercialAttentionItem[]): SalesTodayDTO => ({
   generatedAt: GENERATED_AT,
   scope: 'assigned_to_me',
-  // The saturating open-follow-ups metric the band must never print.
-  metrics: [{ key: 'open_follow_ups', label: 'Open follow-ups', value: 100, unit: 'count' } as never],
+  // The open-follow-ups metric the band must never print. It is now the true scope-wide count
+  // rather than a figure that saturated at the page size, and the band still shows rows and a way
+  // through to the full list instead of a total of its own.
+  metrics: [{ key: 'open-follow-ups', label: 'Open follow-ups', value: 137, unit: 'count' } as never],
   attentionItems: items,
+  attentionItemLimit: 100,
+  attentionItemsTruncated: false,
 });
 
 const mount = () => render(

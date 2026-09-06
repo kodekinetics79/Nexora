@@ -9,6 +9,7 @@ import type { PerformanceDTO, SalesTodayDTO } from '../../api/services/commercia
 import type {
   DashboardDataDTO,
   DeadlineBoardDTO,
+  PipelineAnalyticsDTO,
   Release01DashboardDTO,
 } from '../../api/services/dashboardService';
 
@@ -47,6 +48,7 @@ vi.mock('../../api/services/commercialIntelligenceService', async (importOrigina
 const getRelease01 = vi.fn();
 const getDeadlineBoard = vi.fn();
 const getDashboard = vi.fn();
+const getPipelineAnalytics = vi.fn();
 vi.mock('../../api/services/dashboardService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/services/dashboardService')>();
   return {
@@ -56,6 +58,7 @@ vi.mock('../../api/services/dashboardService', async (importOriginal) => {
       getRelease01: (params: unknown) => getRelease01(params),
       getDeadlineBoard: (params: unknown) => getDeadlineBoard(params),
       getDashboard: (businessUnitId: number) => getDashboard(businessUnitId),
+      getPipelineAnalytics: (params: unknown) => getPipelineAnalytics(params),
     },
   };
 });
@@ -69,6 +72,9 @@ const performance = (over: Partial<PerformanceDTO> = {}): PerformanceDTO => ({
   to: iso(TODAY),
   scope: 'tenant',
   minimumConversionSample: 5,
+  decidedQuotes: 5,
+  conversionEligible: false,
+  conversionRate: null,
   metrics: [
     { key: 'won', label: 'Won', value: 3, unit: 'count' },
     { key: 'lost', label: 'Lost', value: 2, unit: 'count' },
@@ -120,13 +126,43 @@ const board = (over: Partial<DeadlineBoardDTO> = {}): DeadlineBoardDTO => ({
   ...over,
 });
 
+/** Everything the pipeline endpoint emits, at the zeros a tenant with no quotes gets. */
+const pipeline = (over: Partial<PipelineAnalyticsDTO> = {}): PipelineAnalyticsDTO => ({
+  funnel: [
+    { key: 'leads', label: 'Requests in', count: 0, value: null, valueCurrency: null, valueUnavailableReason: 'Nothing priced yet.' },
+    { key: 'accepted', label: 'Accepted', count: 0, value: null, valueCurrency: null, valueUnavailableReason: 'Nothing priced yet.' },
+    { key: 'quoted', label: 'Quotes written', count: 0, value: null, valueCurrency: null, valueUnavailableReason: 'Nothing priced yet.' },
+    { key: 'won', label: 'Won', count: 0, value: null, valueCurrency: null, valueUnavailableReason: 'Nothing priced yet.' },
+  ],
+  lossReasons: [],
+  // Served here precisely so the screen can be asserted never to draw it.
+  weightedForecast: 987654,
+  forecastCurrency: 'SAR',
+  forecastUnavailableReason: null,
+  awaitingResponseQuotes: 0,
+  awaitingResponseValue: null,
+  respondedQuotes: 0,
+  respondedValue: null,
+  funnelScope: 'window',
+  windowFrom: `${iso(TODAY.subtract(29, 'day'))}T00:00:00Z`,
+  windowTo: `${iso(TODAY)}T00:00:00Z`,
+  roleScope: { scope: 'tenant', ownerUserId: null, accountTeamIds: [], scopedUserIds: [] },
+  unownedQuotesExcluded: 0,
+  unownedQuotesExcludedReason: null,
+  generatedAt: '2026-09-06T09:15:00Z',
+  ...over,
+});
+
 const salesToday = (items: SalesTodayDTO['attentionItems']): SalesTodayDTO => ({
   generatedAt: '2026-09-06T09:00:00Z',
   scope: 'tenant',
-  // The saturating open-follow-ups metric. It is served here precisely so the screen can be
-  // asserted never to print it: the server counts follow-ups after `.Take(100)`.
-  metrics: [{ key: 'open_follow_ups', label: 'Open follow-ups', value: 100, unit: 'count' } as never],
+  // The open-follow-ups metric, served here precisely so the screen can be asserted never to
+  // print it. It is now a true scope-wide count rather than one taken after the server's page,
+  // and band 5 still owns rows rather than totals.
+  metrics: [{ key: 'open-follow-ups', label: 'Open follow-ups', value: 137, unit: 'count' } as never],
   attentionItems: items,
+  attentionItemLimit: 100,
+  attentionItemsTruncated: false,
 });
 
 /** The band reads `volumeTrend` and nothing else on this payload, so the rest is not invented. */
@@ -155,21 +191,22 @@ beforeEach(() => {
   getRelease01.mockResolvedValue(release());
   getDeadlineBoard.mockResolvedValue(board());
   getSalesToday.mockResolvedValue(salesToday([]));
+  getPipelineAnalytics.mockResolvedValue(pipeline());
   getDashboard.mockResolvedValue(monthly([{ month: '2026-09', count: 4, value: 1200 }]));
 });
 
 describe('the dashboard reads as one sentence', () => {
-  it('puts the bands in the story order, and leaves bands 2 and 3 unbuilt rather than broken', async () => {
+  it('puts all six bands in the story order', async () => {
     renderPage();
 
     await waitFor(() => expect(bandTitles()).toEqual([
       'Did we win what we decided?',
+      "What's out with customers, and where it stops",
+      'Why we lost',
       "What's closing on us",
       'What needs you today',
       'The last six months',
     ]));
-    // The seam for "what's out there" and "why we lost" is a comment, not a card: a placeholder
-    // would be one more thing on the screen that looks like a band which failed to load.
     expect(screen.queryByText(/coming soon|not yet available|placeholder/i)).toBeNull();
   });
 
@@ -197,7 +234,10 @@ describe('the dashboard reads as one sentence', () => {
   it('names the band the dates govern, next to the dates', async () => {
     renderPage();
 
-    expect(await screen.findByText('Dates govern · Did we win')).toBeInTheDocument();
+    // Three bands take the window now, so all three are named. A control that governs three of
+    // six and says it governs one is the same untruth as one that claims to govern all six.
+    expect(await screen.findByTestId('dates-govern'))
+      .toHaveTextContent("Dates govern · Did we win · What's out with customers · Why we lost");
   });
 });
 
@@ -253,8 +293,8 @@ describe('one band failing leaves the rest of the screen standing', () => {
     // Exactly one band failed, so exactly one band says so.
     expect(screen.getAllByText('We could not load this')).toHaveLength(1);
 
-    // The four bands are all still on the screen, and the ones that loaded still show their data.
-    expect(bandTitles()).toHaveLength(4);
+    // The six bands are all still on the screen, and the ones that loaded still show their data.
+    expect(bandTitles()).toHaveLength(6);
     expect(await screen.findByText(/3 went our way/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Past deadline/)).toBeInTheDocument();
   });
@@ -277,12 +317,14 @@ describe('the empty screen a new tenant opens', () => {
     renderPage();
 
     expect(await screen.findByText(/Nothing has been marked won or lost/)).toBeInTheDocument();
+    expect(screen.getByTestId('book-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('losses-empty')).toBeInTheDocument();
     expect(screen.getByText(/Nothing is scheduled yet/)).toBeInTheDocument();
     expect(screen.getByText(NOTHING_SCHEDULED_SENTENCE)).toBeInTheDocument();
     expect(screen.getByText('No requests or orders were recorded in the last six months.')).toBeInTheDocument();
 
     // Empty is not an error anywhere on the screen: no Alert, nothing to retry.
-    expect(bandTitles()).toHaveLength(4);
+    expect(bandTitles()).toHaveLength(6);
     expect(screen.queryByText('We could not load this')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
@@ -320,9 +362,12 @@ describe('the figures this screen refuses to show', () => {
     await screen.findByText(/3 went our way/);
 
     const page = document.body.textContent ?? '';
-    // The 0.3/0.5 heuristic, removed from the product rather than relabelled.
+    // The 0.3/0.5 heuristic, removed from the product rather than relabelled. Band 2 reads the
+    // very payload that still carries it, which is why this is asserted on the whole screen.
     expect(page).not.toMatch(/weighted/i);
-    // The server's own follow-up count saturates at exactly 100, so no total is printed anywhere.
+    expect(page).not.toContain('987,654');
+    // Band 5 shows rows and a route to the full list, never a total of its own, so the server's
+    // follow-up counts do not appear on this screen at all.
     expect(page).not.toContain('Open follow-ups');
     // `CalculateTrend` reports a literal "100%" up against a zero previous period, which pre-launch
     // is the default. No band renders a trend flag, so the string cannot appear.

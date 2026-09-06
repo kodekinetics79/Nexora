@@ -8,6 +8,8 @@ import dashboardService from '../../api/services/dashboardService';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import VerdictBand from './glance/VerdictBand';
+import OutstandingBand from './glance/OutstandingBand';
+import LossesBand from './glance/LossesBand';
 import ClosingBand from './glance/ClosingBand';
 import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
@@ -19,8 +21,8 @@ import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow 
  *
  *   0  whose numbers          the scope strip below the title
  *   1  did we win             VerdictBand
- *   2  what's out there       NOT BUILT — see the seam below
- *   3  why we lost            NOT BUILT — see the seam below
+ *   2  what's out there       OutstandingBand
+ *   3  why we lost            LossesBand
  *   4  what's closing on us   ClosingBand
  *   5  what needs you today   TodayBand
  *   6  the last six months    SixMonthsBand
@@ -38,6 +40,20 @@ import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow 
  * arithmetic in it is turning a chosen preset into two dates.
  */
 type PeriodKey = '30d' | '90d' | 'ytd' | 'custom';
+
+/**
+ * The bands the period chips actually move, named by the titles the reader can see above them.
+ *
+ * A control that silently governs three bands out of six is the same lie as one that claims to
+ * govern all of them, so this list is written from the bands that pass `applied` down and each of
+ * those bands repeats the fact on its own seal. Bands 2 and 3 join it because
+ * /pipeline-analytics now takes a window and states, per response, whether it applied one.
+ */
+const GOVERNED_BANDS: readonly string[] = Object.freeze([
+  'Did we win',
+  "What's out with customers",
+  'Why we lost',
+]);
 
 const PERIOD_CHOICES: readonly { key: PeriodKey; label: string }[] = Object.freeze([
   { key: '30d', label: 'Last 30 days' },
@@ -234,6 +250,7 @@ export default function DashboardPage() {
           <Typography
             variant="caption"
             title="Steps 4, 5 and 6 have their own fixed windows, set by the server."
+            data-testid="dates-govern"
             sx={{
               textTransform: 'uppercase',
               letterSpacing: '0.08em',
@@ -242,7 +259,7 @@ export default function DashboardPage() {
               color: 'text.secondary',
             }}
           >
-            Dates govern · Did we win
+            {`Dates govern · ${GOVERNED_BANDS.join(' · ')}`}
           </Typography>
           <Stack direction="row" spacing={0.75} role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
             {PERIOD_CHOICES.map((choice) => (
@@ -296,32 +313,29 @@ export default function DashboardPage() {
         <VerdictBand from={applied.from} to={applied.to} index={1} />
 
         {/*
-          SEAM — bands 2 and 3 belong HERE, in this order, and are not in this pass.
+          Bands 2 and 3 read ONE aggregate between them — /pipeline-analytics, under a single
+          react-query key — because they are two readings of the same figures over the same scope
+          and the same freshness. They still hold their own states and print their own failure, so
+          the pair behaves like every other band on the screen from the reader's side.
 
-            2 · "What's out there, and where it stops" — the funnel. It needs a server aggregate
-                that states each stage's count with its own scope and freshness; the existing
-                /pipeline-analytics carries `weightedForecast`, which is removed from this screen
-                (an unmeasured 0.3/0.5 heuristic presented as instruction), and no stage-level
-                figure on it is scoped per reader.
-            3 · "Why we lost" — loss reasons. There is no aggregate at all today: /performance
-                publishes won/lost/decided and nothing about cause.
-
-          Nothing is rendered in their place ON PURPOSE. A greyed card labelled "coming soon" reads
-          as a band that failed to load, which is exactly the state rule 3 spends its effort making
-          distinguishable. When the aggregates exist, the bands drop in at this point and the
-          numerals on steps 4, 5 and 6 already leave room for them.
+          What that endpoint publishes and this screen still refuses to draw is `weightedForecast`:
+          an unmeasured 0.3/0.5 probability heuristic presented as an instruction. It was removed
+          from the product rather than relabelled, and neither band reads it.
         */}
+        <OutstandingBand from={applied.from} to={applied.to} index={2} />
 
-        <ClosingBand step="4" index={2} />
+        <LossesBand from={applied.from} to={applied.to} index={3} />
 
-        <TodayBand index={3} />
+        <ClosingBand step="4" index={4} />
+
+        <TodayBand index={5} />
 
         <SixMonthsBand
           points={points}
           loading={canRequestSeries && series.isLoading}
           error={seriesError}
           onRetry={canRequestSeries ? () => void series.refetch() : undefined}
-          index={4}
+          index={6}
         />
       </Stack>
 

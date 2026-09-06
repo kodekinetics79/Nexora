@@ -19,6 +19,10 @@ const performance = (over: Partial<PerformanceDTO> = {}): PerformanceDTO => ({
   to: TO,
   scope: 'assigned_to_me',
   minimumConversionSample: 5,
+  // Below the floor, so the server withholds the rate rather than sending a 60 nobody may act on.
+  decidedQuotes: 5,
+  conversionEligible: false,
+  conversionRate: null,
   metrics: [
     { key: 'won', label: 'Won', value: 3, unit: 'count' },
     { key: 'lost', label: 'Lost', value: 2, unit: 'count' },

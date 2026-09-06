@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box, Typography, Paper, Stack, Chip, Button, Tooltip, Alert, Divider,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TableSortLabel,
@@ -148,6 +148,36 @@ const dayLabel = (days: number | null): string => {
   return `${days} day${days === 1 ? '' : 's'}`;
 };
 
+/**
+ * The dashboard's "what's closing on us" band drills through to this route carrying the SERVER's
+ * bucket key (`/analytics/deadlines?bucket=days_1_3`), and this board buckets in the browser with
+ * six columns of its own. This is the whole translation between the two vocabularies.
+ *
+ * It is lossy in exactly one place, and deliberately not hidden: the server separates "8–30 days"
+ * from "more than 30 days", while this board has a single "8 days or more" column, so both server
+ * keys land on `later` and the reader is told the list is wider than the column they pressed. The
+ * alternative — quietly showing a broader set under the pressed column's name — is the drill-
+ * through lying about what it filtered.
+ */
+const ARRIVING_BUCKETS: Readonly<Record<string, { key: BucketKey; widerThan?: string }>> = Object.freeze({
+  overdue: { key: 'overdue' },
+  today: { key: 'today' },
+  days_1_3: { key: 'next3' },
+  days_4_7: { key: 'thisWeek' },
+  days_8_30: { key: 'later', widerThan: '8–30 days' },
+  later: { key: 'later', widerThan: 'more than 30 days' },
+  unknown: { key: 'noDate' },
+});
+
+/**
+ * What the `bucket` parameter selects, or 'all' when it names nothing this board can draw.
+ *
+ * An unrecognised key falls back to every open enquiry AND says so. Silently showing everything is
+ * how a link that was meant to narrow the board comes to look like one that did nothing.
+ */
+const arrivingBucket = (param: string | null): BucketKey | 'all' =>
+  (param && ARRIVING_BUCKETS[param] ? ARRIVING_BUCKETS[param].key : 'all');
+
 type SortKey = 'deadline' | 'lines' | 'client';
 
 const DeadlineBoardPage: React.FC = () => {
@@ -161,7 +191,15 @@ const DeadlineBoardPage: React.FC = () => {
   // One dialog for the whole table, not one per row: 500 mounted dialogs is 500 mounted
   // candidate queries. The row being resolved is state, the dialog is a singleton.
   const [resolveLead, setResolveLead] = useState<LeadResponseDTO | null>(null);
-  const [activeBucket, setActiveBucket] = useState<BucketKey | 'all'>('all');
+  // Where the reader arrived from. The band above navigates here with a new `bucket` each time a
+  // column is pressed and React keeps this page mounted across those navigations, so the parameter
+  // is re-read rather than only seeding the first render. Pressing a chip here still moves the
+  // selection on its own: the URL is the entry point, not a mirror of every local press.
+  const [searchParams] = useSearchParams();
+  const requestedBucket = searchParams.get('bucket');
+  const [activeBucket, setActiveBucket] = useState<BucketKey | 'all'>(() => arrivingBucket(requestedBucket));
+  useEffect(() => { setActiveBucket(arrivingBucket(requestedBucket)); }, [requestedBucket]);
+  const arrival = requestedBucket ? ARRIVING_BUCKETS[requestedBucket] ?? null : null;
 
   /**
    * Re-runs deterministic client matching over the tenant's undecided leads.
@@ -374,6 +412,19 @@ const DeadlineBoardPage: React.FC = () => {
               <Button size="small" onClick={() => setActiveBucket('all')} sx={{ ml: 1, textTransform: 'none' }}>Show all</Button>
             )}
           </Typography>
+
+          {requestedBucket && !arrival && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              {`The link asked for the group “${requestedBucket}”, which this board does not have a column for. `}
+              Every open enquiry is listed instead — nothing has been filtered out, and nothing is hidden.
+            </Alert>
+          )}
+          {arrival?.widerThan && activeBucket === arrival.key && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              {`You pressed “${arrival.widerThan}”. This board groups everything from 8 days out into one `}
+              {`“${BUCKETS.find((b) => b.key === arrival.key)?.label}” column, so the list below is wider than the column you came from.`}
+            </Alert>
+          )}
 
           <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
             <Table size="small" aria-label="Open enquiries by deadline">

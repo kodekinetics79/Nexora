@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import DeadlineBoardPage from './DeadlineBoardPage';
 import type { LeadResponseDTO } from '../../api/services/leadService';
 
@@ -47,6 +48,7 @@ vi.mock('react-router-dom', async (importOriginal) => {
   return { ...actual, useNavigate: () => navigate };
 });
 
+
 /** An enquiry with a real deadline and no client record — the live tenant's common case. */
 const unlinkedLead = (over: Partial<LeadResponseDTO> = {}): LeadResponseDTO => ({
   id: 488,
@@ -74,10 +76,39 @@ const unlinkedLead = (over: Partial<LeadResponseDTO> = {}): LeadResponseDTO => (
   ...over,
 });
 
-const wrapper = ({ children }: { children: ReactNode }) => {
+/**
+ * The board now reads its bucket off the URL, so it needs a router around it in every test — the
+ * plain `bucket`-less entry is the state a reader who opened the board from the rail is in.
+ */
+const wrapperAt = (entry: string) => ({ children }: { children: ReactNode }) => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[entry]}>{children}</MemoryRouter>
+    </QueryClientProvider>
+  );
 };
+
+const wrapper = wrapperAt('/analytics/deadlines');
+
+/** The board as the dashboard's drill-through reaches it: mounted on a URL carrying a bucket. */
+const renderAt = (search: string) =>
+  render(<DeadlineBoardPage />, { wrapper: wrapperAt(`/analytics/deadlines${search}`) });
+
+/**
+ * Two enquiries in different buckets, so a filter that did nothing is visible as a filter.
+ *
+ * The overdue date is well inside `MIN_VALID_YEAR`: `parseDateSafe` reads the instant in the
+ * reader's own zone, so a UTC midnight on 1 Jan 2000 falls in 1999 west of UTC and is discarded as
+ * a sentinel — which would have put this enquiry in "no deadline recorded" instead.
+ */
+const twoBuckets = () => ({
+  items: [
+    unlinkedLead({ id: 601, rfqno: 'FC-OVERDUE', bidClosingDate: '2020-06-01T00:00:00Z' }),
+    unlinkedLead({ id: 602, rfqno: 'FC-FAR-OFF', bidClosingDate: '2099-01-01T00:00:00Z' }),
+  ],
+  totalCount: 2, pageNumber: 1, pageSize: 500,
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -266,5 +297,71 @@ describe('DeadlineBoardPage — enquiries a rep is working stay on the board', (
     )).toBeInTheDocument();
     // The old sentence named rejection — the one exclusion that was never happening.
     expect(screen.queryByText(/Rejected enquiries are not shown/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Band 4 of the dashboard routes here with the SERVER's bucket key. The board kept its selection
+ * in local state and read no search parameter at all, so every drill-through landed on the
+ * unfiltered board — the press appeared to do nothing.
+ */
+describe('DeadlineBoardPage — arriving from the dashboard band', () => {
+  it('opens on the bucket the link named, not on everything', async () => {
+    getAllLeads.mockResolvedValue(twoBuckets());
+    renderAt('?bucket=overdue');
+
+    expect(await screen.findByText('FC-OVERDUE')).toBeInTheDocument();
+    expect(screen.queryByText('FC-FAR-OFF')).not.toBeInTheDocument();
+    expect(screen.getByText(/showing 1 in "Past deadline"/)).toBeInTheDocument();
+  });
+
+  it('maps each of the server\'s narrow keys onto this board\'s own column', async () => {
+    getAllLeads.mockResolvedValue(twoBuckets());
+    renderAt('?bucket=unknown');
+
+    // Neither enquiry has a missing deadline, so the honest result of this link is an empty
+    // bucket — not a silent fallback to the full board.
+    expect(await screen.findByText('Nothing in this bucket.')).toBeInTheDocument();
+    expect(screen.getByText(/showing 0 in "No deadline recorded"/)).toBeInTheDocument();
+  });
+
+  // The lossy half of the map. The server splits 8–30 days from beyond 30; this board has one
+  // column covering both, so the reader is told the list is wider than the column they pressed.
+  it('says so when the column it landed on is wider than the one that was pressed', async () => {
+    getAllLeads.mockResolvedValue(twoBuckets());
+    renderAt('?bucket=days_8_30');
+
+    expect(await screen.findByText(/wider than the column you came from/)).toBeInTheDocument();
+    expect(screen.getByText(/You pressed .8–30 days./)).toBeInTheDocument();
+    expect(screen.getByText('FC-FAR-OFF')).toBeInTheDocument();
+  });
+
+  it('never widens the note onto a key that maps exactly', async () => {
+    getAllLeads.mockResolvedValue(twoBuckets());
+    renderAt('?bucket=today');
+
+    expect(await screen.findByText(/showing 0 in "Closes today"/)).toBeInTheDocument();
+    expect(screen.queryByText(/wider than the column you came from/)).not.toBeInTheDocument();
+  });
+
+  it('names a bucket key it cannot draw instead of quietly showing everything', async () => {
+    getAllLeads.mockResolvedValue(twoBuckets());
+    renderAt('?bucket=days_31_60');
+
+    expect(await screen.findByText(/does not have a column for/)).toBeInTheDocument();
+    expect(screen.getByText(/“days_31_60”/)).toBeInTheDocument();
+    // Both rows are there, and the board says that is what happened rather than implying a filter.
+    expect(screen.getByText('FC-OVERDUE')).toBeInTheDocument();
+    expect(screen.getByText('FC-FAR-OFF')).toBeInTheDocument();
+  });
+
+  it('opens unfiltered, and silently, when no bucket was asked for', async () => {
+    getAllLeads.mockResolvedValue(twoBuckets());
+    renderAt('');
+
+    expect(await screen.findByText('FC-OVERDUE')).toBeInTheDocument();
+    expect(screen.getByText('FC-FAR-OFF')).toBeInTheDocument();
+    expect(screen.queryByText(/does not have a column for/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/showing \d+ in/)).not.toBeInTheDocument();
   });
 });

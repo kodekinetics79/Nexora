@@ -21,19 +21,21 @@ import { formatMoney } from '../../../utils/currency';
  * <p><b>Two stacked panels, never a dual axis.</b> Counts and money have no common scale, so a
  * single plot carrying both would decide where the line sits relative to the bars by its two axis
  * ranges rather than by the business — "value is pulling ahead of volume" could be produced or
- * erased by a rendering choice nobody made. `TrendPanel` reached the same conclusion and this band
- * follows its geometry: identical left gutter, identical band widths, month labels carried once
- * beneath the pair, so the columns above and the line below are read as one picture with one
- * meaning per vertical position.</p>
+ * erased by a rendering choice nobody made. The geometry the two panels share is what replaces
+ * that: identical left gutter, identical band widths, month labels carried once beneath the pair,
+ * so the columns above and the line below are read as one picture with one meaning per vertical
+ * position.
  *
- * <p><b>What this fixes in TrendPanel.</b> Its empty test is
- * <code>count === 0 &amp;&amp; value === 0</code>, but the server sends <code>value: null</code>
- * — with a reason — whenever the business unit has no single base currency, which is the default
- * for a new tenant. Null is not 0, so that test failed and the panel drew a line chart of nulls: a
- * flat run along the baseline that reads as "we sold nothing", when the truth is "we cannot state
- * this in one currency". Here null counts as empty, and a series that is null while requests were
- * genuinely received renders the server's own ValueUnavailableReason over an intact frame instead
- * of a number.</p>
+ * <p><b>The null-value trap this band exists to avoid.</b> The executive panel this replaces
+ * tested its series for emptiness with <code>count === 0 &amp;&amp; value === 0</code>. The server
+ * sends <code>value: null</code> — with a reason — whenever the business unit has no single base
+ * currency, which is the default for a new tenant. Null is not 0, so that test failed, the panel
+ * took the "we have data" path, and it drew a line chart of nulls: a flat run along the baseline
+ * that reads as "we sold nothing", when the truth is "we cannot state this in one currency". Here
+ * null counts as empty, and a series that is null while requests were genuinely received renders
+ * the server's own ValueUnavailableReason over an intact frame instead of a number. The lesson
+ * generalises past this band: on this contract a missing figure is null and a measured nothing is
+ * 0, and any emptiness test that conflates them will draw the wrong chart confidently.</p>
  */
 
 /**
@@ -145,9 +147,10 @@ export default function SixMonthsBand({
   const labels = rows.length ? rows.map((r) => monthLabel(r.month)) : fallbackMonths();
   const slots = labels.length;
 
-  // Null is emptiness, not zero. This is the line TrendPanel gets wrong: a new tenant with no
-  // single base currency gets `value: null` on every month, and testing `value === 0` sent it down
-  // the "we have data" path to draw a flat line of nulls along the baseline.
+  // Null is emptiness, not zero. This is the line the executive panel this band replaces got
+  // wrong: a new tenant with no single base currency gets `value: null` on every month, and
+  // testing `value === 0` sent it down the "we have data" path to draw a flat line of nulls along
+  // the baseline.
   const empty = rows.length === 0
     || rows.every((r) => r.count === 0 && (r.value === null || r.value === undefined || r.value === 0));
 
