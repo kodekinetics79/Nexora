@@ -32,6 +32,28 @@ public class Plan
     /// <summary>List price per month in USD (precision 10,2). Null = not priced yet.</summary>
     public decimal? MonthlyPriceUsd { get; set; }
 
+    /// <summary>
+    /// Which AI package this plan sells — one of <see cref="AI.AiPackages"/>. It is the STARTING
+    /// posture a tenant provisioned from this plan is given, copied once at provisioning in the
+    /// same way <see cref="Features"/> is: editing a plan afterwards never reaches back into
+    /// tenants already created from it.
+    ///
+    /// <para>It cannot carry consent. A plan may say a customer bought cloud extraction; it may
+    /// not say they agreed to send whole documents off their own infrastructure. See
+    /// <see cref="AI.AiPackages"/>.</para>
+    /// </summary>
+    public string AiPackage { get; set; } = AI.AiPackages.Off;
+
+    /// <summary>
+    /// The monthly AI token ceiling a tenant on this plan starts with. Null means either "not
+    /// decided" or "deliberately uncapped" — <see cref="AiAllowanceUnlimited"/> is what tells
+    /// those two apart, and only one of them is a decision anybody made.
+    /// </summary>
+    public long? AiMonthlyTokenAllowance { get; set; }
+
+    /// <summary>Unbounded AI spend, chosen. Never inferred from an absent allowance.</summary>
+    public bool AiAllowanceUnlimited { get; set; }
+
     public bool IsActive { get; set; } = true;
 
     public DateTime CreatedOn { get; set; } = DateTime.UtcNow;

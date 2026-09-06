@@ -242,6 +242,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("character varying(300)");
 
+                    b.Property<string>("PlanDeviationApprovedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("PlanDeviationApprovedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("PlanDeviationReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
                     b.Property<string>("AllowedModel")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
@@ -18873,6 +18884,19 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<bool>("AiAllowanceUnlimited")
+                        .HasColumnType("boolean");
+
+                    b.Property<long?>("AiMonthlyTokenAllowance")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("AiPackage")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("Off");
 
                     b.Property<string>("Code")
                         .IsRequired()

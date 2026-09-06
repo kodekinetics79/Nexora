@@ -210,6 +210,14 @@ CREATE TABLE IF NOT EXISTS platform."Plans" (
     "MaxDocsPerMonth" integer NOT NULL,
     "MaxSeats" integer NOT NULL,
     "Features" jsonb DEFAULT '{}'::jsonb NOT NULL,
+    -- The AI package this plan sells, and the monthly ceiling a tenant on it starts with.
+    -- 'Off' rather than NULL: a plan is always selling SOME answer about AI, and "no value" is
+    -- the one state that would make a tenant's starting posture depend on which code path
+    -- provisioned it. The allowance stays NULL until somebody decides it — a monthly ceiling is
+    -- a commercial term, not something a schema default gets to pick.
+    "AiPackage" character varying(32) DEFAULT 'Off'::character varying NOT NULL,
+    "AiMonthlyTokenAllowance" bigint,
+    "AiAllowanceUnlimited" boolean DEFAULT false NOT NULL,
     "IsActive" boolean NOT NULL,
     "CreatedOn" timestamp without time zone NOT NULL,
     "MonthlyPriceUsd" numeric(10,2)
@@ -2310,6 +2318,11 @@ CREATE TABLE IF NOT EXISTS public."AiProcessingPolicies" (
     "AllowedModel" character varying(255),
     "MonthlySoftTokenLimit" bigint,
     "MonthlyHardTokenLimit" bigint,
+    -- Why this tenant's AI settings differ from the package its plan sells, who accepted that,
+    -- and when. All three or none — CK_AiProcessingPolicies_PlanDeviation below.
+    "PlanDeviationReason" character varying(1000),
+    "PlanDeviationApprovedBy" character varying(255),
+    "PlanDeviationApprovedOn" timestamp without time zone,
     "Version" bigint DEFAULT 1 NOT NULL,
     "UpdatedOn" timestamp without time zone NOT NULL,
     "UpdatedBy" character varying(255) NOT NULL,
@@ -2340,7 +2353,15 @@ CREATE TABLE IF NOT EXISTS public."AiProcessingPolicies" (
         AND length(trim("DataResidency")) > 0
         AND (NOT "ExternalProcessingAllowed"
              OR ("RedactionRequired" AND "PrivacyReviewRequired"
-                 AND "AllowedProvider" IS NOT NULL AND "AllowedModel" IS NOT NULL)))
+                 AND "AllowedProvider" IS NOT NULL AND "AllowedModel" IS NOT NULL))),
+    -- All three or none of them. A reason with no approver, or an approver with no reason, is a
+    -- half-written exception, and half-written is the shape things take when they are typed
+    -- under pressure.
+    CONSTRAINT "CK_AiProcessingPolicies_PlanDeviation" CHECK (
+        ("PlanDeviationReason" IS NULL AND "PlanDeviationApprovedBy" IS NULL
+            AND "PlanDeviationApprovedOn" IS NULL)
+        OR ("PlanDeviationReason" IS NOT NULL AND "PlanDeviationApprovedBy" IS NOT NULL
+            AND "PlanDeviationApprovedOn" IS NOT NULL))
 );
 
 ALTER TABLE ONLY public."AiProcessingPolicies" FORCE ROW LEVEL SECURITY;
