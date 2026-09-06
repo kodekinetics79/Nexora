@@ -290,4 +290,58 @@ describe('extraction pre-flight', () => {
     expect(screen.getByRole('button', { name: 'Edit policy' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Authorize provider' })).toBeVisible();
   });
+
+  /**
+   * The refusal an operator actually met: "External processing requires redaction, privacy review,
+   * provider and model." — a red toast, on a form of twenty inputs, several of them scrolled out of
+   * sight, naming four fields without saying which. And the server checks its rules in order, so
+   * satisfying the named one only revealed the next.
+   */
+  it('names the fields external processing needs instead of refusing after the round trip', async () => {
+    const update = vi.spyOn(platformApi, 'updateTenantAiPolicy');
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    fireEvent.click(dialog.getByLabelText('External processing allowed'));
+    fireEvent.change(dialog.getByLabelText(/Change reason/), { target: { value: 'Enabling external processing' } });
+
+    // Named on the fields themselves, and once more in a line that survives being scrolled past.
+    expect(dialog.getByText('Name the provider external processing is allowed to use.')).toBeVisible();
+    expect(dialog.getByText('Name the model external processing is allowed to use.')).toBeVisible();
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Allowed provider/);
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Allowed model/);
+
+    // And the request is never sent, so the server never gets to answer with a sentence about four
+    // fields at once.
+    expect(dialog.getByRole('button', { name: 'Save policy' })).toBeDisabled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The second refusal, which used to be invisible until the first was fixed: a rate with no
+   * currency and no pricing version is a number nobody can reproduce a bill from.
+   */
+  it('asks for the currency and pricing version as soon as an external rate is typed', async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    fireEvent.change(dialog.getByLabelText('External input cost / 1M'), { target: { value: '12' } });
+    fireEvent.change(dialog.getByLabelText(/Change reason/), { target: { value: 'Recording external rates' } });
+
+    expect(dialog.getByRole('alert')).toHaveTextContent(/External cost currency/);
+    expect(dialog.getByRole('alert')).toHaveTextContent(/External pricing version/);
+    expect(dialog.getByRole('button', { name: 'Save policy' })).toBeDisabled();
+  });
+
+  /** Zero is a kill switch wearing a budget's clothes, and the field says so where it is typed. */
+  it('refuses a zero hard limit at the field rather than at the ledger', async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    fireEvent.change(dialog.getByLabelText('Monthly hard token limit'), { target: { value: '0' } });
+    expect(dialog.getByText(/refuses every document while every other control reads open/i)).toBeVisible();
+  });
 });

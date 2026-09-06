@@ -38,6 +38,102 @@ const optionalNumber = (value: string): number | null => value.trim() === '' ? n
  * further down this tab, which each row names.
  */
 
+/**
+ * The server's own refusals, asked BEFORE the request rather than reported after it.
+ *
+ * <p>`TenantsController.UpdateAiPolicy` refuses seven ways, each with one sentence naming several
+ * fields at once — "External processing requires redaction, privacy review, provider and model."
+ * That sentence arrives as a red toast on a form of twenty inputs, several of them scrolled out of
+ * view, and it does not say WHICH of the four is missing. An operator's only move is to guess,
+ * press Save again, and read the same sentence. Worse, the rules are checked in order, so fixing
+ * the named one reveals the next: the cost fields and the currency behind it are a second refusal
+ * waiting in line.</p>
+ *
+ * <p>So the same rules are stated here, per field, before submit. The server keeps every one of
+ * them — this is not a relocation of authority, it is the form declining to waste a round trip and
+ * naming what it wants.</p>
+ */
+type PolicyProblems = Partial<Record<keyof TenantAiPolicy | 'reason', string>>;
+
+const policyProblems = (draft: TenantAiPolicy, reason: string): PolicyProblems => {
+  const problems: PolicyProblems = {};
+  const blank = (value: string | null | undefined) => !value || !value.trim();
+
+  if (!reason.trim()) problems.reason = 'A change reason is required and is written to the audit trail.';
+
+  // External processing is the switch that lets a customer's documents leave this deployment.
+  // Each of the four is named on its own control rather than in one sentence about four.
+  if (draft.externalProcessingAllowed) {
+    if (!draft.redactionRequired) problems.redactionRequired = 'Required before documents may leave this deployment.';
+    if (!draft.privacyReviewRequired) problems.privacyReviewRequired = 'Required before documents may leave this deployment.';
+    if (blank(draft.allowedProvider)) problems.allowedProvider = 'Name the provider external processing is allowed to use.';
+    if (blank(draft.allowedModel)) problems.allowedModel = 'Name the model external processing is allowed to use.';
+  }
+
+  // Zero is not a budget, it is a silent kill switch — every other control reads open while the
+  // token ledger refuses every document. The server says so; so does the field.
+  if (draft.monthlyHardTokenLimit === 0) {
+    problems.monthlyHardTokenLimit = 'Zero refuses every document while every other control reads open. '
+      + 'Leave it empty for no ceiling, or turn AI processing off.';
+  }
+  if (draft.monthlySoftTokenLimit != null && draft.monthlyHardTokenLimit != null
+      && draft.monthlySoftTokenLimit > draft.monthlyHardTokenLimit) {
+    problems.monthlySoftTokenLimit = 'The soft limit cannot exceed the hard limit.';
+  }
+  if (draft.maxTokensPerDocument != null && draft.maxTokensPerDocument <= 0) {
+    problems.maxTokensPerDocument = 'Must be greater than zero.';
+  }
+  if (draft.externalDependencyCeilingPercent < 0 || draft.externalDependencyCeilingPercent > 10) {
+    problems.externalDependencyCeilingPercent = 'Between 0 and 10 per cent.';
+  }
+  if (draft.retentionDays < 1 || draft.retentionDays > 3650) problems.retentionDays = 'Between 1 and 3650 days.';
+  if (blank(draft.allowedDataClassifications)) problems.allowedDataClassifications = 'Required.';
+  if (blank(draft.egressPolicy)) problems.egressPolicy = 'Required.';
+  if (blank(draft.dataResidency)) problems.dataResidency = 'Required.';
+
+  // A rate with no currency and no pricing version is a number nobody can reproduce a bill from.
+  const anyExternalRate = draft.externalInputCostPerMillionTokens != null
+    || draft.externalOutputCostPerMillionTokens != null;
+  if (anyExternalRate) {
+    if (draft.externalInputCostPerMillionTokens == null) problems.externalInputCostPerMillionTokens = 'Required once either external rate is set.';
+    if (draft.externalOutputCostPerMillionTokens == null) problems.externalOutputCostPerMillionTokens = 'Required once either external rate is set.';
+    if (blank(draft.externalCostCurrency)) problems.externalCostCurrency = 'Required once an external rate is set.';
+    if (blank(draft.externalPricingVersion)) problems.externalPricingVersion = 'Required once an external rate is set — a rate nobody can date is a bill nobody can reproduce.';
+  }
+
+  const anyLocalRate = draft.localComputeCostPerHour != null || draft.ocrCostPerPage != null;
+  if (anyLocalRate) {
+    if (draft.localComputeCostPerHour == null) problems.localComputeCostPerHour = 'Required once either local rate is set.';
+    if (draft.ocrCostPerPage == null) problems.ocrCostPerPage = 'Required once either local rate is set.';
+    if (blank(draft.localCostCurrency)) problems.localCostCurrency = 'Required once a local rate is set.';
+  }
+
+  return problems;
+};
+
+/** The operator-facing name of each control, so the summary line reads as the form does. */
+const FIELD_LABELS: Record<string, string> = {
+  redactionRequired: 'Redaction required',
+  privacyReviewRequired: 'Privacy review required',
+  allowedProvider: 'Allowed provider',
+  allowedModel: 'Allowed model',
+  monthlySoftTokenLimit: 'Monthly soft token limit',
+  monthlyHardTokenLimit: 'Monthly hard token limit',
+  maxTokensPerDocument: 'Document token limit',
+  externalDependencyCeilingPercent: 'External dependency ceiling',
+  retentionDays: 'Retention days',
+  allowedDataClassifications: 'Data classifications',
+  egressPolicy: 'Egress policy',
+  dataResidency: 'Data residency',
+  externalInputCostPerMillionTokens: 'External input cost / 1M',
+  externalOutputCostPerMillionTokens: 'External output cost / 1M',
+  externalCostCurrency: 'External cost currency',
+  externalPricingVersion: 'External pricing version',
+  localComputeCostPerHour: 'Local compute cost / hour',
+  ocrCostPerPage: 'OCR cost / page',
+  localCostCurrency: 'Local cost currency',
+};
+
 const STATUS_TONE: Record<AiReadinessStatus, 'success' | 'error' | 'neutral' | 'warning'> = {
   Pass: 'success',
   Fail: 'error',
@@ -217,6 +313,10 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
   const [policyOpen, setPolicyOpen] = useState(false);
   const [draft, setDraft] = useState<TenantAiPolicy | null>(null);
   const [policyReason, setPolicyReason] = useState('');
+  // Recomputed as the operator types, so a field stops complaining the moment it is satisfied
+  // rather than on the next round trip to the server.
+  const problems: PolicyProblems = draft ? policyProblems(draft, policyReason) : {};
+  const blockingProblems = Object.entries(problems).filter(([key]) => key !== 'reason');
   const [authorizeOpen, setAuthorizeOpen] = useState(false);
   const [revokeId, setRevokeId] = useState<string | null>(null);
   const [provider, setProvider] = useState({
@@ -358,19 +458,28 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
 
       <Dialog open={policyOpen} onClose={() => !updatePolicy.isPending && setPolicyOpen(false)} fullWidth maxWidth="md">
         <DialogTitle>Edit tenant AI policy</DialogTitle><DialogContent dividers>{draft && <Stack spacing={2}>
-          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}><FormControlLabel control={<Switch checked={draft.isEnabled} onChange={(_, value) => setDraft({ ...draft, isEnabled: value })} />} label="AI processing enabled" /><FormControlLabel control={<Switch checked={draft.externalProcessingAllowed} onChange={(_, value) => setDraft({ ...draft, externalProcessingAllowed: value })} />} label="External processing allowed" /><FormControlLabel control={<Switch checked={draft.redactionRequired} onChange={(_, value) => setDraft({ ...draft, redactionRequired: value })} />} label="Redaction required" /><FormControlLabel control={<Switch checked={draft.privacyReviewRequired} onChange={(_, value) => setDraft({ ...draft, privacyReviewRequired: value })} />} label="Privacy review required" /></Stack>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}><FormControlLabel control={<Switch checked={draft.isEnabled} onChange={(_, value) => setDraft({ ...draft, isEnabled: value })} />} label="AI processing enabled" /><FormControlLabel control={<Switch checked={draft.externalProcessingAllowed} onChange={(_, value) => setDraft({ ...draft, externalProcessingAllowed: value })} />} label="External processing allowed" /><FormControlLabel control={<Switch checked={draft.redactionRequired} onChange={(_, value) => setDraft({ ...draft, redactionRequired: value })} />} label="Redaction required" sx={{ color: problems.redactionRequired ? 'error.main' : undefined }} /><FormControlLabel control={<Switch checked={draft.privacyReviewRequired} onChange={(_, value) => setDraft({ ...draft, privacyReviewRequired: value })} />} label="Privacy review required" sx={{ color: problems.privacyReviewRequired ? 'error.main' : undefined }} /></Stack>
           <TextField label="Allowed purposes (comma-separated)" value={draft.allowedPurposes.join(',')} onChange={(e) => setDraft({ ...draft, allowedPurposes: e.target.value.split(',').map((x) => x.trim()).filter(Boolean) })} />
           <Grid container spacing={2}>
-            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth label="Allowed provider" value={draft.allowedProvider ?? ''} onChange={(e) => setDraft({ ...draft, allowedProvider: e.target.value || null })} /></Grid>
-            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth label="Allowed model" value={draft.allowedModel ?? ''} onChange={(e) => setDraft({ ...draft, allowedModel: e.target.value || null })} /></Grid>
-            {([['Monthly soft token limit', 'monthlySoftTokenLimit'], ['Monthly hard token limit', 'monthlyHardTokenLimit'], ['Document token limit', 'maxTokensPerDocument'], ['External input cost / 1M', 'externalInputCostPerMillionTokens'], ['External output cost / 1M', 'externalOutputCostPerMillionTokens'], ['Local compute cost / hour', 'localComputeCostPerHour'], ['OCR cost / page', 'ocrCostPerPage']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label={label} value={draft[key] ?? ''} onChange={(e) => setDraft({ ...draft, [key]: optionalNumber(e.target.value) })} /></Grid>)}
-            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="External dependency ceiling (%)" value={draft.externalDependencyCeilingPercent} onChange={(e) => setDraft({ ...draft, externalDependencyCeilingPercent: Number(e.target.value) })} slotProps={{ htmlInput: { min: 0, max: 10 } }} /></Grid>
-            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="Retention days" value={draft.retentionDays} onChange={(e) => setDraft({ ...draft, retentionDays: Number(e.target.value) })} /></Grid>
-            {([['Data classifications', 'allowedDataClassifications'], ['Egress policy', 'egressPolicy'], ['Data residency', 'dataResidency'], ['External cost currency', 'externalCostCurrency'], ['External pricing version', 'externalPricingVersion'], ['Local cost currency', 'localCostCurrency']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth label={label} value={draft[key] ?? ''} onChange={(e) => setDraft({ ...draft, [key]: e.target.value || null })} /></Grid>)}
+            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth label="Allowed provider" required={draft.externalProcessingAllowed} value={draft.allowedProvider ?? ''} error={Boolean(problems.allowedProvider)} helperText={problems.allowedProvider ?? ' '} onChange={(e) => setDraft({ ...draft, allowedProvider: e.target.value || null })} /></Grid>
+            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth label="Allowed model" required={draft.externalProcessingAllowed} value={draft.allowedModel ?? ''} error={Boolean(problems.allowedModel)} helperText={problems.allowedModel ?? ' '} onChange={(e) => setDraft({ ...draft, allowedModel: e.target.value || null })} /></Grid>
+            {([['Monthly soft token limit', 'monthlySoftTokenLimit'], ['Monthly hard token limit', 'monthlyHardTokenLimit'], ['Document token limit', 'maxTokensPerDocument'], ['External input cost / 1M', 'externalInputCostPerMillionTokens'], ['External output cost / 1M', 'externalOutputCostPerMillionTokens'], ['Local compute cost / hour', 'localComputeCostPerHour'], ['OCR cost / page', 'ocrCostPerPage']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: optionalNumber(e.target.value) })} /></Grid>)}
+            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="External dependency ceiling (%)" value={draft.externalDependencyCeilingPercent} error={Boolean(problems.externalDependencyCeilingPercent)} helperText={problems.externalDependencyCeilingPercent ?? ' '} onChange={(e) => setDraft({ ...draft, externalDependencyCeilingPercent: Number(e.target.value) })} slotProps={{ htmlInput: { min: 0, max: 10 } }} /></Grid>
+            <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="Retention days" value={draft.retentionDays} error={Boolean(problems.retentionDays)} helperText={problems.retentionDays ?? ' '} onChange={(e) => setDraft({ ...draft, retentionDays: Number(e.target.value) })} /></Grid>
+            {([['Data classifications', 'allowedDataClassifications'], ['Egress policy', 'egressPolicy'], ['Data residency', 'dataResidency'], ['External cost currency', 'externalCostCurrency'], ['External pricing version', 'externalPricingVersion'], ['Local cost currency', 'localCostCurrency']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: e.target.value || null })} /></Grid>)}
           </Grid>
           <FormControlLabel control={<Checkbox checked={draft.inputOutputAuditAllowed} onChange={(_, value) => setDraft({ ...draft, inputOutputAuditAllowed: value })} />} label="Input/output audit content permitted" />
-          <TextField label="Change reason" value={policyReason} onChange={(e) => setPolicyReason(e.target.value)} required multiline minRows={2} />
-        </Stack>}</DialogContent><DialogActions><Button onClick={() => setPolicyOpen(false)}>Cancel</Button><Button variant="contained" disabled={!policyReason.trim() || updatePolicy.isPending} onClick={() => updatePolicy.mutate()}>Save policy</Button></DialogActions>
+          <TextField label="Change reason" value={policyReason} onChange={(e) => setPolicyReason(e.target.value)} required multiline minRows={2} error={Boolean(problems.reason)} helperText={problems.reason ?? ' '} />
+          {/* One line naming every field still wanted, because the fields themselves can be
+              scrolled out of view in a dialog this tall — and the server checks its rules in
+              order, so discovering them one refusal at a time was the actual experience. */}
+          {blockingProblems.length > 0 && (
+            <Alert role="alert" severity="warning" sx={{ borderRadius: 2 }}>
+              {blockingProblems.length === 1 ? 'One field still needs an answer: ' : `${blockingProblems.length} fields still need an answer: `}
+              {blockingProblems.map(([key]) => FIELD_LABELS[key] ?? key).join(', ')}.
+            </Alert>
+          )}
+        </Stack>}</DialogContent><DialogActions><Button onClick={() => setPolicyOpen(false)}>Cancel</Button><Button variant="contained" disabled={Object.keys(problems).length > 0 || updatePolicy.isPending} onClick={() => updatePolicy.mutate()}>Save policy</Button></DialogActions>
       </Dialog>
 
       <ReasonDialog open={authorizeOpen} title="Authorize external AI provider" confirmLabel="Authorize provider" minReasonLength={5} reasonLabel="Justification / approval reference" description="Grants this tenant access to one exact external endpoint and model. The provider, scope and approval remain auditable." extra={<Stack spacing={2}><TextField label="Provider" value={provider.provider} onChange={(e) => setProvider({ ...provider, provider: e.target.value })} /><TextField label="Endpoint" value={provider.endpoint} onChange={(e) => setProvider({ ...provider, endpoint: e.target.value })} /><TextField label="Model" value={provider.model} onChange={(e) => setProvider({ ...provider, model: e.target.value })} /><TextField label="Allowed purposes" value={provider.purposes} onChange={(e) => setProvider({ ...provider, purposes: e.target.value })} /><TextField label="Expires on" type="datetime-local" value={provider.expiresOn} onChange={(e) => setProvider({ ...provider, expiresOn: e.target.value })} slotProps={{ inputLabel: { shrink: true } }} /><FormControlLabel control={<Checkbox checked={provider.unstructured} onChange={(_, value) => setProvider({ ...provider, unstructured: value })} />} label="Allow unstructured document content" /></Stack>} extraProblem={!provider.provider.trim() || !provider.endpoint.trim() || !provider.purposes.trim() ? 'Provider, endpoint and at least one purpose are required.' : null} busy={authorize.isPending} onClose={() => setAuthorizeOpen(false)} onConfirm={(reason) => authorize.mutate(reason)} />
