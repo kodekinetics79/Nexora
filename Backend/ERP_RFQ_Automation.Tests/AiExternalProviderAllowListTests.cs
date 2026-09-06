@@ -429,6 +429,19 @@ public sealed class AiExternalProviderAllowListTests
         Assert.Contains(AiReadinessCodes.PolicyModelAllowed, closed);
         Assert.Equal(closed.Length, report.BlockingCount);
 
+        // ...and the dependency ceiling is NOT one of them. It reads shut only because control
+        // 4 is shut, its instruction is "authorize this destination (controls 5-7)", and
+        // counting it turned two closed settings into three — sending an operator to author a
+        // grant that either already exists or is not what is stopping the document.
+        var ceiling = report.Checks.Single(check => check.Code == AiReadinessCodes.DependencyCeiling);
+        Assert.Equal(AiReadinessStatus.Blocked, ceiling.Status);
+        Assert.Null(ceiling.DenialReason);
+        Assert.DoesNotContain(AiReadinessCodes.DependencyCeiling, closed);
+        Assert.Contains("waiting on control 4", ceiling.CurrentValue, StringComparison.Ordinal);
+        // Nothing to do here, so nothing is asked of anybody.
+        Assert.Equal(string.Empty, ceiling.RequiredValue);
+        Assert.Equal(string.Empty, ceiling.SetItIn);
+
         // The enforcing gate can only ever name the first of them; that is the whole defect.
         var decision = await fixture.Trust.EvaluateAsync(
             fixture.TenantId, fixture.Descriptor, AiPurposes.RfqExtraction, true, default);
@@ -524,11 +537,12 @@ public sealed class AiExternalProviderAllowListTests
     }
 
     [Fact]
-    public async Task Readiness_ClosesOnAZeroMonthlyBudget_WhichThePolicyEndpointAccepts()
+    public async Task Readiness_ClosesOnAZeroMonthlyBudget_WhichARowCanStillHold()
     {
-        // MonthlyHardTokenLimit = 0 is a legal policy value — the update endpoint rejects only
-        // negatives — and it refuses every reservation in the ledger, below every control the
-        // rest of this report covers. Omitting it would recreate the whole defect: an operator
+        // The update endpoint now refuses to WRITE a zero (it is a kill switch wearing a
+        // budget's clothes), but rows predating that guard, a seeder, or a hand-run statement
+        // can all still hold one, and it refuses every reservation in the ledger below every
+        // control the rest of this report covers. Omitting it would recreate the whole defect: an operator
         // opening every lock above, being told READY, and watching every document dead-letter
         // under a code that appeared in no row.
         using var fixture = new Fixture();
@@ -587,18 +601,34 @@ public sealed class AiExternalProviderAllowListTests
     }
 
     [Fact]
-    public async Task Readiness_WithNoMonthlyCeiling_DoesNotInventAConstraint()
+    public async Task Readiness_WithNoMonthlyCeiling_WarnsWithoutInventingAConstraint()
     {
-        // The limit is nullable and unset means unlimited. A budget row reported as blocking
-        // because nobody set a number would send operators to change a control that is not shut.
+        // Two things have to be true at once. Nothing is shut — a budget row reported as
+        // blocking because nobody typed a number would send operators to change a control that
+        // is not closed — and yet "no monthly ceiling" is unbounded spend on a tenant that has
+        // not gone live, which is not something to print a green tick next to.
         using var fixture = new Fixture();
         await fixture.AuthorizeAsync(unstructuredAllowed: true);
 
-        var budget = (await fixture.Readiness().EvaluateAsync(fixture.TenantId, default)).Checks
-            .Single(check => check.Code == AiReadinessCodes.MonthlyHardBudget);
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+        var budget = report.Checks.Single(check => check.Code == AiReadinessCodes.MonthlyHardBudget);
 
-        Assert.Equal(AiReadinessStatus.Pass, budget.Status);
+        Assert.Equal(AiReadinessStatus.Warn, budget.Status);
         Assert.Null(budget.DenialReason);
+        Assert.Contains("unbounded", budget.CurrentValue, StringComparison.Ordinal);
+
+        // A warning is not a refusal: the documents extract.
+        Assert.True(report.Ready);
+        Assert.Equal(0, report.BlockingCount);
+        Assert.Equal(1, report.WarningCount);
+        Assert.Null(report.FirstBlockingReason);
+
+        // And it stops warning once somebody decides a number.
+        fixture.MutatePolicy(policy => policy.MonthlyHardTokenLimit = 2_000_000);
+        var decided = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+        Assert.Equal(AiReadinessStatus.Pass,
+            decided.Checks.Single(check => check.Code == AiReadinessCodes.MonthlyHardBudget).Status);
+        Assert.Equal(0, decided.WarningCount);
     }
 
     [Fact]

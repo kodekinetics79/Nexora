@@ -23,7 +23,26 @@ public enum AiReadinessStatus
 {
     Pass,
     Fail,
-    NotApplicable
+    NotApplicable,
+
+    /// <summary>
+    /// Open, and still a fact somebody has to decide about. It never blocks a document and
+    /// never makes the report un-ready: it is for a control that is satisfied only because
+    /// nobody has set it, where the unset value carries a standing cost or risk.
+    /// </summary>
+    Warn,
+
+    /// <summary>
+    /// NOT an independent finding: this control's outcome follows entirely from an earlier
+    /// closed one, and opening that one settles this row without anybody touching it.
+    ///
+    /// <para>Distinct from <see cref="NotApplicable"/>, which says the control cannot bite in
+    /// this configuration at all. Blocked rows are excluded from
+    /// <see cref="AiExtractionReadinessReport.BlockingCount"/> — counting them told operators
+    /// to fix three things when two settings were closed, and the third row's instruction was
+    /// to do something they had already done.</para>
+    /// </summary>
+    Blocked
 }
 
 /// <summary>
@@ -90,6 +109,15 @@ public sealed record AiExtractionReadinessCheck(
 /// instant" — it is never an input to an enforcement decision, and no code path may branch on
 /// it.</para>
 /// </summary>
+/// <param name="BlockingCount">
+/// Root causes only. A control whose outcome follows from an earlier closed one is reported
+/// as <see cref="AiReadinessStatus.Blocked"/> and is not counted here, so this number is the
+/// number of settings an operator actually has to change.
+/// </param>
+/// <param name="WarningCount">
+/// Controls that are open but carry a standing decision — today, a tenant with no monthly
+/// token ceiling at all. Never affects <see cref="Ready"/>: these documents extract.
+/// </param>
 /// <param name="FirstBlockingReason">
 /// The denial code of the first closed control. For controls 1-9 this is exactly what
 /// <c>IAiExternalProviderTrust.EvaluateAsync</c> would return for the same tenant; for 10-14
@@ -103,6 +131,7 @@ public sealed record AiExtractionReadinessReport(
     bool Ready,
     string? FirstBlockingReason,
     int BlockingCount,
+    int WarningCount,
     DateTime EvaluatedOnUtc,
     IReadOnlyList<AiExtractionReadinessCheck> Checks);
 
@@ -262,12 +291,13 @@ public sealed class AiExtractionReadinessService(
                 + "is not. One capital letter refuses every document this tenant submits, and it is refused "
                 + "in the token ledger AFTER the allow-list gate has already passed the document, under "
                 + $"{AiPolicyDenials.ModelDenied}, which triages as a generic extraction failure rather than "
-                + $"an authorization one. Copy the required value exactly as printed: {provider.Model}"),
-
-            await CeilingCheckAsync(13, businessUnitId, provider, policy, locks, local, ct),
-
-            await BudgetCheckAsync(14, businessUnitId, policy, ct)
+                + $"an authorization one. Copy the required value exactly as printed: {provider.Model}")
         };
+        // 13 and 14 are appended rather than initialised with the rest: the ceiling row reports
+        // which of the rows ABOVE it it is waiting on, and reading them is how it names the
+        // same number and the same wording the operator is looking at.
+        checks.Add(await CeilingCheckAsync(13, businessUnitId, provider, policy, checks, local, ct));
+        checks.Add(await BudgetCheckAsync(14, businessUnitId, policy, ct));
 
         // A mis-scoped call carries no lock rows at all, because it says the CALLER is wrong
         // rather than that the tenant's configuration is closed. Without this row such a
@@ -280,12 +310,16 @@ public sealed class AiExtractionReadinessService(
                 "a request scoped to this tenant", "n/a — this is a caller fault, not a setting",
                 "The chain refuses to evaluate another tenant's configuration, so nothing below was tested."));
 
+        // Fail is a ROOT CAUSE: a control closed on its own account, that somebody has to go
+        // and open. Blocked rows follow from one of these and settle themselves, so they are
+        // reported and not counted.
         var blocking = checks.Where(x => x.Status == AiReadinessStatus.Fail).ToList();
         return new AiExtractionReadinessReport(
             provider, purpose, UnstructuredPayload: true,
             Ready: blocking.Count == 0,
             FirstBlockingReason: blocking.FirstOrDefault()?.DenialReason,
             BlockingCount: blocking.Count,
+            WarningCount: checks.Count(x => x.Status == AiReadinessStatus.Warn),
             EvaluatedOnUtc: DateTime.UtcNow,
             Checks: checks);
     }
@@ -296,9 +330,10 @@ public sealed class AiExtractionReadinessService(
         string title, string setItIn, string detail)
     {
         // An absent lock means an earlier closed one removed what this control tests. Not a
-        // pass, not a failure of its own: nothing here is invented.
+        // pass, not a failure of its own, and not NotApplicable either — this control applies
+        // perfectly well, it simply was not reached. Nothing here is invented.
         if (!locks.TryGetValue(code, out var outcome))
-            return new(order, code, title, AiReadinessStatus.NotApplicable, null,
+            return new(order, code, title, AiReadinessStatus.Blocked, null,
                 "not evaluated: an earlier control is closed", string.Empty, string.Empty, detail);
 
         var moot = outcome.Status == AiReadinessStatus.NotApplicable;
@@ -342,7 +377,7 @@ public sealed class AiExtractionReadinessService(
     /// </summary>
     private async Task<AiExtractionReadinessCheck> CeilingCheckAsync(
         int order, long businessUnitId, AiProviderDescriptor provider, AiProcessingPolicy? policy,
-        IReadOnlyDictionary<string, AiTrustLockOutcome> locks, bool local, CancellationToken ct)
+        IReadOnlyList<AiExtractionReadinessCheck> earlier, bool local, CancellationToken ct)
     {
         const string title = "External dependency ceiling";
         const string detail =
@@ -355,35 +390,42 @@ public sealed class AiExtractionReadinessService(
             return Moot(order, AiReadinessCodes.DependencyCeiling, title,
                 $"Provider class Local ({provider.ClassificationReason}) — local calls are not rationed");
 
-        var exempt = new[]
-        {
-            AiReadinessCodes.EndpointResolved, AiReadinessCodes.PolicyPresent, AiReadinessCodes.PolicyEnabled,
-            AiReadinessCodes.ExternalProcessingAllowed, AiReadinessCodes.AuthorizationPresent,
-            AiReadinessCodes.AuthorizationLive, AiReadinessCodes.AuthorizationPurpose
-        }.All(code => locks.TryGetValue(code, out var outcome) && outcome.Status == AiReadinessStatus.Pass);
+        // The destination controls a live grant exempts this ratio from, read from the rows
+        // themselves so the number and the wording this row cites are the ones on screen.
+        string[] destination =
+        [
+            AiReadinessCodes.EndpointResolved, AiReadinessCodes.PolicyPresent,
+            AiReadinessCodes.PolicyEnabled, AiReadinessCodes.ExternalProcessingAllowed,
+            AiReadinessCodes.AuthorizationPresent, AiReadinessCodes.AuthorizationLive,
+            AiReadinessCodes.AuthorizationPurpose
+        ];
+        var waitingOn = earlier.FirstOrDefault(
+            check => destination.Contains(check.Code) && check.Status != AiReadinessStatus.Pass);
 
-        if (exempt)
+        if (waitingOn is null)
             return Moot(order, AiReadinessCodes.DependencyCeiling, title,
                 "exempt: this destination holds a live authorization covering this purpose");
 
         if (policy is null)
-            return new(order, AiReadinessCodes.DependencyCeiling, title, AiReadinessStatus.NotApplicable,
+            return new(order, AiReadinessCodes.DependencyCeiling, title, AiReadinessStatus.Blocked,
                 null, "not evaluated: no AI processing policy row", string.Empty, string.Empty, detail);
 
+        // Reported, never counted. Reaching this line REQUIRES one of controls 1-7 to be
+        // closed — a live grant for this destination exempts the call from the ratio — so the
+        // ratio here is always measuring a state the operator is in the middle of leaving.
+        // Counting it printed a fourteenth red row whose instruction was "authorize this
+        // destination (controls 5-7)" while those very controls read Satisfied six rows above,
+        // and turned two closed settings into "3 controls blocking".
         var recent = await AiPolicyDenials.RecentProviderClassesAsync(db.AiRequests, businessUnitId, ct);
         var ratio = AiPolicyDenials.ExternalDependencyRatio(recent) * 100m;
-        var breached = AiPolicyDenials.ExceedsExternalDependencyCeiling(
-            recent, policy.ExternalDependencyCeilingPercent);
-        var current =
-            $"one more external call would be {ratio:0.0}% of the last {recent.Count + 1} governed calls; "
-            + $"ExternalDependencyCeilingPercent = {policy.ExternalDependencyCeilingPercent}";
 
-        return new(order, AiReadinessCodes.DependencyCeiling, title,
-            breached ? AiReadinessStatus.Fail : AiReadinessStatus.Pass,
-            breached ? AiPolicyDenials.ExternalDependencyCap : null,
-            current,
-            "authorize this destination (controls 5-7) rather than raising the ceiling",
-            SetInAiProviders, detail);
+        return new(order, AiReadinessCodes.DependencyCeiling, title, AiReadinessStatus.Blocked, null,
+            $"waiting on control {waitingOn.Order} ({waitingOn.Title}) — once that is open, this "
+            + "destination's own grant exempts the call from the ratio. For reference: one more "
+            + $"UNAUTHORIZED external call would be {ratio:0.0}% of the last {recent.Count + 1} "
+            + $"governed calls, against ExternalDependencyCeilingPercent = "
+            + $"{policy.ExternalDependencyCeilingPercent}",
+            string.Empty, string.Empty, detail);
     }
 
     /// <summary>
@@ -407,7 +449,9 @@ public sealed class AiExtractionReadinessService(
             + "exhausted month. Leave the limit unset for no ceiling. The SOFT limit is not "
             + "tested here because it only flags a call in the ledger, it never refuses one. "
             + "This is the one control below which no allow-list grant exempts a call, and it "
-            + "is applied after every control above it has already passed.";
+            + "is applied after every control above it has already passed. An UNSET limit warns "
+            + "rather than passes: documents extract, but the tenant's AI spend has no ceiling "
+            + "at all, and a tick is the wrong thing to print next to an unpriced liability.";
 
         if (policy is null)
             return new(order, AiReadinessCodes.MonthlyHardBudget, title, AiReadinessStatus.NotApplicable,
@@ -416,10 +460,16 @@ public sealed class AiExtractionReadinessService(
         // The POLICY's limit, not the period row's: the reservation copies this value onto the
         // row immediately before testing it, so a row carrying last month's limit is never
         // what bites, and reporting the row's copy would show a number that does not apply.
+        // Warn, not Pass. Nothing is closed — every document extracts — but "no monthly
+        // ceiling" is unbounded spend, and rendering that as a green tick is how a tenant
+        // reaches go-live with no cost control anybody ever decided on. It is deliberately not
+        // a Fail: a budget row that blocked because nobody typed a number would send operators
+        // to change a control that is not shut.
         if (policy.MonthlyHardTokenLimit is not { } hard)
-            return new(order, AiReadinessCodes.MonthlyHardBudget, title, AiReadinessStatus.Pass, null,
-                "MonthlyHardTokenLimit = (unset — no monthly ceiling)",
-                "MonthlyHardTokenLimit unset, or above this period's usage", SetInAiPolicy, detail);
+            return new(order, AiReadinessCodes.MonthlyHardBudget, title, AiReadinessStatus.Warn, null,
+                "MonthlyHardTokenLimit = (unset — no monthly ceiling: this tenant's AI spend is unbounded)",
+                "a monthly ceiling sized to this tenant's plan, or a deliberate decision to leave it open",
+                SetInAiPolicy, detail);
 
         var period = AiPolicyDenials.BudgetPeriodStart(DateTime.UtcNow);
         var budget = await db.AiBudgetPeriods.AsNoTracking()
