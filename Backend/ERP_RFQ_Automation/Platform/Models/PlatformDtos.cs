@@ -370,6 +370,36 @@ public class ProvisionTenantRequest
     [StringLength(32)]
     public string? DataRegion { get; set; }
 
+    /// <summary>
+    /// One of <see cref="TenantDeploymentProfiles"/>. Omitted means PRODUCTION, which is the only
+    /// safe default: a profile is what decides whether catalogued production prerequisites may be
+    /// deferred, and defaulting to anything else would hand out a relaxed gate to a typo.
+    ///
+    /// <para><b>Why it is on the provisioning request at all.</b> Every tenant was born
+    /// PRODUCTION, so a demo or an internal test workspace — which has no customer, no contract
+    /// and no third-party estate to point at — was created into the strictest profile the product
+    /// has and then had to be walked back through a separate Owner endpoint on a screen the
+    /// operator had not opened yet. The result was a test tenant sitting in Provisioning behind
+    /// controls that were never meant to apply to it. Saying so at creation is the same decision,
+    /// taken at the moment the operator actually knows the answer.</para>
+    ///
+    /// <para><b>It grants nothing the profile endpoint does not.</b> Anything other than
+    /// PRODUCTION is Owner-only and requires <see cref="DeploymentProfileReason"/>, enforced in
+    /// the controller — provisioning submit is a TenantAdmin endpoint, and without that check this
+    /// field would be a SupportAdmin's route to a deferral they cannot otherwise obtain.</para>
+    /// </summary>
+    [StringLength(16)]
+    public string? DeploymentProfile { get; set; }
+
+    /// <summary>
+    /// Required for every profile other than PRODUCTION, minimum 15 characters, recorded as the
+    /// approval reason on the tenant and in the provisioning audit trail — the same three facts
+    /// (who, when, why) <c>DeploymentProfilePolicy.IsApproved</c> demands before a DEMO tenant
+    /// defers anything.
+    /// </summary>
+    [StringLength(1000)]
+    public string? DeploymentProfileReason { get; set; }
+
     // ---- commercial terms -----------------------------------------------------------------
     // The revenue block. Defaults are chosen so that the ONLY way to create a tenant nobody
     // pays for is to say so explicitly and give a reason that lands in the audit log.

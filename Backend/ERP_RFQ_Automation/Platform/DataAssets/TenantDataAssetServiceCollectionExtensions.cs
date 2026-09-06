@@ -17,6 +17,10 @@ public static class TenantDataAssetServiceCollectionExtensions
         // Stateless; scoped only to sit alongside the context it is handed.
         services.AddScoped<ITenantPostgreSqlScopeProbe, TenantPostgreSqlScopeProbe>();
         services.AddScoped<IPlatformDataBoundaryProvisioner, PlatformDataBoundaryProvisioner>();
+
+        // The on-demand path into the same automation, for a tenant that was provisioned before
+        // this deployment declared its estate.
+        services.AddScoped<IPlatformDataBoundaryApplier, PlatformDataBoundaryApplier>();
         return services;
     }
 }

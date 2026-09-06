@@ -114,6 +114,23 @@ per-type overrides: `LogicalKey`, `Classification`, `Disposition`.
   deletion certification needs from them, and is not a claim that anything about a
   subprocessor has been checked.
 
+**Tenants provisioned before the manifest was set.** Provisioning was the only moment the
+automation ever ran, so a tenant created before these keys existed stayed on the manual path
+forever. It no longer does: on the tenant's **Activation** tab, `data.residency-isolation`
+opens a dialog with no fields and one button, which calls
+`POST /api/platform/tenants/{id}/data-assets/apply-platform-manifest` (Owner). That registers
+the declared boundaries and verifies the PostgreSQL scope from the same live probe
+provisioning uses, under the same registry rules — a probe that disagrees refuses the whole
+action. `GET /api/platform/data-boundaries` is what the console reads to decide whether it can
+offer the button at all; declare nothing and the operator gets the manual form, now carrying
+the four key names that would end it.
+
+A tenant with **no contractual `DataRegion`** can never pass this control — the probe has
+nothing to agree with. Two things now prevent that: provisioning records the declared region
+when the wizard's Data region box is left blank (a submitted region is never overridden), and
+the button above fills an empty column from the declaration and audits it as having come from
+there. A region that is already recorded and disagrees is refused, never rewritten.
+
 ### Malware scanning posture
 
 The current Render contract deliberately selects the built-in structural inspector for
