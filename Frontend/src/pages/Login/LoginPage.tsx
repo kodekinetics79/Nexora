@@ -20,13 +20,11 @@ import {
   DarkMode as MoonIcon,
   Visibility,
   VisibilityOff,
-  CheckCircleOutlined as CheckIcon,
   VerifiedUserOutlined as IntegrityIcon,
   SettingsOutlined as SettingsIcon,
   ArrowForwardRounded as ArrowIcon,
 } from '@mui/icons-material';
 import styled from '@emotion/styled';
-import { keyframes } from '@emotion/react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppTheme } from '../../context/ThemeContext';
 import Branding from '../../components/common/Branding';
@@ -37,14 +35,10 @@ import { presentableErrorMessage } from '../../utils/apiErrors';
 import { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
 import { INBOX_ROOT } from '../../components/layout/navCatalog';
 import { loginErrorMessage } from './loginError';
+import { BrandHero, EvidenceSpine } from './EvidenceSpine';
 
 /** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
 const LOGIN_ERROR_ID = 'login-error';
-
-const signalTravel = keyframes`
-  0%, 100% { transform: translate3d(0, 0, 0); opacity: .42; }
-  50% { transform: translate3d(0, 140px, 0); opacity: 1; }
-`;
 
 const Container = styled.div<{ mode: string }>`
   min-height: 100vh;
@@ -205,12 +199,6 @@ const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) =>
     boxShadow: `0 0 0 3px ${theme.palette.primary.main}24`,
   }
 }));
-
-const evidenceStages = [
-  { title: 'Capture & reconcile', detail: 'Customer email → Canonical Lead' },
-  { title: 'Approve & source', detail: 'Participation → Formal RFQ' },
-  { title: 'Fulfil & collect', detail: 'Order → Delivery evidence → Payment' },
-];
 
 // --- Auth service typing ---
 interface LoginBusinessUnitOption {
@@ -387,26 +375,7 @@ const LoginPage: React.FC = () => {
     <Container mode={mode} data-testid="login-viewport">
       <LoginShell data-testid="login-card">
         <EvidencePanel aria-label="Nexora evidence-to-cash workflow" data-decorative-motion="true">
-          <Box
-            aria-hidden="true"
-            sx={{
-              position: 'absolute',
-              width: 330,
-              height: 330,
-              right: -168,
-              bottom: -148,
-              border: '1px solid rgba(243, 210, 122, .18)',
-              borderRadius: '50%',
-              '&::before, &::after': {
-                content: '""',
-                position: 'absolute',
-                border: '1px solid rgba(224, 161, 0, .15)',
-                borderRadius: '50%',
-              },
-              '&::before': { inset: 48 },
-              '&::after': { inset: 104 },
-            }}
-          />
+          <BrandHero />
           <Box
             sx={{
               '& .MuiTypography-root': { color: '#f8fafc !important' },
@@ -445,108 +414,7 @@ const LoginPage: React.FC = () => {
             Ownership, approvals and status stay attached at every handoff.
           </Typography>
 
-          <Box
-            aria-label="Illustrative commercial record"
-            sx={{
-              display: { xs: 'none', sm: 'flex' },
-              alignItems: 'center',
-              justifyContent: 'flex-start',
-              gap: 2,
-              py: 1.25,
-              px: 1.5,
-              width: 'fit-content',
-              border: '1px solid rgba(170, 160, 130, .32)',
-              borderRadius: 999,
-              background: 'rgba(18, 20, 24, .55)',
-              backdropFilter: 'blur(10px)',
-            }}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <IntegrityIcon aria-hidden="true" sx={{ color: '#e0a100', fontSize: 22 }} />
-              <Typography sx={{ color: '#e8e4da', fontSize: 14, fontWeight: 600 }}>
-                Illustrative workflow · governed through payment
-              </Typography>
-            </Box>
-          </Box>
-
-          <Box
-            component="ol"
-            aria-label="Governed commercial stages"
-            sx={{
-              listStyle: 'none',
-              p: 0,
-              m: { xs: 0, sm: '28px 0 0' },
-              display: 'grid',
-              gridTemplateColumns: 'minmax(0, 1fr)',
-              position: 'relative',
-              maxWidth: 500,
-              '&::before': {
-                content: '""',
-                position: 'absolute',
-                left: 16,
-                top: 30,
-                bottom: 30,
-                width: '1px',
-                background: 'linear-gradient(#fff1c9, #e0a100)',
-                opacity: .55,
-              },
-              '&::after': {
-                content: '""',
-                position: 'absolute',
-                left: 13,
-                top: 28,
-                width: 7,
-                height: 7,
-                borderRadius: '50%',
-                background: '#f3d27a',
-                boxShadow: '0 0 0 4px rgba(224, 161, 0, .12), 0 0 18px rgba(224, 161, 0, .9)',
-                animation: `${signalTravel} 7s cubic-bezier(.16, 1, .3, 1) infinite`,
-              },
-              '@media (prefers-reduced-motion: reduce)': {
-                '&::after': { animation: 'none' },
-              },
-              '@media (max-width: 599.95px)': { display: 'none' },
-            }}
-          >
-            {evidenceStages.map((stage) => (
-              <Box
-                component="li"
-                key={stage.title}
-                sx={{
-                  minWidth: 0,
-                  minHeight: 70,
-                  py: 1.25,
-                  display: 'grid',
-                  gridTemplateColumns: '34px minmax(0, 1fr)',
-                  alignItems: 'center',
-                  gap: 2,
-                  position: 'relative',
-                }}
-              >
-                <Box sx={{
-                  width: 32,
-                  height: 32,
-                  border: '1px solid #e0a100',
-                  borderRadius: '50%',
-                  display: 'grid',
-                  placeItems: 'center',
-                  background: '#14171d',
-                  boxShadow: '0 10px 28px -16px rgba(224, 161, 0, .95)',
-                  zIndex: 1,
-                }}>
-                  <CheckIcon aria-hidden="true" sx={{ color: '#e0a100', fontSize: 18 }} />
-                </Box>
-                <Box>
-                  <Typography sx={{ color: '#f8fafc', fontSize: 15, fontWeight: 700, lineHeight: 1.2 }}>
-                    {stage.title}
-                  </Typography>
-                  <Typography sx={{ color: '#c2bdb1', fontSize: 13, mt: .45, lineHeight: 1.25 }}>
-                    {stage.detail}
-                  </Typography>
-                </Box>
-              </Box>
-            ))}
-          </Box>
+          <EvidenceSpine />
 
           <Box
             sx={{
@@ -598,7 +466,7 @@ const LoginPage: React.FC = () => {
             </IconButton>
           </Box>
 
-          <AuthSurface mode={mode}>
+          <AuthSurface mode={mode} className="nx-enter">
             <Typography
               component="h1"
               sx={{
@@ -767,23 +635,13 @@ const LoginPage: React.FC = () => {
                 disabled={loading || (businessUnitOptions !== null && selectedBusinessUnitId === '')}
                 aria-busy={loading}
                 sx={{
-                  minHeight: 61,
+                  minHeight: 58,
                   py: 1.5,
+                  mt: 1,
                   fontSize: 16,
                   borderRadius: '12px',
-                  background: 'linear-gradient(110deg, #c9931a 0%, #a87a12 58%, #c9931a 112%)',
-                  color: '#ffffff',
-                  boxShadow: '0 16px 34px -20px rgba(201, 147, 26, .88)',
-                  transition: 'box-shadow 180ms ease-out, transform 180ms ease-out, filter 180ms ease-out',
-                  '&:hover': {
-                    background: 'linear-gradient(110deg, #a87a12 0%, #c9931a 58%, #a87a12 112%)',
-                    boxShadow: '0 20px 38px -20px rgba(201, 147, 26, .92)',
-                    transform: 'translateY(-1px)',
-                  },
-                  '&:active': { transform: 'translateY(0)' },
                   '& .MuiButton-endIcon': { transition: 'transform 180ms ease-out' },
                   '&:hover .MuiButton-endIcon': { transform: 'translateX(3px)' },
-                  mt: 1,
                 }}
               >
                 {loading ? (
