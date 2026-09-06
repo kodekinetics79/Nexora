@@ -739,11 +739,19 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             assemblyId = result.AssemblyId!.Value;
         }
 
-        EmailInquiryRecoverySweepResult sweep;
+        // What "invisible to stranded recovery" has to mean here is that the sweep does not touch
+        // THIS message. It cannot be read off sweep.StrandedComponents.Examined: SweepOnceAsync
+        // resolves every tenant with stranded work (ResolveTenantsWithStrandedWorkAsync), so that
+        // counter describes the whole shared collection database, and asserting zero on it made
+        // this test fail the moment any other class in the collection left a stranded row alive.
+        // The durable state of this assembly's own components is the tenant-scoped equivalent.
+        var beforeSweep = await ReadComponentDispositionsAsync(services, businessUnitId, assemblyId);
         using (var sweepScope = services.CreateScope())
-            sweep = await sweepScope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyRecoveryService>()
+            await sweepScope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyRecoveryService>()
                 .SweepOnceAsync();
-        Assert.Equal(0, sweep.StrandedComponents.Examined);
+        Assert.Equal(
+            beforeSweep,
+            await ReadComponentDispositionsAsync(services, businessUnitId, assemblyId));
 
         using var verify = services.CreateScope();
         using var tenant = verify.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
@@ -1145,4 +1153,22 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         command.CommandText = sql;
         return Convert.ToInt32(await command.ExecuteScalarAsync());
     }
+
+    /// <summary>
+    /// The disposition of one assembly's components, ordered, so a sweep that must not touch this
+    /// message can be checked against the rows it owns instead of a platform-wide counter.
+    /// </summary>
+    private static async Task<List<(long Id, EmailInquiryComponentStatus Status, bool IsTerminal)>>
+        ReadComponentDispositionsAsync(IServiceProvider services, long businessUnitId, long assemblyId)
+    {
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        return await db.EmailInquiryComponents.AsNoTracking()
+            .Where(x => x.AssemblyId == assemblyId)
+            .OrderBy(x => x.Id)
+            .Select(x => new ValueTuple<long, EmailInquiryComponentStatus, bool>(x.Id, x.Status, x.IsTerminal))
+            .ToListAsync();
+    }
+
 }
