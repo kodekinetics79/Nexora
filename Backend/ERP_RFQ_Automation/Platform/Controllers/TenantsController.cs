@@ -1158,6 +1158,16 @@ public class TenantsController : ControllerBase
         if (request.MonthlySoftTokenLimit is < 0 || request.MonthlyHardTokenLimit is < 0
             || request.MonthlySoftTokenLimit is { } soft && request.MonthlyHardTokenLimit is { } hard && soft > hard)
             return BadRequest(new { error = "Token limits must be non-negative and soft cannot exceed hard." });
+        // Zero is not a budget, it is a silent kill switch. Every control on the readiness
+        // report reads open and the token ledger then refuses every single document with
+        // hard_budget_exceeded — which triages as a broken extractor, not as a setting. A
+        // tenant that should not use AI is IsEnabled = false, which says so on every screen.
+        if (request.MonthlyHardTokenLimit is 0)
+            return BadRequest(new
+            {
+                error = "A monthly hard token limit of 0 refuses every document while every other "
+                    + "control reads open. Leave it unset for no ceiling, or disable AI processing."
+            });
         if (request.MaxTokensPerDocument is <= 0 || request.ExternalDependencyCeilingPercent is < 0 or > 10
             || request.RetentionDays is < 1 or > 3650
             || string.IsNullOrWhiteSpace(request.AllowedDataClassifications)

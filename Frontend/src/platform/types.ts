@@ -1573,13 +1573,21 @@ export interface AiProviderTrustView {
 }
 
 /**
- * How one control in the extraction chain stands.
+ * How one control in the extraction chain stands. None of the three non-Pass states below is a
+ * pass, and none of them is a failure either — telling them apart is what stops the report
+ * over-stating the work.
  *
- * `NotApplicable` is deliberately not a pass: it means the control cannot bite in this
- * configuration (a loopback deployment egresses nothing) or that an earlier closed control
- * removed the thing it tests. It neither blocks nor counts as ready.
+ * `NotApplicable`: the control cannot bite in this configuration at all — a loopback deployment
+ * egresses nothing, so its egress controls are greyed rather than ticked.
+ *
+ * `Blocked`: the control applies and simply was not reached, because one above it is closed.
+ * Opening that one settles this row with nobody touching it, so it is reported and never
+ * counted as a blocker.
+ *
+ * `Warn`: open, and still a decision somebody owes — a control satisfied only because nobody
+ * set it, where the unset value carries a standing cost. It never makes the report un-ready.
  */
-export type AiReadinessStatus = 'Pass' | 'Fail' | 'NotApplicable';
+export type AiReadinessStatus = 'Pass' | 'Fail' | 'NotApplicable' | 'Warn' | 'Blocked';
 
 export interface AiExtractionReadinessCheck {
   order: number;
@@ -1604,7 +1612,10 @@ export interface AiExtractionReadinessReport {
   unstructuredPayload: boolean;
   ready: boolean;
   firstBlockingReason: string | null;
+  /** Root causes only: controls closed on their own account, not ones waiting on those. */
   blockingCount: number;
+  /** Open, but carrying a standing decision. Never affects `ready`. */
+  warningCount: number;
   evaluatedOnUtc: string;
   checks: AiExtractionReadinessCheck[];
 }

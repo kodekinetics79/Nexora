@@ -62,7 +62,10 @@ const readiness = (
   unstructuredPayload: true,
   ready: false,
   firstBlockingReason: 'external_processing_denied',
+  // Root causes only. The ceiling row below is shut solely because control 4 is, and counting
+  // it made this read "3 controls blocking" over two settings and a consequence.
   blockingCount: 3,
+  warningCount: 0,
   evaluatedOnUtc: '2026-08-12T09:00:00Z',
   checks: [
     check(1, 'endpoint_resolved', 'Inference endpoint resolves'),
@@ -91,6 +94,12 @@ const readiness = (
       requiredValue: 'AllowedModel = "deepseek-v4-pro" (or unset)',
       setItIn: 'PUT /api/platform/tenants/{id}/ai-policy (platform Owner, second factor required)',
       detail: 'AllowedModel is compared ORDINAL — CASE-SENSITIVE — while AllowedProvider is not.',
+    }),
+    check(13, 'external_dependency_ceiling', 'External dependency ceiling', {
+      status: 'Blocked',
+      currentValue: 'waiting on control 4 (External processing is consented to) — once that is'
+        + ' open, this destination\'s own grant exempts the call from the ratio.',
+      detail: 'Governs UNAUTHORIZED external usage only, as a share of the last 100 governed calls.',
     }),
   ],
   ...overrides,
@@ -138,7 +147,7 @@ describe('extraction pre-flight', () => {
     renderTab();
 
     // The verdict, the count, and the code the next submitted document actually comes back with.
-    expect(await screen.findByText(/Documents will not extract — 3 controls blocking/)).toBeVisible();
+    expect(await screen.findByText(/Documents will not extract — 3 settings to change/)).toBeVisible();
     expect(within(verdict()).getByText('external_processing_denied')).toBeVisible();
     expect(within(verdict()).getByText(/fixing one reveals the next/i)).toBeVisible();
     expect(platformApi.getTenantAiReadiness).toHaveBeenCalledWith('9');
@@ -168,6 +177,48 @@ describe('extraction pre-flight', () => {
     const satisfied = row('AI processing is enabled');
     expect(within(satisfied).getByText('Satisfied')).toBeVisible();
     expect(within(satisfied).queryByText('Required value')).not.toBeInTheDocument();
+  });
+
+  it('reports a control that is only waiting on another, without asking for anything', async () => {
+    renderTab();
+
+    await screen.findByText(/Documents will not extract/);
+
+    // The row an operator was previously sent to act on: red, counted, and instructing them to
+    // "authorize this destination (controls 5-7)" when those controls already read Satisfied.
+    // Addressed by its stated reason rather than its title: "External dependency ceiling" is
+    // also a field label in the effective-policy grid further down the tab.
+    const ceiling = screen.getByText(/waiting on control 4/).closest('.MuiPaper-root') as HTMLElement;
+    expect(within(ceiling).getByText('Not reached')).toBeVisible();
+    expect(within(ceiling).queryByText('Blocking')).not.toBeInTheDocument();
+    expect(within(ceiling).queryByText('Required value')).not.toBeInTheDocument();
+    expect(within(ceiling).queryByText(/Set it in/)).not.toBeInTheDocument();
+  });
+
+  it('says a tenant with no spending ceiling is ready and still owes a decision', async () => {
+    vi.spyOn(platformApi, 'getTenantAiReadiness').mockResolvedValue(readiness({
+      ready: true,
+      firstBlockingReason: null,
+      blockingCount: 0,
+      warningCount: 1,
+      checks: [
+        check(14, 'monthly_hard_token_budget', 'Monthly token budget has headroom', {
+          status: 'Warn',
+          currentValue: 'MonthlyHardTokenLimit = (unset — no monthly ceiling: this tenant\'s AI'
+            + ' spend is unbounded)',
+          detail: 'An UNSET limit warns rather than passes.',
+        }),
+      ],
+    }));
+
+    renderTab();
+
+    // Green said "finished" over a tenant whose AI spend nobody had put a number on.
+    expect(await screen.findByText(/Documents will extract — 1 thing still to decide/)).toBeVisible();
+    const budget = row('Monthly token budget has headroom');
+    expect(within(budget).getByText('Needs a decision')).toBeVisible();
+    expect(within(budget).getByText(/spend is unbounded/)).toBeVisible();
+    expect(within(budget).queryByText('Satisfied')).not.toBeInTheDocument();
   });
 
   it('offers copy rather than retyping for the case-sensitive model comparison', async () => {

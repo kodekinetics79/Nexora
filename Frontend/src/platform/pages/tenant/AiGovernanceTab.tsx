@@ -38,19 +38,30 @@ const optionalNumber = (value: string): number | null => value.trim() === '' ? n
  * further down this tab, which each row names.
  */
 
-const STATUS_TONE: Record<AiReadinessStatus, 'success' | 'error' | 'neutral'> = {
+const STATUS_TONE: Record<AiReadinessStatus, 'success' | 'error' | 'neutral' | 'warning'> = {
   Pass: 'success',
   Fail: 'error',
   // Grey, never green: a control that cannot bite here has not been satisfied, and a tick would
   // tell a reader that a local deployment had passed an egress check it never ran.
   NotApplicable: 'neutral',
+  // Amber, never green: nothing is shut, and something is still owed a decision.
+  Warn: 'warning',
+  // Grey, and deliberately not red: this row is a consequence of one above it and needs no
+  // action of its own. Reading it as a separate failure is what turned two closed settings into
+  // "3 controls blocking", with an instruction to do something already done.
+  Blocked: 'neutral',
 };
 
 const STATUS_LABEL: Record<AiReadinessStatus, string> = {
   Pass: 'Satisfied',
   Fail: 'Blocking',
   NotApplicable: 'Not applicable',
+  Warn: 'Needs a decision',
+  Blocked: 'Not reached',
 };
+
+/** Reported, but nothing is asked of the reader: rows that carry no action of their own. */
+const QUIET: readonly AiReadinessStatus[] = ['NotApplicable', 'Blocked'];
 
 /**
  * A value that has to reach a form field byte for byte — the normalised endpoint origin, and the
@@ -98,7 +109,7 @@ function ReadinessCheckRow({ check }: { check: AiExtractionReadinessCheck }) {
       sx={{
         p: blocking ? 2 : 1.25,
         borderColor: blocking ? 'error.main' : undefined,
-        opacity: check.status === 'NotApplicable' ? 0.75 : 1,
+        opacity: QUIET.includes(check.status) ? 0.75 : 1,
       }}
     >
       <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
@@ -141,15 +152,23 @@ function ReadinessReport({ report }: { report: AiExtractionReadinessReport }) {
   const resolved = report.resolvedProvider;
   return (
     <>
-      <Alert severity={report.ready ? 'success' : 'error'}>
+      {/* Ready with something outstanding is its own state. Rendering it green said the tenant
+          was finished when nobody had yet decided, for instance, whether its AI spend has a
+          ceiling at all. */}
+      <Alert severity={report.ready ? (report.warningCount > 0 ? 'warning' : 'success') : 'error'}>
         <AlertTitle sx={{ fontWeight: 800 }}>
           {report.ready
-            ? 'Documents will extract'
-            : `Documents will not extract — ${report.blockingCount} control${report.blockingCount === 1 ? '' : 's'} blocking`}
+            ? report.warningCount > 0
+              ? `Documents will extract — ${report.warningCount} thing${report.warningCount === 1 ? '' : 's'} still to decide`
+              : 'Documents will extract'
+            : `Documents will not extract — ${report.blockingCount} setting${report.blockingCount === 1 ? '' : 's'} to change`}
         </AlertTitle>
         {report.ready ? (
           <Typography variant="body2">
             Every control in the chain is open for unstructured {report.purpose} on this tenant.
+            {report.warningCount > 0
+              && ' Nothing is blocked — the rows marked "Needs a decision" below are open only because'
+                + ' nobody has set them, and each says what it costs to leave that way.'}
           </Typography>
         ) : (
           <>
@@ -162,10 +181,16 @@ function ReadinessReport({ report }: { report: AiExtractionReadinessReport }) {
             </Typography>
             {/* The whole point of the panel: the gate can only ever name the first refusal, so an
                 operator who fixes it and resubmits meets the next one, and the next. */}
-            <Typography variant="body2" sx={{ mt: 1 }}>
-              That is only the first one. Every control marked blocking below has to be opened —
-              fixing one reveals the next, which is what cost the pilot its first week.
-            </Typography>
+            {/* Only when there IS a next one. Printed under a single closed control it
+                over-states the work in the same breath as the count above it. */}
+            {report.blockingCount > 1 && (
+              <Typography variant="body2" sx={{ mt: 1 }}>
+                That is only the first one. Every control marked blocking below has to be opened —
+                fixing one reveals the next, which is what cost the pilot its first week. Rows
+                marked &ldquo;Not reached&rdquo; are waiting on one of those and need nothing from
+                you.
+              </Typography>
+            )}
           </>
         )}
       </Alert>
