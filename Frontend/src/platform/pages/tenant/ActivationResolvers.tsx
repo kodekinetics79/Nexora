@@ -8,6 +8,7 @@ import {
 import { useSnackbar } from 'notistack';
 import Stack from '../../components/Flex';
 import ReasonDialog from '../../components/ReasonDialog';
+import DeploymentDatabasePanel from '../../components/DeploymentDatabasePanel';
 import { ErrorState, LoadingState } from '../../components/States';
 import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
@@ -661,6 +662,43 @@ function DataAssetBoundaryResolver({ tenant, onClose, onResolved }: OpenResolver
               ? 'Working…'
               : primary ? 'Verify from the platform probe' : 'Register and verify'}
           </Button>
+        </DialogActions>
+      </Dialog>
+    );
+  }
+
+  // NOTHING DECLARED YET, and the server can describe its own database. One confirmation, once for
+  // the platform — not four opaque fields, and not four environment variables somebody else has to
+  // set. The manual form below is still reachable and is still the whole product for a deployment
+  // that has to state something other than what its connection says.
+  if (!declared && !byHand && manifestQuery.data) {
+    return (
+      <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ fontWeight: 800 }}>Where does this deployment keep customer data?</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Typography variant="body2" component="div" color="text.secondary">
+              This control asks where <strong>{tenant.name}</strong>’s data lives and who backs it up.
+              It is the same answer for every tenant on this deployment, so it is asked once — here —
+              and then every tenant, including this one, registers and verifies itself against it.
+            </Typography>
+            <DeploymentDatabasePanel
+              manifest={manifestQuery.data}
+              dense
+              onRecorded={() => {
+                // The dialog re-reads the manifest and lands on the one-button path above, which
+                // then registers THIS tenant. Deliberately two presses rather than one: recording
+                // the deployment's database and registering a tenant against it are different
+                // decisions, and an operator should see the first one take effect.
+                manifestQuery.refetch();
+                invalidate();
+              }}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button color="inherit" onClick={() => setByHand(true)}>Enter it by hand</Button>
+          <Button onClick={onClose} color="inherit">Cancel</Button>
         </DialogActions>
       </Dialog>
     );

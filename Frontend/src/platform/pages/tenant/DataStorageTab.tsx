@@ -16,6 +16,7 @@ import type {
   PlatformDataBoundary, RegisterTenantDataAssetInput, Tenant, TenantDataAsset, VerifyTenantDataAssetInput,
 } from '../../types';
 import DataRecoveryPanel from './DataRecoveryPanel';
+import DeploymentDatabasePanel from '../../components/DeploymentDatabasePanel';
 
 const LOGICAL_KEY = 'postgresql.primary' as const;
 const ASSET_TYPE = 'PostgreSqlTenantScope' as const;
@@ -210,15 +211,23 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
             that disagrees refuses the whole action rather than registering half of it.
           </Alert>
         ) : (
-          <Alert severity="warning" sx={{ mt: 2 }}>
-            <AlertTitle sx={{ fontWeight: 800 }}>This deployment has not declared its own database</AlertTitle>
-            {manifestDefect ?? (
-              <>Set <code>Platform__DataBoundaries__PostgreSqlTenantScope__OpaqueProviderReference</code>,{' '}
-                <code>__Region</code>, <code>__BackupPolicyReference</code> and <code>__BackupPolicyVersion</code>{' '}
-                on the API service and every tenant registers and verifies itself. Until then the forms
-                below are the only way, once per tenant.</>
+          <Box sx={{ mt: 2 }}>
+            {manifestDefect && (
+              <Alert severity="warning" sx={{ mb: 1.5, borderRadius: 2 }}>
+                <AlertTitle sx={{ fontWeight: 800 }}>The configured boundary was refused</AlertTitle>
+                {manifestDefect}
+              </Alert>
             )}
-          </Alert>
+            {/* Asked here as well as in the activation dialog, because this is the screen an
+                operator opens when they want to understand the boundary rather than when they are
+                being stopped by it. Same panel, same one recording. */}
+            {manifestQuery.data && (
+              <DeploymentDatabasePanel
+                manifest={manifestQuery.data}
+                onRecorded={() => { manifestQuery.refetch(); invalidate(); }}
+              />
+            )}
+          </Box>
         )}
         {!primary ? <Alert severity="warning" sx={{ mt: 2 }}>No primary PostgreSQL tenant-scope asset is registered.</Alert> : (
           <Stack spacing={1.25} sx={{ mt: 2 }}>

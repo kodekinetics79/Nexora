@@ -81,7 +81,26 @@ recoverable legacy files and rewrite absolute `Attachments.FilePath` values to p
   Render deployment metadata.
 - The app URL is `https://nexora-fyjw.onrender.com`.
 
-### Data-boundary manifest (optional, but it is what stops the retyping)
+### Where this deployment keeps customer data
+
+**The console asks for this now, and it asks once.** Platform → any tenant → Activation →
+`data.residency-isolation`, or the tenant's Data & storage tab. The server reads its own database
+connection and shows what it found — on a Neon deployment that is the endpoint id and the region,
+taken from the host the process is actually connected to — and an Owner confirms it. The one thing
+no connection can reveal is how long the provider keeps backups, so that is the single question the
+screen asks, with the common answer preselected. It is recorded once for the whole deployment, in
+`platform."PlatformDataBoundarySettings"`, audited under `platform.data-boundary.record`, and every
+tenant from then on registers and verifies itself against it.
+
+Nothing below is needed for a Nexora-hosted deployment. It remains for infrastructure-as-code
+installations that would rather declare their estate with the rest of their configuration — and for
+the eight boundary types other than the database, which the console does not ask about.
+
+**What an Owner records in the console wins over configuration.** Not because it is more
+trustworthy: because it is the one an operator can correct. A wrong value in configuration cannot
+be fixed from the screen that shows it.
+
+### Data-boundary manifest (configuration path)
 
 `Platform:DataBoundaries:*` describes **this deployment's own estate**, per tenant
 data-boundary type. Provisioning reads it and registers each declared boundary against
@@ -114,10 +133,10 @@ per-type overrides: `LogicalKey`, `Classification`, `Disposition`.
   deletion certification needs from them, and is not a claim that anything about a
   subprocessor has been checked.
 
-**Tenants provisioned before the manifest was set.** Provisioning was the only moment the
-automation ever ran, so a tenant created before these keys existed stayed on the manual path
-forever. It no longer does: on the tenant's **Activation** tab, `data.residency-isolation`
-opens a dialog with no fields and one button, which calls
+**Tenants provisioned before the deployment described itself.** Provisioning was the only moment
+the automation ever ran, so a tenant created before that stayed on the manual path forever. It no
+longer does: on the tenant's **Activation** tab, `data.residency-isolation` opens a dialog with no
+fields and one button, which calls
 `POST /api/platform/tenants/{id}/data-assets/apply-platform-manifest` (Owner). That registers
 the declared boundaries and verifies the PostgreSQL scope from the same live probe
 provisioning uses, under the same registry rules — a probe that disagrees refuses the whole

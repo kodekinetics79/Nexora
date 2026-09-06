@@ -287,14 +287,13 @@ services:
       # -----------------------------------------------------------------------
       # WHAT THIS DEPLOYMENT'S OWN DATABASE IS.
       #
-      # Every tenant on this service lives in the same Neon database, in the same
-      # region, under the same backup policy. Until these four are set the platform
-      # cannot say so — and data.residency-isolation makes an operator hand-type the
-      # provider reference, region and backup policy into a form for EVERY new
-      # tenant, then hand-hash an evidence document about a database Nexora runs
-      # itself. With them set, provisioning registers the boundary and verifies it
-      # from a live probe, and a tenant provisioned before they existed is repaired
-      # from the activation screen with one button and no fields.
+      # OPTIONAL, AND NOT THE EASY PATH. The console asks for this now: the server
+      # reads its own database connection, shows an Owner what it found, and records
+      # the confirmation once for the whole deployment. Nobody needs to know a Neon
+      # endpoint id, and nobody needs a deploy to answer it. These four exist for
+      # infrastructure-as-code installations that would rather declare their estate
+      # with the rest of their configuration — and what an Owner records in the
+      # console wins over them, because that is the one an operator can correct.
       #
       # sync: false on purpose: the region is a residency claim about a customer's
       # data and the provider reference names this estate. Neither is something this

@@ -34,6 +34,15 @@ const manifest: PlatformDataBoundaryManifest = {
   boundaries: [],
   defects: [],
   configurationKey: 'Platform:DataBoundaries',
+  source: 'console',
+  observation: {
+    host: 'ep-super-sea.c-2.us-east-1.aws.neon.tech', providerName: 'Neon',
+    opaqueProviderReference: 'neon-ep-super-sea', region: 'us-east-1',
+    basis: 'Read from the database host this process is connected to.', isUsable: true,
+  },
+  recordedBy: 'owner@nexora.app',
+  recordedOn: '2026-09-06T10:00:00Z',
+  recordedBasis: 'observed-and-confirmed',
 };
 
 const decision: TenantActivationDataDecision = {
@@ -79,21 +88,70 @@ describe('the data-boundary resolver', () => {
   });
 
   /**
-   * The manual path is not a legacy branch to be removed; it is the whole product for a
-   * deployment that has not described itself. What that operator must NOT get is a form with no
-   * explanation of why the platform is asking them for infrastructure facts.
+   * The state an operator actually meets on a fresh deployment: nothing declared anywhere. What
+   * they must NOT be shown is four opaque infrastructure fields, and what they must NOT be told is
+   * to go and set an environment variable — the first fix for this control did the second, which
+   * is the same demand wearing a different hat. The server is connected to the database in
+   * question, so it says what it is and asks for a confirmation.
    */
-  it('falls back to the manual form, naming the keys that would end it', async () => {
+  it('offers what the server read about its own database instead of asking for it', async () => {
     vi.spyOn(platformApi, 'getPlatformDataBoundaries').mockResolvedValue({
-      ...manifest, configured: false, primaryPostgreSqlScope: null,
+      ...manifest, configured: false, source: 'none', primaryPostgreSqlScope: null,
+    });
+    const record = vi.spyOn(platformApi, 'recordPlatformDataBoundary').mockResolvedValue(manifest);
+    renderDialog();
+
+    const use = await screen.findByRole('button', { name: 'Use this for every tenant' });
+    expect(screen.getByText(/neon-ep-super-sea/)).toBeVisible();
+    expect(screen.getByText(/Read from the database host/)).toBeVisible();
+    // The two facts the server can see are not asked for at all.
+    expect(screen.queryByLabelText(/Opaque provider reference/)).toBeNull();
+    expect(screen.queryByLabelText(/^Data region/)).toBeNull();
+
+    fireEvent.click(use);
+    await waitFor(() => expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      // Omitted, so the server records what IT observed rather than what a form carried back.
+      opaqueProviderReference: null,
+      region: null,
+      backupPolicyReference: 'pitr-7d',
+    })));
+  });
+
+  /**
+   * The one fact no connection can reveal. Backup retention lives in the provider's console, not
+   * in the database, so it is asked — once, in words, with the common answer preselected.
+   */
+  it('asks only for the one thing the server cannot observe', async () => {
+    vi.spyOn(platformApi, 'getPlatformDataBoundaries').mockResolvedValue({
+      ...manifest, configured: false, source: 'none', primaryPostgreSqlScope: null,
     });
     renderDialog();
 
-    expect(await screen.findByLabelText(/Opaque provider reference/)).toHaveValue('');
-    expect(screen.queryByRole('button', { name: 'Register and verify' })).toBeNull();
-    expect(screen.getByText(/has not declared its own database/i)).toBeVisible();
-    expect(screen.getByText(/Platform__DataBoundaries__PostgreSqlTenantScope__OpaqueProviderReference/))
-      .toBeVisible();
+    await screen.findByRole('button', { name: 'Use this for every tenant' });
+    expect(screen.getByLabelText(/How long backups are kept/)).toBeVisible();
+  });
+
+  /**
+   * A host that says nothing about itself — a self-hosted box, an IP address — still has to be
+   * describable. The panel then asks, in an operator's words rather than the registry's.
+   */
+  it('asks in plain words when the host tells it nothing', async () => {
+    vi.spyOn(platformApi, 'getPlatformDataBoundaries').mockResolvedValue({
+      ...manifest,
+      configured: false,
+      source: 'none',
+      primaryPostgreSqlScope: null,
+      observation: {
+        host: 'db.internal', providerName: null, opaqueProviderReference: null, region: null,
+        basis: 'The database host is db.internal. Its shape is not one this deployment can read a provider or a region from, so both have to be stated.',
+        isUsable: false,
+      },
+    });
+    renderDialog();
+
+    expect(await screen.findByLabelText(/A name for this database/)).toBeVisible();
+    expect(screen.getByLabelText(/Where it is hosted/)).toBeVisible();
+    expect(screen.getByText(/could not read its own database name/i)).toBeVisible();
   });
 
   /**
