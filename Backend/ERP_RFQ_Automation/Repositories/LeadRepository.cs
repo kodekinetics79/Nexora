@@ -518,7 +518,8 @@ namespace ERP_RFQ_Automation.Repositories
       DateTime? startDate = null,
       DateTime? endDate = null,
       bool excludeAssigned = false,
-      bool onlyAssigned = false)
+      bool onlyAssigned = false,
+      AccountTeamScope? accessScope = null)
         {
             var query = _context.Leads
                 .AsNoTracking()
@@ -527,6 +528,24 @@ namespace ERP_RFQ_Automation.Repositories
                 .Where(l => l.LeadStatus != null &&
                     (l.LeadStatus.SetupCode == "QUALIFIED" || l.LeadStatus.SetupValue == "Accepted" || l.LeadStatus.SetupValue == "Qualified"))
                 .Where(l => !l.Rfqs.Any());  // Only show leads that have NOT yet been converted to an RFQ
+
+            // The row boundary, and the one place it is deliberately NOT InCommercialScope.
+            // That filter drops every owner-less lead on purpose, because an unassigned lead is
+            // not ordinary record data — it is "discoverable only through the governed routing
+            // queue", and this method IS that queue. The queue's own predicate is therefore the
+            // union: everything still waiting to be claimed, plus the caller's own assigned work.
+            // Somebody else's assigned work is refused for exactly the reason
+            // CommercialAccessFilters gives — customer ownership must never let one rep open
+            // another rep's opportunity — and refusing it in the query rather than in one of the
+            // two actions that reach it is what stops the next caller reintroducing it.
+            //
+            // A null scope is the unscoped shape this signature had before, left unfiltered the
+            // way GetLeadListAsync leaves one; both controller paths resolve an actor first.
+            if (accessScope is { IsTenantWide: false })
+            {
+                var scopedUserIds = accessScope.UserIds;
+                query = query.Where(l => l.AssignTo == null || scopedUserIds.Contains(l.AssignTo.Value));
+            }
 
             // Exclude assigned leads if requested (but only if we're not looking for a specific assignee)
             if (excludeAssigned && !assignedToId.HasValue)

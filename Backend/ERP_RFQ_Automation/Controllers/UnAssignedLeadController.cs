@@ -15,14 +15,26 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly ILeadRepository _repository;
         private readonly ICommercialRoutingApplicationService _routing;
+        private readonly ICommercialAccessContext _commercialAccess;
 
         public UnAssignedLeadController(
             ILeadRepository repository,
-            ICommercialRoutingApplicationService routing)
+            ICommercialRoutingApplicationService routing,
+            ICommercialAccessContext commercialAccess)
         {
             _repository = repository;
             _routing = routing;
+            _commercialAccess = commercialAccess;
         }
+
+        /// <summary>
+        /// The caller's own row scope, or null when their identity does not resolve.
+        ///
+        /// <para>Never taken from a query-string owner id. <c>assignedToId</c> arrives from a
+        /// filter control and can only ever NARROW what this scope already permits.</para>
+        /// </summary>
+        private Task<CommercialActorScope?> ActorAsync() =>
+            _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
 
         [HttpGet]
         [RequireModulePermission("Leads", PermissionAction.View)]
@@ -50,8 +62,12 @@ namespace ERP_RFQ_Automation.Controllers
             if (pageSize < 1 || pageSize > 1000)
                 return BadRequest("Page size must be between 1 and 1000.");
 
+            var actor = await ActorAsync();
+            if (actor == null || actor.BusinessUnitId != targetBUId) return Forbid();
+
             var (leads, total) = await _repository.GetAcceptedLeadsAsync(
-                pageNumber, pageSize, targetBUId, assignedToId, search, startDate, endDate, excludeAssigned, onlyAssigned);
+                pageNumber, pageSize, targetBUId, assignedToId, search, startDate, endDate, excludeAssigned, onlyAssigned,
+                actor.AccountScope);
 
             return Ok(new PaginatedResponseDTO<AcceptedLeadResponseDTO>
             {
@@ -86,8 +102,12 @@ namespace ERP_RFQ_Automation.Controllers
             if (pageSize < 1 || pageSize > 1000)
                 return BadRequest("Page size must be between 1 and 1000.");
 
+            var actor = await ActorAsync();
+            if (actor == null || actor.BusinessUnitId != targetBUId) return Forbid();
+
             var (leads, total) = await _repository.GetAcceptedLeadsAsync(
-                pageNumber, pageSize, targetBUId, assignedToId, search, startDate, endDate, excludeAssigned: false, onlyAssigned: true);
+                pageNumber, pageSize, targetBUId, assignedToId, search, startDate, endDate, excludeAssigned: false, onlyAssigned: true,
+                actor.AccountScope);
 
             return Ok(new PaginatedResponseDTO<AcceptedLeadResponseDTO>
             {
@@ -198,6 +218,17 @@ namespace ERP_RFQ_Automation.Controllers
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             var lead = await _repository.GetAcceptedLeadByIdAsync(id, businessUnitId);
             if (lead == null)
+                return NotFound($"Accepted lead with ID {id} not found");
+
+            // Both halves of the rule CommercialAccessFilters states. While an inquiry is
+            // unassigned it belongs to the governed routing queue and has to be readable by
+            // whoever might claim it — that is what this screen is for. The moment it has an
+            // owner it is that rep's opportunity, and this read answers the way api/leads/{id}
+            // does rather than handing over the line items and attachments on the tenant
+            // predicate alone. The row is fetched first only to learn whether it has an owner;
+            // nothing out of scope is returned.
+            if (lead.AssignedToId != null
+                && !await _commercialAccess.CanAccessLeadAsync(id, HttpContext.RequestAborted))
                 return NotFound($"Accepted lead with ID {id} not found");
 
             return Ok(lead);
