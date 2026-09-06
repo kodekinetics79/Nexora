@@ -134,8 +134,10 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
   };
 
   const primaryRows = useMemo(
-    () => PRIMARY_NAV.filter((item) => !item.moduleName || hasPermission(item.moduleName)),
-    [hasPermission],
+    () => PRIMARY_NAV.filter(
+      (item) => (!item.managerOnly || isManager) && (!item.moduleName || hasPermission(item.moduleName)),
+    ),
+    [hasPermission, isManager],
   );
   // Overlapping legacy prefixes are resolved by journey order. This gives every route exactly one
   // primary owner (Inbox before Leads for intake), and keeps duplicate directory entries secondary.

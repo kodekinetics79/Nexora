@@ -7,7 +7,6 @@ import {
   Settings as SetupIcon,
   Apps as AllScreensIcon,
   // Advanced groups
-  Dashboard as DashboardIcon,
   InsightsOutlined as InsightsIcon,
   CalendarMonth as DeadlineIcon,
   QueryStats as PerformanceIcon,
@@ -137,6 +136,8 @@ export interface PrimaryNavItem {
   icon: ReactNode;
   path: string;
   moduleName?: string;
+  /** Shown to manager-tier readers only; the row's screen is still permission-gated. */
+  managerOnly?: boolean;
   /** Addresses at which this row counts as "here", beyond its own path and its views'. */
   activePrefixes?: string[];
   /** The one level of tabs this destination offers. Absent means the screen has no tabs. */
@@ -155,6 +156,19 @@ export const ADVANCED_ROOT = '/advanced';
  * while the order stays stable across roles.
  */
 export const PRIMARY_NAV: PrimaryNavItem[] = [
+  {
+    // First row for the people who read the numbers rather than work a single deal (owner
+    // decision, 2026-09-05). Manager-tier only, and gated on Dashboard like its route, so a
+    // director opens on the funnel while a rep's rail still begins with the Inbox.
+    key: 'executive',
+    label: 'Executive view',
+    description: 'The funnel, the money and the team at a glance, every figure with its source.',
+    icon: <InsightsIcon />,
+    path: '/dashboard',
+    moduleName: 'Dashboard',
+    managerOnly: true,
+    activePrefixes: ['/dashboard', '/executive/today'],
+  },
   {
     key: 'inbox',
     label: 'Inbox',
@@ -414,16 +428,12 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         moduleName: 'Leads',
         keywords: ['deadline', 'closing date', 'due', 'overdue', 'board'],
       },
-      {
-        key: 'dashboard-overview',
-        label: 'Dashboard',
-        labelKey: 'dashboard',
-        description: 'Headline KPIs for the workspace. Reads "insufficient data" until there is enough history.',
-        path: '/dashboard',
-        icon: <DashboardIcon />,
-        moduleName: 'Dashboard',
-        keywords: ['kpi', 'home', 'overview', 'stats'],
-      },
+      // '/dashboard' is NOT listed here any more: it is the Executive view, the first row of the
+      // rail for manager-tier users. Leaving the old Dashboard card in the directory would put one
+      // destination behind two doors — the exact defect this file's "one door per destination"
+      // tests were written for after Users and Integration Hub each appeared twice — and the card's
+      // own description ("headline KPIs... insufficient data") no longer describes the screen.
+      // The destination did not disappear from the product; it moved up into the rail.
       {
         key: 'dashboard-team',
         label: 'Team workload',

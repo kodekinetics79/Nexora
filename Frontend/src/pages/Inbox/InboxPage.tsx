@@ -18,6 +18,7 @@ import {
 } from '@mui/icons-material';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import ViewTabs from '../../components/layout/ViewTabs';
+import GlanceStrip from './GlanceStrip';
 import { useAuth } from '../../context/AuthContext';
 import { formatDateSafe } from '../../utils/dates';
 import emailTriageService, {
@@ -200,6 +201,8 @@ const InboxPage: React.FC = () => {
           Refresh
         </Button>
       </Stack>
+
+      <GlanceStrip />
 
       <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
 

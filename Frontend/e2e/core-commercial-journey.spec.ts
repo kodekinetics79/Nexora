@@ -177,7 +177,12 @@ test('37 Dashboard metrics reconcile', async ({ page }) => {
   const today = await jsonOk<{ metrics: Array<{ key: string; value: number }> }>(await api(page, token, 'get', '/api/commercial-intelligence/sales-today'));
   const followUps = await jsonOk<Array<{ status: string }>>(await api(page, token, 'get', '/api/commercial-intelligence/follow-ups?status=open'));
   expect(today.metrics.find((row) => row.key === 'open-follow-ups')?.value).toBe(followUps.filter((row) => /Open|InProgress/i.test(row.status)).length);
-  await page.goto('/dashboard');
+  // The sales-today figures are read on the INBOX now, in the "Today at a glance" strip above the
+  // queues, rather than on /dashboard — a manager's landing screen became the executive funnel and
+  // the reader's own daily numbers went where the reader works. What this test proves is unchanged
+  // and is the whole point of it: the number the API reports is the number a person actually sees.
+  // Only the screen it is seen on moved, so the assertion moved with it rather than being dropped.
+  await page.goto('/inbox');
   await expect(page.getByText(required('E2E_CORE_DASHBOARD_METRIC_LABEL'), { exact: false }).first()).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
   await page.screenshot({ path: path.join(evidenceDir, '37-dashboard-reconciliation.png'), fullPage: true });

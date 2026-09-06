@@ -40,13 +40,19 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
   const theme = useMemo(() => {
     const primaryPalette = buildAccessiblePaletteColor(primaryColor);
 
-    // Worst-case surface the brand colour is drawn *on* as text: in light mode
-    // the off-white page background, in dark mode the lighter paper surface.
-    const worstCaseSurface = mode === 'dark' ? '#1b1f26' : '#f5f4f1';
+    // Worst-case surface the brand colour is drawn *on* as text: in light mode pure white —
+    // paper cards and the glass shell composite to near-white, and brass derived against the
+    // off-white page (#f5f4f1) read 4.19:1 on them at 12px (axe, /advanced) — in dark mode the
+    // lighter paper surface.
+    const worstCaseSurface = mode === 'dark' ? '#1b1f26' : '#ffffff';
     // Text/outlined buttons paint `primary.main` as their label. Several brand
     // colours fail AA in that role (Steel Blue 3.92:1 on the light page;
     // Executive Navy 1.40:1 on dark paper), so derive a readable variant.
-    const primaryOnSurface = readableOn(primaryColor, worstCaseSurface, AA_TEXT_CONTRAST);
+    // Derived text colours aim a little above the 4.5:1 floor: the glass shell composites
+    // paper to #fefefe rather than pure white, and a colour that clears 4.5 exactly on white
+    // reads 4.4 there. The margin costs a shade of brass and nothing else.
+    const AA_TEXT_TARGET = 4.9;
+    const primaryOnSurface = readableOn(primaryColor, worstCaseSurface, AA_TEXT_TARGET);
     const primaryBorderOnSurface = readableOn(primaryColor, worstCaseSurface, AA_NON_TEXT_CONTRAST);
 
     // Tactile depth — owner decision of 2026-09-05 ("3D" actions, a glass shell; see DESIGN.md
@@ -131,6 +137,15 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       info: {
         main: mode === 'dark' ? '#38bdf8' : '#0369a1',
       },
+      // The library's light error/success mains (#d74545, #448a47) are 4.31:1 and 4.18:1 on
+      // white — under the floor for the 11px bold chip labels the deadline board draws with
+      // them. Derived the same way as the brand colour, against the lightest surface.
+      ...(mode === 'light'
+        ? {
+            error: { main: readableOn('#d74545', '#ffffff', AA_TEXT_TARGET) },
+            success: { main: readableOn('#2f9e6e', '#ffffff', AA_TEXT_TARGET) },
+          }
+        : {}),
       // Make MUI's own contrastText derivation (secondary/error/warning/...)
       // target AA body text instead of its 3:1 default.
       contrastThreshold: AA_TEXT_CONTRAST,

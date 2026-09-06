@@ -232,34 +232,45 @@ interface LoginResponse {
 /**
  * Where a user lands after signing in.
  *
- * Everyone lands on the Inbox — the one screen that answers "what do I do next" instead of asking
- * the reader to choose a module.
+ * Two answers, by tier — not by module.
  *
- * The history is worth keeping, because it is the reason this is a constant now. Login first called
- * `navigate('/analytics/deadlines')` unconditionally; that route is gated on Leads, and of the four
- * seeded starter roles only SALES_MANAGER and SALES_REP hold it, so a Procurement Officer signed in
- * successfully and landed on "Access Denied" as their first screen. The fix at the time was a
- * per-permission fallback table — seven candidate destinations, each with its own module gate. That
- * worked, but it meant four roles saw four different first screens, and none of the seven could show
- * work that had not yet become a lead.
+ * Everyone who works deals lands on the Inbox: the one screen that answers "what do I do next"
+ * instead of asking the reader to choose a module. The history is worth keeping, because it is
+ * the reason this stays deliberately simple. Login first called `navigate('/analytics/deadlines')`
+ * unconditionally; that route is gated on Leads, and of the four seeded starter roles only
+ * SALES_MANAGER and SALES_REP hold it, so a Procurement Officer signed in successfully and landed
+ * on "Access Denied" as their first screen. The fix at the time was a per-permission fallback
+ * table — seven candidate destinations, each with its own module gate. That worked, but it meant
+ * four roles saw four different first screens, and none of the seven could show work that had not
+ * yet become a lead. `/inbox` is deliberately UNGUARDED at the route and asks for each queue
+ * separately, so the permission problem cannot recur.
  *
- * `/inbox` is deliberately UNGUARDED at the route and asks for each queue separately, so the
- * permission problem cannot recur: a user with no grants at all gets a page that names what is
- * missing and points at Setup, which is the correct answer to "I have no access", and a user with
- * some grants gets exactly the queues they can work. One first screen, for everybody.
+ * Manager-tier users — a manager, an administrator by rank, the owner — land on the executive
+ * view instead (owner decision, 2026-09-05): a director reads the funnel and the numbers, not a
+ * work queue, and the first screen is where the numbers have the most effect. That destination IS
+ * gated (`PermissionGuard moduleName="Dashboard"`), so this only sends someone there when that
+ * gate will open for them: rank authority, which `hasPermission` honours outright, or an explicit
+ * Dashboard view grant matched the way `hasPermission` matches it. Nobody can be sent to a denial.
  */
 export const LANDING_ROUTE = INBOX_ROOT;
+export const EXECUTIVE_LANDING_ROUTE = '/dashboard';
 
-/**
- * Kept as a function, and still exported, because the sign-in flow and its tests both call it and
- * because the shape leaves room for a future per-role landing without moving the call site. It
- * ignores its arguments by design — see above: branching on permissions here is what produced the
- * Access Denied first screen.
- */
-export const landingRouteFor = (
-  _isSuperAdmin: boolean,
-  _permissions: ReadonlyArray<{ moduleName: string; canView?: boolean }>,
-): string => LANDING_ROUTE;
+export interface LandingIdentity {
+  isSuperAdmin?: boolean;
+  isManager?: boolean;
+  hasModuleAuthorityByRank?: boolean;
+  permissions: ReadonlyArray<{ moduleName: string; canView?: boolean }>;
+}
+
+export const landingRouteFor = (identity: LandingIdentity): string => {
+  const rank = identity.isSuperAdmin === true || identity.hasModuleAuthorityByRank === true;
+  const managerTier = rank || identity.isManager === true;
+  if (!managerTier) return LANDING_ROUTE;
+  const dashboardGranted = identity.permissions.some(
+    (p) => p.moduleName.trim().toLowerCase() === 'dashboard' && p.canView === true,
+  );
+  return rank || dashboardGranted ? EXECUTIVE_LANDING_ROUTE : LANDING_ROUTE;
+};
 
 const LoginPage: React.FC = () => {
   const { mode, setMode } = useAppTheme();
@@ -347,7 +358,12 @@ const LoginPage: React.FC = () => {
         permissions: me.permissions ?? [],
         entitlements: me.entitlements ?? [],
       });
-      navigate(landingRouteFor(me.isSuperAdmin === true, me.permissions ?? []));
+      navigate(landingRouteFor({
+        isSuperAdmin: me.isSuperAdmin === true,
+        isManager: me.isManager === true,
+        hasModuleAuthorityByRank: me.hasModuleAuthorityByRank === true,
+        permissions: me.permissions ?? [],
+      }));
     } catch (err: unknown) {
       setError(loginErrorMessage(err));
     } finally {

@@ -161,10 +161,24 @@ describe('where the rail says you are', () => {
   });
 
   it('marks the owning workspace rather than the Screen directory on an operational screen', () => {
-    renderRail('/dashboard');
+    renderRail('/analytics/deadlines');
     expect(row('Dashboards & analytics')).toHaveAttribute('aria-expanded', 'true');
-    expect(row('Dashboard')).toHaveAttribute('aria-current', 'page');
+    expect(row('Deadline board')).toHaveAttribute('aria-current', 'page');
     expect(row('Screen directory')).not.toHaveAttribute('aria-current');
+  });
+
+  /**
+   * `/dashboard` is the Executive view now, and it is a manager-tier rail row rather than a card in
+   * the directory. This harness signs in as a rep (`isManager: false`), so the address belongs to
+   * no destination they have — and the rail says so by lighting nothing, which is the same answer
+   * it gives for any address outside the reader's spine. A rep who still has the Dashboard module
+   * permission can reach the screen by URL; what they no longer get is a navigation entry to a
+   * screen whose panels would tell them the figures are for managers.
+   */
+  it('lights nothing for a rep on the manager-tier executive address', () => {
+    renderRail('/dashboard');
+    expect(screen.queryByRole('button', { name: 'Executive view' })).toBeNull();
+    expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(0);
   });
 
   it('nests Setup under Administration without losing its current-screen signal', () => {
