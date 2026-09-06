@@ -1,4 +1,5 @@
 using System;
+using System.Security.Claims;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Authorization;
@@ -26,6 +27,7 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly IDashboardRepository _repository;
         private readonly IGrossMarginService _grossMargin;
+        private readonly IAccountTeamScopeResolver _accountScope;
 
         /// <summary>Default gross-margin window when the caller states none.</summary>
         private const int DefaultMarginWindowDays = 90;
@@ -36,10 +38,14 @@ namespace ERP_RFQ_Automation.Controllers
         /// </summary>
         private const int MaximumMarginWindowDays = 732;
 
-        public WorkloadController(IDashboardRepository repository, IGrossMarginService grossMargin)
+        public WorkloadController(
+            IDashboardRepository repository,
+            IGrossMarginService grossMargin,
+            IAccountTeamScopeResolver accountScope)
         {
             _repository = repository;
             _grossMargin = grossMargin;
+            _accountScope = accountScope;
         }
 
         /// <summary>
@@ -60,21 +66,50 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
-        /// GET /api/dashboard/pipeline-analytics — WP-B2 stage funnel, loss reasons and weighted
-        /// forecast for the caller's BU. Any user with Dashboard View.
+        /// GET /api/dashboard/pipeline-analytics?from&amp;to — WP-B2 stage funnel, loss reasons and
+        /// weighted forecast, restricted to the rows the caller may read. Any user with Dashboard
+        /// View.
+        ///
+        /// <para><b>Why [RequireManagerRole] is gone.</b> It was standing in for a scope the query
+        /// did not have: <c>GetPipelineAnalyticsAsync</c> took a business unit and nothing else, so
+        /// every predicate in it was tenant-wide. That left two outcomes and both were wrong — a
+        /// sales representative was refused their own funnel outright, or, the day somebody
+        /// removed the attribute to unblock them, was served the company's money under a heading
+        /// that says "your accounts". The attribute could only come off once the QUERY was scoped,
+        /// and it is scoped now: the resolved scope travels into the repository and is echoed back
+        /// on the payload, so a reader can see whose figures they are looking at.</para>
         ///
         /// <para>The margin proxy this endpoint used to carry has been removed; see
         /// <see cref="GetGrossMargin"/>.</para>
         /// </summary>
         [HttpGet("pipeline-analytics")]
-        [RequireManagerRole]
         [RequireModulePermission("Dashboard", PermissionAction.View)]
-        public async Task<ActionResult<PipelineAnalyticsDTO>> GetPipelineAnalytics(CancellationToken ct)
+        public async Task<ActionResult<PipelineAnalyticsDTO>> GetPipelineAnalytics(
+            [FromQuery] DateTime? from, [FromQuery] DateTime? to, CancellationToken ct)
         {
             var businessUnitId = GetBusinessUnitId();
-            if (businessUnitId <= 0) return Forbid();
+            var roleId = ClaimId("roleId");
+            var userId = ClaimId(ClaimTypes.NameIdentifier);
+            if (userId <= 0) userId = ClaimId("sub");
+            if (businessUnitId <= 0 || roleId <= 0 || userId <= 0) return Forbid();
 
-            var data = await _repository.GetPipelineAnalyticsAsync(businessUnitId);
+            // Both ends or neither. Half a window is not a period the payload can state, and a
+            // funnel that silently ignored the half it was given would let the screen draw a
+            // "period applied" seal over an all-time figure.
+            if (from.HasValue != to.HasValue)
+                return BadRequest(new { message = "State both ends of the period, or neither." });
+
+            var effectiveFrom = NormalizeUtc(from);
+            var effectiveTo = NormalizeUtc(to);
+            if (effectiveFrom >= effectiveTo)
+                return BadRequest(new { message = "The reporting window must start before it ends." });
+            if (effectiveTo > DateTime.UtcNow.AddMinutes(1))
+                return BadRequest(new { message = "The reporting window cannot end in the future." });
+
+            var scope = await _accountScope.ResolveAsync(userId, roleId, businessUnitId, DateTime.UtcNow, ct);
+
+            var data = await _repository.GetPipelineAnalyticsAsync(
+                businessUnitId, scope, effectiveFrom, effectiveTo, ct);
             return Ok(data);
         }
 
@@ -114,8 +149,10 @@ namespace ERP_RFQ_Automation.Controllers
             return Ok(data);
         }
 
-        private long GetBusinessUnitId() =>
-            long.TryParse(User.FindFirst("businessUnitId")?.Value, out var id) ? id : 0;
+        private long GetBusinessUnitId() => ClaimId("businessUnitId");
+
+        private long ClaimId(string claimType) =>
+            long.TryParse(User.FindFirst(claimType)?.Value, out var id) ? id : 0;
 
         private static DateTime? NormalizeUtc(DateTime? value) => value is null
             ? null

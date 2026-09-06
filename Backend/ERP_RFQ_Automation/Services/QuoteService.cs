@@ -256,6 +256,11 @@ namespace ERP_RFQ_Automation.Services
                 CurrencyId = request.CurrencyId,
                 HeaderRemarks = request.HeaderRemarks,
                 CreatedBy = Actor(request.CreatedBy),
+                // The named owner behind the funnel's per-rep figures. It stays null when the
+                // actor string names nobody in this tenant, or more than one person — the quote
+                // is then honestly unowned rather than attributed to a guess.
+                OwnerUserId = await QuoteOwnerAttribution.ResolveAsync(
+                    _context, request.BusinessUnitId, request.CreatedBy),
                 CreatedDate = DateTime.UtcNow,
                 DiscountTypeId = request.DiscountTypeId,
                 DiscountValue = request.DiscountValue,
@@ -484,6 +489,7 @@ namespace ERP_RFQ_Automation.Services
                     TotalAmount = 0m,
                     HeaderRemarks = "Commercial Review Required: pricing, inventory, lead time, tax, freight and validity remain pending.",
                     CreatedBy = actor.Trim(),
+                    OwnerUserId = await QuoteOwnerAttribution.ResolveAsync(_context, businessUnitId, actor, ct),
                     CreatedDate = now,
                     QuoteItems = markedForQuote.OrderBy(item => item.Id).Select(item => new QuoteItem
                     {
@@ -2321,6 +2327,11 @@ namespace ERP_RFQ_Automation.Services
                 DiscountTypeId = source.DiscountTypeId,
                 DiscountValue = source.DiscountValue,
                 CreatedBy = actor,
+                // Ownership follows the offer, not the keystroke: a manager who issues a revision
+                // of a rep's quote has not taken the opportunity off them. Only a revision of an
+                // already-unowned quote falls back to whoever is acting.
+                OwnerUserId = source.OwnerUserId
+                    ?? await QuoteOwnerAttribution.ResolveAsync(_context, source.BusinessUnitId, actor),
                 CreatedDate = now,
                 RevisionOfQuoteId = source.Id,
                 RevisionNo = source.RevisionNo + 1,

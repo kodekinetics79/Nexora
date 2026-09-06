@@ -85,7 +85,43 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
     /// <summary>Lost/expired quotes grouped by their recorded outcome reason.</summary>
     public class PipelineLossReasonDTO
     {
+        /// <summary>
+        /// The governed catalogue code this group is keyed on — the <c>SetupMaster.SetupCode</c>
+        /// of a "QuoteOutcomeReason" row ("PRICE", "LOST_COMPETITOR", "AUTO_EXPIRED", …), or
+        /// <see cref="UnrecordedCode"/> for the quotes that carry no reason at all.
+        ///
+        /// <para>It exists because <see cref="Reason"/> is a display string an administrator can
+        /// rename at any time, so it is not something a client can key behaviour, an icon or a
+        /// saved filter on. This is.</para>
+        /// </summary>
+        public string Code { get; set; } = string.Empty;
+
+        /// <summary>Display name, from the tenant's own reason catalogue.</summary>
         public string Reason { get; set; } = string.Empty;
+
+        /// <summary>
+        /// <see cref="CustomerStatedGroup"/> or <see cref="NeverEstablishedGroup"/> — whether the
+        /// customer told us why we lost, or we never found out. Set by the SERVER, never inferred
+        /// by the client, because the answer depends on the tenant's reason catalogue and on which
+        /// codes the expiry sweep writes unattended; a client that guessed would have to duplicate
+        /// both and would drift from them.
+        /// </summary>
+        public string Group { get; set; } = NeverEstablishedGroup;
+
+        /// <summary>The customer gave a reason and it is in the tenant's catalogue.</summary>
+        public const string CustomerStatedGroup = "customer_stated";
+
+        /// <summary>
+        /// Nobody ever learned why. Covers quotes with no recorded reason and quotes the SLA
+        /// sweep expired on its own, which is the distinction the band exists for: an automatic
+        /// expiry at the top of a ranked list reads as the market rejecting our prices when it
+        /// actually means nobody followed the quote up.
+        /// </summary>
+        public const string NeverEstablishedGroup = "never_established";
+
+        /// <summary><see cref="Code"/> for lost quotes carrying no outcome reason.</summary>
+        public const string UnrecordedCode = "UNRECORDED";
+
         public int Count { get; set; }
 
         /// <summary>Lost value in base currency; NULL when this group spans unconvertible currencies.</summary>
@@ -131,14 +167,47 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
         public decimal? RespondedValue { get; set; }
 
         /// <summary>
-        /// The window the funnel counts cover. This funnel has never been period-filtered, and a
+        /// The window the funnel counts cover: <see cref="AllTimeScope"/> when the caller asked
+        /// for no period, <see cref="WindowScope"/> when the server actually applied one. A
         /// reader looking at an all-time funnel beside a 90-day margin needs to be told which is
-        /// which — so the scope is stated on the contract rather than assumed.
+        /// which — so the scope is stated on the contract rather than assumed, and a client must
+        /// read this rather than assume its own period control was honoured.
         /// </summary>
         public string FunnelScope { get; set; } = AllTimeScope;
 
         /// <summary>Every record in the business unit, with no date filter.</summary>
         public const string AllTimeScope = "all_time";
+
+        /// <summary>Only records created inside <see cref="WindowFrom"/>..<see cref="WindowTo"/>.</summary>
+        public const string WindowScope = "window";
+
+        /// <summary>Inclusive start of the applied window; null when <see cref="FunnelScope"/> is all-time.</summary>
+        public DateTime? WindowFrom { get; set; }
+
+        /// <summary>Exclusive end of the applied window; null when <see cref="FunnelScope"/> is all-time.</summary>
+        public DateTime? WindowTo { get; set; }
+
+        /// <summary>
+        /// Which rows this reader is allowed to see, echoed the way the release-01 dashboard
+        /// echoes it and using the same contract, so the two dashboards cannot describe the same
+        /// caller's scope in two different shapes. A figure that does not say whose it is can be
+        /// read as personal when it is company-wide, which is the worst outcome this endpoint has.
+        /// </summary>
+        public DashboardRelease01RoleScopeDTO RoleScope { get; set; } = new();
+
+        /// <summary>
+        /// Quotes with no established owner that were left OUT of every figure above because this
+        /// reader is not tenant-scoped. Zero at tenant scope, where unowned quotes are included.
+        ///
+        /// <para>Reported so the exclusion is visible rather than silent — the same treatment
+        /// <see cref="TeamWorkloadDTO.LateIngestedExcludedLeads"/> gives its own exclusion. An
+        /// unowned quote cannot be attributed to a rep without inventing an owner, and inventing
+        /// one puts somebody else's revenue under this reader's heading.</para>
+        /// </summary>
+        public int UnownedQuotesExcluded { get; set; }
+
+        /// <summary>The server's reason for <see cref="UnownedQuotesExcluded"/>; null when none were excluded.</summary>
+        public string? UnownedQuotesExcludedReason { get; set; }
 
         // AvgMarginPct / MarginSampleLines / MarginLinesExcludedForFx / TotalQuoteLines were
         // REMOVED here, not deprecated. The figure was an unweighted mean of per-line percentages

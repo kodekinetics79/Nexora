@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Interfaces;
 
 namespace ERP_RFQ_Automation.Reporting;
@@ -97,7 +98,12 @@ public sealed class ReportBuilder : IReportBuilder
 
     private async Task BuildPipelineAsync(long businessUnitId, ReportDocument document)
     {
-        var pipeline = await _dashboard.GetPipelineAnalyticsAsync(businessUnitId);
+        // A scheduled report is produced for the tenant, not for a reader sitting in front of a
+        // screen: there is no authenticated caller to resolve a narrower scope from, and the
+        // document says so in its own heading. Tenant scope is therefore the honest one to state
+        // rather than a default that quietly widens somebody's view.
+        var pipeline = await _dashboard.GetPipelineAnalyticsAsync(
+            businessUnitId, AccountTeamScope.TenantWide(0));
         document.IsEmpty = pipeline.Funnel.All(stage => stage.Count == 0);
 
         var funnel = document.AddSection("Stage funnel")

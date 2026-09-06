@@ -852,6 +852,10 @@ public partial class ErpRfqAutomationContext
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Sla.cs.
         ConfigureSlaModel(modelBuilder);
 
+        // ==== Quote ownership (Models/Quote.Ownership.cs) ====
+        // The named owner the scoped pipeline funnel reads instead of the CreatedBy free text.
+        ConfigureQuoteOwnershipModel(modelBuilder);
+
         // ==== Gate 8 scheduled reporting (Reporting/) ====
         modelBuilder.ApplyReportingModel(
             e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
