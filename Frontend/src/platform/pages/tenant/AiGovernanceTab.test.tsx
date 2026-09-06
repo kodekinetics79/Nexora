@@ -108,8 +108,17 @@ const readiness = (
 /** One control's card, addressed the way an operator finds it: by the control's own title. */
 const row = (title: string) => screen.getByText(title).closest('.MuiPaper-root') as HTMLElement;
 
+/**
+ * The fourteen-control report is no longer the first thing on the tab — it is incident triage,
+ * one disclosure down. Every assertion about it goes through the same click an engineer makes.
+ */
+const openTechnicalDetail = async () => {
+  fireEvent.click(await screen.findByText(/Technical detail —/));
+  await screen.findByText(/never changes anything and offers no control that would/i);
+};
+
 const verdict = () =>
-  screen.getByText(/Documents will/).closest('.MuiAlert-root') as HTMLElement;
+  screen.getByText(/Documents will (not )?extract/).closest('.MuiAlert-root') as HTMLElement;
 
 const renderTab = () => render(
   <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -146,8 +155,15 @@ describe('extraction pre-flight', () => {
   it('answers whether documents extract before anything has to be read', async () => {
     renderTab();
 
-    // The verdict, the count, and the code the next submitted document actually comes back with.
-    expect(await screen.findByText(/Documents will not extract — 3 settings to change/)).toBeVisible();
+    // Above the fold: a sentence, not a denial code.
+    expect(await screen.findByText(/Document reading is not working — 3 settings to change/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Set up AI' })).toBeVisible();
+    expect(screen.queryByText('external_processing_denied')).not.toBeInTheDocument();
+
+    // The verdict, the count, and the code the next submitted document comes back with, for
+    // whoever needs to paste it into a ticket.
+    await openTechnicalDetail();
+    expect(screen.getByText(/Documents will not extract — 3 settings to change/)).toBeVisible();
     expect(within(verdict()).getByText('external_processing_denied')).toBeVisible();
     expect(within(verdict()).getByText(/fixing one reveals the next/i)).toBeVisible();
     expect(platformApi.getTenantAiReadiness).toHaveBeenCalledWith('9');
@@ -156,7 +172,7 @@ describe('extraction pre-flight', () => {
   it('names every blocking control at once, with what to set and where', async () => {
     renderTab();
 
-    await screen.findByText(/Documents will not extract/);
+    await openTechnicalDetail();
 
     // Three closed controls in three different layers, each carrying the code the layer that
     // refuses actually emits. The gate itself can only ever report the first of them.
@@ -182,7 +198,7 @@ describe('extraction pre-flight', () => {
   it('reports a control that is only waiting on another, without asking for anything', async () => {
     renderTab();
 
-    await screen.findByText(/Documents will not extract/);
+    await openTechnicalDetail();
 
     // The row an operator was previously sent to act on: red, counted, and instructing them to
     // "authorize this destination (controls 5-7)" when those controls already read Satisfied.
@@ -214,7 +230,8 @@ describe('extraction pre-flight', () => {
     renderTab();
 
     // Green said "finished" over a tenant whose AI spend nobody had put a number on.
-    expect(await screen.findByText(/Documents will extract — 1 thing still to decide/)).toBeVisible();
+    await openTechnicalDetail();
+    expect(screen.getByText(/Documents will extract — 1 thing still to decide/)).toBeVisible();
     const budget = row('Monthly token budget has headroom');
     expect(within(budget).getByText('Needs a decision')).toBeVisible();
     expect(within(budget).getByText(/spend is unbounded/)).toBeVisible();
@@ -227,7 +244,7 @@ describe('extraction pre-flight', () => {
 
     renderTab();
 
-    await screen.findByText(/Documents will not extract/);
+    await openTechnicalDetail();
     const model = row('Policy allows this model');
     expect(within(model).getByText(/CASE-SENSITIVE/)).toBeVisible();
 
@@ -238,16 +255,15 @@ describe('extraction pre-flight', () => {
     expect(await within(model).findByText('Copied exactly as shown.')).toBeVisible();
   });
 
-  it('offers no control that would open a lock, only the audited requests that do', async () => {
+  it('keeps the report itself a diagnosis, with the action beside it rather than inside it', async () => {
     renderTab();
 
-    await screen.findByText(/Documents will not extract/);
+    await openTechnicalDetail();
 
-    // Diagnosis only. Letting document text leave the tenant stays an explicit, attributable act
-    // with a justification and an expiry, made through the two dialogs further down this tab.
-    const buttons = screen.getAllByRole('button').map((button) => button.textContent ?? '');
-    expect(buttons.filter((label) => /fix|allow|enable|open|remediate|apply/i.test(label))).toEqual([]);
+    // No row carries a "fix this" affordance: the report still states, and never remediates.
     expect(screen.getByText(/never changes anything and offers no control that would/i)).toBeVisible();
+    const closed = row('External processing is consented to');
+    expect(within(closed).queryByRole('button', { name: /fix|allow|enable|apply/i })).not.toBeInTheDocument();
   });
 
   it('greys the egress controls on a local deployment instead of ticking them', async () => {
@@ -271,11 +287,86 @@ describe('extraction pre-flight', () => {
 
     renderTab();
 
-    expect(await screen.findByText('Documents will extract')).toBeVisible();
+    await openTechnicalDetail();
+    expect(screen.getByText('Documents will extract')).toBeVisible();
     const egress = row('Egress policy permits whole documents');
     expect(within(egress).getByText('Not applicable')).toBeVisible();
     expect(within(egress).getByText(/nothing egresses/)).toBeVisible();
     expect(within(egress).queryByText('Satisfied')).not.toBeInTheDocument();
+  });
+
+  it('sets up AI from four answers, and sends no endpoint or model id anywhere near the caller', async () => {
+    const setup = vi.spyOn(platformApi, 'setTenantAiEnablement').mockResolvedValue({
+      policy: { ...policy, isEnabled: true, externalProcessingAllowed: true, version: 3 },
+      readiness: readiness({ ready: true, firstBlockingReason: null, blockingCount: 0, checks: [] }),
+      authorization: null,
+    });
+
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up AI' }));
+
+    // Q1 and Q1b are the consent decision, in the words a customer would recognise.
+    fireEvent.click(await screen.findByText('An approved cloud provider'));
+    fireEvent.click(screen.getByText('The whole document'));
+    expect(screen.getByText(/document text leaves their infrastructure/)).toBeVisible();
+
+    // Apply stays shut until somebody says who approved it.
+    const apply = screen.getByRole('button', { name: 'Apply and re-check' });
+    expect(apply).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/Justification/), {
+      target: { value: 'Signed DPA ref INTF-2026-114, clause 4.2.' },
+    });
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+
+    await waitFor(() => expect(setup).toHaveBeenCalledTimes(1));
+    const [tenantId, body] = setup.mock.calls[0];
+    expect(tenantId).toBe('9');
+    expect(body).toMatchObject({
+      posture: 'ApprovedCloud',
+      cloudEgress: 'FullDocument',
+      purposes: ['RfqExtraction'],
+      version: 2,
+    });
+    // The whole point: the destination is the server's to know. One capital letter in a model id
+    // used to refuse every document this tenant submitted.
+    expect(JSON.stringify(body)).not.toContain('deepseek');
+    expect(JSON.stringify(body)).not.toContain('ollama');
+  });
+
+  it('will not let an operator leave the spend question unanswered', async () => {
+    // Unbounded spend is a choice somebody makes, not a field somebody skips — so the dialog
+    // always has one of the two selected and says what the chosen one costs.
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up AI' }));
+
+    // Nothing is pre-ticked for a tenant with no settled answer, so the spend question appears
+    // only once somebody has said what may read the documents.
+    expect(screen.queryByText('No ceiling')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText('An approved cloud provider'));
+
+    // Seeded from the tenant's own policy, and recomputed as the operator types — the number
+    // an operator can weigh is documents, not tokens.
+    expect(await screen.findByText(/About 1 document a month/)).toBeVisible();
+    fireEvent.change(screen.getByLabelText('Monthly token ceiling'), { target: { value: '2000000' } });
+    expect(screen.getByText(/About 111 documents a month/)).toBeVisible();
+
+    fireEvent.click(screen.getByText('No ceiling'));
+    expect(screen.getByText('Unlimited spend.')).toBeVisible();
+    expect(screen.getByText(/standing warning until somebody sets a number/)).toBeVisible();
+  });
+
+  it('offers private mode only where the deployment can honour it', async () => {
+    // On an installation whose every inference destination is off-host, "nothing leaves their
+    // servers" is Off with extra steps: it refuses every document under a code that reads like
+    // a fault. The dialog says so instead of writing it.
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up AI' }));
+
+    const privateMode = await screen.findByText(/A private model/);
+    expect(within(privateMode.closest('label') as HTMLElement).getByRole('radio')).toBeDisabled();
+    expect(screen.getByText(/Not available here: this installation is pointed at https:\/\/ollama.example/))
+      .toBeVisible();
   });
 
   it('says the pre-flight is unknown rather than ready when it cannot be read, and still edits', async () => {

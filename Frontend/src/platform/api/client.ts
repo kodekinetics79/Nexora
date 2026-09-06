@@ -8,6 +8,8 @@ import type {
   PlatformDataBoundaryManifest,
   AuditEntry,
   AiExtractionReadinessReport,
+  TenantAiEnablementInput,
+  TenantAiEnablementResult,
   AiProviderAuthorization,
   AiProviderTrustView,
   AuthorizeAiProviderInput,
@@ -360,6 +362,12 @@ export interface PlatformApi {
   updateTenantAiPolicy(tenantId: string, body: UpdateTenantAiPolicyInput): Promise<TenantAiPolicy>;
   getTenantAiProviders(tenantId: string): Promise<AiProviderTrustView>;
   getTenantAiReadiness(tenantId: string): Promise<AiExtractionReadinessReport>;
+  /**
+   * One call for the whole answer: the policy and, where the posture egresses, the destination
+   * grant. Replaces the two-dialog dance that reliably left a tenant with a live grant and a
+   * policy nobody had edited.
+   */
+  setTenantAiEnablement(tenantId: string, body: TenantAiEnablementInput): Promise<TenantAiEnablementResult>;
   authorizeTenantAiProvider(tenantId: string, body: AuthorizeAiProviderInput): Promise<AiProviderAuthorization>;
   revokeTenantAiProvider(tenantId: string, authorizationId: string, reason: string): Promise<AiProviderAuthorization>;
 
@@ -1603,6 +1611,10 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<AiExtractionReadinessReport>(
       `/api/platform/tenants/${tenantId}/ai-readiness`,
     )).data,
+  setTenantAiEnablement: async (tenantId, body) => (await platformHttp.post<TenantAiEnablementResult>(
+    `/api/platform/tenants/${tenantId}/ai-enablement`, body,
+    { headers: { 'Idempotency-Key': crypto.randomUUID() } },
+  )).data,
   authorizeTenantAiProvider: async (tenantId, body) => {
     const result = (await platformHttp.post<{ authorization: AiProviderAuthorization }>(
       `/api/platform/tenants/${tenantId}/ai-providers`, body,

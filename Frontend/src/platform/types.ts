@@ -1586,6 +1586,37 @@ export interface AiExtractionReadinessReport {
   checks: AiExtractionReadinessCheck[];
 }
 
+/**
+ * What a tenant has decided their documents may be read by, as one answer.
+ *
+ * The policy row and the destination grant hold sixteen fields between them that encode this.
+ * The operator answers the posture; the server turns it back into fields, taking the endpoint
+ * and the model from the resolved provider so that nobody types the case-sensitive model id.
+ */
+export type AiPosture = 'Off' | 'PrivateOnly' | 'ApprovedCloud';
+
+export type AiCloudEgress = 'RedactedFieldsOnly' | 'FullDocument';
+
+export interface TenantAiEnablementInput {
+  posture: AiPosture;
+  /** `ApprovedCloud` only. `FullDocument` is the customer's text leaving their infrastructure. */
+  cloudEgress: AiCloudEgress | null;
+  purposes: string[];
+  monthlyHardTokenLimit: number | null;
+  /** Unbounded spend, chosen. Distinct from "nobody decided", which the server refuses. */
+  noMonthlyCeiling: boolean;
+  grantExpiresOn: string | null;
+  version: number;
+  justification: string;
+}
+
+export interface TenantAiEnablementResult {
+  policy: TenantAiPolicy;
+  /** The pre-flight re-run against what was just written, so the tab never shows a stale verdict. */
+  readiness: AiExtractionReadinessReport;
+  authorization: AiProviderAuthorization | null;
+}
+
 export interface AuthorizeAiProviderInput {
   provider: string;
   endpoint: string;
