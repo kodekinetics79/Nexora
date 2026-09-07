@@ -79,6 +79,7 @@ public static class PlatformSupportFixture
         await using var context = db.ContextFor(null);
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = name ?? slug,
             Slug = slug,
             Status = status,

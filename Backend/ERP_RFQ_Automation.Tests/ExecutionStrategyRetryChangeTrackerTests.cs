@@ -169,6 +169,7 @@ public sealed class ExecutionStrategyRetryChangeTrackerTests
             using var db = new ErpRfqAutomationContext(_options, new StubTenant(null));
             db.Set<Tenant>().Add(new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Id = Tenant,
                 Name = "Retry Tenant",
                 Slug = "retry-tenant",

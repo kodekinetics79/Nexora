@@ -21,6 +21,7 @@ public sealed class EvidenceRetentionLegalHoldPortableTests
         Seed.EnsureBusinessUnit(db, businessUnitId);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Portable retention hold tenant",
             Slug = "portable-retention-hold",
             Status = TenantStatus.Active,

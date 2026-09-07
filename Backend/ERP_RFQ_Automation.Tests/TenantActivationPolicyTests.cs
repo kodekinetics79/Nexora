@@ -97,6 +97,7 @@ public sealed class TenantActivationPolicyTests
         db.Set<ERP_RFQ_Automation.Billing.RateCard>().Add(card);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 1_993, Name = "Noor & Sons", Slug = "noor-sons",
             Status = TenantStatus.Provisioning, PlanId = plan.Id, RateCardId = card.Id,
             PrimaryBusinessUnitId = 1_991, CreatedOn = DateTime.UtcNow,
@@ -122,6 +123,7 @@ public sealed class TenantActivationPolicyTests
         db.Set<Plan>().Add(plan);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 993, Name = "Policy Tenant", Slug = "policy-tenant",
             Status = TenantStatus.Provisioning, PlanId = plan.Id,
             PrimaryBusinessUnitId = 991, CreatedOn = DateTime.UtcNow
@@ -185,6 +187,7 @@ public sealed class TenantActivationPolicyTests
         // at on the morning after a provisioning run went wrong.
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 9971, Name = "Unremediated", Slug = "unremediated",
             Status = TenantStatus.Provisioning, CreatedOn = DateTime.UtcNow
         });
@@ -284,6 +287,7 @@ public sealed class TenantActivationPolicyTests
         await using var db = database.ContextFor(null);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 9972, Name = "Verdict", Slug = "verdict",
             Status = TenantStatus.Provisioning, CreatedOn = DateTime.UtcNow
         });
@@ -319,6 +323,7 @@ public sealed class TenantActivationPolicyTests
         Seed.EnsureBusinessUnit(db, 994);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 995, Name = "Blocked", Slug = "blocked", Status = TenantStatus.Provisioning,
             PrimaryBusinessUnitId = 994, CreatedOn = DateTime.UtcNow
         });
@@ -342,6 +347,7 @@ public sealed class TenantActivationPolicyTests
         await using var db = database.ContextFor(null);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 996, Name = "Evidence", Slug = "evidence", Status = TenantStatus.Provisioning,
             CreatedOn = DateTime.UtcNow
         });

@@ -118,6 +118,7 @@ public sealed class PlatformAdmin360SecurityFixTests
             await seed.SaveChangesAsync();
             var tenant = new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = "A7 Tenant", Slug = "a7-tenant", Status = TenantStatus.Active,
                 PrimaryBusinessUnitId = bu.Id, CreatedBy = "test", CreatedOn = DateTime.UtcNow
             };
@@ -242,6 +243,7 @@ public sealed class PlatformAdmin360SecurityFixTests
             await seed.SaveChangesAsync();
             var tenant = new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = "Sec3 Tenant", Slug = "sec3-tenant", Status = TenantStatus.Active,
                 PrimaryBusinessUnitId = bu.Id, CreatedBy = "test", CreatedOn = DateTime.UtcNow
             };

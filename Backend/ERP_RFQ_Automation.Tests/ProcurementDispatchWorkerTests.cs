@@ -536,6 +536,7 @@ public sealed class ProcurementDispatchWorkerTests
             using var db = _database.ContextFor(null);
             db.Set<Tenant>().Add(new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Id = Tenant,
                 Name = "Dispatch Tenant",
                 Slug = "dispatch-tenant",
@@ -732,6 +733,7 @@ public sealed class ProcurementDispatchWorkerPostgreSqlTests(PostgreSqlTestDatab
         {
             seed.Set<Tenant>().Add(new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Id = tenantId,
                 Name = "Dispatch retry tenant",
                 Slug = $"dispatch-retry-{suffix}",

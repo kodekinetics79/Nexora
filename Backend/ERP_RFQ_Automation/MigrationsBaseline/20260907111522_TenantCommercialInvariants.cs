@@ -58,11 +58,21 @@ namespace ERP_RFQ_Automation.Migrations
             // every customer whose plan is chosen after the workspace is created. Four tests in
             // the existing suite assert that state; they were right and the first draft of this
             // constraint was wrong.
+            //
+            // SCOPED TO THE LIVE STATUSES, and that scoping is load-bearing rather than timid.
+            // ErasePersonalDataAsync deliberately NULLS BillingContactEmail — the customer's AP
+            // address is the customer's personal data — and TenantLifecycleGraph.ErasureAllowedFrom
+            // permits erasure only from Suspended or Archived. An unscoped constraint would
+            // therefore make a compliance operation fail on any tenant that had ever been
+            // Billable, which is a worse defect than the one being closed. The rule that actually
+            // matters is narrower and truer: a tenant WE ARE CHARGING must have somewhere to send
+            // the invoice.
             migrationBuilder.Sql("""
                 ALTER TABLE platform."Tenants"
                     ADD CONSTRAINT "CK_Tenants_BillableIsInvoiceable"
                     CHECK (
-                        "BillingMode" <> 'Billable'
+                        "Status" NOT IN ('Provisioning', 'Active', 'PastDue')
+                        OR "BillingMode" <> 'Billable'
                         OR "BillingContactEmail" IS NOT NULL
                     ) NOT VALID;
                 """);

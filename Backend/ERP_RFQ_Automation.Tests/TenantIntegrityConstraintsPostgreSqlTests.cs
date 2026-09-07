@@ -1,4 +1,6 @@
+using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -143,6 +145,44 @@ public sealed class TenantIntegrityConstraintsPostgreSqlTests
         Assert.Equal(1, await CountAsync(connection, transaction, slug));
     }
 
+    /// <summary>
+    /// The constraint must not break personal-data erasure, which is why it is scoped to the live
+    /// statuses rather than applied to every Billable row.
+    ///
+    /// <para><c>ErasePersonalDataAsync</c> NULLS <c>BillingContactEmail</c> on purpose — a
+    /// customer's accounts-payable address is the customer's personal data — and
+    /// <c>TenantLifecycleGraph.ErasureAllowedFrom</c> permits erasure only from Suspended or
+    /// Archived. An unscoped constraint would have made a compliance operation fail on any tenant
+    /// that had ever been Billable: a worse defect than the one being closed, and one that would
+    /// have surfaced as a 500 in the middle of a deletion request.</para>
+    /// </summary>
+    [Theory]
+    [Trait("Category", "PostgreSQL")]
+    [InlineData("Suspended")]
+    [InlineData("Archived")]
+    public async Task Erasure_may_clear_the_invoice_recipient_once_the_tenant_is_off_the_product(string status)
+    {
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        var slug = Unique("erased");
+        await InsertTenantAsync(connection, transaction, slug,
+            billingMode: "Billable", billingContactEmail: "ap@erased.test");
+
+        await ExecuteAsync(connection, transaction,
+            """UPDATE platform."Tenants" SET "Status" = @status WHERE "Slug" = @slug;""",
+            ("status", status), ("slug", slug));
+
+        // The erasure write itself: the recipient goes, the row stays.
+        await ExecuteAsync(connection, transaction,
+            """
+            UPDATE platform."Tenants" SET "BillingContactEmail" = NULL, "ContactEmail" = NULL
+            WHERE "Slug" = @slug;
+            """, ("slug", slug));
+
+        Assert.Equal(1, await CountAsync(connection, transaction, slug));
+    }
+
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task A_trial_cannot_exist_without_an_end_date()
@@ -216,6 +256,49 @@ public sealed class TenantIntegrityConstraintsPostgreSqlTests
         read.Parameters.AddWithValue("slug", slug);
 
         Assert.Equal(1L, (long)(await read.ExecuteScalarAsync())!);
+    }
+
+    /// <summary>
+    /// The token has to be INCREMENTED to be worth anything. Declaring IsConcurrencyToken on a
+    /// plain long makes EF put it in the WHERE clause; it does not make anything advance it, and
+    /// a token that never advances matches every time. That is not hypothetical — it is what
+    /// happened to the email-assembly token, which is why TenantConcurrencyStamp exists.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_stale_writer_loses_instead_of_silently_overwriting()
+    {
+        var slug = Unique("concurrent");
+        await using (var seed = _database.ContextFor(null))
+        {
+            seed.Set<Tenant>().Add(new Tenant
+            {
+                Name = "Concurrent", Slug = slug, Status = TenantStatus.Active,
+                BillingContactEmail = "ap@concurrent.test",
+                CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // Two operators read the same row — the two-tabs case the console makes easy.
+        await using var first = _database.ContextFor(null);
+        await using var second = _database.ContextFor(null);
+        var a = await first.Set<Tenant>().IgnoreQueryFilters().SingleAsync(t => t.Slug == slug);
+        var b = await second.Set<Tenant>().IgnoreQueryFilters().SingleAsync(t => t.Slug == slug);
+        Assert.Equal(a.Version, b.Version);
+
+        a.LegalName = "Written by the first operator";
+        await first.SaveChangesAsync();
+
+        b.City = "Written by the second operator";
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => second.SaveChangesAsync());
+
+        await using var verify = _database.ContextFor(null);
+        var landed = await verify.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .SingleAsync(t => t.Slug == slug);
+        Assert.Equal("Written by the first operator", landed.LegalName);
+        Assert.Null(landed.City);                 // the stale write did not land
+        Assert.Equal(a.Version, landed.Version);  // and the token advanced
     }
 
     // ============================================================ helpers

@@ -41,21 +41,30 @@ WHERE t."PrimaryBusinessUnitId" IS NOT NULL
 
 \echo ''
 \echo '=============================================================='
-\echo ' 3. Billable tenants that cannot actually be invoiced'
-\echo '    (blocks CK_Tenants_BillableIsInvoiceable at VALIDATE time)'
+\echo ' 3. LIVE Billable tenants with nowhere to send the invoice'
+\echo '    (blocks CK_Tenants_BillableIsInvoiceable at VALIDATE time.'
+\echo '     Scoped to live statuses because personal-data erasure'
+\echo '     legitimately nulls this column on a Suspended/Archived'
+\echo '     tenant -- the customer AP address is personal data.)'
 \echo '=============================================================='
-SELECT "Id", "Slug", "Status",
-       ("PlanId" IS NULL)                                   AS missing_plan,
-       ("BillingContactEmail" IS NULL)                      AS missing_invoice_recipient,
-       (coalesce("PaymentTermsDays", 0) <= 0)               AS missing_payment_terms
+SELECT "Id", "Slug", "Status", "BillingMode"
 FROM platform."Tenants"
-WHERE "BillingMode" = 'Billable'
-  AND NOT (
-        "PlanId" IS NOT NULL
-    AND "BillingContactEmail" IS NOT NULL
-    AND coalesce("PaymentTermsDays", 0) > 0
-  )
+WHERE "Status" IN ('Provisioning', 'Active', 'PastDue')
+  AND "BillingMode" = 'Billable'
+  AND "BillingContactEmail" IS NULL
 ORDER BY "Status", "Id";
+
+-- Informational, and NOT constrained: a plan-less Billable tenant is a supported state
+-- (UnplannedTenantAllowance), and payment terms are not in the constraint because zero is a
+-- real term ("due on receipt") and null is refused by the API rather than the table.
+SELECT "Id", "Slug", "Status",
+       ("PlanId" IS NULL)                     AS no_plan_unplanned_allowance,
+       (coalesce("PaymentTermsDays", -1) < 0) AS payment_terms_unstated
+FROM platform."Tenants"
+WHERE "Status" IN ('Provisioning', 'Active', 'PastDue')
+  AND "BillingMode" = 'Billable'
+  AND ("PlanId" IS NULL OR "PaymentTermsDays" IS NULL)
+ORDER BY "Id";
 
 \echo ''
 \echo '=============================================================='

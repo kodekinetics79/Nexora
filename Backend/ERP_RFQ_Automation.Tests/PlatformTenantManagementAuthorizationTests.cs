@@ -64,6 +64,7 @@ public sealed class PlatformTenantManagementAuthorizationTests
         await using var context = db.ContextFor(null);
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Acme", Slug = "acme", Status = TenantStatus.Provisioning,
             CountryCode = "US", CreatedOn = DateTime.UtcNow, CreatedBy = "tests"
         };

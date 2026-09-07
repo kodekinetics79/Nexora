@@ -165,6 +165,7 @@ public sealed class QuoteDeliveryDurabilityTests
         Seed.EnsureBusinessUnit(db, 970);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 97, Name = "Uncertain tenant", Slug = "uncertain-tenant-97",
             Status = TenantStatus.Active, PrimaryBusinessUnitId = 970
         });

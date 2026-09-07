@@ -180,8 +180,8 @@ public sealed class PlatformPlansAndOverviewTests
             seed.Set<Plan>().Add(custom);
             await seed.SaveChangesAsync();
             seed.Set<Tenant>().AddRange(
-                new Tenant { Name = "No Plan", Slug = "no-plan", Status = TenantStatus.Active },
-                new Tenant { Name = "Custom Plan", Slug = "custom-plan", Status = TenantStatus.Active, PlanId = custom.Id });
+                new Tenant { BillingContactEmail = "ap@fixture.test", Name = "No Plan", Slug = "no-plan", Status = TenantStatus.Active },
+                new Tenant { BillingContactEmail = "ap@fixture.test", Name = "Custom Plan", Slug = "custom-plan", Status = TenantStatus.Active, PlanId = custom.Id });
             await seed.SaveChangesAsync();
         }
 
@@ -273,9 +273,9 @@ public sealed class PlatformPlansAndOverviewTests
         await using (var seed = db.ContextFor(null))
         {
             seed.Set<Tenant>().AddRange(
-                new Tenant { Name = "One", Slug = "one", Status = TenantStatus.Provisioning },
-                new Tenant { Name = "Two", Slug = "two", Status = TenantStatus.Provisioning },
-                new Tenant { Name = "Three", Slug = "three", Status = TenantStatus.PastDue });
+                new Tenant { BillingContactEmail = "ap@fixture.test", Name = "One", Slug = "one", Status = TenantStatus.Provisioning },
+                new Tenant { BillingContactEmail = "ap@fixture.test", Name = "Two", Slug = "two", Status = TenantStatus.Provisioning },
+                new Tenant { BillingContactEmail = "ap@fixture.test", Name = "Three", Slug = "three", Status = TenantStatus.PastDue });
             await seed.SaveChangesAsync();
         }
 

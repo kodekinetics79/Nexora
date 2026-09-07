@@ -25,6 +25,7 @@ public sealed class PlatformDeadLetterRecoveryTests
         Seed.EnsureBusinessUnit(db, 910);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 91, Name = "Recovery tenant", Slug = "recovery-tenant-91",
             Status = TenantStatus.Active, PrimaryBusinessUnitId = 910
         });
@@ -74,6 +75,7 @@ public sealed class PlatformDeadLetterRecoveryTests
         Seed.EnsureBusinessUnit(db, 940);
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = 94, Name = "Recovery tenant 94", Slug = "recovery-tenant-94",
             Status = TenantStatus.Active, PrimaryBusinessUnitId = 940
         });
@@ -117,8 +119,8 @@ public sealed class PlatformDeadLetterRecoveryTests
         Seed.EnsureBusinessUnit(db, 920);
         Seed.EnsureBusinessUnit(db, 930);
         db.Set<Tenant>().AddRange(
-            new Tenant { Id = 92, Name = "Tenant 92", Slug = "tenant-92", Status = TenantStatus.Active, PrimaryBusinessUnitId = 920 },
-            new Tenant { Id = 93, Name = "Tenant 93", Slug = "tenant-93", Status = TenantStatus.Active, PrimaryBusinessUnitId = 930 });
+            new Tenant { BillingContactEmail = "ap@fixture.test", Id = 92, Name = "Tenant 92", Slug = "tenant-92", Status = TenantStatus.Active, PrimaryBusinessUnitId = 920 },
+            new Tenant { BillingContactEmail = "ap@fixture.test", Id = 93, Name = "Tenant 93", Slug = "tenant-93", Status = TenantStatus.Active, PrimaryBusinessUnitId = 930 });
         db.Quotes.Add(new Quote
         {
             Id = 931, BusinessUnitId = 930, QuoteNo = "Q-OTHER-931",

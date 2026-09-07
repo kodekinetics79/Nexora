@@ -1654,6 +1654,7 @@ public class PlatformBillingTests
         {
             var tenant = new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = "Unmapped Tenant",
                 Slug = $"unmapped-{Guid.NewGuid():N}"[..20],
                 Status = TenantStatus.Active,
@@ -1801,6 +1802,7 @@ public class PlatformBillingTests
 
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Billing Tenant",
             Slug = $"billing-{Guid.NewGuid():N}"[..20],
             Status = TenantStatus.Active,

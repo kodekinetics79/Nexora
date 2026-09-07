@@ -673,6 +673,7 @@ public sealed class PlatformTenantEditAndApprovalTests
         await using var seed = db.ContextFor(null);
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Edit Tenant",
             Slug = slug,
             Status = status,

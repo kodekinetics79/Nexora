@@ -313,6 +313,7 @@ public sealed class TenantUserInvitationTests
             {
                 var tenant = new Tenant
                 {
+                    BillingContactEmail = "ap@fixture.test",
                     Name = $"Tenant {slug}", Slug = slug, Status = TenantStatus.Active,
                     PrimaryBusinessUnitId = unit.Id, CreatedBy = "tests", CreatedOn = DateTime.UtcNow
                 };

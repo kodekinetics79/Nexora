@@ -892,6 +892,7 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
         {
             db.Set<Tenant>().Add(new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = $"Retention tenant {tenantId}",
                 Slug = $"retention-{tenantId}",
                 Status = TenantStatus.Active,

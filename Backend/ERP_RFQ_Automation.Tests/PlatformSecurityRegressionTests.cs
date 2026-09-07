@@ -151,6 +151,7 @@ public class PlatformSecurityRegressionTests
         await using var context = db.ContextFor(null);
         context.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Must Not Persist",
             Slug = "stale-provisioning-state",
             Status = TenantStatus.Provisioning,

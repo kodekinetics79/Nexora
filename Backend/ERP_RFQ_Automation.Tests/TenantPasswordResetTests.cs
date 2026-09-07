@@ -107,6 +107,7 @@ public sealed class TenantPasswordResetTests
 
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = $"Tenant {slug}",
             Slug = slug,
             Status = TenantStatus.Active,

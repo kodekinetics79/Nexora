@@ -198,6 +198,7 @@ public sealed class TenantModuleGrantAdminTests
 
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Module Tenant",
             Slug = $"module-tenant-{Guid.NewGuid():N}"[..24],
             Status = TenantStatus.Active,

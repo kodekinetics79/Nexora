@@ -139,6 +139,7 @@ public sealed class PlatformTenantUserManagementTests
 
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = $"Tenant {slug}",
             Slug = slug,
             Status = status,

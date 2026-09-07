@@ -287,6 +287,7 @@ public sealed class TenantDataControlPointerCoverageTests(PostgreSqlTestDatabase
         await db.SaveChangesAsync();
         db.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = $"Pointer coverage tenant {tenantId}",
             Slug = $"pointer-coverage-{tenantId}",
             Status = TenantStatus.Active,

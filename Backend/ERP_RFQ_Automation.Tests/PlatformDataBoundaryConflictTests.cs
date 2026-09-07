@@ -134,6 +134,7 @@ public sealed class PlatformDataBoundaryConflictTests
         {
             context.Set<Tenant>().Add(new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Id = asset.TenantId,
                 Name = $"Conflict tenant {asset.TenantId}",
                 Slug = $"conflict-tenant-{asset.TenantId}",

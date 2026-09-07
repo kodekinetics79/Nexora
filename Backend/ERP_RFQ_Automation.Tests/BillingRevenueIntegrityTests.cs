@@ -1543,6 +1543,7 @@ public sealed class BillingRevenueIntegrityTests
             });
         seed.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = tenantId,
             Name = $"Tenant {tenantId}",
             Slug = $"{slug}-{tenantId}",
@@ -1588,6 +1589,7 @@ public sealed class BillingRevenueIntegrityTests
             });
         seed.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = TenantId,
             Name = "Entitlement Tenant",
             Slug = "entitlements",

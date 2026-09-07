@@ -29,6 +29,7 @@ public sealed class TenantLifecycleReanimationPostgreSqlTests(PostgreSqlTestData
             Seed.BusinessUnit(seed, businessUnitId);
             var tenant = new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = "Stale purge fencing tenant",
                 Slug = $"stale-purge-fence-{Guid.NewGuid():N}",
                 Status = TenantStatus.Archived,
@@ -86,6 +87,7 @@ public sealed class TenantLifecycleReanimationPostgreSqlTests(PostgreSqlTestData
             var suffix = Guid.NewGuid().ToString("N")[..10];
             var tenant = new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = "Lifecycle race tenant",
                 Slug = $"lifecycle-race-{suffix}",
                 Status = TenantStatus.Archived,

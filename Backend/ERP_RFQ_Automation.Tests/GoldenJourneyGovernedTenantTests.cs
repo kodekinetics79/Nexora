@@ -483,6 +483,7 @@ public sealed class GoldenJourneyGovernedTenantTests : IDisposable
 
             ctx.Set<Tenant>().Add(new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = "E2E Golden Tenant A",
                 Slug = "e2e-golden-a",
                 Status = TenantStatus.Active,

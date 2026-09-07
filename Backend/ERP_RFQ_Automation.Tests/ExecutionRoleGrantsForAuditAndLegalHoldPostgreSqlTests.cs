@@ -189,6 +189,7 @@ public sealed class ExecutionRoleGrantsForAuditAndLegalHoldPostgreSqlTests
         await using var context = _database.ContextFor(null);
         context.Set<Tenant>().Add(new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = TenantId,
             Name = "Execution Role Grants Tenant",
             Slug = "grants-fence",

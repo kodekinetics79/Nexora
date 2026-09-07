@@ -276,6 +276,7 @@ public sealed class BillingStatementComputePostgreSqlTests
 
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Billing PG Tenant",
             Slug = $"billing-pg-{suffix}",
             Status = TenantStatus.Active,

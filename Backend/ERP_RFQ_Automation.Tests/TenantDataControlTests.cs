@@ -777,6 +777,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
         {
             db.Set<Tenant>().Add(new Tenant
             {
+                BillingContactEmail = "ap@fixture.test",
                 Name = $"Data control tenant {tenantId}",
                 Slug = $"data-control-{tenantId}",
                 Status = TenantStatus.Active,

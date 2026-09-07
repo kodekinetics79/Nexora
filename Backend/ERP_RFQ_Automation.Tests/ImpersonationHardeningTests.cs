@@ -39,7 +39,7 @@ public sealed class ImpersonationHardeningTests
         var before = DateTime.UtcNow;
 
         var (_, expiresAtUtc, jti) = service.IssueImpersonationToken(
-            7, new Tenant { Id = 1, Name = "T", Slug = "t" }, 42, "support");
+            7, new Tenant { BillingContactEmail = "ap@fixture.test", Id = 1, Name = "T", Slug = "t" }, 42, "support");
 
         var lifetime = expiresAtUtc - before;
         Assert.InRange(lifetime, TimeSpan.FromMinutes(expectedMinutes - 0.5), TimeSpan.FromMinutes(expectedMinutes + 0.5));
@@ -398,6 +398,7 @@ public sealed class ImpersonationHardeningTests
         await seed.SaveChangesAsync();
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Name = "Impersonation Tenant",
             Slug = slug,
             Status = TenantStatus.Active,

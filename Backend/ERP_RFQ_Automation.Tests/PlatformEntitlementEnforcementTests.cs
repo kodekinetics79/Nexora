@@ -64,6 +64,7 @@ public sealed class PlatformEntitlementEnforcementTests
         Seed.EnsureBusinessUnit(ctx, businessUnitId);
         var tenant = new Tenant
         {
+            BillingContactEmail = "ap@fixture.test",
             Id = id,
             Name = $"Tenant {id}",
             Slug = $"tenant-{id}",
