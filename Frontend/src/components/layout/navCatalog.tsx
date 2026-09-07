@@ -148,25 +148,32 @@ export const INBOX_ROOT = '/inbox';
 export const ADVANCED_ROOT = '/advanced';
 
 /**
- * The seven commercial rows.
+ * The Dashboard, then the seven commercial rows.
  *
- * Ordered by the journey, not by module name: work arrives (Inbox), becomes an enquiry (Leads),
- * becomes a request we can price (RFQs), becomes an offer (Quotes), an Order, a fulfilled delivery,
- * and finally a receivable. Permission filtering means each role sees only the stages it can open,
- * while the order stays stable across roles.
+ * The seven are ordered by the journey, not by module name: work arrives (Inbox), becomes an
+ * enquiry (Leads), becomes a request we can price (RFQs), becomes an offer (Quotes), an Order, a
+ * fulfilled delivery, and finally a receivable. Permission filtering means each role sees only the
+ * stages it can open, while the order stays stable across roles — including the Dashboard above
+ * them, which every role that holds the module now sees in the same place.
  */
 export const PRIMARY_NAV: PrimaryNavItem[] = [
   {
-    // First row for the people who read the numbers rather than work a single deal (owner
-    // decision, 2026-09-05). Manager-tier only, and gated on Dashboard like its route, so a
-    // director opens on the funnel while a rep's rail still begins with the Inbox.
+    // The first row for EVERYONE (owner decision, 2026-09-06, replacing the manager-only row of
+    // 2026-09-05). `/dashboard` is now one screen for a rep, a manager and a director: identical
+    // layout for all three, with the server scoping each band's figures and each band stating that
+    // scope on its own seal. There is therefore nothing on it to keep from a representative.
+    //
+    // Hiding the row was also not hiding the screen. The route is gated on the Dashboard module
+    // alone, and TenantBaselineCatalog seeds SALES_REP with Read("Dashboard") — so a rep who typed
+    // the address was already admitted, and the rail was merely declining to tell them the screen
+    // existed. Reps still LAND on the Inbox after signing in: where a working day starts is a
+    // different decision from what a person may reach, and only the second one changed here.
     key: 'executive',
-    label: 'Executive view',
-    description: 'The funnel, the money and the team at a glance, every figure with its source.',
+    label: 'Dashboard',
+    description: 'What you won, what is closing on you and what needs you today, each figure with its own scope.',
     icon: <InsightsIcon />,
     path: '/dashboard',
     moduleName: 'Dashboard',
-    managerOnly: true,
     activePrefixes: ['/dashboard', '/executive/today'],
   },
   {
@@ -428,11 +435,12 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         moduleName: 'Leads',
         keywords: ['deadline', 'closing date', 'due', 'overdue', 'board'],
       },
-      // '/dashboard' is NOT listed here any more: it is the Executive view, the first row of the
-      // rail for manager-tier users. Leaving the old Dashboard card in the directory would put one
-      // destination behind two doors — the exact defect this file's "one door per destination"
-      // tests were written for after Users and Integration Hub each appeared twice — and the card's
-      // own description ("headline KPIs... insufficient data") no longer describes the screen.
+      // '/dashboard' is NOT listed here any more: it is the Dashboard, the first row of the
+      // rail, and since 2026-09-06 the first row for every role that holds the module. Leaving
+      // the old Dashboard card in the directory would put one destination behind two doors — the
+      // exact defect this file's "one door per destination" tests were written for after Users and
+      // Integration Hub each appeared twice — and the card's own description ("headline KPIs...
+      // insufficient data") no longer describes the screen.
       // The destination did not disappear from the product; it moved up into the rail.
       {
         key: 'dashboard-team',

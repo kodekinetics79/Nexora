@@ -26,8 +26,18 @@ export interface CommercialAttentionItem {
 export interface SalesTodayDTO {
   generatedAt: string;
   scope: 'tenant' | 'managed_scope' | 'assigned_to_me';
+  /**
+   * The open- and overdue-follow-up counts are now the true totals for the caller's scope and may
+   * exceed the number of `attentionItems` rows. They used to saturate at exactly 100 because the
+   * server counted after taking its page.
+   */
   metrics: IntelligenceMetric[];
+  /** At most `attentionItemLimit` rows, earliest `dueAt` first. */
   attentionItems: CommercialAttentionItem[];
+  /** The server's own cap on `attentionItems`. Never assume 100 at a call site. */
+  attentionItemLimit: number;
+  /** True when there are more open follow-ups than the rows returned: this is a first page. */
+  attentionItemsTruncated: boolean;
 }
 
 export interface RepSummaryDTO {
@@ -214,8 +224,18 @@ export interface PerformanceDTO {
   from: string;
   to: string;
   metrics: IntelligenceMetric[];
-  scope: 'tenant' | 'assigned_to_me';
+  scope: 'tenant' | 'managed_scope' | 'assigned_to_me';
   minimumConversionSample: number;
+  /** Won plus lost across the resolved scope — the denominator the floor is measured against. */
+  decidedQuotes: number;
+  conversionEligible: boolean;
+  /**
+   * Percent, 0-100 to two decimal places, and NULL whenever `conversionEligible` is false. Null
+   * means the figure is not available and must be shown with the sample it is short of; it is
+   * never a 0 and never a dash. Nothing may recompute it from the `won`/`decided` metrics — only
+   * this figure honours both the caller's scope and the minimum sample.
+   */
+  conversionRate: number | null;
   outcomeReconciliation: {
     recordedOutcomes?: number | null;
     attributedOutcomes: number;

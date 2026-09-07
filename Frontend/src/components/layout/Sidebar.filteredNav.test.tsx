@@ -168,17 +168,26 @@ describe('where the rail says you are', () => {
   });
 
   /**
-   * `/dashboard` is the Executive view now, and it is a manager-tier rail row rather than a card in
-   * the directory. This harness signs in as a rep (`isManager: false`), so the address belongs to
-   * no destination they have — and the rail says so by lighting nothing, which is the same answer
-   * it gives for any address outside the reader's spine. A rep who still has the Dashboard module
-   * permission can reach the screen by URL; what they no longer get is a navigation entry to a
-   * screen whose panels would tell them the figures are for managers.
+   * `/dashboard` is a rail row for every role that holds the Dashboard module (owner decision,
+   * 2026-09-06). This replaces the assertion
+   * `expect(screen.queryByRole('button', { name: 'Executive view' })).toBeNull()`, which pinned the
+   * previous day's decision that the row was manager-tier only. That decision described the rail
+   * and not the product: the route is gated on the Dashboard module alone, TenantBaselineCatalog
+   * seeds SALES_REP with Read("Dashboard"), and this very harness signs in as a rep — so the
+   * screen was always one typed address away, and the only thing the hidden row achieved was that
+   * the rep arriving there had no idea where they were. The screen now scopes every band to the
+   * reader, so the row is shown and it lights like any other.
    */
-  it('lights nothing for a rep on the manager-tier executive address', () => {
+  it('lights the dashboard row for a rep, who may now reach it', () => {
     renderRail('/dashboard');
-    expect(screen.queryByRole('button', { name: 'Executive view' })).toBeNull();
-    expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(0);
+    expect(row('Dashboard')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('hides the dashboard row from a role without the module, as it gates every other row', () => {
+    auth.grants = new Set(['Orders']);
+    renderRail('/dashboard');
+
+    expect(screen.queryByRole('button', { name: 'Dashboard' })).not.toBeInTheDocument();
   });
 
   it('nests Setup under Administration without losing its current-screen signal', () => {

@@ -141,15 +141,36 @@ const reachablePaths = new Set<string>([
 /**
  * The rail a role actually sees. `PRIMARY_NAV` is the catalogue; the Sidebar shows an entry only
  * when the reader is manager-tier or the entry is not manager-only, and these tests assert the
- * SEEN rail rather than the catalogue for the same reason the Sidebar filters it — "seven rows" was
- * never a fact about the array, it was a promise about what a working day looks like.
+ * SEEN rail rather than the catalogue for the same reason the Sidebar filters it — the row count
+ * was never a fact about the array, it was a promise about what a working day looks like. No
+ * primary row is manager-only any more, so the two rails are currently identical; the helper stays
+ * because the next manager-only row must be a decision somebody makes on purpose.
  */
 const railFor = (isManager: boolean) => PRIMARY_NAV.filter((item) => !item.managerOnly || isManager);
 
+
 describe('the rail exposes the complete commercial spine', () => {
-  it('carries no more than seven commercial destinations, in journey order, for the people who work deals', () => {
-    expect(railFor(false)).toHaveLength(7);
+  /**
+   * The Dashboard row, then the seven commercial destinations, for EVERY role (owner decision,
+   * 2026-09-06, replacing the manager-only row of 2026-09-05).
+   *
+   * The assertions this replaces were `expect(railFor(false)).toHaveLength(7)` with a key list
+   * beginning 'inbox', and `expect(railFor(false).map(item => item.key)).not.toContain('executive')`.
+   * They encoded a decision that had already stopped being true in the product: `/dashboard` is
+   * gated on the Dashboard module alone and TenantBaselineCatalog seeds SALES_REP with
+   * Read("Dashboard"), so a rep who typed the address was admitted and shown the screen — the rail
+   * was hiding the door, not locking it. The screen itself is now one screen for all three
+   * audiences, scoped per reader by the server, so the row is open to everyone who holds the
+   * module and both counts move up by one.
+   *
+   * The property the old count existed to protect is asserted separately below: the COMMERCIAL
+   * spine is still seven rows and still in journey order, so "a rep's rail does not grow" keeps its
+   * teeth and only the deliberate addition is allowed through.
+   */
+  it('carries the dashboard and the seven commercial destinations, in journey order, for everyone', () => {
+    expect(railFor(false)).toHaveLength(8);
     expect(railFor(false).map((item) => item.key)).toEqual([
+      'executive',
       'inbox',
       'leads',
       'rfqs',
@@ -160,34 +181,36 @@ describe('the rail exposes the complete commercial spine', () => {
     ]);
   });
 
-  /**
-   * The executive row is an EIGHTH row and only for manager-tier readers (owner decision,
-   * 2026-09-05). Asserted as an addition on top of the seven rather than by relaxing the count,
-   * because the constraint the seven exist to enforce — a rep's rail does not grow — is exactly
-   * what a bare `toHaveLength(8)` would stop protecting.
-   */
-  it('adds the executive row for manager-tier readers and for nobody else', () => {
-    expect(railFor(true)).toHaveLength(8);
-    expect(railFor(true)[0].key).toBe('executive');
-    expect(railFor(false).map((item) => item.key)).not.toContain('executive');
+  it('keeps the commercial spine at seven rows below the dashboard', () => {
+    const spine = railFor(false).filter((item) => item.key !== 'executive');
+
+    expect(spine).toHaveLength(7);
+    expect(spine[0].key).toBe('inbox');
   });
 
-  it('opens on the work queue, not on a chooser of modules', () => {
-    expect(railFor(false)[0].path).toBe('/inbox');
+  it('shows a representative and a manager the identical rail', () => {
+    // The screen behind every row is still permission-gated, and the Dashboard scopes its own
+    // figures per reader — so there is no row left that a manager sees and a rep does not.
+    expect(railFor(true).map((item) => item.key)).toEqual(railFor(false).map((item) => item.key));
+    expect(railFor(false).map((item) => item.key)).toContain('executive');
   });
 
-  /** A director opens on the numbers; the queue is still their second row, not a lost one. */
-  it('opens a manager on the funnel, with the queue still one row down', () => {
-    expect(railFor(true)[0].path).toBe('/dashboard');
-    expect(railFor(true)[1].path).toBe('/inbox');
+  it('opens on the numbers, with the work queue one row down, for every role', () => {
+    // Where a rep LANDS after signing in is a separate decision and has not changed: landingRoute
+    // still sends every non-manager to the Inbox (see landingRoute.test.ts). This is about what
+    // they can reach, not where their day starts.
+    for (const isManager of [false, true]) {
+      expect(railFor(isManager)[0].path).toBe('/dashboard');
+      expect(railFor(isManager)[1].path).toBe('/inbox');
+    }
   });
 
   it('accounts for all 69 old destinations across four surfaces', () => {
     // These are the numbers the before/after rests on, so they are asserted rather than counted by
-    // hand: 7 commercial rows + 15 tabs + 56 directory cards + 25 Setup entries + the directory door.
-    // The directory lost one card and the rail gained one row when the Dashboard became the
-    // Executive view: the destination moved, so the accounting still balances.
-    expect(railFor(false)).toHaveLength(7);
+    // hand: 1 dashboard row + 7 commercial rows + 15 tabs + 56 directory cards + 25 Setup entries
+    // + the directory door. The directory lost one card and the rail gained one row when the
+    // Dashboard moved up into the rail: the destination moved, so the accounting still balances.
+    expect(railFor(false)).toHaveLength(8);
     expect(PRIMARY_VIEWS).toHaveLength(15);
     expect(ADVANCED_ENTRIES).toHaveLength(56);
     expect(ADVANCED_GROUPS).toHaveLength(10);
