@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Alert, Box, Button, Card, CardContent, Chip, Divider, TextField, Tooltip, Typography,
+  Alert, Autocomplete, Box, Button, Card, CardContent, Chip, Divider, TextField, Tooltip,
+  Typography,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -20,6 +21,7 @@ import { ErrorState, LoadingState } from '../components/States';
 import CommitBar from '../components/CommitBar';
 import { useStagedChanges } from '../components/useStagedChanges';
 import PeopleSection from './customer/PeopleSection';
+import { COUNTRY_CODES, countryLabel } from '../components/localeData';
 import type {
   TenantConfigurationBlocker, TenantConfigurationField, TenantConfigurationSlice,
   TenantConfigurationView,
@@ -90,7 +92,7 @@ export default function CustomerPage() {
   // with the maker-checker and the proration preview the billing programme specifies.
   const COMMERCIAL_EDITABLE = [
     'contractStartOn', 'contractEndOn', 'paymentTermsDays', 'purchaseOrderReference',
-    'billingContactName', 'billingContactEmail', 'accountOwnerEmail',
+    'billingContactName', 'billingContactEmail', 'billingAddress', 'accountOwnerEmail',
   ];
   const commercialLabels = useMemo(() => {
     const out: Record<string, string> = {};
@@ -134,77 +136,172 @@ export default function CustomerPage() {
   }, [view, dirtyRef]);
 
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  /**
+   * Refused here rather than after the operator has typed a reason and pressed Save.
+   *
+   * Every rule below is one the server already enforces; catching it in the browser is not a
+   * second opinion, it is the difference between a sentence naming the field and a JSON binding
+   * error quoting `System.Nullable\`1[System.DateTime]`.
+   */
+  const commitBlockedReason = useMemo(() => {
+    const d = stagedCommercial.draft;
+    const terms = (d.paymentTermsDays ?? '').trim();
+    if (terms !== '' && !/^\d+$/.test(terms)) {
+      return 'Payment terms must be a whole number of days — 0 for due on receipt, 30 for net 30.';
+    }
+    if (terms !== '' && Number(terms) > 365) {
+      return 'Payment terms cannot exceed 365 days; an invoice due beyond that is effectively never due.';
+    }
+    const start = (d.contractStartOn ?? '').trim();
+    const end = (d.contractEndOn ?? '').trim();
+    if (start && end && end < start) {
+      return 'The renewal date is before the contract start date.';
+    }
+    const country = (staged.draft.countryCode ?? '').trim();
+    if (country !== '' && !/^[A-Za-z]{2}$/.test(country)) {
+      return 'Country must be a two-letter ISO code, such as SA or GB.';
+    }
+    const email = (staged.draft.contactEmail ?? '').trim();
+    if (email !== '' && !/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(email)) {
+      return 'The company email does not look like an email address.';
+    }
+    const invoiceEmail = (d.billingContactEmail ?? '').trim();
+    if (invoiceEmail !== '' && !/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(invoiceEmail)) {
+      return 'The invoice email does not look like an email address.';
+    }
+    return null;
+  }, [staged.draft, stagedCommercial.draft]);
+
+  /**
+   * One operator act, two audited endpoints, and an HONEST report of what landed.
+   *
+   * The first version of this returned a single error saying "Nothing on this customer has been
+   * altered" whenever anything threw — including when the billing write had already committed and
+   * only the profile write failed. It also never rebased the draft on success, so the bar still
+   * read "2 unsaved changes" after a good save, and pressing Save again sent the now-stale
+   * If-Match and produced "This customer was changed by somebody else while you had it open."
+   * The operator's own successful save was reported to them as a colleague's edit.
+   */
   const commit = useMutation({
-    mutationFn: async (reason: string) => {
+    mutationFn: async (reason: string): Promise<{ saved: string[]; failed?: string }> => {
       const tenant = tenantQuery.data;
       if (!tenant) throw new Error('The customer record is not loaded.');
+      const done: string[] = [];
 
-      // The contract goes to the billing endpoint, which is Owner-or-BillingAdmin. Sent FIRST and
-      // awaited, so that if the caller lacks billing authority the identity write does not land
-      // and leave the operator believing the whole commit succeeded. Which endpoint refused is
-      // reported, because "it failed" without saying what did save is how a partial write becomes
-      // invisible.
+      // Billing first and awaited: it is Owner-or-BillingAdmin while the profile write is
+      // TenantAdmin, so the reverse order would land the identity change and then fail on
+      // authority.
       if (stagedCommercial.dirty) {
         const c = (key: string) => {
           const value = stagedCommercial.draft[key]?.trim();
           return value === undefined || value === '' ? null : value;
         };
-        const terms = stagedCommercial.draft.paymentTermsDays?.trim();
+        const rawTerms = stagedCommercial.draft.paymentTermsDays?.trim() ?? '';
         try {
           await platformApi.setTenantAccountContact(id, {
             billingContactName: c('billingContactName'),
             billingContactEmail: c('billingContactEmail'),
-            billingAddress: tenant.billingAddress,
+            billingAddress: c('billingAddress'),
             purchaseOrderReference: c('purchaseOrderReference'),
-            paymentTermsDays: terms === undefined || terms === '' ? null : Number(terms),
+            paymentTermsDays: rawTerms === '' ? null : Number(rawTerms),
             accountOwnerEmail: c('accountOwnerEmail'),
             contractStartOn: c('contractStartOn'),
             contractEndOn: c('contractEndOn'),
             reason,
           });
+          done.push('Contract and billing');
         } catch (error) {
-          throw new Error(platformErrorMessage(
-            error,
-            'The contract and billing changes were refused. Nothing was saved.',
-          ));
+          return {
+            saved: done,
+            failed: `Contract and billing was refused: ${platformErrorMessage(error, 'the server did not say why')}`,
+          };
         }
       }
-      if (!staged.dirty) return null;
-      const v = (key: string) => {
-        const value = staged.draft[key]?.trim();
-        return value === undefined || value === '' ? null : value;
-      };
-      return platformApi.updateTenantProfile(id, {
-        name: tenant.name,
-        legalName: v('legalName'),
-        registrationNumber: v('registrationNumber'),
-        taxNumber: v('taxNumber'),
-        countryCode: v('countryCode'),
-        industry: v('industry'),
-        website: v('website'),
-        addressLine1: v('addressLine1'),
-        addressLine2: tenant.addressLine2,
-        city: v('city'),
-        stateProvince: tenant.stateProvince,
-        postalCode: v('postalCode'),
-        phone: v('phone'),
-        contactEmail: v('contactEmail'),
-        logoUrl: tenant.logoUrl,
-        timeZoneId: tenant.timeZoneId,
-        locale: tenant.locale,
-        reason,
-      }, baseVersion ?? undefined);
+
+      if (staged.dirty) {
+        // If-Match exists to catch SOMEBODY ELSE's change, and the billing write above is not
+        // somebody else — it is the first half of this same operator act, and it advances the
+        // tenant's Version through TenantConcurrencyStamp. Sending the version we loaded the page
+        // with would fail our own second write and report it as a colleague's edit, which is
+        // exactly what it did the first time this ran end to end.
+        //
+        // So re-read the version after our own write, and assert against that. A change made by
+        // anyone else between the two is still caught, because their write moves it again.
+        let expected = baseVersion ?? undefined;
+        if (done.includes('Contract and billing')) {
+          try {
+            expected = (await platformApi.getTenantConfiguration(id)).version;
+          } catch {
+            // Could not re-read: send no assertion rather than a known-stale one. A missing
+            // If-Match is "no opinion"; a wrong one is a false conflict.
+            expected = undefined;
+          }
+        }
+
+        const v = (key: string) => {
+          const value = staged.draft[key]?.trim();
+          return value === undefined || value === '' ? null : value;
+        };
+        try {
+          await platformApi.updateTenantProfile(id, {
+            name: tenant.name,
+            legalName: v('legalName'),
+            registrationNumber: v('registrationNumber'),
+            taxNumber: v('taxNumber'),
+            countryCode: v('countryCode'),
+            industry: v('industry'),
+            website: v('website'),
+            addressLine1: v('addressLine1'),
+            addressLine2: tenant.addressLine2,
+            city: v('city'),
+            stateProvince: tenant.stateProvince,
+            postalCode: v('postalCode'),
+            phone: v('phone'),
+            contactEmail: v('contactEmail'),
+            logoUrl: tenant.logoUrl,
+            timeZoneId: tenant.timeZoneId,
+            locale: tenant.locale,
+            reason,
+          }, expected);
+          done.push('Company details');
+        } catch (error) {
+          return {
+            saved: done,
+            failed: `Company details were refused: ${platformErrorMessage(error, 'the server did not say why')}`,
+          };
+        }
+      }
+      return { saved: done };
     },
-    onSuccess: () => {
-      setSaveError(null);
+    onSuccess: (result) => {
+      // Rebase whatever actually landed, so the bar stops offering to save it again and the next
+      // If-Match is taken from fresh state rather than from the version we started with.
       queryClient.invalidateQueries({ queryKey: platformKeys.tenantConfiguration(id) });
       queryClient.invalidateQueries({ queryKey: platformKeys.tenant(id) });
       queryClient.invalidateQueries({ queryKey: platformKeys.customers() });
+
+      if (result.failed) {
+        setSaved(null);
+        setSaveError(result.saved.length > 0
+          // Naming what DID land is the whole point: "nothing was saved" was false, and a
+          // committed contract change that the operator believes was rolled back is worse than
+          // an error, because they will make it again.
+          ? `${result.saved.join(' and ')} saved. ${result.failed}`
+          : result.failed);
+        if (result.saved.includes('Contract and billing')) stagedCommercial.rebase(stagedCommercial.draft);
+        return;
+      }
+      setSaveError(null);
+      setSaved(result.saved.join(' and ') || 'Nothing to save');
+      staged.rebase(staged.draft);
+      stagedCommercial.rebase(stagedCommercial.draft);
     },
-    onError: (error) => setSaveError(platformErrorMessage(
-      error,
-      'The changes were not saved. Nothing on this customer has been altered.',
-    )),
+    onError: (error) => {
+      setSaved(null);
+      setSaveError(platformErrorMessage(error, 'The changes were not saved.'));
+    },
   });
 
   // Leaving with unsaved edits used to lose them silently — switching tabs unmounted the form.
@@ -213,7 +310,7 @@ export default function CustomerPage() {
     const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
-  }, [staged.dirty]);
+  }, [staged.dirty, stagedCommercial.dirty]);
 
   const groupedBlockers = useMemo(() => {
     const byOwner = new Map<string, TenantConfigurationBlocker[]>();
@@ -232,7 +329,7 @@ export default function CustomerPage() {
   if (configuration.isError || !view) {
     return (
       <Box>
-        <Button startIcon={<BackIcon />} onClick={() => navigate('/platform/tenants')} sx={{ mb: 2 }}>
+        <Button startIcon={<BackIcon />} onClick={() => navigate('/platform/customers')} sx={{ mb: 2 }}>
           Back to customers
         </Button>
         <ErrorState
@@ -244,13 +341,14 @@ export default function CustomerPage() {
   }
 
   const { state, nextAction, slices } = view;
+  const needsSomebody = blockers.length > 0 || state.legalHoldActive;
   const tenant = tenantQuery.data;
 
   return (
     <Box>
       <Button
         startIcon={<BackIcon />}
-        onClick={() => navigate('/platform/tenants')}
+        onClick={() => navigate('/platform/customers')}
         sx={{ mb: 1.5 }}
         color="inherit"
       >
@@ -268,6 +366,7 @@ export default function CustomerPage() {
             <Button
               size="small"
               variant="outlined"
+              color="inherit"
               startIcon={<AdvancedIcon />}
               onClick={() => navigate(`/platform/tenants/${encodeURIComponent(id)}`)}
             >
@@ -285,20 +384,27 @@ export default function CustomerPage() {
         happens next, and this renders that verbatim rather than deciding for itself.
       */}
       {nextAction && (
-        <Alert
-          severity={blockers.length > 0 || state.legalHoldActive ? 'warning' : 'success'}
-          icon={false}
-          sx={{ mt: 2.5, borderLeft: 3, borderColor: 'warning.main' }}
-        >
-          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{nextAction.label}</Typography>
-          <Typography variant="body2" sx={{ mt: 0.25 }}>{nextAction.detail}</Typography>
-        </Alert>
+        <Box sx={{ mt: 3, pl: 2, borderLeft: 3, borderColor: 'primary.main' }}>
+          <Typography
+            sx={{
+              fontFamily: '"Cambay", "Source Sans 3", sans-serif',
+              fontWeight: 700, fontSize: 20, lineHeight: 1.25,
+              color: needsSomebody ? 'warning.main' : 'text.primary',
+            }}
+          >
+            {nextAction.label}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: '68ch' }}>
+            {nextAction.detail}
+          </Typography>
+        </Box>
       )}
 
       {blockers.length > 0 && (
-        <Card variant="outlined" sx={{ mt: 2.5 }}>
-          <CardContent>
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>What is blocking this customer</Typography>
+        <Box sx={{ mt: 4 }}>
+            <Typography
+              sx={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em' }}
+            >What is blocking this customer</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
               Grouped by who has to act. Nothing here is a setting a salesperson is expected to
               answer alone.
@@ -307,12 +413,14 @@ export default function CustomerPage() {
             <Stack spacing={2.5}>
               {groupedBlockers.map(([owner, items]) => (
                 <Box key={owner}>
-                  <Chip
-                    size="small"
-                    label={owner}
-                    color={owner === 'Finance' ? 'warning' : owner === 'Owner' ? 'error' : 'default'}
-                    sx={{ fontWeight: 700, mb: 1 }}
-                  />
+                  <Typography
+                    sx={{
+                      fontSize: 11, fontWeight: 700, letterSpacing: '0.08em',
+                      textTransform: 'uppercase', color: 'text.secondary', mb: 1,
+                    }}
+                  >
+                    {owner}
+                  </Typography>
                   <Stack spacing={1.25}>
                     {items.map((blocker) => (
                       <Box
@@ -339,8 +447,7 @@ export default function CustomerPage() {
                 </Box>
               ))}
             </Stack>
-          </CardContent>
-        </Card>
+        </Box>
       )}
 
       <Box
@@ -376,11 +483,17 @@ export default function CustomerPage() {
         />
       </Box>
 
-      {saveError && <Alert severity="error" sx={{ mt: 2.5 }}>{saveError}</Alert>}
+      {saveError && (
+        <Alert severity="error" sx={{ mt: 2.5 }} onClose={() => setSaveError(null)}>{saveError}</Alert>
+      )}
+      {saved && (
+        <Alert severity="success" sx={{ mt: 2.5 }} onClose={() => setSaved(null)}>{saved} saved.</Alert>
+      )}
 
       <CommitBar
         changes={[...staged.changes, ...stagedCommercial.changes]}
         busy={commit.isPending}
+        blockedReason={commitBlockedReason}
         onDiscard={() => { staged.discard(); stagedCommercial.discard(); }}
         onCommit={(reason) => commit.mutate(reason)}
       />
@@ -468,6 +581,30 @@ function StatusRibbon({ state }: { state: TenantConfigurationView['state'] }) {
   );
 }
 
+/**
+ * Input types for the fields whose free-text form was a trap.
+ *
+ * Dates arrive as ISO strings and were rendered in bare text boxes, so "15/01/2027" reached the
+ * server and came back as a JSON binding error quoting a .NET nullable type. Payment terms were
+ * coerced with Number(), so "30 days" became NaN and then null — silently clearing the terms on a
+ * tenant the server does not refuse.
+ */
+const FIELD_INPUT: Record<string, object> = {
+  contractStartOn: { type: 'date', slotProps: { inputLabel: { shrink: true } } },
+  contractEndOn: { type: 'date', slotProps: { inputLabel: { shrink: true } } },
+  trialEndsOn: { type: 'date', slotProps: { inputLabel: { shrink: true } } },
+  billingStartsOn: { type: 'date', slotProps: { inputLabel: { shrink: true } } },
+  paymentTermsDays: {
+    type: 'number',
+    slotProps: { htmlInput: { min: 0, max: 365, inputMode: 'numeric' } },
+    helperText: '0 for due on receipt',
+  },
+  contactEmail: { type: 'email' },
+  billingContactEmail: { type: 'email' },
+  accountOwnerEmail: { type: 'email' },
+  billingAddress: { multiline: true, minRows: 2 },
+};
+
 function SliceCard({
   slice, editing, draft, onChange, editableKeys,
 }: {
@@ -502,13 +639,29 @@ function SliceCard({
         <Box component="dl" sx={{ m: 0, display: 'grid', gap: editing ? 2 : 1.25 }}>
           {slice.fields.map((field) => (
             editing && !field.derived && (!editableKeys || editableKeys.includes(field.key)) ? (
-              <TextField
-                key={field.key}
-                size="small"
-                label={field.label}
-                value={draft[field.key] ?? ''}
-                onChange={(e) => onChange(field.key, e.target.value)}
-              />
+              field.key === 'countryCode' ? (
+                // A picker, as the creation flow already uses. Free text here accepted "UK",
+                // which is two ASCII letters and passes the server check, then breaks every
+                // country-derived default because the ISO code is GB.
+                <Autocomplete
+                  key={field.key}
+                  size="small"
+                  options={COUNTRY_CODES}
+                  value={draft[field.key] || null}
+                  onChange={(_e, v) => onChange(field.key, v ?? '')}
+                  getOptionLabel={(code) => countryLabel(code)}
+                  renderInput={(params) => <TextField {...params} label={field.label} />}
+                />
+              ) : (
+                <TextField
+                  key={field.key}
+                  size="small"
+                  label={field.label}
+                  value={draft[field.key] ?? ''}
+                  onChange={(e) => onChange(field.key, e.target.value)}
+                  {...FIELD_INPUT[field.key]}
+                />
+              )
             ) : (
               <FieldRow key={field.key} field={field} />
             )

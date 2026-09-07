@@ -22,10 +22,22 @@ export default function PageHeader({
       }}
     >
       <Box>
+        {/*
+          Cambay at 700, which is the display voice DESIGN.md specifies and the tenant side
+          already uses. This was Source Sans 3 at 800 — a black weight standing in for a
+          typeface, which is what made every console screen read as MUI defaults with brand
+          colours applied rather than as the same product as the customer-facing app.
+        */}
         <Typography
           variant="h4"
           component="h1"
-          sx={{ fontWeight: 800, letterSpacing: '-0.02em' }}
+          sx={{
+            fontFamily: '"Cambay", "Source Sans 3", sans-serif',
+            fontWeight: 700,
+            fontSize: 30,
+            lineHeight: 1.15,
+            letterSpacing: '-0.02em',
+          }}
         >
           {title}
         </Typography>

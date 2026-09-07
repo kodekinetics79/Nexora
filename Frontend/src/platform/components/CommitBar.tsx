@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert, Box, Button, Collapse, Dialog, DialogActions, DialogContent, DialogTitle,
   Table, TableBody, TableCell, TableRow, TextField, Typography,
@@ -42,6 +42,13 @@ export default function CommitBar<T>({
   const [touched, setTouched] = useState(false);
 
   const dirty = changes.length > 0;
+
+  // When the commit lands, the caller rebases and `changes` empties. Close on that rather than on
+  // the click: the dialog used to stay open over a successful save, so the operator pressed Save
+  // a second time and got a stale-write conflict describing their own edit as somebody else's.
+  useEffect(() => {
+    if (!dirty && reviewing && !busy) { setReviewing(false); setReason(''); setTouched(false); }
+  }, [dirty, reviewing, busy]);
   const reasonTooShort = reason.trim().length < minReasonLength;
 
   return (

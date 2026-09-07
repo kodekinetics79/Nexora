@@ -63,11 +63,9 @@ export function useStagedChanges<T extends object>(
   const changes = useMemo(() => {
     const out: StagedChange<T>[] = [];
     for (const key of Object.keys(draft) as (keyof T & string)[]) {
-      const before = draft[key];
-      const after = original[key];
       // Treat null, undefined and empty string as the same absence, so clearing an already-empty
       // field is not reported as a change somebody has to read and dismiss.
-      const same = shown(before) === shown(after);
+      const same = shown(original[key]) === shown(draft[key]);
       if (!same) {
         out.push({
           field: key,

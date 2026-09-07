@@ -2,12 +2,11 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Box, Button, Chip, InputAdornment, Table, TableBody, TableCell, TableHead, TableRow,
-  TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
+  Box, Button, InputAdornment, Table, TableBody, TableCell, TableHead, TableRow,
+  TextField, ToggleButton, ToggleButtonGroup, Typography,
 } from '@mui/material';
 import {
   AddOutlined as AddIcon,
-  ArrowForwardOutlined as OpenIcon,
   SearchOutlined as SearchIcon,
 } from '@mui/icons-material';
 import { platformApi } from '../api/client';
@@ -16,7 +15,11 @@ import { platformKeys } from '../api/queryKeys';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import PageHeader from '../components/PageHeader';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
+import Stack from '../components/Flex';
 import type { CustomerListRow } from '../types';
+
+/** One head-cell style, so the columns share a rhythm instead of each inventing one. */
+const HEAD = { fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: 'text.secondary' };
 
 /**
  * THE CUSTOMERS SCREEN — the book of business, filtered to what needs a person today.
@@ -54,7 +57,9 @@ export default function CustomersPage() {
     return rows
       .filter((r) => (view === 'all' ? true : r.needsAttention))
       .filter((r) => term === '' || r.name.toLowerCase().includes(term)
-        || (r.legalName ?? '').toLowerCase().includes(term))
+        || (r.legalName ?? '').toLowerCase().includes(term)
+        || (r.planCode ?? '').toLowerCase().includes(term)
+        || (r.countryCode ?? '').toLowerCase().includes(term))
       // Rows that need somebody come first; within that, the most blocked first. A list sorted
       // by creation date buries the customer who has been stuck since Tuesday.
       .sort((a, b) => Number(b.needsAttention) - Number(a.needsAttention)
@@ -127,24 +132,33 @@ export default function CustomersPage() {
 
       {visible.length === 0 ? (
         <EmptyState
-          title={view === 'attention' ? 'Nothing is waiting on us' : 'No customers yet'}
-          message={
-            view === 'attention'
-              ? 'Every customer is either live and clear, or already closed. Switch to All to see the whole book.'
-              : 'Create the first customer to get started.'
+          title={
+            search.trim() !== '' ? `No customer matches “${search.trim()}”`
+              : view === 'attention' ? 'Nothing is waiting on us'
+                : 'No customers yet'
           }
+          message={
+            search.trim() !== ''
+              // Saying "No customers yet" over a full book is how somebody creates a duplicate.
+              ? `${rows.length} customers exist. Clear the search to see them.`
+              : view === 'attention'
+                ? 'Every customer is either live and clear, or already closed. Switch to All to see the whole book.'
+                : 'Create the first customer to get started.'
+          }
+          action={search.trim() !== ''
+            ? <Button onClick={() => setSearch('')}>Clear search</Button>
+            : undefined}
         />
       ) : (
-        <Box sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, overflowX: 'auto' }}>
-          <Table size="small">
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table size="small" sx={{ '& td, & th': { borderColor: 'divider' } }}>
             <TableHead>
               <TableRow>
-                <TableCell sx={{ fontWeight: 700 }}>Customer</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Plan</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Renews</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 320 }}>What happens next</TableCell>
-                <TableCell />
+                <TableCell sx={{ ...HEAD, width: '26%' }}>Customer</TableCell>
+                <TableCell sx={{ ...HEAD, width: 120 }}>Status</TableCell>
+                <TableCell sx={{ ...HEAD, width: 140 }}>Plan</TableCell>
+                <TableCell sx={{ ...HEAD, width: 130 }} align="right">Renews</TableCell>
+                <TableCell sx={{ ...HEAD }}>What happens next</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -163,7 +177,12 @@ function CustomerRow({ row, onOpen }: { row: CustomerListRow; onOpen: (to: strin
     <TableRow
       hover
       onClick={open}
-      sx={{ cursor: 'pointer', '&:last-child td': { border: 0 } }}
+      sx={{
+        cursor: 'pointer',
+        '&:last-child td': { border: 0 },
+        'td:first-of-type': { boxShadow: 'inset 2px 0 0 transparent' },
+        '&:hover td:first-of-type': { boxShadow: (t) => `inset 2px 0 0 ${t.palette.primary.main}` },
+      }}
     >
       <TableCell>
         <Typography variant="body2" sx={{ fontWeight: 700 }}>{row.name}</Typography>
@@ -173,13 +192,15 @@ function CustomerRow({ row, onOpen }: { row: CustomerListRow; onOpen: (to: strin
       </TableCell>
 
       <TableCell>
-        <Chip
-          size="small"
-          label={row.status}
-          color={row.status === 'Active' ? 'success' : row.status === 'PastDue' ? 'error' : 'default'}
-          variant={row.status === 'Active' ? 'filled' : 'outlined'}
-          sx={{ fontWeight: 700 }}
-        />
+        <Stack direction="row" spacing={0.9} sx={{ alignItems: 'center' }}>
+          <Box sx={{
+            width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+            bgcolor: row.status === 'Active' ? 'success.main'
+              : row.status === 'PastDue' ? 'error.main'
+                : row.status === 'Provisioning' ? 'warning.main' : 'text.disabled',
+          }} />
+          <Typography variant="body2">{row.status}</Typography>
+        </Stack>
       </TableCell>
 
       <TableCell>
@@ -187,8 +208,13 @@ function CustomerRow({ row, onOpen }: { row: CustomerListRow; onOpen: (to: strin
         <Typography variant="caption" color="text.secondary">{row.billingMode}</Typography>
       </TableCell>
 
-      <TableCell>
-        <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>{asDate(row.contractEndOn)}</Typography>
+      <TableCell align="right">
+        <Typography
+          variant="body2"
+          sx={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}
+        >
+          {asDate(row.contractEndOn)}
+        </Typography>
       </TableCell>
 
       {/*
@@ -211,11 +237,7 @@ function CustomerRow({ row, onOpen }: { row: CustomerListRow; onOpen: (to: strin
         )}
       </TableCell>
 
-      <TableCell align="right">
-        <Tooltip describeChild title={`Open ${row.name}`}>
-          <span><OpenIcon fontSize="small" sx={{ color: 'text.disabled', verticalAlign: 'middle' }} /></span>
-        </Tooltip>
-      </TableCell>
+
     </TableRow>
   );
 }

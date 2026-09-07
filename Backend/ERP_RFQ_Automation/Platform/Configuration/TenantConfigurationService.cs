@@ -155,7 +155,7 @@ public sealed class TenantConfigurationService(
                 new("countryCode", "Country", t.CountryCode),
                 new("contactEmail", "Company email", t.ContactEmail),
                 new("phone", "Phone", t.Phone),
-                new("addressLine1", "Address", t.AddressLine1),
+                new("addressLine1", "Registered address", t.AddressLine1),
                 new("city", "City", t.City),
                 new("postalCode", "Postal code", t.PostalCode),
                 new("industry", "Industry", t.Industry),
@@ -193,6 +193,12 @@ public sealed class TenantConfigurationService(
                 new("purchaseOrderReference", "PO reference", t.PurchaseOrderReference),
                 new("billingContactName", "Invoices to", t.BillingContactName),
                 new("billingContactEmail", "Invoice email", t.BillingContactEmail),
+                // The address the invoice is ADDRESSED to, which is not the registered address in
+                // the Company group. Absent from this slice at first, so the customer screen
+                // showed one address and silently echoed the other back on every save — a
+                // salesperson told to "fix the invoice address" edited the registered one, the
+                // review dialog confirmed the change, and the invoice kept printing the old value.
+                new("billingAddress", "Invoice address", t.BillingAddress),
                 new("accountOwnerEmail", "Our account owner", t.AccountOwnerEmail)
             ]),
 
