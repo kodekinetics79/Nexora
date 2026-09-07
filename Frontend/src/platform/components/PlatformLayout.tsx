@@ -39,6 +39,7 @@ import {
 import { useAppTheme } from '../../context/ThemeContext';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
 import BrandMark from '../../components/common/BrandMark';
+import { buildLabel } from '../../buildInfo';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import type { PlatformPermissions } from '../auth/permissions';
 import SkipLink, { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
@@ -180,7 +181,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
       <Box sx={{ p: 2 }}>
         <Typography variant="caption" sx={{ color: 'text.secondary', opacity: 0.7 }}>
-          ADR-0005 · control plane
+          ADR-0005 · control plane · build {buildLabel()}
         </Typography>
       </Box>
     </Box>

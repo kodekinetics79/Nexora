@@ -9,6 +9,7 @@ import App from './App';
 import { queryClient } from './api/queryClient';
 import ErrorBoundary from './components/common/ErrorBoundary';
 import { SnackbarProvider } from 'notistack';
+import NewBuildNotice from './components/common/NewBuildNotice';
 import { Toaster } from 'react-hot-toast';
 import './index.css';
 import './i18n';
@@ -48,6 +49,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             <SnackbarProvider maxSnack={3} anchorOrigin={{ vertical: 'top', horizontal: 'right' }}>
               <ErrorBoundary>
                 <App />
+                {/* Tells an open tab that it is running yesterday's JavaScript. */}
+                <NewBuildNotice />
                 {/* Inside the boundary, not beside it: a render throw originating in a toast used
                     to be uncaught and unmounted the entire application root. */}
                 <Toaster position="top-right" />
