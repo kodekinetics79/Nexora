@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Box, Button, Tab, Tabs, Tooltip } from '@mui/material';
@@ -11,7 +11,6 @@ import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import PageHeader from '../components/PageHeader';
 import { BillingModeChip, PlanChip, TenantStatusChip } from '../components/StatusChip';
 import { ErrorState, LoadingState } from '../components/States';
-import OverviewTab from './tenant/OverviewTab';
 import CommercialTab from './tenant/CommercialTab';
 import SupportTab from './tenant/SupportTab';
 import AuditTab from './tenant/AuditTab';
@@ -20,10 +19,9 @@ import ActivationPolicyPanel from './tenant/ActivationPolicyPanel';
 import AiGovernanceTab from './tenant/AiGovernanceTab';
 import ModulesTab from './tenant/ModulesTab';
 import DataStorageTab from './tenant/DataStorageTab';
-import ProfileAccessTab from './tenant/ProfileAccessTab';
 import ProvisioningDiagnosticsTab from './tenant/ProvisioningDiagnosticsTab';
 import UsersTab from './tenant/UsersTab';
-import { TENANT_DETAIL_TABS, type TenantDetailTabKey } from './tenantNavigation';
+import { RETIRED_TENANT_TABS, TENANT_DETAIL_TABS, type TenantDetailTabKey } from './tenantNavigation';
 
 export default function TenantDetailPage() {
   const { id = '' } = useParams();
@@ -32,7 +30,6 @@ export default function TenantDetailPage() {
   const availableTabs = useMemo(
     () => TENANT_DETAIL_TABS.filter((entry) =>
       (entry.key !== 'support' || permissions.canAdministerTenants)
-      && (entry.key !== 'profile-access' || permissions.canAdministerTenants)
       && (entry.key !== 'users' || permissions.canAdministerTenants)
       && (entry.key !== 'ai-governance' || permissions.isOwner)
       && (entry.key !== 'data-storage' || permissions.isOwner)),
@@ -42,10 +39,20 @@ export default function TenantDetailPage() {
   // what an operator pastes into a ticket. The legacy key remains stable for existing links.
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const tab = useMemo<TenantDetailTabKey>(() => {
-    const requested = searchParams.get('tab');
-    return (availableTabs.find((entry) => entry.key === requested)?.key ?? 'overview') as TenantDetailTabKey;
-  }, [availableTabs, searchParams]);
+  const requestedTab = searchParams.get('tab');
+
+  // A link to a tab whose work moved goes to the screen that now does that work, rather than
+  // quietly landing on whatever tab happens to be first. Support tickets carry these URLs.
+  useEffect(() => {
+    if (requestedTab && RETIRED_TENANT_TABS[requestedTab]) {
+      navigate(`/platform/customers/${encodeURIComponent(id)}`, { replace: true });
+    }
+  }, [requestedTab, id, navigate]);
+
+  const tab = useMemo<TenantDetailTabKey>(() => (
+    (availableTabs.find((entry) => entry.key === requestedTab)?.key
+      ?? availableTabs[0]?.key) as TenantDetailTabKey
+  ), [availableTabs, requestedTab]);
 
   const openTab = (next: string) => {
     const params = new URLSearchParams(searchParams);
@@ -56,14 +63,6 @@ export default function TenantDetailPage() {
   const tenantQuery = useQuery({
     queryKey: platformKeys.tenant(id),
     queryFn: () => platformApi.getTenant(id),
-    enabled: id !== '',
-  });
-
-  // Read here rather than inside the offboarding tab so the Overview banner and the deletion
-  // screen are looking at the same retention clock, not two fetches of it.
-  const offboardingQuery = useQuery({
-    queryKey: platformKeys.offboarding(id),
-    queryFn: () => platformApi.getOffboarding(id),
     enabled: id !== '',
   });
 
@@ -95,8 +94,11 @@ export default function TenantDetailPage() {
         actions={
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
             {permissions.canAdministerTenants && (
-              <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => openTab('profile-access')}>
-                Edit tenant
+              <Button
+                size="small" variant="outlined" startIcon={<EditIcon />}
+                onClick={() => navigate(`/platform/customers/${encodeURIComponent(id)}`)}
+              >
+                Edit this customer
               </Button>
             )}
             {permissions.isOwner && (
@@ -133,17 +135,7 @@ export default function TenantDetailPage() {
         ))}
       </Tabs>
 
-      {tab === 'overview' && (
-        <OverviewTab
-          tenant={tenant}
-          offboarding={offboardingQuery.data}
-          offboardingUnavailable={offboardingQuery.isError}
-          onOpenTab={openTab}
-          canViewSupport={permissions.canAdministerTenants}
-        />
-      )}
       {tab === 'activation' && <ActivationPolicyPanel tenant={tenant} />}
-      {tab === 'profile-access' && permissions.canAdministerTenants && <ProfileAccessTab tenant={tenant} />}
       {tab === 'users' && permissions.canAdministerTenants && <UsersTab tenant={tenant} />}
       {tab === 'provisioning' && <ProvisioningDiagnosticsTab tenant={tenant} />}
       {tab === 'commercial' && <CommercialTab tenant={tenant} />}

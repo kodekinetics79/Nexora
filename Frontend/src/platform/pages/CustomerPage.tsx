@@ -67,9 +67,10 @@ export default function CustomerPage() {
   const view = configuration.data;
   const blockers = view?.blockers ?? [];
 
-  // Only the identity slice is writable from this page today; commercial terms and modules are
-  // still owned by their own screens. Stated here rather than implied, so the gap is visible.
+  // Identity and the contract are both written from here now. Modules and deployment are still
+  // owned by their own screens, and the footer says so rather than leaving it to be discovered.
   const identity = view?.slices.find((x) => x.key === 'identity');
+  const commercial = view?.slices.find((x) => x.key === 'commercial');
   const identityLabels = useMemo(() => {
     const out: Record<string, string> = {};
     for (const f of identity?.fields ?? []) out[f.key] = f.label;
@@ -81,15 +82,46 @@ export default function CustomerPage() {
     return out;
   }, [identity]);
 
+  // The contract fields this page owns. Plan and billing mode are NOT among them: changing what
+  // a customer pays is a different act from correcting who the invoice goes to, and it belongs
+  // with the maker-checker and the proration preview the billing programme specifies.
+  const COMMERCIAL_EDITABLE = [
+    'contractStartOn', 'contractEndOn', 'paymentTermsDays', 'purchaseOrderReference',
+    'billingContactName', 'billingContactEmail', 'accountOwnerEmail',
+  ];
+  const commercialLabels = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of commercial?.fields ?? []) {
+      if (COMMERCIAL_EDITABLE.includes(f.key)) out[f.key] = f.label;
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commercial]);
+  const commercialInitial = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of commercial?.fields ?? []) {
+      if (COMMERCIAL_EDITABLE.includes(f.key)) {
+        // Payment terms arrive rendered as "30 days"; the input wants the number.
+        out[f.key] = f.key === 'paymentTermsDays'
+          ? (f.value ?? '').replace(/\D+/g, '')
+          : (f.value ?? '');
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commercial]);
+
   const staged = useStagedChanges<Record<string, string>>(identityInitial, identityLabels);
+  const stagedCommercial = useStagedChanges<Record<string, string>>(commercialInitial, commercialLabels);
   const { rebase } = staged;
+  const { rebase: rebaseCommercial } = stagedCommercial;
   // Adopt a newly loaded server state as the baseline, but never while the operator has unsaved
   // edits — a background refetch silently discarding somebody's typing is the defect the old
   // profile tab had, where saving the region wiped a half-typed company profile.
-  const dirtyRef = staged.dirty;
+  const dirtyRef = staged.dirty || stagedCommercial.dirty;
   useEffect(() => {
-    if (!dirtyRef) rebase(identityInitial);
-  }, [identityInitial, dirtyRef, rebase]);
+    if (!dirtyRef) { rebase(identityInitial); rebaseCommercial(commercialInitial); }
+  }, [identityInitial, commercialInitial, dirtyRef, rebase, rebaseCommercial]);
 
   // The version the edits were started from. Sent as If-Match so a write that lost a race is
   // refused rather than landing on top of somebody else's change.
@@ -103,6 +135,38 @@ export default function CustomerPage() {
     mutationFn: async (reason: string) => {
       const tenant = tenantQuery.data;
       if (!tenant) throw new Error('The customer record is not loaded.');
+
+      // The contract goes to the billing endpoint, which is Owner-or-BillingAdmin. Sent FIRST and
+      // awaited, so that if the caller lacks billing authority the identity write does not land
+      // and leave the operator believing the whole commit succeeded. Which endpoint refused is
+      // reported, because "it failed" without saying what did save is how a partial write becomes
+      // invisible.
+      if (stagedCommercial.dirty) {
+        const c = (key: string) => {
+          const value = stagedCommercial.draft[key]?.trim();
+          return value === undefined || value === '' ? null : value;
+        };
+        const terms = stagedCommercial.draft.paymentTermsDays?.trim();
+        try {
+          await platformApi.setTenantAccountContact(id, {
+            billingContactName: c('billingContactName'),
+            billingContactEmail: c('billingContactEmail'),
+            billingAddress: tenant.billingAddress,
+            purchaseOrderReference: c('purchaseOrderReference'),
+            paymentTermsDays: terms === undefined || terms === '' ? null : Number(terms),
+            accountOwnerEmail: c('accountOwnerEmail'),
+            contractStartOn: c('contractStartOn'),
+            contractEndOn: c('contractEndOn'),
+            reason,
+          });
+        } catch (error) {
+          throw new Error(platformErrorMessage(
+            error,
+            'The contract and billing changes were refused. Nothing was saved.',
+          ));
+        }
+      }
+      if (!staged.dirty) return null;
       const v = (key: string) => {
         const value = staged.draft[key]?.trim();
         return value === undefined || value === '' ? null : value;
@@ -142,7 +206,7 @@ export default function CustomerPage() {
 
   // Leaving with unsaved edits used to lose them silently — switching tabs unmounted the form.
   useEffect(() => {
-    if (!staged.dirty) return undefined;
+    if (!staged.dirty && !stagedCommercial.dirty) return undefined;
     const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
@@ -288,9 +352,10 @@ export default function CustomerPage() {
           <SliceCard
             key={slice.key}
             slice={slice}
-            editing={slice.key === 'identity' && slice.editable}
-            draft={staged.draft}
-            onChange={staged.set}
+            editing={(slice.key === 'identity' || slice.key === 'commercial') && slice.editable}
+            draft={slice.key === 'commercial' ? stagedCommercial.draft : staged.draft}
+            editableKeys={slice.key === 'commercial' ? COMMERCIAL_EDITABLE : undefined}
+            onChange={slice.key === 'commercial' ? stagedCommercial.set : staged.set}
           />
         ))}
       </Box>
@@ -298,17 +363,17 @@ export default function CustomerPage() {
       {saveError && <Alert severity="error" sx={{ mt: 2.5 }}>{saveError}</Alert>}
 
       <CommitBar
-        changes={staged.changes}
+        changes={[...staged.changes, ...stagedCommercial.changes]}
         busy={commit.isPending}
-        onDiscard={staged.discard}
+        onDiscard={() => { staged.discard(); stagedCommercial.discard(); }}
         onCommit={(reason) => commit.mutate(reason)}
       />
 
       <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 3 }}>
-        Version {view.version} · company details are edited here and saved through the audited
-        profile endpoint with the version above as If-Match. Contract, modules and deployment are
-        still written by their own screens — reachable from Advanced — and are shown read-only
-        until their commit paths move here too.
+        Version {view.version} · company details and the contract are edited here and saved
+        through their own audited endpoints — the profile write carries the version above as
+        If-Match. Plan, billing mode, module access and deployment are still written by their own
+        screens, reachable from Advanced, and are shown read-only until those paths move too.
       </Typography>
     </Box>
   );
@@ -388,12 +453,14 @@ function StatusRibbon({ state }: { state: TenantConfigurationView['state'] }) {
 }
 
 function SliceCard({
-  slice, editing, draft, onChange,
+  slice, editing, draft, onChange, editableKeys,
 }: {
   slice: TenantConfigurationSlice;
   editing: boolean;
   draft: Record<string, string>;
   onChange: (key: string, value: string) => void;
+  /** When present, only these fields become inputs; the rest stay read-only rows. */
+  editableKeys?: string[];
 }) {
   return (
     <Card variant="outlined">
@@ -418,7 +485,7 @@ function SliceCard({
 
         <Box component="dl" sx={{ m: 0, display: 'grid', gap: editing ? 2 : 1.25 }}>
           {slice.fields.map((field) => (
-            editing && !field.derived ? (
+            editing && !field.derived && (!editableKeys || editableKeys.includes(field.key)) ? (
               <TextField
                 key={field.key}
                 size="small"

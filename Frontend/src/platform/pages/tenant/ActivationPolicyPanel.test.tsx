@@ -410,10 +410,10 @@ describe('ActivationPolicyPanel', () => {
    * happened twice. It renders the real page rather than asserting on an import, because an unused
    * import type-checks and still renders nothing.
    *
-   * It also pins the ORDER. "Second, after Overview" is the property; being present somewhere in
-   * an eleven-tab scroller is what it looked like the last two times.
+   * It also pins the ORDER. Leading the row is the property; being present somewhere in an
+   * eleven-tab scroller is what it looked like the last two times.
    */
-  it('is rendered on its own tab, second in the row, and no longer on Lifecycle', async () => {
+  it('is rendered on its own tab, first in the row, and no longer on Lifecycle', async () => {
     vi.spyOn(platformApi, 'getTenant').mockResolvedValue(tenant);
     vi.spyOn(platformApi, 'getOffboarding').mockRejectedValue(new Error('not needed for this assertion'));
 
@@ -427,10 +427,11 @@ describe('ActivationPolicyPanel', () => {
       </MemoryRouter>,
     );
 
+    // Overview moved to the customer screen, so activation leads. The property being pinned is
+    // prominence, not the number two.
     const tabs = await screen.findAllByRole('tab');
-    expect(tabs[0]).toHaveTextContent('Overview');
-    expect(tabs[1]).toHaveTextContent('Activation');
-    expect(tabs[2]).toHaveTextContent('Offboarding & deletion');
+    expect(tabs[0]).toHaveTextContent('Activation');
+    expect(tabs[1]).toHaveTextContent('Offboarding & deletion');
     expect(screen.getByRole('button', { name: 'Offboard / delete tenant' })).toBeVisible();
 
     expect(await screen.findByText('Authoritative tenant activation')).toBeVisible();
