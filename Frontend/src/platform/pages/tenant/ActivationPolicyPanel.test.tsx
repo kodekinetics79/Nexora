@@ -42,7 +42,7 @@ const tenant = {
 } as Tenant;
 
 const control = (over: Partial<ActivationControlDecision>): ActivationControlDecision => ({
-  code: 'security.privileged-mfa-policy', satisfied: false,
+  code: 'security.privileged-mfa-policy', title: "The customer's MFA policy", satisfied: false,
   detail: 'Owner-approved privileged MFA evidence is required.', evidenceReferences: [],
   disposition: 'BLOCKING', blocksProduction: true, deferralKey: null, productionRequirement: null,
   remediation: null,
@@ -95,9 +95,51 @@ describe('ActivationPolicyPanel', () => {
   it('shows the full activation blockers and never enables a client-side override', async () => {
     renderPanel();
     expect(await screen.findByText('Authoritative tenant activation')).toBeVisible();
-    expect(screen.getAllByText('security.privileged-mfa-policy')).toHaveLength(2);
+    // Named twice — once in the blocked banner, once as the control's heading — and the raw code
+    // survives exactly once, as the small line support asks for. See the title test below.
+    expect(screen.getAllByText("The customer's MFA policy")).toHaveLength(2);
+    expect(screen.getAllByText('security.privileged-mfa-policy')).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Activate tenant' })).toBeDisabled();
     expect(screen.getByText(/server transition changes tenant state/i)).toBeVisible();
+  });
+
+  /**
+   * What the operator reads first.
+   *
+   * <p>The banner at the top of this tab listed its blockers as bare control codes —
+   * "commercial.rate-card", "data.residency-isolation" — and each control card was headed by the
+   * same string. That is an engineer's identifier presented to the salesperson holding the account
+   * as the reason their customer cannot be switched on. The names come from the server's control
+   * catalogue, which requires one for every control, so this cannot silently regress by somebody
+   * adding control #15.</p>
+   */
+  it('names the blockers instead of listing identifiers, and keeps the code for support', async () => {
+    vi.spyOn(platformApi, 'getTenantActivationDecision').mockResolvedValue({
+      ...activationBlocked,
+      blockingControls: ['security.privileged-mfa-policy', 'commercial.rate-card'],
+      controls: [
+        control({}),
+        // Satisfied, and sitting BETWEEN two blockers in the server's order — the arrangement the
+        // ordering exists for.
+        control({ code: 'commercial.plan', title: 'A plan on the account', satisfied: true, disposition: 'SATISFIED' }),
+        control({ code: 'commercial.rate-card', title: 'The agreed rate card' }),
+      ],
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText(/2 things are outstanding/i)).toBeVisible();
+    // Outstanding controls come first, so the cards with buttons are not buried among green ones.
+    const headings = screen.getAllByText(/^(The customer's MFA policy|The agreed rate card|A plan on the account)$/);
+    expect(headings.map((node) => node.textContent)).toEqual([
+      "The customer's MFA policy", 'The agreed rate card',       // the banner, in server order
+      "The customer's MFA policy", 'The agreed rate card',       // then the cards, unsatisfied first
+      'A plan on the account',
+    ]);
+    expect(screen.getAllByText('The agreed rate card')).toHaveLength(2);
+    // The identifier is still on the page — an operator pastes it into a ticket — but it is not
+    // the heading and it is not the summary.
+    expect(screen.getByText('commercial.rate-card')).toBeVisible();
   });
 
   it('requires real evidence metadata before recording an activation attestation', async () => {

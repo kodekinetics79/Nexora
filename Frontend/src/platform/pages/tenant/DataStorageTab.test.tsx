@@ -30,7 +30,7 @@ const activationBlocked: TenantActivationDecision = {
   evaluatedAtUtc: '2026-08-08T12:00:00Z', warnings: [],
   blockingControls: ['security.privileged-mfa-policy'],
   controls: [{
-    code: 'security.privileged-mfa-policy', satisfied: false,
+    code: 'security.privileged-mfa-policy', title: "The customer's MFA policy", satisfied: false,
     detail: 'Owner-approved privileged MFA evidence is required.', evidenceReferences: [],
     disposition: 'BLOCKING', blocksProduction: true, deferralKey: null, productionRequirement: null,
     // This tab does not render the activation panel; the field is here because the contract

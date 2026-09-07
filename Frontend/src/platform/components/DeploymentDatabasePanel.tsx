@@ -67,8 +67,15 @@ export default function DeploymentDatabasePanel({ manifest, onRecorded, dense }:
 
   const backupPolicyReference = policy === CUSTOM ? customPolicy.trim() : policy;
 
+  // The conflict the server reports when other tenants are still registered against a different
+  // database. Held rather than thrown away, because the message on its own ("re-register or move
+  // them first") names no control that does it — one stale tenant from a test run then blocks
+  // activation for every other tenant on the deployment, permanently.
+  const [conflict, setConflict] = useState<{ tenantIds: number[]; canReregister: boolean } | null>(null);
+
   const record = useMutation({
-    mutationFn: () => platformApi.recordPlatformDataBoundary({
+    mutationFn: (reregister: boolean = false) => platformApi.recordPlatformDataBoundary({
+      reregisterConflictingTenants: reregister,
       // Omitted on the observed path: the server re-reads its own connection and records the
       // result as observed-and-confirmed, so what is stored is what the process saw at that
       // instant rather than what a form carried back to it.
@@ -79,12 +86,20 @@ export default function DeploymentDatabasePanel({ manifest, onRecorded, dense }:
       reason: observed.isUsable ? null : 'Recorded from the operator console for this deployment.',
     }),
     onSuccess: () => {
+      setConflict(null);
       queryClient.invalidateQueries({ queryKey: platformKeys.platformDataBoundaries() });
       enqueueSnackbar('This deployment’s database is recorded — every tenant can now register itself', { variant: 'success' });
       onRecorded?.();
     },
-    onError: (error) =>
-      enqueueSnackbar(platformErrorMessage(error, 'The database could not be recorded'), { variant: 'error' }),
+    onError: (error) => {
+      const body = (error as { response?: { data?: { conflictingTenantIds?: number[]; canReregister?: boolean } } })
+        ?.response?.data;
+      if (body?.conflictingTenantIds?.length) {
+        setConflict({ tenantIds: body.conflictingTenantIds, canReregister: Boolean(body.canReregister) });
+        return;
+      }
+      enqueueSnackbar(platformErrorMessage(error, 'The database could not be recorded'), { variant: 'error' });
+    },
   });
 
   const problem = !backupPolicyReference
@@ -168,11 +183,43 @@ export default function DeploymentDatabasePanel({ manifest, onRecorded, dense }:
 
       {problem && <Alert role="alert" severity="error" sx={{ borderRadius: 2 }}>{problem}</Alert>}
 
+      {conflict && (
+        <Alert severity="warning" role="status" sx={{ borderRadius: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>
+            {conflict.tenantIds.length} tenant{conflict.tenantIds.length === 1 ? ' is' : 's are'} still
+            registered against a different database
+          </AlertTitle>
+          <Typography variant="body2">
+            Tenant{conflict.tenantIds.length === 1 ? ' ' : 's '}
+            {conflict.tenantIds.join(', ')} — usually left behind by an earlier test. Until they match,
+            this deployment cannot record its database, and no tenant can finish activation.
+          </Typography>
+          {conflict.canReregister ? (
+            <Button
+              size="small"
+              variant="contained"
+              color="warning"
+              sx={{ mt: 1 }}
+              disabled={record.isPending}
+              onClick={() => record.mutate(true)}
+            >
+              Move {conflict.tenantIds.length === 1 ? 'it' : 'them'} onto this database
+            </Button>
+          ) : (
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Only offered when the database is the one this process read for itself. A typed value
+              can never move a tenant's registration — that is what stops a residency control being
+              satisfied by editing a string.
+            </Typography>
+          )}
+        </Alert>
+      )}
+
       <Box>
         <Button
           variant="contained"
           disabled={Boolean(problem) || record.isPending}
-          onClick={() => record.mutate()}
+          onClick={() => record.mutate(false)}
           sx={{ fontWeight: 700 }}
         >
           {record.isPending ? 'Recording…' : observed.isUsable ? 'Use this for every tenant' : 'Record this for every tenant'}

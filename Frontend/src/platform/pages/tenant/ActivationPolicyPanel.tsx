@@ -185,6 +185,19 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
   }
 
   const decision = decisionQuery.data;
+  const blockedTitles = new Map(decision.controls.map((control) => [control.code, control.title]));
+  /**
+   * Outstanding first, in the server's order within each group.
+   *
+   * <p>Fourteen controls rendered in evaluation order put the three that need doing somewhere in
+   * the middle of eleven green ones, so the operator scrolled and scanned for the cards with
+   * buttons. Nothing about the verdict changes — this is the same list, and a satisfied control is
+   * still shown, because "where did that control go" is its own kind of confusion.</p>
+   */
+  const controls = [
+    ...decision.controls.filter((control) => !control.satisfied),
+    ...decision.controls.filter((control) => control.satisfied),
+  ];
 
   /**
    * The two halves of what the server will accept, kept apart because the console had them
@@ -278,7 +291,23 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
         <AlertTitle sx={{ fontWeight: 800 }}>{decision.ready ? 'All activation controls pass' : 'Activation blocked by server policy'}</AlertTitle>
         {decision.blockingControls.length === 0
           ? 'The decision is ready. The separate Owner action is still required.'
-          : <Box component="ul" sx={{ m: 0, pl: 2.5 }}>{decision.blockingControls.map((code) => <li key={code}>{code}</li>)}</Box>}
+          : <>
+            <Typography variant="body2">
+              {decision.blockingControls.length === 1
+                ? 'One thing is outstanding. It is listed below with the button that clears it.'
+                : `${decision.blockingControls.length} things are outstanding. Each is listed below with the button that clears it.`}
+            </Typography>
+            {/* Names, not codes. This list was the first thing on the tab and it read
+                "commercial.rate-card, data.residency-isolation, entitlements.typed-hard-limits" —
+                an engineer's identifiers handed to the person holding the account as the reason
+                their customer cannot be switched on. The names come from the server's control
+                catalogue, so a control added later cannot arrive here nameless. */}
+            <Box component="ul" sx={{ m: 0, mt: 0.5, pl: 2.5 }}>
+              {decision.blockingControls.map((code) => (
+                <li key={code}>{blockedTitles.get(code) ?? code}</li>
+              ))}
+            </Box>
+          </>}
       </Alert>
       {tenant.status !== 'provisioning' && (
         <Alert severity="info" sx={{ mt: 2 }}>Only a tenant in Provisioning can be activated. Current status: {tenant.status}.</Alert>
@@ -357,11 +386,11 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
       </Stack>
 
       <Stack spacing={1.25} sx={{ mt: 2 }}>
-        {decision.controls.map((control) => <Paper key={control.code} variant="outlined" sx={{ p: 2 }}>
+        {controls.map((control) => <Paper key={control.code} variant="outlined" sx={{ p: 2 }}>
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
             <Box>
               <Stack direction="row" spacing={1} alignItems="center">
-                <Typography sx={{ fontWeight: 800 }}>{control.code}</Typography>
+                <Typography sx={{ fontWeight: 800 }}>{control.title}</Typography>
                 <SoftChip
                   label={DISPOSITION_COPY[control.disposition].label}
                   tone={DISPOSITION_COPY[control.disposition].tone}
@@ -403,6 +432,11 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
                   Evidence: {control.evidenceReferences.join(' · ')}
                 </Typography>
               )}
+              {/* The code stays on the card, small and last: it is what support asks for and what
+                  an operator pastes into a ticket. What it must not be is the heading. */}
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75, opacity: 0.7 }}>
+                {control.code}
+              </Typography>
             </Box>
             {/*
               The remedy, gated on the authority the SERVER will apply rather than on a guess.

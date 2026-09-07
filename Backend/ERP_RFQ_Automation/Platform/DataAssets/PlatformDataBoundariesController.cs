@@ -67,6 +67,22 @@ public sealed class RecordPlatformDataBoundaryRequest
 
     [StringLength(1000)]
     public string? Reason { get; set; }
+
+    /// <summary>
+    /// Move tenants that are registered against a DIFFERENT database onto the one this process is
+    /// actually connected to, in the same audited act.
+    ///
+    /// <para>Only honoured on the OBSERVED path — where the provider reference and region were read
+    /// from the live connection rather than typed. That is the whole distinction the conflict check
+    /// exists to protect: refusing lets nobody satisfy a residency control by editing a string, but
+    /// it also left the operator with a message telling them to "re-register or move them first"
+    /// and no control anywhere that does it. One stale tenant from a test run then blocks the
+    /// activation of every other tenant on the deployment, permanently.</para>
+    ///
+    /// <para>Re-registering onto an OBSERVED value is not a claim: it is correcting the evidence to
+    /// what the database itself reports. Every moved row is named in the audit entry.</para>
+    /// </summary>
+    public bool ReregisterConflictingTenants { get; set; }
 }
 
 /// <summary>
@@ -178,14 +194,21 @@ public sealed class PlatformDataBoundariesController(
             .Where(a => !string.Equals(a.Region, region, StringComparison.OrdinalIgnoreCase)
                         || !string.Equals(a.OpaqueProviderReference, provider, StringComparison.Ordinal))
             .ToList();
-        if (mismatched.Count > 0)
+        // Moving them is offered ONLY when the values were observed from the live connection. A
+        // typed claim can still never drag the evidence along behind it.
+        var moving = mismatched.Count > 0 && confirming && request.ReregisterConflictingTenants;
+        if (mismatched.Count > 0 && !moving)
             return Conflict(new
             {
                 error = "Tenants are already registered against a different database, and this row only "
                         + "claims what those registrations prove. Re-register or move them first: "
                         + string.Join("; ", mismatched.Take(5).Select(a =>
                             $"tenant {a.TenantId} is on '{a.OpaqueProviderReference}' in '{a.Region}'"))
-                        + (mismatched.Count > 5 ? $"; and {mismatched.Count - 5} more." : ".")
+                        + (mismatched.Count > 5 ? $"; and {mismatched.Count - 5} more." : "."),
+                // What the console needs to offer the way out, instead of printing the sentence and
+                // stopping. Absent on the typed path, because there is no way out there by design.
+                conflictingTenantIds = mismatched.Select(a => a.TenantId).ToArray(),
+                canReregister = confirming
             });
 
         var now = DateTime.UtcNow;
@@ -212,6 +235,20 @@ public sealed class PlatformDataBoundariesController(
                 row.Version += 1;
             }
 
+            if (moving)
+            {
+                var stale = await db.Set<TenantDataAsset>()
+                    .Where(a => a.LogicalKey == TenantDataAssetRegistryService.PostgreSqlLogicalKey)
+                    .ToListAsync(ct);
+                foreach (var asset in stale.Where(a =>
+                             !string.Equals(a.Region, region, StringComparison.OrdinalIgnoreCase)
+                             || !string.Equals(a.OpaqueProviderReference, provider, StringComparison.Ordinal)))
+                {
+                    asset.OpaqueProviderReference = provider;
+                    asset.Region = region.ToLowerInvariant();
+                }
+            }
+
             row.OpaqueProviderReference = provider;
             row.Region = region.ToLowerInvariant();
             row.BackupPolicyReference = Trim(request.BackupPolicyReference)!;
@@ -232,7 +269,9 @@ public sealed class PlatformDataBoundariesController(
                     basis,
                     observedHost = observation.Host,
                     observationBasis = observation.Basis,
-                    reason
+                    reason,
+                    // Named individually: "moved 3 tenants" is not an audit record anybody can act on.
+                    reregisteredTenantIds = moving ? mismatched.Select(a => a.TenantId).ToArray() : []
                 }, null, HttpContext, ct);
 
             await tx.CommitAsync(ct);

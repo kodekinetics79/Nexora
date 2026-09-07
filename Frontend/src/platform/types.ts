@@ -405,6 +405,8 @@ export interface PlatformDataBoundaryManifest {
  * "what the server observed" and is recorded as such; sending them means the Owner typed them.
  */
 export interface RecordPlatformDataBoundaryInput {
+  /** Move tenants registered against a different database onto the observed one, in the same audited act. */
+  reregisterConflictingTenants?: boolean;
   opaqueProviderReference?: string | null;
   region?: string | null;
   backupPolicyReference: string;
@@ -517,6 +519,12 @@ export interface ActivationControlRemediation {
 
 export interface ActivationControlDecision {
   code: string;
+  /**
+   * What the control is called on screen, served by the control catalogue. The console renders
+   * this and keeps `code` for support and for pasting into a ticket — an operator should never be
+   * told that "entitlements.typed-hard-limits" is why their customer cannot be switched on.
+   */
+  title: string;
   satisfied: boolean;
   detail: string;
   evidenceReferences: string[];
@@ -1505,6 +1513,10 @@ export interface CreateSubscriptionInvoiceInput {
 }
 
 export interface TenantAiPolicy {
+  /** Tokens a document is budgeted at — served so the console and the ledger cannot drift. */
+  tokensPerDocument: number;
+  /** Document counts the console offers as presets. */
+  allowancePresets: number[];
   /** What this DEPLOYMENT pays for AI, read-only. Shown, never asked for. */
   deploymentRateSummary: string;
   businessUnitId: string;

@@ -41,6 +41,17 @@ public static class TenantActivationPolicy
 public sealed record ActivationControlDecision(
     string Code, bool Satisfied, string Detail, IReadOnlyList<string> EvidenceReferences)
 {
+    /// <summary>
+    /// What this control is called on screen, from
+    /// <see cref="ActivationControlRemediationCatalog"/>.
+    ///
+    /// <para>Served rather than mapped on the console, so that the name sits beside the sentence
+    /// explaining the remedy and cannot drift from it, and so a control added later cannot reach an
+    /// operator as a bare dotted identifier. It is display text and nothing else: nothing on this
+    /// side reads it, and no value of it moves a control's verdict.</para>
+    /// </summary>
+    public string Title { get; init; } = ActivationControlRemediationCatalog.TitleFor(Code);
+
     public string Disposition { get; init; } =
         Satisfied ? ActivationControlDispositions.Satisfied : ActivationControlDispositions.Blocking;
 

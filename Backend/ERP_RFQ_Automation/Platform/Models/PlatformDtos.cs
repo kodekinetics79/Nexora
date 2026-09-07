@@ -629,6 +629,17 @@ public class TenantStatusChangeRequest
 public class TenantAiPolicyDto
 {
     /// <summary>
+    /// Tokens a document is budgeted at, so the console can offer an allowance in DOCUMENTS while
+    /// the ledger keeps enforcing tokens. Served rather than duplicated in the frontend: two copies
+    /// of this number drift the first time either is edited, and the drift is invisible until a
+    /// tenant is cut off earlier than the operator promised.
+    /// </summary>
+    public long TokensPerDocument { get; set; }
+
+    /// <summary>The document counts the console offers as presets.</summary>
+    public int[] AllowancePresets { get; set; } = [];
+
+    /// <summary>
     /// What this DEPLOYMENT pays for AI, in one sentence, read-only. Shown so an operator can see
     /// the rate their tenant's calls are priced at without being asked to supply it — it is the
     /// same rate for every tenant calling the same endpoint.
