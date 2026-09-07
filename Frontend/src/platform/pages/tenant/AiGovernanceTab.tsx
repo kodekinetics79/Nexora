@@ -15,6 +15,7 @@ import { fmtDateTime } from '../../components/format';
 import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
+import AllowanceMeter from './AllowanceMeter';
 import type {
   AiExtractionReadinessCheck, AiExtractionReadinessReport, AiReadinessStatus,
   AuthorizeAiProviderInput, Tenant, TenantAiPolicy,
@@ -443,7 +444,25 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
             {/* Token limits stay: they ration what a tenant may spend, which IS a per-customer
                 commercial term. The four rate fields that used to sit beside them do not — what a
                 million tokens cost is one number for the whole deployment. */}
-            {([['Monthly soft token limit', 'monthlySoftTokenLimit'], ['Monthly hard token limit', 'monthlyHardTokenLimit'], ['Document token limit', 'maxTokensPerDocument']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: optionalNumber(e.target.value) })} /></Grid>)}
+            {/* The allowance, in the unit the customer signed for. The soft limit and the
+                per-document cap stay below under Advanced — they are real controls, but they are
+                not what an operator comes to this screen to set. */}
+            <Grid size={{ xs: 12 }}>
+              <AllowanceMeter
+                policy={policy}
+                documents={draft.monthlyHardTokenLimit != null && policy.tokensPerDocument
+                  ? Math.max(1, Math.floor(draft.monthlyHardTokenLimit / policy.tokensPerDocument))
+                  : 500}
+                uncapped={draft.monthlyHardTokenLimit == null}
+                onChange={({ documents, uncapped }) => setDraft({
+                  ...draft,
+                  monthlyHardTokenLimit: uncapped
+                    ? null
+                    : Math.max(1, documents) * (policy.tokensPerDocument || 12000),
+                })}
+              />
+            </Grid>
+            {([['Monthly soft token limit', 'monthlySoftTokenLimit'], ['Document token limit', 'maxTokensPerDocument']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: optionalNumber(e.target.value) })} /></Grid>)}
             <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="External dependency ceiling (%)" value={draft.externalDependencyCeilingPercent} error={Boolean(problems.externalDependencyCeilingPercent)} helperText={problems.externalDependencyCeilingPercent ?? ' '} onChange={(e) => setDraft({ ...draft, externalDependencyCeilingPercent: Number(e.target.value) })} slotProps={{ htmlInput: { min: 0, max: 10 } }} /></Grid>
             <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth type="number" label="Retention days" value={draft.retentionDays} error={Boolean(problems.retentionDays)} helperText={problems.retentionDays ?? ' '} onChange={(e) => setDraft({ ...draft, retentionDays: Number(e.target.value) })} /></Grid>
             {([['Data classifications', 'allowedDataClassifications'], ['Egress policy', 'egressPolicy'], ['Data residency', 'dataResidency']] as const).map(([label, key]) => <Grid key={key} size={{ xs: 12, sm: 6 }}><TextField fullWidth label={label} value={draft[key] ?? ''} error={Boolean(problems[key])} helperText={problems[key] ?? ' '} onChange={(e) => setDraft({ ...draft, [key]: e.target.value || null })} /></Grid>)}

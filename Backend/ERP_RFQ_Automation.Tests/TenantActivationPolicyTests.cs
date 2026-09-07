@@ -220,6 +220,18 @@ public sealed class TenantActivationPolicyTests
             + "console can only render them as a bare code with no way to act on them: "
             + string.Join(", ", unmapped));
 
+        // A NAME, not the code. The console heads each control card with this and lists the
+        // blockers at the top of the tab from it; a control that fell through to its own code would
+        // put "entitlements.typed-hard-limits" in front of the salesperson holding the account, as
+        // the reason their customer cannot be switched on.
+        var unnamed = decision.Controls
+            .Where(control => string.IsNullOrWhiteSpace(control.Title)
+                              || string.Equals(control.Title, control.Code, StringComparison.Ordinal))
+            .Select(control => control.Code).ToArray();
+        Assert.True(unnamed.Length == 0,
+            "These activation controls reach the operator as a bare dotted identifier: "
+            + string.Join(", ", unnamed));
+
         foreach (var control in decision.Controls)
         {
             var reason = ActivationControlRemediationCatalog.NoRemedyReason(control.Code);

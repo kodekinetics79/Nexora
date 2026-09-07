@@ -19,6 +19,8 @@ import AiGovernanceTab from './AiGovernanceTab';
  */
 
 const policy: TenantAiPolicy = {
+  tokensPerDocument: 12_000,
+  allowancePresets: [100, 500, 2_000, 10_000],
   deploymentRateSummary: '0.27 in / 1.10 out per 1M tokens USD (rate 2026-09). Set for the whole deployment, not per tenant.',
   businessUnitId: '4', isEnabled: true, externalProcessingAllowed: false,
   allowedPurposes: ['RfqExtraction'], allowedProvider: null, allowedModel: null,
@@ -343,7 +345,10 @@ describe('extraction pre-flight', () => {
     }
 
     // What it rations is still asked, because that IS a per-customer commercial term.
-    expect(dialog.getByLabelText('Monthly hard token limit')).toBeVisible();
+    // The allowance is set in DOCUMENTS now — the unit the customer signed for — and converted to
+    // the token ceiling the ledger enforces. The soft limit and per-document cap remain as raw
+    // numbers because they are engineering controls, not commercial ones.
+    expect(dialog.getByLabelText('Documents per month')).toBeVisible();
     expect(dialog.getByLabelText('Monthly soft token limit')).toBeVisible();
     expect(dialog.getByLabelText('Document token limit')).toBeVisible();
   });
@@ -355,13 +360,40 @@ describe('extraction pre-flight', () => {
     expect(screen.getByText(/per 1M tokens USD \(rate 2026-09\)/)).toBeVisible();
   });
 
-  /** Zero is a kill switch wearing a budget's clothes, and the field says so where it is typed. */
-  it('refuses a zero hard limit at the field rather than at the ledger', async () => {
+  /**
+   * Zero is a kill switch wearing a budget's clothes. It used to be typeable, and the field warned
+   * about it after the fact; now the control cannot express it at all — the allowance is a document
+   * count with a floor of one, and "no ceiling" is a separate, deliberate choice.
+   */
+  it('cannot express a zero allowance at all', async () => {
     renderTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
     const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
 
-    fireEvent.change(dialog.getByLabelText('Monthly hard token limit'), { target: { value: '0' } });
-    expect(dialog.getByText(/refuses every document while every other control reads open/i)).toBeVisible();
+    expect(dialog.queryByLabelText('Monthly hard token limit')).not.toBeInTheDocument();
+    expect(dialog.getByLabelText('Documents per month')).toHaveAttribute('min', '1');
+  });
+
+  it('sets the allowance in documents and shows the token ceiling it becomes', async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    fireEvent.click(dialog.getByText('500 docs'));
+
+    // 500 documents x 12,000 tokens — the conversion is served by the API so the console and the
+    // ledger cannot drift apart.
+    expect(dialog.getByText(/6,000,000/)).toBeVisible();
+  });
+
+  it('makes unlimited spend a separate, warned choice', async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    fireEvent.click(dialog.getByText('No ceiling'));
+
+    expect(dialog.getByText('Unlimited AI spend for this tenant.')).toBeVisible();
+    expect(dialog.getByText(/retry loop on one bad document/i)).toBeVisible();
   });
 });

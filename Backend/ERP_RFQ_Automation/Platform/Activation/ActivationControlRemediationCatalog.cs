@@ -119,17 +119,28 @@ public static class ActivationControlRemediationCatalog
     /// held to, not the silence left behind by a control nobody got round to mapping. A missing
     /// entry is a bug, and the exhaustiveness test fails on it.</para>
     /// </summary>
-    private sealed record Entry(ActivationControlRemediation? Remediation, string? NoRemedyReason);
+    /// <param name="Title">
+    /// What this control is called on screen, in the words of the person who has to clear it.
+    ///
+    /// <para>The console used to head each control card with its CODE — <c>data.residency-isolation</c>,
+    /// <c>entitlements.typed-hard-limits</c> — and list the blockers at the top of the tab as those
+    /// same bare strings. That is an engineer's identifier presented to a salesperson as the reason
+    /// a customer cannot be switched on. It is required here, first, rather than kept in a lookup on
+    /// the console: a control added later arrives with a name or it does not compile, and the name
+    /// is written next to the sentence that explains the remedy instead of drifting away from it.</para>
+    /// </param>
+    private sealed record Entry(string Title, ActivationControlRemediation? Remediation, string? NoRemedyReason);
 
-    private static Entry Remedy(string surface, string action, string label, string authority, string hint) =>
-        new(new ActivationControlRemediation(surface, action, label, authority, hint), null);
+    private static Entry Remedy(string title, string surface, string action, string label, string authority, string hint) =>
+        new(title, new ActivationControlRemediation(surface, action, label, authority, hint), null);
 
-    private static Entry NoRemedy(string reason) => new(null, reason);
+    private static Entry NoRemedy(string title, string reason) => new(title, null, reason);
 
     private static readonly Dictionary<string, Entry> Entries = new(StringComparer.Ordinal)
     {
         // --- controls an operator can actually resolve -------------------------------------
         ["identity.legal-customer"] = Remedy(
+            "The customer's legal identity",
             ActivationRemediationSurfaces.TenantProfileAccess,
             ActivationRemediationActions.TenantProfileIdentity,
             "Record the legal identity",
@@ -139,6 +150,7 @@ public static class ActivationControlRemediationCatalog
             + "name: a workspace called \"Acme\" is not evidence that a company called Acme signed anything."),
 
         ["commercial.plan"] = Remedy(
+            "A plan on the account",
             ActivationRemediationSurfaces.TenantCommercial,
             ActivationRemediationActions.TenantPlanAssignment,
             "Assign a plan",
@@ -147,6 +159,7 @@ public static class ActivationControlRemediationCatalog
             + "commercial decision and carries the Billing policy. Only an active plan can be assigned."),
 
         ["billing.account-recipient"] = Remedy(
+            "Who receives the invoices",
             ActivationRemediationSurfaces.TenantCommercial,
             ActivationRemediationActions.TenantAccountContact,
             "Set the invoicing details",
@@ -156,6 +169,7 @@ public static class ActivationControlRemediationCatalog
             + "never be billed and can never be offboarded."),
 
         ["billing.currency-tax"] = Remedy(
+            "Billing currency and tax rate",
             ActivationRemediationSurfaces.TenantProfileAccess,
             ActivationRemediationActions.TenantProfileIdentity,
             "Record the tax identity",
@@ -168,6 +182,7 @@ public static class ActivationControlRemediationCatalog
             + "on Commercial."),
 
         ["commercial.rate-card"] = Remedy(
+            "The agreed rate card",
             ActivationRemediationSurfaces.TenantCommercial,
             ActivationRemediationActions.TenantRateCardPin,
             "Pin a rate card",
@@ -178,6 +193,7 @@ public static class ActivationControlRemediationCatalog
             + "on the Billing page."),
 
         ["commercial.approved-terms"] = Remedy(
+            "Approved commercial terms",
             ActivationRemediationSurfaces.TenantCommercial,
             ActivationRemediationActions.TenantCommercialTerms,
             "Approve the commercial dates",
@@ -192,6 +208,7 @@ public static class ActivationControlRemediationCatalog
         // NOT want. The plan half of the control (unbounded seat/document/extraction limits) is
         // still a plan fix and the hint says so, rather than pretending one screen owns both.
         ["entitlements.typed-hard-limits"] = Remedy(
+            "Usage limits on the plan",
             ActivationRemediationSurfaces.TenantModules,
             ActivationRemediationActions.TenantModuleGrants,
             "Set this customer's modules",
@@ -202,6 +219,7 @@ public static class ActivationControlRemediationCatalog
             + "limit being unbounded, and fixing that on the plan moves every tenant on it."),
 
         ["security.privileged-mfa-policy"] = Remedy(
+            "The customer's MFA policy",
             ActivationRemediationSurfaces.TenantActivation,
             ActivationRemediationActions.TenantActivationEvidence,
             "Record the MFA attestation",
@@ -212,6 +230,7 @@ public static class ActivationControlRemediationCatalog
             + "never be filled in as if it had."),
 
         ["data.residency-isolation"] = Remedy(
+            "Where this customer's data lives",
             ActivationRemediationSurfaces.TenantDataStorage,
             ActivationRemediationActions.TenantDataAssetBoundary,
             "Register or verify the data boundary",
@@ -221,6 +240,7 @@ public static class ActivationControlRemediationCatalog
             + "steps is next is a fact about the registry, so the dialog reads it rather than asking."),
 
         ["integrations.mandatory"] = Remedy(
+            "Integrations the plan requires",
             ActivationRemediationSurfaces.TenantActivation,
             ActivationRemediationActions.TenantActivationEvidence,
             "Record the integration evidence",
@@ -236,6 +256,7 @@ public static class ActivationControlRemediationCatalog
         // one and the control stays red, every OTHER Resolve button on this screen becomes
         // something they have learned to distrust.
         ["admin.first-activated"] = NoRemedy(
+            "The customer's first sign-in",
             "There is deliberately no resolver. This control asserts that a person who is NOT the "
             + "operator took possession of the workspace by redeeming their invitation and signing in, so "
             + "anything on this console that could satisfy it would be the operator forging that "
@@ -244,6 +265,7 @@ public static class ActivationControlRemediationCatalog
             + "the customer redeeming it is the only thing that clears the control."),
 
         ["audit.health"] = NoRemedy(
+            "Audit logging is recording",
             "There is deliberately no resolver. The control passes once at least one privileged action "
             + "against this tenant has been persisted successfully to the platform audit log, which is a "
             + "consequence of the ordinary work of provisioning and configuring the tenant. A button that "
@@ -251,6 +273,7 @@ public static class ActivationControlRemediationCatalog
             + "that proves nothing about whether auditing works."),
 
         ["provisioning.completed-verified"] = NoRemedy(
+            "Provisioning finished cleanly",
             "There is deliberately no resolver. The control reads whether provisioning reached a terminal "
             + "successful state, which is owned by the provisioning execution and not by anything an "
             + "operator can assert. A stuck or failed execution is diagnosed and retried from the "
@@ -258,6 +281,7 @@ public static class ActivationControlRemediationCatalog
             + "rather than by declaring it."),
 
         ["data.lifecycle-operational"] = NoRemedy(
+            "No deletion in progress",
             "There is deliberately no resolver. The control fails only when this tenant has a scheduled "
             + "deletion, a started purge or a completed erasure on its record. Reversing any of those is a "
             + "governed lifecycle decision with its own reason, its own approver and its own audit action "
@@ -278,6 +302,16 @@ public static class ActivationControlRemediationCatalog
                     + "for having none, and never both or neither.");
         }
     }
+
+    /// <summary>
+    /// What this control is called on screen. Falls back to the CODE for anything uncatalogued —
+    /// ugly on purpose, because the exhaustiveness test fails on that case and a plausible-looking
+    /// invented name would let control #15 ship unmapped and unnoticed.
+    /// </summary>
+    public static string TitleFor(string? controlCode) =>
+        controlCode is not null && Entries.TryGetValue(controlCode, out var entry)
+            ? entry.Title
+            : controlCode ?? string.Empty;
 
     /// <summary>Every control code this catalogue has an opinion about. Ordering is not meaningful.</summary>
     public static IReadOnlyCollection<string> Codes => Entries.Keys;

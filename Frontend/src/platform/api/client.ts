@@ -862,6 +862,10 @@ const normalizeTenantActivationDecision = (wire: WireRecord): TenantActivationDe
   tenantId: asId(wire.tenantId as string | number),
   controls: ((wire.controls as WireRecord[]) ?? []).map((control) => ({
     ...(control as unknown as TenantActivationDecision['controls'][number]),
+    // The server names every control; this covers the deploy window where the console is ahead of
+    // the API. A bare dotted code is poor, but a blank heading where the control's name should be
+    // is worse, and it is the failure an operator would hit first.
+    title: (control.title as string | undefined) || (control.code as string),
     evidenceReferences: (control.evidenceReferences as string[]) ?? [],
   })),
   blockingControls: (wire.blockingControls as string[]) ?? [],

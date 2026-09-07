@@ -1165,6 +1165,8 @@ public class TenantsController : ControllerBase
             .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
         if (policy is null) return NotFound();
         var dto = ToAiPolicyDto(policy);
+        dto.TokensPerDocument = AiAllowance.TokensPerDocument;
+        dto.AllowancePresets = AiAllowance.DocumentPresets;
         dto.DeploymentRateSummary = DescribeRateCard(
             scope.ServiceProvider.GetRequiredService<IAiRateCardProvider>().Current);
         return Ok(dto);
