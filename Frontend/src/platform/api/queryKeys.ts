@@ -12,6 +12,7 @@ export const platformKeys = {
       ? [...platformKeys.all, 'overview']
       : [...platformKeys.all, 'overview', windowDays]) as readonly unknown[],
   tenants: () => [...platformKeys.all, 'tenants'] as const,
+  customers: () => [...platformKeys.all, 'customers'] as const,
   tenant: (id: string) => [...platformKeys.all, 'tenant', id] as const,
   tenantOperations: (id: string) => [...platformKeys.all, 'tenant', id, 'operations'] as const,
   // Nested under the tenant so ANY tenant mutation refreshes the customer screen's one read.

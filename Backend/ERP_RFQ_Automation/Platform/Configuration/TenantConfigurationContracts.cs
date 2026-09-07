@@ -97,3 +97,31 @@ public sealed record TenantConfigurationBlocker(
 
 /// <summary>The one thing to do next, so a list row and a header can say it in a sentence.</summary>
 public sealed record TenantNextAction(string Label, string Detail, string? Slice);
+
+/// <summary>
+/// One row of the customer list: enough to decide whether to open it, and never enough to
+/// require opening it to find out.
+///
+/// <para>The tenant list used to show name, country, plan, billing mode, trial end, status and
+/// created date — seven columns, none of which answers "does this one need me today". An operator
+/// found that out by opening each customer in turn and reading a twelve-tab screen. The
+/// <see cref="NextAction"/> here is the same sentence the customer screen shows, computed once on
+/// the server, so a list row and the page behind it can never disagree.</para>
+/// </summary>
+public sealed record CustomerListRow(
+    long TenantId,
+    string Name,
+    string? LegalName,
+    string? CountryCode,
+    string Status,
+    string BillingMode,
+    string? PlanCode,
+    DateTime? TrialEndsOn,
+    DateTime? ContractEndOn,
+    DateTime CreatedOn,
+    int BlockerCount,
+    /// <summary>Who has to act on the first blocker — Finance, Sales or Support, Owner.</summary>
+    string? BlockedOn,
+    TenantNextAction? NextAction,
+    /// <summary>True when this row is one an operator should look at today.</summary>
+    bool NeedsAttention);

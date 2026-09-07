@@ -38,3 +38,17 @@ public sealed class TenantConfigurationController(ITenantConfigurationService co
         return Ok(view);
     }
 }
+
+/// <summary>
+/// The customer list behind the redesigned Customers screen. Separate controller because the
+/// route has no tenant id in it, and the detail controller's route template requires one.
+/// </summary>
+[ApiController]
+[Route("api/platform/customers")]
+[Authorize(Policy = PlatformPolicies.PlatformScope)]
+public sealed class CustomerListController(ITenantConfigurationService configuration) : ControllerBase
+{
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<CustomerListRow>>> List(CancellationToken ct)
+        => Ok(await configuration.ListAsync(User, ct));
+}

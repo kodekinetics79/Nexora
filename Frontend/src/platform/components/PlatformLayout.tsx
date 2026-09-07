@@ -70,7 +70,10 @@ const NAV: {
   visible?: (permissions: PlatformPermissions) => boolean;
 }[] = [
   { to: '/platform/overview', label: 'Overview', icon: <OverviewIcon /> },
-  { to: '/platform/tenants', label: 'Tenants', icon: <TenantsIcon /> },
+  // "Customers", not "Tenants". A tenant is a row in our database; a customer is who the
+  // salesperson signed. The old twelve-tab screen stays reachable from a customer's Advanced
+  // menu and by its existing ?tab= links, but it is no longer where anybody starts.
+  { to: '/platform/customers', label: 'Customers', icon: <TenantsIcon /> },
   { to: '/platform/pipeline', label: 'Pipeline', icon: <PipelineIcon /> },
   { to: '/platform/plans', label: 'Plans', icon: <PlansIcon /> },
   { to: '/platform/users', label: 'Users', icon: <UsersIcon />, visible: (p) => p.isOwner },

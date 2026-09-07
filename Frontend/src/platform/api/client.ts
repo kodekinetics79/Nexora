@@ -115,7 +115,8 @@ import type {
   RecordTenantDataRecoveryEvidenceInput,
   UpsertPlanInput,
   TenantModules,
-  TenantConfigurationView
+  TenantConfigurationView,
+  CustomerListRow
 } from '../types';
 
 export interface AuditQuery {
@@ -176,6 +177,8 @@ export interface PlatformApi {
   getTenant(id: string): Promise<Tenant>;
   /** One read for the customer screen: state, slices, blockers and the next action. */
   getTenantConfiguration(id: string): Promise<TenantConfigurationView>;
+  /** The customer list: one row per tenant, each carrying its own next action. */
+  listCustomers(): Promise<CustomerListRow[]>;
   updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
   updateTenantDataRegion(id: string, input: UpdateTenantDataRegionInput): Promise<Tenant>;
   /** Owner-gated. The only writer of the deployment profile and its approval record. */
@@ -1120,6 +1123,8 @@ const httpPlatformApi: PlatformApi = {
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
   getTenantConfiguration: async (id) =>
     (await platformHttp.get<TenantConfigurationView>(`/api/platform/tenants/${id}/configuration`)).data,
+  listCustomers: async () =>
+    (await platformHttp.get<CustomerListRow[]>('/api/platform/customers')).data,
   updateTenantProfile: async (id, input) =>
     normalizeTenant((await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/profile`, input)).data),
   updateTenantDataRegion: async (id, input) =>

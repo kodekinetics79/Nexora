@@ -2540,3 +2540,23 @@ export interface TenantConfigurationView {
   blockers: TenantConfigurationBlocker[];
   nextAction: TenantNextAction | null;
 }
+
+/** One row of the redesigned customer list. Carries the same next action its page shows. */
+export interface CustomerListRow {
+  tenantId: number;
+  name: string;
+  legalName: string | null;
+  countryCode: string | null;
+  status: string;
+  billingMode: string;
+  planCode: string | null;
+  trialEndsOn: string | null;
+  contractEndOn: string | null;
+  createdOn: string;
+  blockerCount: number;
+  /** Who has to act on the first blocker — Finance, Sales or Support, Owner. */
+  blockedOn: string | null;
+  nextAction: TenantNextAction | null;
+  /** True when this row is one an operator should look at today. */
+  needsAttention: boolean;
+}

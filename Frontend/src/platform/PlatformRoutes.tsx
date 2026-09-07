@@ -15,6 +15,8 @@ const TenantDetailPage = lazy(() => import('./pages/TenantDetailPage'));
 // than replacing it, so the two can be compared on the same data before anything is retired —
 // and so every ?tab= deep link already pasted into a support ticket keeps working.
 const CustomerPage = lazy(() => import('./pages/CustomerPage'));
+const CustomersPage = lazy(() => import('./pages/CustomersPage'));
+const NewCustomerPage = lazy(() => import('./pages/NewCustomerPage'));
 const PipelinePage = lazy(() => import('./pages/PipelinePage'));
 const PlansFlagsPage = lazy(() => import('./pages/PlansFlagsPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
@@ -58,8 +60,13 @@ export default function PlatformRoutes() {
             */}
             <Route index element={<Navigate to={PLATFORM_HOME} replace />} />
             <Route path="overview" element={<OverviewPage />} />
+            <Route path="customers" element={<CustomersPage />} />
+            {/* The twelve-tab screen and its list stay mounted so every ?tab= link already
+                pasted into a support ticket keeps resolving, and so the two can be compared. */}
             <Route path="tenants" element={<TenantsPage />} />
             <Route path="tenants/:id" element={<TenantDetailPage />} />
+            {/* Ahead of :id, or "new" is read as a tenant id and the page tries to load it. */}
+            <Route path="customers/new" element={<NewCustomerPage />} />
             <Route path="customers/:id" element={<CustomerPage />} />
             <Route path="pipeline" element={<PipelinePage />} />
             <Route path="plans" element={<PlansFlagsPage />} />

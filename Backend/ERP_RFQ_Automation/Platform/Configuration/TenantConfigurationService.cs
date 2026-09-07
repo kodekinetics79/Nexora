@@ -11,6 +11,9 @@ namespace ERP_RFQ_Automation.Platform.Configuration;
 public interface ITenantConfigurationService
 {
     Task<TenantConfigurationView?> ReadAsync(long tenantId, ClaimsPrincipal actor, CancellationToken ct = default);
+
+    /// <summary>The customer list, with each row carrying the same next action its page shows.</summary>
+    Task<IReadOnlyList<CustomerListRow>> ListAsync(ClaimsPrincipal actor, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -75,6 +78,67 @@ public sealed class TenantConfigurationService(
         return new TenantConfigurationView(
             tenant.Id, tenant.Version, state, slices, decision, blockers,
             NextActionFor(tenant, decision, blockers, holdActive));
+    }
+
+    /// <summary>
+    /// The customer list.
+    ///
+    /// <para>Each row is evaluated through the same activation policy the customer screen uses, so
+    /// the sentence on the row and the sentence on the page are the same sentence rather than two
+    /// implementations that drift. That costs one policy evaluation per tenant, which is why this
+    /// is a list of customers and not a report: at the scale this console is for — tens of
+    /// customers, not thousands — an honest answer is worth more than a fast wrong one. If the
+    /// fleet ever outgrows that, the fix is to persist the decision when it changes, NOT to let
+    /// the list compute a cheaper answer that disagrees with the page.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<CustomerListRow>> ListAsync(
+        ClaimsPrincipal actor, CancellationToken ct = default)
+    {
+        var role = actor.FindFirst(PlatformAuthConstants.PlatformRoleClaim)?.Value;
+        var actorIsOwner = role == nameof(PlatformRole.Owner);
+
+        var tenants = await db.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Include(x => x.Plan)
+            .OrderByDescending(x => x.CreatedOn)
+            .ToListAsync(ct);
+
+        var holds = actorIsOwner
+            ? await db.Set<TenantLegalHold>().IgnoreQueryFilters().AsNoTracking()
+                .Where(x => x.ReleasedOn == null).Select(x => x.TenantId).Distinct().ToListAsync(ct)
+            : [];
+
+        var rows = new List<CustomerListRow>(tenants.Count);
+        foreach (var tenant in tenants)
+        {
+            TenantActivationDecision? decision = null;
+            if (activation is not null) decision = await activation.EvaluateAsync(tenant.Id, ct);
+            var blockers = BuildBlockers(decision);
+            var holdActive = holds.Contains(tenant.Id);
+            var next = NextActionFor(tenant, decision, blockers, holdActive);
+
+            rows.Add(new CustomerListRow(
+                tenant.Id, tenant.Name, tenant.LegalName, tenant.CountryCode,
+                tenant.Status.ToString(), tenant.BillingMode.ToString(),
+                tenant.Plan?.Code?.ToLowerInvariant(),
+                tenant.TrialEndsOn, tenant.ContractEndOn, tenant.CreatedOn,
+                blockers.Count, blockers.FirstOrDefault()?.Owner, next,
+                NeedsAttention(tenant, blockers.Count, holdActive)));
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Whether this row is one somebody should look at today. Deliberately narrow: a filter that
+    /// selects most of the list is a filter nobody uses.
+    /// </summary>
+    private static bool NeedsAttention(Tenant tenant, int blockerCount, bool holdActive)
+    {
+        if (holdActive) return true;
+        if (tenant.Status is TenantStatus.Provisioning or TenantStatus.PastDue) return true;
+        if (tenant.Status == TenantStatus.Active && blockerCount > 0) return true;
+        if (tenant.BillingMode == TenantBillingMode.Trial && tenant.TrialEndsOn is DateTime ends
+            && (ends.Date - DateTime.UtcNow.Date).TotalDays <= 14) return true;
+        return false;
     }
 
     // ------------------------------------------------------------------ slices
