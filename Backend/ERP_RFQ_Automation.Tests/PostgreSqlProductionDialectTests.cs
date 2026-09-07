@@ -129,6 +129,9 @@ public sealed class PostgreSqlProductionDialectTests
                 CompletedOn = DateTime.UtcNow
             });
             await context.SaveChangesAsync();
+            // The TRIGGER's row, untouched: the nexora_ai_default_provisioning RLS policy pins its
+            // shape, including this switch. Provisioning opens it immediately afterwards, which
+            // that policy does not govern — see TenantsController.Provision.
             Assert.False((await context.AiProcessingPolicies.IgnoreQueryFilters()
                 .SingleAsync(p => p.BusinessUnitId == 9_912)).ExternalProcessingAllowed);
         }

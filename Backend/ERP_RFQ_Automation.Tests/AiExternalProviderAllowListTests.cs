@@ -702,25 +702,25 @@ public sealed class AiExternalProviderAllowListTests
     }
 
     [Fact]
-    public async Task Readiness_AtShippedSecureDefaults_IsNotReady_AndNamesExternalProcessing()
+    public async Task Readiness_AtShippedSecureDefaults_NoLongerBlocksOnTheTwoSettingsWithOneAnswer()
     {
-        // A tenant on the day it is provisioned. Its first document died with
-        // external_processing_denied and nothing else — the first of several closed controls,
-        // with no hint that more were queued behind it. That is what cost the 2026-08 pilot
-        // its days: one lock revealed per submission.
+        // A tenant on the day it is provisioned. It used to arrive with external processing denied
+        // and egress narrowed to redacted fields — two settings, on every tenant, with exactly one
+        // correct answer between them, discovered one dead document at a time. Reading documents
+        // with the configured model IS the product, so a tenant is now provisioned able to do it.
         using var fixture = new Fixture();
         fixture.ResetToShippedSecureDefaults();
 
         var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
 
-        Assert.False(report.Ready);
         var external = report.Checks.Single(check => check.Code == AiReadinessCodes.ExternalProcessingAllowed);
-        Assert.Equal(AiReadinessStatus.Fail, external.Status);
-        Assert.Equal(AiExternalProviderTrustReasons.PolicyExternalProcessingDenied, external.DenialReason);
-        Assert.Equal("ExternalProcessingAllowed = false", external.CurrentValue);
-        Assert.Equal("ExternalProcessingAllowed = true", external.RequiredValue);
-        Assert.Contains("ai-policy", external.SetItIn, StringComparison.Ordinal);
-        Assert.Equal(AiExternalProviderTrustReasons.PolicyExternalProcessingDenied, report.FirstBlockingReason);
+        Assert.Equal(AiReadinessStatus.Pass, external.Status);
+        Assert.Equal("ExternalProcessingAllowed = true", external.CurrentValue);
+
+        var egress = report.Checks.Single(check => check.Code == AiReadinessCodes.EgressPolicyWholeDocument);
+        Assert.Equal(AiReadinessStatus.Pass, egress.Status);
+        Assert.Equal($"EgressPolicy = \"{AiEgressPolicies.FullDocument}\"", egress.CurrentValue);
+        Assert.NotEqual(AiExternalProviderTrustReasons.PolicyExternalProcessingDenied, report.FirstBlockingReason);
 
         // The controls the shipped defaults leave OPEN must stay open. A report that reddened
         // rows nobody has to touch would send operators to change working settings, which is
@@ -742,7 +742,9 @@ public sealed class AiExternalProviderAllowListTests
         // not merely the next one — that property is the entire point of the pre-flight.
         using var fixture = new Fixture();
         fixture.ResetToShippedSecureDefaults();
-        fixture.MutatePolicy(policy => policy.ExternalProcessingAllowed = true);
+        // Narrowed deliberately, which is a decision a tenant can genuinely make — unlike the old
+        // shipped default, which made it for every tenant and then blocked the product.
+        fixture.MutatePolicy(policy => policy.EgressPolicy = AiEgressPolicies.RedactedFieldsOnly);
 
         var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
 

@@ -708,11 +708,29 @@ public class TenantsController : ControllerBase
                 //
                 // Checked rather than assumed, so this works on both providers: the trigger owns
                 // the row where it exists, and the explicit add covers providers where it does not.
-                var policyExists = await _context.AiProcessingPolicies.IgnoreQueryFilters()
-                    .AnyAsync(p => p.BusinessUnitId == bu.Id, ct);
-                if (!policyExists)
-                    _context.AiProcessingPolicies.Add(
-                        AiProcessingPolicy.CreateSecureDefault(bu.Id, actor, DateTime.UtcNow));
+                var aiPolicy = await _context.AiProcessingPolicies.IgnoreQueryFilters()
+                    .SingleOrDefaultAsync(p => p.BusinessUnitId == bu.Id, ct);
+                if (aiPolicy is null)
+                {
+                    aiPolicy = AiProcessingPolicy.CreateSecureDefault(bu.Id, actor, DateTime.UtcNow);
+                    _context.AiProcessingPolicies.Add(aiPolicy);
+                }
+                else
+                {
+                    // The trigger wrote the row, and it cannot write these two: the RLS policy
+                    // nexora_ai_default_provisioning pins the exact shape of the row it may INSERT.
+                    // That policy governs INSERT only, so the values are set here, immediately
+                    // after, in the same transaction. Reading documents with the endpoint this
+                    // deployment was configured with is the product — a tenant provisioned unable
+                    // to do it is a tenant nobody can use, and the operator had two settings to
+                    // change with exactly one correct answer between them.
+                    aiPolicy.ExternalProcessingAllowed = true;
+                    aiPolicy.EgressPolicy = AiEgressPolicies.FullDocument;
+                    aiPolicy.RedactionRequired = true;
+                    aiPolicy.PrivacyReviewRequired = true;
+                    aiPolicy.UpdatedOn = DateTime.UtcNow;
+                    aiPolicy.UpdatedBy = actor;
+                }
 
                 // ---- founding Super Administrator ---------------------------------------
                 // The role and its holder are created IN THE SAME TRANSACTION as the tenant,

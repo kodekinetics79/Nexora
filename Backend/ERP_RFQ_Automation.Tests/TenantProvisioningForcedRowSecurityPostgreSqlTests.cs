@@ -178,7 +178,7 @@ public sealed class TenantProvisioningForcedRowSecurityPostgreSqlTests(ForcedRow
 
         // The defaults are the point of the row, not a detail of it: an AI governance row that
         // arrives open is worse than one that never arrives.
-        Assert.Equal("tenant-provisioning|30|TenantApprovedRegion|RedactedFieldsOnly|false|true",
+        Assert.Equal("tenant-provisioning|30|TenantApprovedRegion|FullDocument|false|true",
             await StringAsync(database.SuperuserConnectionString, $"""
                 SELECT "UpdatedBy" || '|' || "RetentionDays" || '|' || "DataResidency"
                        || '|' || "EgressPolicy" || '|' || "ExternalProcessingAllowed"

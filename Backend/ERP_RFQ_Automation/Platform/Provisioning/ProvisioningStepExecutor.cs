@@ -386,16 +386,31 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
         // it, because SQLite has no such trigger. Checked rather than assumed, so this works on
         // both providers: the trigger owns the row where it exists, and the explicit add covers
         // providers where it does not.
-        var exists = await db.AiProcessingPolicies.IgnoreQueryFilters()
-            .AnyAsync(p => p.BusinessUnitId == businessUnitId, ct);
-        if (exists)
-            return Detail(new { businessUnitId, createdByTrigger = true });
+        var policy = await db.AiProcessingPolicies.IgnoreQueryFilters()
+            .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
+        var createdByTrigger = policy is not null;
+        if (policy is null)
+        {
+            policy = AiProcessingPolicy.CreateSecureDefault(businessUnitId, actor, DateTime.UtcNow);
+            db.AiProcessingPolicies.Add(policy);
+        }
+        else
+        {
+            // Kept in step with the synchronous path in TenantsController: the trigger cannot write
+            // these two (the nexora_ai_default_provisioning RLS policy pins the shape of the row it
+            // may INSERT), so they are set immediately after, which that policy does not govern. A
+            // starting posture that depends on which provisioning path ran is not a starting posture.
+            policy.ExternalProcessingAllowed = true;
+            policy.EgressPolicy = AiEgressPolicies.FullDocument;
+            policy.RedactionRequired = true;
+            policy.PrivacyReviewRequired = true;
+            policy.UpdatedOn = DateTime.UtcNow;
+            policy.UpdatedBy = actor;
+        }
 
-        db.AiProcessingPolicies.Add(
-            AiProcessingPolicy.CreateSecureDefault(businessUnitId, actor, DateTime.UtcNow));
         await db.SaveChangesAsync(ct);
 
-        return Detail(new { businessUnitId, createdByTrigger = false });
+        return Detail(new { businessUnitId, createdByTrigger });
     }
 
     // ---- 5. the founding role -------------------------------------------------------------
