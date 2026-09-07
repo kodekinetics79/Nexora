@@ -163,8 +163,9 @@ public sealed class PlatformControlPlaneHardeningPostgreSqlTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
-                INSERT INTO platform."Tenants" ("Name", "Slug", "Status", "CreatedOn", "CreatedBy")
-                VALUES ('Hardening probe', @slug, 'Active', now(), 'tests')
+                INSERT INTO platform."Tenants"
+                    ("Name", "Slug", "Status", "CreatedOn", "CreatedBy", "BillingContactEmail")
+                VALUES ('Hardening probe', @slug, 'Active', now(), 'tests', 'ap@hardening.test')
                 RETURNING "Id";
                 """;
             command.Parameters.AddWithValue("slug", $"hardening-probe-{Guid.NewGuid():N}");

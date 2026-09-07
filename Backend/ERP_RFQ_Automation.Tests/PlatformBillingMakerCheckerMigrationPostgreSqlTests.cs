@@ -62,8 +62,9 @@ public sealed class PlatformBillingMakerCheckerMigrationPostgreSqlTests(
         // hide the readiness refusal this test is about.
         await context.Database.ExecuteSqlRawAsync($"""
             INSERT INTO platform."Tenants"
-                ("Id", "Name", "Slug", "Status", "CreatedOn", "BillingMode")
-            VALUES ({TenantId}, 'Billing upgrade tenant', 'billing-upgrade-{TenantId}', 'Active', now(), 'Billable');
+                ("Id", "Name", "Slug", "Status", "CreatedOn", "BillingMode", "BillingContactEmail")
+            VALUES ({TenantId}, 'Billing upgrade tenant', 'billing-upgrade-{TenantId}', 'Active', now(),
+                    'Billable', 'ap@billing-upgrade.test');
             INSERT INTO platform."RateCards"
                 ("Id", "Code", "Currency", "EffectiveFromUtc", "IsActive", "CreatedOn", "Version")
             VALUES ({RateCardId}, 'billing-upgrade-card', 'USD', '2019-01-01', true, now(), 1);

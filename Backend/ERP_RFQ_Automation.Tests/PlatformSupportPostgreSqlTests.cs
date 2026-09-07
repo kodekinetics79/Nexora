@@ -90,8 +90,10 @@ public sealed class PlatformSupportPostgreSqlTests
         try
         {
             await Execute(connection, $"""
-                INSERT INTO platform."Tenants" ("Id", "Name", "Slug", "Status", "CreatedOn")
-                VALUES ({tenantId}, 'Support Desk Probe', 'support-desk-probe', 'Active', now())
+                INSERT INTO platform."Tenants"
+                    ("Id", "Name", "Slug", "Status", "CreatedOn", "BillingContactEmail")
+                VALUES ({tenantId}, 'Support Desk Probe', 'support-desk-probe', 'Active', now(),
+                        'ap@support-probe.test')
                 ON CONFLICT ("Id") DO NOTHING;
                 """);
 

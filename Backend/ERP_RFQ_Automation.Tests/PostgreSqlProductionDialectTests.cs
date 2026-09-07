@@ -207,8 +207,10 @@ public sealed class PostgreSqlProductionDialectTests
         {
             create.CommandText = $"""
                 INSERT INTO platform."Tenants"
-                    ("Id", "Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn")
-                VALUES (991100, 'Runtime Test Tenant', 'runtime-test-tenant', 'Active', 9911, now())
+                    ("Id", "Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn",
+                     "BillingContactEmail")
+                VALUES (991100, 'Runtime Test Tenant', 'runtime-test-tenant', 'Active', 9911, now(),
+                        'ap@runtime-test.test')
                 ON CONFLICT ("Id") DO NOTHING;
                 DROP ROLE IF EXISTS {runtimeRole};
                 CREATE ROLE {runtimeRole} LOGIN PASSWORD '{runtimePassword}' NOINHERIT NOSUPERUSER NOBYPASSRLS;

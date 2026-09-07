@@ -67,8 +67,9 @@ public sealed class FinalPlatformRevenueControlsPostgreSqlTests(PostgreSqlTestDa
             seed.Transaction = transaction;
             seed.CommandText = """
                 INSERT INTO platform."Tenants"
-                    ("Id","Name","Slug","Status","CreatedOn","BillingMode")
-                VALUES (997101,'Revenue rollup tenant','revenue-rollup-997101','Active',now(),'Billable');
+                    ("Id","Name","Slug","Status","CreatedOn","BillingMode","BillingContactEmail")
+                VALUES (997101,'Revenue rollup tenant','revenue-rollup-997101','Active',now(),'Billable',
+                        'ap@revenue-rollup.test');
                 INSERT INTO platform."RateCards"
                     ("Id","Code","Currency","EffectiveFromUtc","IsActive","CreatedOn","Version")
                 VALUES (997102,'revenue-rollup-card','USD','2025-01-01',true,now(),1);
