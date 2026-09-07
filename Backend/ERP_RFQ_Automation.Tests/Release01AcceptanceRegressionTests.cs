@@ -57,7 +57,17 @@ public sealed class Release01AcceptanceRegressionTests
         // than passing the right version to a write that should not happen from here, and this
         // assertion pins it.
         Assert.DoesNotContain("transitionStatus", quotePage);
-        Assert.Contains("enabled: !invalidWindow", dashboard);
+
+        // This used to assert `enabled: !invalidWindow` — the dashboard held whatever dates were
+        // typed and switched its queries off while they were unusable. The glance screen cannot
+        // hold an unusable window at all: `applied` is the only state the bands read, and the one
+        // place that writes it refuses anything `isValidWindow` rejects, so a half-typed or
+        // inverted range never becomes a window and there is nothing left to disable. That is the
+        // same shape of stronger guarantee as the transitionStatus assertion above — the guard
+        // moved from the query to the state that feeds it — so the assertion moves with it rather
+        // than being dropped. The behaviour itself is pinned in DashboardPage.test.tsx, "keeps the
+        // last usable window when a custom range is inverted, and says so".
+        Assert.Contains("if (isValidWindow(next.from, next.to)) setApplied(next);", dashboard);
     }
 
     private static string FindRepositoryRoot()
