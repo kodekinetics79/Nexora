@@ -280,3 +280,212 @@ looks like assurance and provides none. Verdicts are theirs, from a real month-e
 statement (`:1163-1170`), flow meters counted from the start date while period-end stock
 meters carry a proration note (`:359-363`). The proration engine the other scenarios need
 is a generalisation of this, not a second implementation beside it.
+
+---
+
+# Wave 2 — Internal Audit over the combined set
+
+The four domain panels each looked through one lens. This pass looked for what falls
+between them, and for defects currently **masked** by other defects — the ones that surface
+only once the first fix lands and make the team believe the fix did not work.
+
+Every claim below was re-verified against the source. Wave 2 also **corrected Wave 1** in
+two places; both corrections are recorded, because a panel that only confirms is not
+earning its keep.
+
+## L1 · `Status` carries two orthogonal facts, so the gates answer by click order
+
+`CreditAsync` sets `Status = Corrected` (`SubscriptionInvoiceService.cs:242`).
+`RecordPaymentAsync` then overwrites it with `Paid`/`PartiallyPaid` (`:283-287`). Neither
+reads the other, and `WriteOff` never touches `Status` at all
+(`SubscriptionRevenueControlService.cs:223`).
+
+On a $10,000 invoice with a $1 credit:
+
+- **credit, then pay** → `PartiallyPaid` → the offboarding gate counts $9,999
+- **pay, then credit** → `Corrected` → the offboarding gate excludes the row entirely
+
+Identical money. Opposite verdicts. Decided by which button was clicked first.
+
+**And the fix this document already prescribed does not repair it.** The offboarding gate's
+`Status != Corrected` is a **scope filter**, not arithmetic
+(`TenantOffboardingReadinessService.cs:162`). One shared balance function leaves it intact.
+Settlement state and correction state have to become separate fields first.
+
+**Acceptance.**
+`A_one_dollar_credit_then_a_payment_and_a_payment_then_a_one_dollar_credit_report_the_same_open_AR`
+
+## L2 · Cash and credit notes never reach the ledger — the worst thing nobody saw
+
+`EnqueueInvoiceExportAsync` is called in exactly one place: `FinalizeAsync`
+(`SubscriptionInvoiceService.cs:197-198`). `RecordPaymentAsync` enqueues nothing.
+`CreditAsync` enqueues nothing.
+
+So the moment stream 1 turns the dispatcher on, the general ledger starts receiving
+invoices, voids, refunds, reversals and write-offs — and **never a receipt, never a credit
+note**. GL accounts receivable rises monotonically and diverges from product AR by 100% of
+cash collected plus 100% of credits issued. At forty tenants that is roughly **$16k a month
+of permanent, silent divergence**, discovered at the first external audit as a balance
+nobody can reconcile.
+
+No Wave 1 panel found this, because it sits in the seam between "cash" (AR's lens) and
+"posting" (the Controller's lens).
+
+**Acceptance.** `A_receipt_and_a_credit_note_each_produce_an_accounting_outbox_message` and
+`Product_AR_equals_the_sum_of_acknowledged_outbox_messages_for_a_tenant`
+
+## L3 · Offboarding is already impossible, and the AR fix is masked by it
+
+The gate also requires a reconciled `AccountingOutboxMessage` with a receipt hash
+(`TenantOffboardingReadinessService.cs:168-180`), and the dispatcher is off by default
+(`AccountingOutboxDispatcher.cs:13`). Every invoiced tenant fails
+`AccountingAcknowledgementMissing` **regardless of its AR balance**.
+
+Fix the four-formula defect and offboarding still fails, for a different reason. The team
+will reasonably conclude the first fix did not work. Sequence accordingly.
+
+## L4 · The finalise checker is a bypass with a six-hour cooldown
+
+`ComputeStatementAsync` takes `computedBy` defaulting to `"system:billing-run"`
+(`BillingStatementService.cs:565-567`) and overwrites `statement.ComputedBy` on **every**
+recompute (`:692`). The sweep recomputes the prior period every six hours until it is
+finalised.
+
+So one Owner computes the statement, waits, and the sweep launders their name out of
+`ComputedBy` — after which the same Owner satisfies maker ≠ checker and finalises the
+revenue figure alone.
+
+**Both earlier readings were wrong.** `billing-target-architecture.md` listed this control
+under "already right, must not be rebuilt". The CFO panel called it a lockout that traps the
+Controller. It is neither: it is the only genuine two-person control on the revenue number,
+and it does not hold.
+
+**The fix is not to relax it.** Record a separate `LastHumanComputedBy` that the sweep never
+overwrites, and gate finalise on that. This closes the bypass *and* removes the lockout — a
+Controller who refreshes a figure stays the maker, and a system recompute no longer
+promotes them to checker.
+
+**Acceptance.**
+`A_single_owner_cannot_compute_and_then_finalize_the_same_statement_after_a_system_recompute`
+
+## L5 · A refund need not be backed by any credit note
+
+Credit is capped at `TotalAmount`, not at outstanding
+(`SubscriptionInvoiceService.cs:236`), so crediting a fully paid invoice creates a customer
+credit that `outstanding` floors to zero and that exists nowhere as a liability. Refund's
+ceiling is gross cash received (`SubscriptionRevenueControlService.cs:236`), with no
+requirement that it be backed by a credit. **A $2,000 goodwill credit can be discharged by a
+$10,000 refund and every server ceiling passes** — approved by two Owners, neither of whom
+is shown the credit.
+
+**Acceptance.** `A_refund_cannot_exceed_the_credit_notes_backing_it`
+
+## L6 · A correctly reversed payment makes an invoice unvoidable for ever
+
+`PaymentReversal` increments `ReversedPaymentAmount` and never decrements `PaidAmount`
+(`SubscriptionRevenueControlService.cs:222`), while `Void` requires `PaidAmount == 0`
+(`:244`). A payment keyed to the wrong invoice and properly reversed leaves that invoice
+permanently unvoidable — and, per AR-04, its statement is already spent, so no corrected
+invoice can be raised either.
+
+**Acceptance.** `An_invoice_whose_only_payment_was_reversed_can_still_be_voided`
+
+## L7 · Six balance formulas, not four
+
+`SubscriptionDunningWorker.cs:52-57` carries another copy (arithmetically correct). A fix
+that patches four call sites leaves two behind.
+
+## L8 · The value-date fix opens a back-dating hole
+
+`receivedAtUtc` is bounded above (`SubscriptionInvoiceService.cs:255`) but has **no floor**.
+The moment AR-01 gives the console a date field, a receipt can be back-dated into a
+finalised period with no re-open control and no evidence. Ship the closed-period floor in
+the same change, not after it.
+
+## L9 · Wave 1 overstated the tax defect — it is worse, and different
+
+Determination filters on the tenant's own `CountryCode`
+(`SubscriptionRevenueControlService.cs:84`), which the operator cannot type, and throws
+unless exactly one rule matches (`:91`). So the "type GB-VAT for a Riyadh customer" example
+does not stand.
+
+The real defects: the rule table is keyed on **`Currency`** (`:88`), which is wrong in
+principle — VAT liability does not depend on the currency of the consideration — and
+`taxService` is **optional**. When it is not registered, `taxRate = request.TaxRatePercent`
+(`SubscriptionInvoiceService.cs:118-119`): the operator's typed rate goes onto a legally
+immutable document with no rule, no evidence and no verification.
+
+Not circular. **Fail-open.**
+
+**Acceptance.** `An_invoice_cannot_be_drafted_when_no_approved_tax_rule_resolves` —
+asserted with the service both registered and absent.
+
+---
+
+## Fix order, corrected by Wave 2
+
+The programme in `billing-target-architecture.md` has orderings that create new leaks.
+
+| Do not | Because | Do instead |
+|---|---|---|
+| Enable dunning (stream 1) first | Every dunning action enqueues an outbox message, and the offboarding gate takes the newest by `AcknowledgedAtUtc` — Postgres sorts NULLs **first** on DESC, so an unacknowledged dunning row becomes "latest" and the gate fails | Fix the gate to select the invoice-export message *by type*, then enable dunning |
+| Enable the dispatcher before receipts and credits enqueue (L2) | Poisons the GL from day one; every later reconciliation runs against a corrupted baseline | Add the two enqueue paths first |
+| Automatic invoicing (stream 6) before the tax fail-open is closed (stream 7) | Stream 7 is listed as parallel; it is a **prerequisite**. Removing the human removes the last thing that would notice a null tax service | 7 before 6 |
+| The shared balance function before the `Status` split (L1) | The gate excludes `Corrected` by filter, not arithmetic — the fix leaves the defect and looks like it worked | Split settlement from correction state first |
+| Relax `ExternalReference` uniqueness before the receipt/allocation split | Still forces one wire into three payment rows; it just stops complaining about the fabricated reference | Do the receipt object, or do neither |
+| Ship the value-date field before a period lock (L8) | Licenses back-dating into closed periods | Same change, both halves |
+| Credit-note maker-checker before linking refunds to credits (L5) | The checker signs the smaller of the two acts | Link first |
+
+## Segregation of duties at four people — the honest version
+
+With four people the checker is the same person every time, so a second signature buys a
+**witness, not independence**. Spend it only where a witness changes the outcome.
+
+**Genuinely two humans** — about five events a month, and only where money leaves without a
+customer complaining: multi-tenant price changes; credit notes; refunds and write-offs above
+a threshold.
+
+**Should be a system control, not a human one:** tax determination and seller identity
+(derive them, don't approve them); the evidence hash (compute it — a hand-typed 64-hex
+string checked for shape is theatre); the settle-lag readiness gate; the closed-period floor
+on receipt dates; blocked-meter refusal at rate-card create rather than at finalisation.
+
+**Should be detective, reviewed and signed monthly, not preventive:** cash application;
+single-tenant plan changes; payment-terms and contact edits; rate-card pin and clear. Each
+produces an exception report — receipts not matched to a bank line, invoices with a null tax
+rule, statements finalised early, invoices where credited + paid exceeds total, tenants with
+a mid-period plan change — reviewed by whoever did not perform the majority of them.
+
+**Delete outright:** the three MFA'd Owner approvals between Final statement and posted.
+They cost a working day and, at this headcount, are the same two people in every combination.
+
+### Cash in: the CFO's rejection is upheld, with compensating controls
+
+Two-person approval on recording a payment is rejected — cash *in* is self-alarming (a
+customer who paid and shows unpaid telephones you), and a control routed around by month
+three produces false assurance. It is replaced by three things, all required:
+
+1. An unallocated-cash suspense account and a **weekly bank-to-product reconciliation whose
+   difference is the control**, signed and retained.
+2. A hard system rule that a receipt may only be recorded against a bank line that exists —
+   `ExternalReference` becomes a foreign key to a bank-feed row, not a unique free-text
+   string.
+3. Preventive maker-checker on **refund and reversal only**, which already exists, because
+   money *out* is where a fraudulent receipt is monetised.
+
+## Evidence that must exist for an external audit, and does not
+
+- A **receipt-to-bank-line** record. No bank feed object exists; without it cash cannot be
+  substantively tested.
+- **Outbox messages for receipts and credit notes** (L2), never purged on tenant archive.
+- A **period-close record** per `(TenantId, PeriodStart)`: manifest hash, who computed, who
+  finalised, whether the settle lag was waived and why. `ComputedBy` exists and the sweep
+  overwrites it (L4).
+- A **credit-to-refund linkage** (L5).
+- A **monthly AR ageing snapshot, stored rather than recomputed** — every ageing figure
+  today is derived live from mutable rows, so September's ageing cannot be reproduced later.
+
+Already adequate, and to be preserved: statement lines with provenance, readiness manifests
+and their hashes, `SourceEvidenceJson` with a server-computed hash verified at finalise
+(`SubscriptionInvoiceService.cs:188-195`), and tax-rule versioning with the foreign key to
+`(TaxRuleId, TaxRuleVersion)`.
