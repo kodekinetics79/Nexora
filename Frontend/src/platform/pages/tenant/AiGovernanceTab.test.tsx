@@ -19,6 +19,7 @@ import AiGovernanceTab from './AiGovernanceTab';
  */
 
 const policy: TenantAiPolicy = {
+  deploymentRateSummary: '0.27 in / 1.10 out per 1M tokens USD (rate 2026-09). Set for the whole deployment, not per tenant.',
   businessUnitId: '4', isEnabled: true, externalProcessingAllowed: false,
   allowedPurposes: ['RfqExtraction'], allowedProvider: null, allowedModel: null,
   monthlySoftTokenLimit: 10_000, monthlyHardTokenLimit: 20_000, maxTokensPerDocument: 2_000,
@@ -62,7 +63,10 @@ const readiness = (
   unstructuredPayload: true,
   ready: false,
   firstBlockingReason: 'external_processing_denied',
+  // Root causes only. The ceiling row below is shut solely because control 4 is, and counting
+  // it made this read "3 controls blocking" over two settings and a consequence.
   blockingCount: 3,
+  warningCount: 0,
   evaluatedOnUtc: '2026-08-12T09:00:00Z',
   checks: [
     check(1, 'endpoint_resolved', 'Inference endpoint resolves'),
@@ -91,6 +95,12 @@ const readiness = (
       requiredValue: 'AllowedModel = "deepseek-v4-pro" (or unset)',
       setItIn: 'PUT /api/platform/tenants/{id}/ai-policy (platform Owner, second factor required)',
       detail: 'AllowedModel is compared ORDINAL — CASE-SENSITIVE — while AllowedProvider is not.',
+    }),
+    check(13, 'external_dependency_ceiling', 'External dependency ceiling', {
+      status: 'Blocked',
+      currentValue: 'waiting on control 4 (External processing is consented to) — once that is'
+        + ' open, this destination\'s own grant exempts the call from the ratio.',
+      detail: 'Governs UNAUTHORIZED external usage only, as a share of the last 100 governed calls.',
     }),
   ],
   ...overrides,
@@ -138,7 +148,7 @@ describe('extraction pre-flight', () => {
     renderTab();
 
     // The verdict, the count, and the code the next submitted document actually comes back with.
-    expect(await screen.findByText(/Documents will not extract — 3 controls blocking/)).toBeVisible();
+    expect(await screen.findByText(/Documents will not extract — 3 settings to change/)).toBeVisible();
     expect(within(verdict()).getByText('external_processing_denied')).toBeVisible();
     expect(within(verdict()).getByText(/fixing one reveals the next/i)).toBeVisible();
     expect(platformApi.getTenantAiReadiness).toHaveBeenCalledWith('9');
@@ -168,6 +178,48 @@ describe('extraction pre-flight', () => {
     const satisfied = row('AI processing is enabled');
     expect(within(satisfied).getByText('Satisfied')).toBeVisible();
     expect(within(satisfied).queryByText('Required value')).not.toBeInTheDocument();
+  });
+
+  it('reports a control that is only waiting on another, without asking for anything', async () => {
+    renderTab();
+
+    await screen.findByText(/Documents will not extract/);
+
+    // The row an operator was previously sent to act on: red, counted, and instructing them to
+    // "authorize this destination (controls 5-7)" when those controls already read Satisfied.
+    // Addressed by its stated reason rather than its title: "External dependency ceiling" is
+    // also a field label in the effective-policy grid further down the tab.
+    const ceiling = screen.getByText(/waiting on control 4/).closest('.MuiPaper-root') as HTMLElement;
+    expect(within(ceiling).getByText('Not reached')).toBeVisible();
+    expect(within(ceiling).queryByText('Blocking')).not.toBeInTheDocument();
+    expect(within(ceiling).queryByText('Required value')).not.toBeInTheDocument();
+    expect(within(ceiling).queryByText(/Set it in/)).not.toBeInTheDocument();
+  });
+
+  it('says a tenant with no spending ceiling is ready and still owes a decision', async () => {
+    vi.spyOn(platformApi, 'getTenantAiReadiness').mockResolvedValue(readiness({
+      ready: true,
+      firstBlockingReason: null,
+      blockingCount: 0,
+      warningCount: 1,
+      checks: [
+        check(14, 'monthly_hard_token_budget', 'Monthly token budget has headroom', {
+          status: 'Warn',
+          currentValue: 'MonthlyHardTokenLimit = (unset — no monthly ceiling: this tenant\'s AI'
+            + ' spend is unbounded)',
+          detail: 'An UNSET limit warns rather than passes.',
+        }),
+      ],
+    }));
+
+    renderTab();
+
+    // Green said "finished" over a tenant whose AI spend nobody had put a number on.
+    expect(await screen.findByText(/Documents will extract — 1 thing still to decide/)).toBeVisible();
+    const budget = row('Monthly token budget has headroom');
+    expect(within(budget).getByText('Needs a decision')).toBeVisible();
+    expect(within(budget).getByText(/spend is unbounded/)).toBeVisible();
+    expect(within(budget).queryByText('Satisfied')).not.toBeInTheDocument();
   });
 
   it('offers copy rather than retyping for the case-sensitive model comparison', async () => {
@@ -238,5 +290,78 @@ describe('extraction pre-flight', () => {
     // The operator can still act; they simply are not told what to act on.
     expect(screen.getByRole('button', { name: 'Edit policy' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Authorize provider' })).toBeVisible();
+  });
+
+  /**
+   * The refusal an operator actually met: "External processing requires redaction, privacy review,
+   * provider and model." — a red toast, on a form of twenty inputs, several of them scrolled out of
+   * sight, naming four fields without saying which. And the server checks its rules in order, so
+   * satisfying the named one only revealed the next.
+   */
+  it('names the fields external processing needs instead of refusing after the round trip', async () => {
+    const update = vi.spyOn(platformApi, 'updateTenantAiPolicy');
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    fireEvent.click(dialog.getByLabelText('External processing allowed'));
+    fireEvent.change(dialog.getByLabelText(/Change reason/), { target: { value: 'Enabling external processing' } });
+
+    // Named on the fields themselves, and once more in a line that survives being scrolled past.
+    expect(dialog.getByText('Name the provider external processing is allowed to use.')).toBeVisible();
+    expect(dialog.getByText('Name the model external processing is allowed to use.')).toBeVisible();
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Allowed provider/);
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Allowed model/);
+
+    // And the request is never sent, so the server never gets to answer with a sentence about four
+    // fields at once.
+    expect(dialog.getByRole('button', { name: 'Save policy' })).toBeDisabled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The rate fields are gone, so the refusals they generated are gone with them.
+   *
+   * Six of them were on this dialog — input and output cost per million, currency, pricing
+   * version, local compute per hour, OCR per page — retyped for every customer. None is a fact
+   * about a customer: a million deepseek-v4-pro tokens cost the same for all of them. Asking
+   * produced a tenant carrying the currency "1", which passed the API's "not empty" check,
+   * violated the database's ^[A-Z]{3}$ constraint, and came back as "An unexpected error
+   * occurred". The rate is now one setting for the deployment, and this dialog shows it.
+   */
+  it('does not ask an operator what a million tokens cost', async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    for (const gone of [
+      'External input cost / 1M', 'External output cost / 1M', 'External cost currency',
+      'External pricing version', 'Local compute cost / hour', 'OCR cost / page',
+      'Local cost currency',
+    ]) {
+      expect(dialog.queryByLabelText(gone)).not.toBeInTheDocument();
+    }
+
+    // What it rations is still asked, because that IS a per-customer commercial term.
+    expect(dialog.getByLabelText('Monthly hard token limit')).toBeVisible();
+    expect(dialog.getByLabelText('Monthly soft token limit')).toBeVisible();
+    expect(dialog.getByLabelText('Document token limit')).toBeVisible();
+  });
+
+  it('shows the rate the deployment pays, instead of asking for it', async () => {
+    renderTab();
+
+    expect(await screen.findByText('What AI costs on this deployment')).toBeVisible();
+    expect(screen.getByText(/per 1M tokens USD \(rate 2026-09\)/)).toBeVisible();
+  });
+
+  /** Zero is a kill switch wearing a budget's clothes, and the field says so where it is typed. */
+  it('refuses a zero hard limit at the field rather than at the ledger', async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit tenant AI policy' }));
+
+    fireEvent.change(dialog.getByLabelText('Monthly hard token limit'), { target: { value: '0' } });
+    expect(dialog.getByText(/refuses every document while every other control reads open/i)).toBeVisible();
   });
 });

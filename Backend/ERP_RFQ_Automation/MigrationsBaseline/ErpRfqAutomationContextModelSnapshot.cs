@@ -15232,6 +15232,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("OutcomeReasonId")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("OwnerUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("OwnerUserID");
+
                     b.Property<DateTime?>("QuoteDate")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp without time zone")
@@ -15299,6 +15303,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("DiscountTypeId");
 
+                    b.HasIndex("OwnerUserId");
+
                     b.HasIndex("StatusId");
 
                     b.HasIndex("BusinessUnitId", "ExternalQuoteReference")
@@ -15324,6 +15330,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_Quotes_BusinessUnitID_CommercialCaseID");
 
                     b.HasIndex(new[] { "BusinessUnitId", "NexoraSerial" }, "IX_Quotes_BusinessUnitID_NexoraSerial");
+
+                    b.HasIndex(new[] { "BusinessUnitId", "OwnerUserId" }, "IX_Quotes_BusinessUnitID_OwnerUserID");
 
                     b.HasIndex(new[] { "Rfqid", "CustomerId", "StatusId" }, "IX_Quotes_Helper");
 
@@ -19372,6 +19380,62 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("Status", "BillingMode");
 
                     b.ToTable("Tenants", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.DataAssets.PlatformDataBoundarySettings", b =>
+                {
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("BackupPolicyReference")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("BackupPolicyVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Basis")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ObservedHost")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("OpaqueProviderReference")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("RecordedBy")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<DateTime>("RecordedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Region")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("PlatformDataBoundarySettings", "platform", t =>
+                        {
+                            t.HasCheckConstraint("CK_PlatformDataBoundarySettings_Singleton", "\"Id\" = 1");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Platform.Notifications.PlatformEmailSettings", b =>
@@ -26054,6 +26118,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .WithMany("QuoteDiscountTypes")
                         .HasForeignKey("DiscountTypeId")
                         .HasConstraintName("FK_Quote_DiscountType");
+
+                    b.HasOne("ERP_RFQ_Automation.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerUserId")
+                        .HasConstraintName("FK_Quotes_OwnerUser");
 
                     b.HasOne("ERP_RFQ_Automation.Models.Rfq", "Rfq")
                         .WithMany("Quotes")

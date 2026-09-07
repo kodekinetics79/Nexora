@@ -27,7 +27,8 @@ namespace ERP_RFQ_Automation.Interfaces
          DateTime? startDate = null,
          DateTime? endDate = null,
          bool excludeAssigned = false,
-         bool onlyAssigned = false);
+         bool onlyAssigned = false,
+         AccountTeamScope? accessScope = null);
 
         Task<IEnumerable<UserDropdownDTO>> GetUsersForAssignmentAsync(long businessUnitId);
         Task<AcceptedLeadResponseDTO?> GetAcceptedLeadByIdAsync(long id, long businessUnitId);

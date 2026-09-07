@@ -159,11 +159,33 @@ const FolderCard: React.FC<FolderCardProps> = ({ spec, businessUnitId, canAddDoc
 
   const uploadMutation = useMutation({
     mutationFn: (formData: FormData) => leadService.uploadToFolder(formData, spec.key),
-    onSuccess: (_result, formData) => {
-      const count = formData.getAll('files').length;
+    onSuccess: (result, formData) => {
+      const sent = formData.getAll('files').length;
+      // The count the SERVER wrote, never the count the browser posted. FolderService drops a
+      // zero-byte upload, an unusable filename and a path-traversal filename and carries on, so
+      // the two numbers differ exactly when a document has gone nowhere — not into the folder,
+      // not into any table. Reporting `sent` was the bug the endpoint was changed to make
+      // impossible, and it can only be reintroduced from here.
+      const uploaded = typeof result?.uploaded === 'number' ? result.uploaded : null;
+      const skipped = typeof result?.skipped === 'number' ? result.skipped : null;
+      const nextSweep =
+        'Nothing is read until the folder is swept — press "Sweep now" above, or wait for the next automatic sweep.';
+      if (skipped !== null && skipped > 0) {
+        const placed = uploaded ?? Math.max(sent - skipped, 0);
+        enqueueSnackbar(
+          `${placed} of ${sent} document${sent === 1 ? '' : 's'} placed in the ${spec.title.toLowerCase()}. `
+          + `${skipped} could not be stored — a file was empty, or its name was rejected. Check those `
+          + `${skipped === 1 ? 'file' : 'files'} open properly, rename them if needed, and add them again. `
+          + nextSweep,
+          { variant: 'warning' },
+        );
+        return;
+      }
+      // An older backend reports neither count. The selected count is then all there is, and it
+      // is the browser's own number rather than a claim about what was written.
+      const placed = uploaded ?? sent;
       enqueueSnackbar(
-        `${count} document${count === 1 ? '' : 's'} placed in the ${spec.title.toLowerCase()}. `
-        + 'Nothing is read until the folder is swept — press "Sweep now" above, or wait for the next automatic sweep.',
+        `${placed} document${placed === 1 ? '' : 's'} placed in the ${spec.title.toLowerCase()}. ${nextSweep}`,
         { variant: 'success' },
       );
     },

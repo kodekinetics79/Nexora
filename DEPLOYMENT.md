@@ -81,7 +81,26 @@ recoverable legacy files and rewrite absolute `Attachments.FilePath` values to p
   Render deployment metadata.
 - The app URL is `https://nexora-fyjw.onrender.com`.
 
-### Data-boundary manifest (optional, but it is what stops the retyping)
+### Where this deployment keeps customer data
+
+**The console asks for this now, and it asks once.** Platform → any tenant → Activation →
+`data.residency-isolation`, or the tenant's Data & storage tab. The server reads its own database
+connection and shows what it found — on a Neon deployment that is the endpoint id and the region,
+taken from the host the process is actually connected to — and an Owner confirms it. The one thing
+no connection can reveal is how long the provider keeps backups, so that is the single question the
+screen asks, with the common answer preselected. It is recorded once for the whole deployment, in
+`platform."PlatformDataBoundarySettings"`, audited under `platform.data-boundary.record`, and every
+tenant from then on registers and verifies itself against it.
+
+Nothing below is needed for a Nexora-hosted deployment. It remains for infrastructure-as-code
+installations that would rather declare their estate with the rest of their configuration — and for
+the eight boundary types other than the database, which the console does not ask about.
+
+**What an Owner records in the console wins over configuration.** Not because it is more
+trustworthy: because it is the one an operator can correct. A wrong value in configuration cannot
+be fixed from the screen that shows it.
+
+### Data-boundary manifest (configuration path)
 
 `Platform:DataBoundaries:*` describes **this deployment's own estate**, per tenant
 data-boundary type. Provisioning reads it and registers each declared boundary against
@@ -113,6 +132,23 @@ per-type overrides: `LogicalKey`, `Classification`, `Disposition`.
 - Only `PostgreSqlTenantScope` is *verified*. The rest are *registered*, which is what
   deletion certification needs from them, and is not a claim that anything about a
   subprocessor has been checked.
+
+**Tenants provisioned before the deployment described itself.** Provisioning was the only moment
+the automation ever ran, so a tenant created before that stayed on the manual path forever. It no
+longer does: on the tenant's **Activation** tab, `data.residency-isolation` opens a dialog with no
+fields and one button, which calls
+`POST /api/platform/tenants/{id}/data-assets/apply-platform-manifest` (Owner). That registers
+the declared boundaries and verifies the PostgreSQL scope from the same live probe
+provisioning uses, under the same registry rules — a probe that disagrees refuses the whole
+action. `GET /api/platform/data-boundaries` is what the console reads to decide whether it can
+offer the button at all; declare nothing and the operator gets the manual form, now carrying
+the four key names that would end it.
+
+A tenant with **no contractual `DataRegion`** can never pass this control — the probe has
+nothing to agree with. Two things now prevent that: provisioning records the declared region
+when the wizard's Data region box is left blank (a submitted region is never overridden), and
+the button above fills an empty column from the declaration and audits it as having come from
+there. A region that is already recorded and disagrees is refused, never rewritten.
 
 ### Malware scanning posture
 
@@ -221,8 +257,36 @@ secrets, and rotate the credentials through the application before customer use.
 | `CommercialFinance__ContactVerificationSecret` | HMAC secret for trusted finance-contact verification assertions (**use a distinct secret**; ≥32 bytes) |
 | `CommercialFinance__AuditActorSecret` | HMAC secret binding authenticated actors to governed database mutations (**use a distinct secret**; ≥32 bytes) |
 | `Ollama__BaseUrl` / `Ollama__ApiKey` | AI extraction provider (until the Claude migration, ADR-0001) |
+| `Ai__RateCard__*` | **What this deployment pays for AI.** See below. Optional — without it every AI call is still governed and metered, it is simply recorded with no cost (`RateUnavailable` on the ledger row). |
 | `Cors__AllowedOrigins__0..n` | allowed frontend origins (the Vercel URL) |
 | `ASPNETCORE_ENVIRONMENT` | `Production` (set by the Dockerfile) |
+
+## What AI costs (`Ai:RateCard:*`)
+
+These six values used to be **fields on every tenant's AI policy screen**, retyped by an operator
+for each customer. None of them is a fact about a customer: a million `deepseek-v4-pro` tokens cost
+the same at `https://ollama.com` whoever is being billed, and the cost of an OCR page is a property
+of the hardware. Asking produced a tenant carrying `ExternalCostCurrency = "1"` — which passed the
+API's "not empty" check, violated the database's `^[A-Z]{3}$` constraint, and reached the operator
+as *"An unexpected error occurred"*.
+
+They now live here, beside `Ollama__BaseUrl`, which names the endpoint whose prices they are.
+
+| Key (env form) | Example | Purpose |
+|---|---|---|
+| `Ai__RateCard__ExternalInputCostPerMillionTokens` | `0.27` | Priced against input tokens at settle time |
+| `Ai__RateCard__ExternalOutputCostPerMillionTokens` | `1.10` | Priced against output tokens |
+| `Ai__RateCard__Currency` | `USD` | **Exactly three uppercase letters** — the database enforces `^[A-Z]{3}$` |
+| `Ai__RateCard__PricingVersion` | `ollama-2026-09` | Stamped on every priced ledger row, so a cost can be traced to the rate that produced it after the rate moves on |
+| `Ai__RateCard__LocalComputeCostPerHour` | `1.85` | Optional; local inference |
+| `Ai__RateCard__OcrCostPerPage` | `0.004` | Optional; OCR |
+
+**All four external values or none.** Half a rate card prices nothing: the ledger writes
+`RateUnavailable` and says so, rather than inventing a partial number. The tenant's AI governance
+tab shows the resulting rate read-only — it never asks for it.
+
+**What stays per tenant:** the monthly soft and hard token limits and the per-document token limit.
+Those ration what a customer may spend, which *is* a commercial term agreed per customer.
 
 ## Security reminders before a real pilot
 - **Rotate** the 3 original secrets (old SQL `sa` / JWT / Ollama) — `SECURITY.md`.

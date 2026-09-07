@@ -13,6 +13,7 @@
  */
 
 export type QueueKey =
+  | 'mail-to-rescue'
   | 'documents-to-check'
   | 'leads-to-own'
   | 'leads-to-decide'
@@ -45,6 +46,25 @@ export interface QueueDefinition {
 export const INBOX_PREVIEW_ROWS = 5;
 
 export const INBOX_QUEUES: readonly QueueDefinition[] = [
+  {
+    // FIRST, because it is the first thing that happens: mail arrives. Everything below this is
+    // work that already became something, and a message that stopped never did — it has no lead,
+    // so `documents-to-check` (GET /api/Lead/needs-review) cannot show it and neither could any
+    // other queue here. Until this existed the landing screen said "You are clear." over stranded
+    // inbound mail, and the only screen that would have shown it is one the reader had just been
+    // told there was no reason to open.
+    key: 'mail-to-rescue',
+    title: 'Mail that needs a person',
+    purpose: 'These messages arrived and produced no inquiry. Nothing moves them until somebody looks.',
+    moduleName: 'Leads',
+    seeAllPath: '/procurement/leads/inbound-mail',
+    seeAllLabel: 'Open inbound mail',
+    emptyTitle: 'No message is waiting on a person',
+    emptyMessage:
+      'Every message the mailbox has taken either became an inquiry, joined one that already existed, or was decided and closed. A message appears here only if it stops.',
+    emptyAction: { label: 'See inbound mail', path: '/procurement/leads/inbound-mail', moduleName: 'Leads' },
+    errorFallback: 'Inbound mail could not be loaded. No empty result has been assumed — try again.',
+  },
   {
     key: 'documents-to-check',
     title: 'Documents to check',

@@ -3,6 +3,11 @@ import platformHttp from './platformHttp';
 import { BILLING_MODES, TENANT_DEPLOYMENT_PROFILES } from '../types';
 import type { EmailProviderCapability, MailConnectionTestResult } from '../../email/types';
 import type {
+  ApplyPlatformDataBoundariesResult,
+  DatabaseSelfObservation,
+  PlatformDataBoundary,
+  PlatformDataBoundaryManifest,
+  RecordPlatformDataBoundaryInput,
   AuditEntry,
   AiExtractionReadinessReport,
   AiProviderAuthorization,
@@ -214,6 +219,18 @@ export interface PlatformApi {
   markTenantPastDue(id: string, reason: string): Promise<Tenant>;
   resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
+  /**
+   * What this DEPLOYMENT declares its own infrastructure to be — and, when nobody has declared
+   * anything, what the running server read off its own database connection.
+   */
+  getPlatformDataBoundaries(): Promise<PlatformDataBoundaryManifest>;
+  /** Records it once for the whole platform. Owner-only and audited on the server. */
+  recordPlatformDataBoundary(input: RecordPlatformDataBoundaryInput): Promise<PlatformDataBoundaryManifest>;
+  /**
+   * Registers and verifies the tenant's boundaries from that declaration, with a live probe of the
+   * running database. No body: nothing in it is an operator's decision.
+   */
+  applyPlatformDataBoundaries(tenantId: string): Promise<ApplyPlatformDataBoundariesResult>;
   getTenantActivationDataDecision(tenantId: string): Promise<TenantActivationDataDecision>;
   registerTenantDataAsset(tenantId: string, input: RegisterTenantDataAssetInput): Promise<TenantDataAsset>;
   verifyTenantDataAsset(
@@ -725,6 +742,12 @@ export const toProvisionRequestBody = (input: ProvisionTenantInput): ProvisionTe
   timeZoneId: orNull(input.timeZoneId),
   locale: orNull(input.locale),
   dataRegion: orNull(input.dataRegion),
+  // Omitted entirely on the ordinary path. PRODUCTION is the server's default and sending it
+  // explicitly would put a profile decision in the audit record of every routine tenant.
+  deploymentProfile: input.deploymentProfile === null || input.deploymentProfile === 'PRODUCTION'
+    ? null : input.deploymentProfile,
+  deploymentProfileReason: input.deploymentProfile === null || input.deploymentProfile === 'PRODUCTION'
+    ? null : orNull(input.deploymentProfileReason),
 
   planId: input.planId == null ? null : Number(input.planId),
   billingMode: input.billingMode,
@@ -789,6 +812,40 @@ const normalizeTenantDataAsset = (wire: WireRecord): TenantDataAsset => ({
   id: asId(wire.id as string | number),
   tenantId: asId(wire.tenantId as string | number),
   verifiedBusinessUnitId: asIdOrNull(wire.verifiedBusinessUnitId as string | number | null),
+});
+
+/**
+ * Every field the console reads is defaulted here, including the ones a NEWER console expects and
+ * an OLDER server does not send.
+ *
+ * <p>Vercel and Render deploy independently, and the frontend is the faster of the two: for the
+ * minutes between a merge and the backend restarting, a new console is talking to the previous
+ * API. When `observation` arrived, the panel read `manifest.observation.isUsable` straight off the
+ * payload, the old server did not send it, and the whole Activation tab went to the error boundary
+ * — an operator saw "Something went wrong" on the screen whose entire job is to explain what is
+ * wrong. A field a deployed server might not send is an optional field, whatever the type says, so
+ * the shape is completed once here rather than guarded at each of the places that read it.</p>
+ */
+const normalizePlatformDataBoundaryManifest = (wire: WireRecord): PlatformDataBoundaryManifest => ({
+  ...(wire as unknown as PlatformDataBoundaryManifest),
+  boundaries: (wire.boundaries as PlatformDataBoundary[]) ?? [],
+  defects: (wire.defects as { assetType: string; reason: string }[]) ?? [],
+  source: (wire.source as PlatformDataBoundaryManifest['source'])
+    ?? (wire.configured ? 'configuration' : 'none'),
+  observation: (wire.observation as DatabaseSelfObservation) ?? {
+    host: null,
+    providerName: null,
+    opaqueProviderReference: null,
+    region: null,
+    // Said plainly, because it is true and it is temporary: this server has not been asked, and
+    // the operator's next move is to wait a minute rather than to start typing.
+    basis: 'This deployment has not been asked what its own database is — the server is running a '
+      + 'version that predates the question. Reload in a minute, or record it by hand below.',
+    isUsable: false,
+  },
+  recordedBy: (wire.recordedBy as string | null) ?? null,
+  recordedOn: (wire.recordedOn as string | null) ?? null,
+  recordedBasis: (wire.recordedBasis as string | null) ?? null,
 });
 
 const normalizeTenantActivationDataDecision = (wire: WireRecord): TenantActivationDataDecision => ({
@@ -1133,6 +1190,33 @@ const httpPlatformApi: PlatformApi = {
   listTenantDataAssets: async (tenantId) =>
     (await platformHttp.get<WireRecord[]>(`/api/platform/tenants/${tenantId}/data-assets`))
       .data.map(normalizeTenantDataAsset),
+  getPlatformDataBoundaries: async () =>
+    normalizePlatformDataBoundaryManifest(
+      (await platformHttp.get<WireRecord>('/api/platform/data-boundaries')).data,
+    ),
+  recordPlatformDataBoundary: async (input) =>
+    normalizePlatformDataBoundaryManifest(
+      (await platformHttp.put<WireRecord>('/api/platform/data-boundaries', {
+        // Sent as null rather than omitted so "use what you observed" is an explicit statement on
+        // the wire, not the absence of one.
+        opaqueProviderReference: input.opaqueProviderReference ?? null,
+        region: input.region ?? null,
+        backupPolicyReference: input.backupPolicyReference,
+        backupPolicyVersion: input.backupPolicyVersion,
+        reason: input.reason ?? null,
+      })).data,
+    ),
+  applyPlatformDataBoundaries: async (tenantId) => {
+    const wire = (await platformHttp.post<WireRecord>(
+      `/api/platform/tenants/${tenantId}/data-assets/apply-platform-manifest`,
+    )).data;
+    return {
+      ...(wire as unknown as ApplyPlatformDataBoundariesResult),
+      registeredLogicalKeys: (wire.registeredLogicalKeys as string[]) ?? [],
+      alreadyRegisteredLogicalKeys: (wire.alreadyRegisteredLogicalKeys as string[]) ?? [],
+      decision: normalizeTenantActivationDataDecision(wire.decision as WireRecord),
+    };
+  },
   getTenantActivationDataDecision: async (tenantId) =>
     normalizeTenantActivationDataDecision(
       (await platformHttp.get<WireRecord>(

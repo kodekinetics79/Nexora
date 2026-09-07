@@ -477,10 +477,8 @@ public sealed class AiGovernanceServiceTests
                         AllowedPurposes = AiPurposes.RfqExtraction,
                         MonthlyHardTokenLimit = hardLimit,
                         MaxTokensPerDocument = maxTokensPerDocument,
-                        ExternalInputCostPerMillionTokens = externalInputRate,
-                        ExternalOutputCostPerMillionTokens = externalOutputRate,
-                        ExternalCostCurrency = externalInputRate.HasValue ? "USD" : null,
-                        ExternalPricingVersion = externalInputRate.HasValue ? "test-rate-v1" : null,
+                        // No rates here any more. What a million tokens cost is a property of the
+                        // endpoint this deployment calls, not of the tenant being billed.
                         UpdatedOn = DateTime.UtcNow,
                         UpdatedBy = "test"
                     });
@@ -510,11 +508,24 @@ public sealed class AiGovernanceServiceTests
             var trust = new AiExternalProviderTrustService(
                 _trustDb, tenantContext, resolver, new NoopLogger<AiExternalProviderTrustService>());
 
+            // The deployment's rate card, supplied the way production supplies it: configuration,
+            // beside the two keys that name the endpoint whose prices these are.
+            var rateCard = new AiRateCardProvider(
+                new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Ai:RateCard:ExternalInputCostPerMillionTokens"] = externalInputRate?.ToString(),
+                    ["Ai:RateCard:ExternalOutputCostPerMillionTokens"] = externalOutputRate?.ToString(),
+                    ["Ai:RateCard:Currency"] = externalInputRate.HasValue ? "USD" : null,
+                    ["Ai:RateCard:PricingVersion"] = externalInputRate.HasValue ? "test-rate-v1" : null
+                }).Build());
+
             Service = new AiGovernanceService(
                 ScopeFactory,
                 tenantScope,
                 _provider.GetRequiredService<ITenantContext>(),
-                trust);
+                trust,
+                metrics: null,
+                rateCard: rateCard);
         }
 
         /// <summary>The agent's Claude destination, as the resolver names it.</summary>

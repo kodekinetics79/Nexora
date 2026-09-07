@@ -639,6 +639,18 @@ export interface ReprocessTriageResult {
   batchId: string | null;
   /** True when the idempotency key matched an earlier call and nothing new was queued. */
   replayed: boolean | null;
+  /**
+   * How much extraction work the override actually resolved to, counting components an identical
+   * earlier request had already queued.
+   *
+   * ZERO IS A REAL ANSWER AND A 200 CARRIES IT: capture re-read the stored original, found
+   * nothing extractable, and the server moved the ingest to the terminal ParseStatus
+   * "Failed - nothing to extract". Nothing is queued and no worker will touch the message, so a
+   * screen that reads only the HTTP status tells the operator their deal was recovered when it
+   * was not. Null when the deployment does not report the count — which is not zero, and must
+   * not be rendered as one.
+   */
+  enqueued: number | null;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -846,13 +858,14 @@ export const readTriagePage = (payload: unknown, requestedPage: number): EmailTr
   };
 };
 
-const readReprocessResult = (payload: unknown): ReprocessTriageResult => {
+export const readReprocessResult = (payload: unknown): ReprocessTriageResult => {
   const root = isRecord(payload) ? payload : {};
   return {
     id: asCount(root.id) ?? asCount(root.emailIngestId),
     status: asText(root.status) ?? asText(root.parseStatus),
     batchId: asText(root.batchId) ?? asText(root.linkedBatchId),
     replayed: asFlag(root.replayed) ?? asFlag(root.idempotentReplay),
+    enqueued: asCount(root.enqueued) ?? asCount(root.scheduled),
   };
 };
 

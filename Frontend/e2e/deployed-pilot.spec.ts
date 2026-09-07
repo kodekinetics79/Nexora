@@ -44,10 +44,30 @@ for (const role of ['manager', 'editor', 'denied']) {
     // Reuse this test account's own HTTP credentials in memory only, never in artifacts.
     const authorization = (await response.request().allHeaders()).authorization;
     expect(Boolean(authorization)).toBe(true);
-    const deniedUsers = await context.request.get(`${contract.apiURL}/api/User?pageNumber=1&pageSize=1`, {
+    // Reading the user list is NOT a uniform denial, and asserting that it was is what made this
+    // lane fail on its first real run. TenantBaselineCatalog grants SALES_MANAGER `Read("Users")`
+    // deliberately -- view only, no create/edit/delete -- because assigning a lead from the grid
+    // is a name-picker over that list, and a manager who cannot see names cannot route work. The
+    // rows are still tenant-scoped by RLS, so this is "the manager sees their own desk", not the
+    // platform's users.
+    //
+    // What must stay true for every persona is that reading a name never becomes authority over
+    // the person, so the manager is held to the write boundary instead of the read one.
+    const usersRead = await context.request.get(`${contract.apiURL}/api/User?pageNumber=1&pageSize=1`, {
       headers: { Authorization: authorization }, maxRedirects: 0,
     });
-    expect(deniedUsers.status()).toBe(403);
+    expect(usersRead.status()).toBe(persona.role === 'manager' ? 200 : 403);
+
+    if (persona.role === 'manager') {
+      // The grant is read-only; prove the absent half rather than trusting the catalogue. A POST
+      // is refused before it can create anything, so this asserts the boundary without writing.
+      const usersWrite = await context.request.post(`${contract.apiURL}/api/User`, {
+        headers: { Authorization: authorization }, maxRedirects: 0,
+        data: {},
+      });
+      expect(usersWrite.status(), 'a Sales Manager may read the user list but never write to it')
+        .toBe(403);
+    }
 
     if (persona.role !== 'denied') {
       for (const destination of ['/procurement/leads/all', '/sales/quotes', '/sales/today']) {

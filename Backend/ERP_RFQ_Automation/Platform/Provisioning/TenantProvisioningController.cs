@@ -83,6 +83,16 @@ public class TenantProvisioningController : ControllerBase
             return StatusCode(StatusCodes.Status403Forbidden,
                 new { error = PlatformCommercialAuthority.DescribeRefusal(levers) });
 
+        // Same shape, same reason: this door is TenantAdmin and the profile decides which
+        // production prerequisites may be deferred, which is Owner authority everywhere else.
+        PlatformDeploymentProfileAuthority.Validate(
+            request.Tenant?.DeploymentProfile, request.Tenant?.DeploymentProfileReason, User,
+            out var profileRefusal, out var profileForbidden);
+        if (profileRefusal is not null)
+            return profileForbidden
+                ? StatusCode(StatusCodes.Status403Forbidden, new { error = profileRefusal })
+                : BadRequest(new { error = profileRefusal });
+
         // The header wins where both are present. A client library that sets it automatically is
         // the more reliable source than a field a caller had to remember to populate.
         var key = Request.Headers.TryGetValue(IdempotencyKeyHeader, out var header)

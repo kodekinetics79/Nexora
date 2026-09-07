@@ -251,7 +251,7 @@ public sealed class LeadAssignmentSurfaceTests
         };
 
     private static UnAssignedLeadController UnassignedLeads(ErpRfqAutomationContext context, long tenant) =>
-        new(new LeadRepository(context), RoutingService(context))
+        new(new LeadRepository(context), RoutingService(context), new PermitCommercialAccessContext(tenant))
         {
             ControllerContext = new ControllerContext
             {

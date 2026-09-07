@@ -35,6 +35,7 @@ public class TenantsController : ControllerBase
     private readonly Onboarding.ITenantAdminInvitationService _invitations;
     private readonly Entitlements.ITenantAccessService? _tenantAccess;
     private readonly ITenantActivationPolicyService? _activationPolicy;
+    private readonly DataAssets.IPlatformDataBoundaryManifest? _dataBoundaries;
 
     /// <summary>
     /// <paramref name="baseline"/> and <paramref name="invitations"/> are REQUIRED dependencies,
@@ -50,7 +51,8 @@ public class TenantsController : ControllerBase
         ITenantBaselineSeeder baseline,
         Onboarding.ITenantAdminInvitationService invitations,
         Entitlements.ITenantAccessService? tenantAccess = null,
-        ITenantActivationPolicyService? activationPolicy = null)
+        ITenantActivationPolicyService? activationPolicy = null,
+        DataAssets.IPlatformDataBoundaryManifest? dataBoundaries = null)
     {
         _context = context;
         _audit = audit;
@@ -61,6 +63,7 @@ public class TenantsController : ControllerBase
         _invitations = invitations;
         _tenantAccess = tenantAccess;
         _activationPolicy = activationPolicy;
+        _dataBoundaries = dataBoundaries;
     }
 
     // GET /api/platform/tenants
@@ -475,6 +478,16 @@ public class TenantsController : ControllerBase
             return StatusCode(StatusCodes.Status403Forbidden,
                 new { error = Auth.PlatformCommercialAuthority.DescribeRefusal(levers) });
 
+        // Same rule as the durable door. A profile is the one lever that lets a tenant activate
+        // with production prerequisites outstanding, and this endpoint is support-level.
+        var deploymentProfile = Auth.PlatformDeploymentProfileAuthority.Validate(
+            request.DeploymentProfile, request.DeploymentProfileReason, User,
+            out var profileRefusal, out var profileForbidden);
+        if (profileRefusal is not null)
+            return profileForbidden
+                ? StatusCode(StatusCodes.Status403Forbidden, new { error = profileRefusal })
+                : BadRequest(new { error = profileRefusal });
+
         if (ValidateCompanyProfile(request) is string profileError)
             return BadRequest(new { error = profileError });
 
@@ -632,7 +645,24 @@ public class TenantsController : ControllerBase
                     BaseCurrencyCode = Normalize(request.BaseCurrencyCode)?.ToUpperInvariant(),
                     TimeZoneId = Normalize(request.TimeZoneId),
                     Locale = Normalize(request.Locale),
-                    DataRegion = Normalize(request.DataRegion),
+                    // Blank means "wherever this deployment puts tenants". A blank column is fatal:
+                    // data.residency-isolation reads its presence and the scope probe has nothing
+                    // to agree with, so a tenant created without one can never be activated. A
+                    // submitted region is never overridden, and a deployment that declares nothing
+                    // still records exactly what was typed, including nothing.
+                    DataRegion = Normalize(request.DataRegion)
+                                 ?? _dataBoundaries?.For(DataAssets.TenantDataAssetTypes.PostgreSqlTenantScope)?.Region,
+
+                    // Approved by whoever submitted it, at this instant, for the stated reason —
+                    // all three, because DeploymentProfilePolicy.IsApproved requires all three and
+                    // a non-production profile missing any of them defers nothing.
+                    DeploymentProfile = deploymentProfile,
+                    DeploymentProfileReason = deploymentProfile == TenantDeploymentProfile.Production
+                        ? null : Normalize(request.DeploymentProfileReason),
+                    DeploymentProfileApprovedBy = deploymentProfile == TenantDeploymentProfile.Production
+                        ? null : actor,
+                    DeploymentProfileApprovedOn = deploymentProfile == TenantDeploymentProfile.Production
+                        ? null : DateTime.UtcNow,
 
                     BillingMode = billingMode,
                     BillingModeReason = Normalize(request.BillingModeReason),
@@ -1115,7 +1145,11 @@ public class TenantsController : ControllerBase
         var tenantDb = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var policy = await tenantDb.AiProcessingPolicies.AsNoTracking()
             .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
-        return policy is null ? NotFound() : Ok(ToAiPolicyDto(policy));
+        if (policy is null) return NotFound();
+        var dto = ToAiPolicyDto(policy);
+        dto.DeploymentRateSummary = DescribeRateCard(
+            scope.ServiceProvider.GetRequiredService<IAiRateCardProvider>().Current);
+        return Ok(dto);
     }
 
     [HttpPut("{id:long}/ai-policy")]
@@ -1128,6 +1162,16 @@ public class TenantsController : ControllerBase
         if (request.MonthlySoftTokenLimit is < 0 || request.MonthlyHardTokenLimit is < 0
             || request.MonthlySoftTokenLimit is { } soft && request.MonthlyHardTokenLimit is { } hard && soft > hard)
             return BadRequest(new { error = "Token limits must be non-negative and soft cannot exceed hard." });
+        // Zero is not a budget, it is a silent kill switch. Every control on the readiness
+        // report reads open and the token ledger then refuses every single document with
+        // hard_budget_exceeded — which triages as a broken extractor, not as a setting. A
+        // tenant that should not use AI is IsEnabled = false, which says so on every screen.
+        if (request.MonthlyHardTokenLimit is 0)
+            return BadRequest(new
+            {
+                error = "A monthly hard token limit of 0 refuses every document while every other "
+                    + "control reads open. Leave it unset for no ceiling, or disable AI processing."
+            });
         if (request.MaxTokensPerDocument is <= 0 || request.ExternalDependencyCeilingPercent is < 0 or > 10
             || request.RetentionDays is < 1 or > 3650
             || string.IsNullOrWhiteSpace(request.AllowedDataClassifications)
@@ -1137,17 +1181,6 @@ public class TenantsController : ControllerBase
         if (request.ExternalProcessingAllowed && (!request.RedactionRequired || !request.PrivacyReviewRequired
             || string.IsNullOrWhiteSpace(request.AllowedProvider) || string.IsNullOrWhiteSpace(request.AllowedModel)))
             return BadRequest(new { error = "External processing requires redaction, privacy review, provider and model." });
-        if ((request.ExternalInputCostPerMillionTokens.HasValue || request.ExternalOutputCostPerMillionTokens.HasValue)
-            && (request.ExternalInputCostPerMillionTokens is null or < 0
-                || request.ExternalOutputCostPerMillionTokens is null or < 0
-                || string.IsNullOrWhiteSpace(request.ExternalCostCurrency)
-                || string.IsNullOrWhiteSpace(request.ExternalPricingVersion)))
-            return BadRequest(new { error = "External rates require input/output rates, currency and pricing version." });
-        if ((request.LocalComputeCostPerHour.HasValue || request.OcrCostPerPage.HasValue)
-            && (request.LocalComputeCostPerHour is null or < 0 || request.OcrCostPerPage is null or < 0
-                || string.IsNullOrWhiteSpace(request.LocalCostCurrency)))
-            return BadRequest(new { error = "Local rates require compute/OCR rates and currency." });
-
         var allowedPurposeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent };
         var purposes = (request.AllowedPurposes ?? [])
@@ -1185,10 +1218,12 @@ public class TenantsController : ControllerBase
         policy.MonthlySoftTokenLimit = request.MonthlySoftTokenLimit;
         policy.MonthlyHardTokenLimit = request.MonthlyHardTokenLimit;
         policy.MaxTokensPerDocument = request.MaxTokensPerDocument;
-        policy.ExternalInputCostPerMillionTokens = request.ExternalInputCostPerMillionTokens;
-        policy.ExternalOutputCostPerMillionTokens = request.ExternalOutputCostPerMillionTokens;
-        policy.ExternalCostCurrency = Normalize(request.ExternalCostCurrency)?.ToUpperInvariant();
-        policy.ExternalPricingVersion = Normalize(request.ExternalPricingVersion);
+        // What AI costs is NOT a tenant setting. It is one rate card for the deployment
+        // (Ai:RateCard, beside Ollama:BaseUrl, which names the endpoint whose prices they are),
+        // read by the token ledger at settle time. These six columns are left where they are and
+        // no longer written: they were retyped for every customer until one of them held the
+        // currency "1", which passed this endpoint's "not empty" check, violated the database's
+        // ^[A-Z]{3}$ constraint, and reached the operator as "An unexpected error occurred".
         policy.ExternalDependencyCeilingPercent = request.ExternalDependencyCeilingPercent;
         policy.RedactionRequired = request.RedactionRequired;
         policy.AllowedDataClassifications = request.AllowedDataClassifications.Trim();
@@ -1197,9 +1232,6 @@ public class TenantsController : ControllerBase
         policy.RetentionDays = request.RetentionDays;
         policy.InputOutputAuditAllowed = request.InputOutputAuditAllowed;
         policy.PrivacyReviewRequired = request.PrivacyReviewRequired;
-        policy.LocalComputeCostPerHour = request.LocalComputeCostPerHour;
-        policy.OcrCostPerPage = request.OcrCostPerPage;
-        policy.LocalCostCurrency = Normalize(request.LocalCostCurrency)?.ToUpperInvariant();
         policy.Version++;
         policy.UpdatedOn = DateTime.UtcNow;
         policy.UpdatedBy = User.FindFirst("email")?.Value ?? "platform";
@@ -1766,6 +1798,25 @@ public class TenantsController : ControllerBase
         DeploymentProfileApprovedBy = t.DeploymentProfileApprovedBy,
         DeploymentProfileApprovedOn = t.DeploymentProfileApprovedOn
     };
+
+    /// <summary>
+    /// The deployment's rate card as one readable sentence. An unpriced deployment says so plainly
+    /// rather than showing blanks an operator would try to fill in — which is how six cost fields
+    /// ended up being typed per tenant in the first place.
+    /// </summary>
+    private static string DescribeRateCard(AiRateCard card)
+    {
+        if (!card.CanPriceExternal)
+            return "No rate card is configured for this deployment, so AI calls are recorded "
+                + "without a cost. Set Ai:RateCard in the service configuration.";
+
+        var local = card.LocalComputeCostPerHour is { } compute && card.OcrCostPerPage is { } ocr
+            ? $"; local {compute} per compute-hour and {ocr} per OCR page"
+            : string.Empty;
+        return $"{card.ExternalInputCostPerMillionTokens} in / "
+            + $"{card.ExternalOutputCostPerMillionTokens} out per 1M tokens {card.Currency} "
+            + $"(rate {card.PricingVersion}){local}. Set for the whole deployment, not per tenant.";
+    }
 
     private static TenantAiPolicyDto ToAiPolicyDto(AiProcessingPolicy p) => new()
     {

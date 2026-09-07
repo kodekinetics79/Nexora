@@ -300,3 +300,53 @@ describe('draft save and resume', () => {
     expect(sparse.adminActivation).toBe('invite');
   });
 });
+
+describe('what the workspace is for', () => {
+  /**
+   * Every tenant used to be born PRODUCTION and a test workspace had to be walked back through a
+   * separate Owner screen afterwards. Saying so at creation is the same decision at the moment the
+   * operator knows the answer — and it carries the same evidence requirement, which the form has
+   * to enforce rather than let the server discover on submit.
+   */
+  it('defaults to the profile that defers nothing', () => {
+    expect(emptyDraft().deploymentProfile).toBe('PRODUCTION');
+    expect(validateStep(STEP_COMMERCIAL, fullDraft())).toEqual({});
+  });
+
+  it('demands a written approval for a non-production workspace', () => {
+    const errors = validateStep(STEP_COMMERCIAL, fullDraft({ deploymentProfile: 'DEMO' }));
+    expect(errors.deploymentProfileReason).toMatch(/at least 15 characters/);
+  });
+
+  it('rejects an approval too short to mean anything', () => {
+    const errors = validateStep(STEP_COMMERCIAL, fullDraft({
+      deploymentProfile: 'LOCAL_TEST', deploymentProfileReason: 'testing',
+    }));
+    expect(errors.deploymentProfileReason).toBeDefined();
+  });
+
+  it('sends no profile at all on the ordinary path', () => {
+    // Not "PRODUCTION": that is the server's default, and stating it would put a profile decision
+    // in the audit record of every routine tenant.
+    const body = toProvisionRequestBody(toProvisionInput(fullDraft()));
+    expect(body.deploymentProfile).toBeNull();
+    expect(body.deploymentProfileReason).toBeNull();
+  });
+
+  it('carries the profile and its approval when one was chosen', () => {
+    const body = toProvisionRequestBody(toProvisionInput(fullDraft({
+      deploymentProfile: 'DEMO',
+      deploymentProfileReason: 'Sales demonstration workspace, no customer data',
+    })));
+    expect(body.deploymentProfile).toBe('DEMO');
+    expect(body.deploymentProfileReason).toBe('Sales demonstration workspace, no customer data');
+  });
+
+  it('drops an approval left behind by an abandoned selection', () => {
+    const body = toProvisionRequestBody(toProvisionInput(fullDraft({
+      deploymentProfile: 'PRODUCTION',
+      deploymentProfileReason: 'Sales demonstration workspace, no customer data',
+    })));
+    expect(body.deploymentProfileReason).toBeNull();
+  });
+});

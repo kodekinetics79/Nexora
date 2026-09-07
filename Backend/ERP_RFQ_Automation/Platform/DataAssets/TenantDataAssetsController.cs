@@ -10,6 +10,7 @@ namespace ERP_RFQ_Automation.Platform.DataAssets;
 [Authorize(Policy = PlatformPolicies.Owner)]
 public sealed class TenantDataAssetsController(
     TenantDataAssetRegistryService registry,
+    IPlatformDataBoundaryApplier applier,
     ILogger<TenantDataAssetsController> logger) : ControllerBase
 {
     [HttpGet]
@@ -25,6 +26,20 @@ public sealed class TenantDataAssetsController(
     public Task<ActionResult<TenantDataAssetDto>> Verify(
         long tenantId, long assetId, [FromBody] VerifyTenantDataAssetRequest request, CancellationToken ct) =>
         Execute(() => registry.VerifyAsync(tenantId, assetId, request, User, HttpContext, ct));
+
+    /// <summary>
+    /// Registers and verifies this tenant's data boundaries from what the DEPLOYMENT declares about
+    /// its own infrastructure, instead of asking an operator to retype it.
+    ///
+    /// <para>No request body: there is nothing here for a human to decide. The provider reference,
+    /// region and backup policy come from <c>Platform:DataBoundaries</c>, the verification comes
+    /// from a live probe of the running database, and a deployment that has declared nothing gets a
+    /// 400 naming the keys it has to set rather than an invented answer.</para>
+    /// </summary>
+    [HttpPost("apply-platform-manifest")]
+    public Task<ActionResult<ApplyPlatformDataBoundariesResult>> ApplyPlatformManifest(
+        long tenantId, CancellationToken ct) =>
+        Execute(() => applier.ApplyAsync(tenantId, User, HttpContext, ct));
 
     [HttpGet("activation-data-decision")]
     public Task<ActionResult<TenantActivationDataDecisionDto>> ActivationDataDecision(

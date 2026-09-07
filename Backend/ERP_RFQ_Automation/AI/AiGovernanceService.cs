@@ -167,7 +167,8 @@ public sealed class AiGovernanceService : IAiGovernanceService
         ITenantScopeAccessor tenantScope,
         ITenantContext tenantContext,
         IAiExternalProviderTrust externalProviderTrust,
-        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null,
+        IAiRateCardProvider? rateCard = null)
     {
         _scopeFactory = scopeFactory;
         _tenantScope = tenantScope;
@@ -175,7 +176,13 @@ public sealed class AiGovernanceService : IAiGovernanceService
         _externalProviderTrust = externalProviderTrust
             ?? throw new ArgumentNullException(nameof(externalProviderTrust));
         _metrics = metrics;
+        // Optional, like metrics and for the same reason: a rate is an OBSERVATION of a call, never
+        // a control over it. A deployment with no rate card prices nothing and says RateUnavailable
+        // on the row; it must never be able to change whether a call is allowed.
+        _rateCard = rateCard?.Current ?? AiRateCard.Empty;
     }
+
+    private readonly AiRateCard _rateCard;
 
     public async Task<AiReservation> ReserveAsync(
         AiCallContext context, string provider, string model, string input,
@@ -498,20 +505,19 @@ public sealed class AiGovernanceService : IAiGovernanceService
 
             if (request.ProviderClass == AiProviderClass.External)
             {
-                var policy = await db.AiProcessingPolicies.SingleAsync(
-                    x => x.BusinessUnitId == reservation.BusinessUnitId, ct);
-                if (policy.ExternalInputCostPerMillionTokens.HasValue
-                    && policy.ExternalOutputCostPerMillionTokens.HasValue
-                    && !string.IsNullOrWhiteSpace(policy.ExternalCostCurrency)
-                    && !string.IsNullOrWhiteSpace(policy.ExternalPricingVersion))
+                // The DEPLOYMENT's rate card, not the tenant's. What a million tokens cost at the
+                // endpoint this installation calls is the same number for every tenant on it, and
+                // the six per-tenant fields that used to hold it were retyped per customer until
+                // one of them held the currency "1".
+                if (_rateCard.CanPriceExternal)
                 {
                     request.EstimatedCost = decimal.Round(
-                        (Math.Max(0, inputTokens) * policy.ExternalInputCostPerMillionTokens.Value
-                         + Math.Max(0, outputTokens) * policy.ExternalOutputCostPerMillionTokens.Value) / 1_000_000m,
+                        (Math.Max(0, inputTokens) * _rateCard.ExternalInputCostPerMillionTokens!.Value
+                         + Math.Max(0, outputTokens) * _rateCard.ExternalOutputCostPerMillionTokens!.Value) / 1_000_000m,
                         6, MidpointRounding.AwayFromZero);
-                    request.CostCurrency = policy.ExternalCostCurrency.Trim().ToUpperInvariant();
+                    request.CostCurrency = _rateCard.Currency;
                     request.CostStatus = AiCostStatuses.EstimatedConfiguredRate;
-                    request.CostPricingVersion = policy.ExternalPricingVersion;
+                    request.CostPricingVersion = _rateCard.PricingVersion;
                 }
                 else
                 {

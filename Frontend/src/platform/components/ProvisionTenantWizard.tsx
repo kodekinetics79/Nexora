@@ -47,6 +47,7 @@ import Stack from './Flex';
 import { platformApi, toProvisionRequestBody } from '../api/client';
 import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import { BILLING_MODES } from '../types';
 import type { BillingMode, SubmitProvisioningResult } from '../types';
 import {
@@ -118,6 +119,17 @@ interface Props {
   onSubmitted: (result: SubmitProvisioningResult) => void;
 }
 
+/**
+ * One sentence per profile, in the operator's terms rather than the policy's. The words that
+ * matter are "deferred" and "cannot be certified": a profile is not a label on a workspace, it is
+ * a statement about which gates that workspace answers to.
+ */
+const PROFILE_HELP: Record<string, string> = {
+  PRODUCTION: 'Every activation control is a hard gate and nothing is deferrable.',
+  DEMO: 'Prerequisites belonging to a customer that does not exist — their storage, their identity provider, a tax authority — may be deferred. The workspace can be switched on; it can never be certified production-ready.',
+  LOCAL_TEST: 'Same deferrals as Demo, for an internal workspace nobody is being sold. Never certifiable.',
+};
+
 export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Props) {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -186,6 +198,18 @@ export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Pr
     queryFn: () => platformApi.listProvisioningDrafts(),
     enabled: open,
   });
+
+  const permissions = usePlatformPermissions();
+
+  // Only so the Data region box can say what leaving it blank will actually record. The field is
+  // free text an operator has no way to answer correctly, and a blank one used to produce a tenant
+  // that could never be activated — the residency control reads the column's presence.
+  const { data: boundaries } = useQuery({
+    queryKey: platformKeys.platformDataBoundaries(),
+    queryFn: () => platformApi.getPlatformDataBoundaries(),
+    enabled: open,
+  });
+  const declaredRegion = boundaries?.primaryPostgreSqlScope?.region ?? null;
 
   // Asked as the operator types, because the address is only free to change now: after
   // provisioning it is permanent on the business unit code and every reference derived
@@ -769,8 +793,61 @@ export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Pr
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 6 }}>
-                <TextField {...field('dataRegion', 'Data region', { helper: 'Where this tenant’s data is stored, if the deployment is regionalised.' })} />
+                <TextField
+                  {...field('dataRegion', 'Data region', {
+                    helper: declaredRegion
+                      ? `Leave blank and this tenant is recorded in ${declaredRegion}, the region this deployment declares for its own database. Fill it in only for a contract that says somewhere else — the server refuses a region its data boundary cannot match.`
+                      : 'Where this tenant’s data is stored, if the deployment is regionalised.',
+                  })}
+                />
               </Grid>
+              {/*
+                WHAT THIS WORKSPACE IS FOR, asked at the moment the operator knows the answer.
+                Every tenant used to be born PRODUCTION — every activation control a hard gate,
+                nothing deferrable — so an internal demo or a test workspace was created into the
+                strictest profile the product has and then had to be walked back through a
+                separate Owner screen the operator had not opened. Test tenants sat in
+                Provisioning behind controls about a customer that does not exist.
+
+                Owner-only, exactly as the server enforces it: the profile decides that
+                catalogued production prerequisites may be deferred, which is the one lever that
+                switches a tenant on with gates outstanding. A SupportAdmin sees what it is set
+                to and cannot change it.
+              */}
+              <Grid size={{ xs: 12, md: 6 }}>
+                <TextField
+                  select
+                  fullWidth
+                  label="Workspace purpose"
+                  value={draft.deploymentProfile}
+                  disabled={!permissions.isOwner}
+                  onChange={(event) => set({
+                    deploymentProfile: event.target.value as ProvisionDraft['deploymentProfile'],
+                    // Cleared on the way back to PRODUCTION so an abandoned selection cannot
+                    // leave an approval reason attached to a tenant that never needed one.
+                    ...(event.target.value === 'PRODUCTION' ? { deploymentProfileReason: '' } : {}),
+                  })}
+                  helperText={permissions.isOwner
+                    ? PROFILE_HELP[draft.deploymentProfile]
+                    : 'Owner-only. A non-production workspace defers production prerequisites, so only an Owner may choose one.'}
+                >
+                  <MenuItem value="PRODUCTION">Production — a real customer</MenuItem>
+                  <MenuItem value="DEMO">Demo — sales or training, no customer data</MenuItem>
+                  <MenuItem value="LOCAL_TEST">Test — internal, throwaway</MenuItem>
+                </TextField>
+              </Grid>
+              {draft.deploymentProfile !== 'PRODUCTION' && (
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    {...field('deploymentProfileReason', 'Why this is not a production workspace', {
+                      required: true,
+                      helper: 'Recorded on the tenant as the approval, against your account. At least 15 characters.',
+                    })}
+                    multiline
+                    minRows={2}
+                  />
+                </Grid>
+              )}
             </Grid>
 
             <SectionHeading title="Workspace defaults" detail="Applied to every document and schedule inside the workspace." />
@@ -1022,7 +1099,16 @@ export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Pr
               <ReviewRow label="Base currency" value={draft.baseCurrencyCode} />
               <ReviewRow label="Time zone" value={draft.timeZoneId} />
               <ReviewRow label="Language & region" value={draft.locale} />
-              <ReviewRow label="Data region" value={draft.dataRegion} />
+              <ReviewRow
+                label="Data region"
+                value={draft.dataRegion || (declaredRegion ? `${declaredRegion} (this deployment)` : '')}
+              />
+              {/* Shown on review even when it is the default: "this is a real customer" is a
+                  statement worth reading back before a workspace is built on it. */}
+              <ReviewRow label="Workspace purpose" value={draft.deploymentProfile} />
+              {draft.deploymentProfile !== 'PRODUCTION' && (
+                <ReviewRow label="Non-production approval" value={draft.deploymentProfileReason} />
+              )}
             </ReviewSection>
 
             <ReviewSection title="Founding administrator" onEdit={() => setStep(STEP_ADMIN)}>

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -39,6 +39,7 @@ vi.mock('../../context/AuthContext', () => ({
 vi.mock('../../components/layout/ViewTabs', () => ({ default: () => null }));
 
 const api = {
+  stoppedMail: vi.fn(),
   needsReview: vi.fn(),
   outstandingLeads: vi.fn(),
   assignedLeads: vi.fn(),
@@ -48,6 +49,12 @@ const api = {
   clientPos: vi.fn(),
 };
 
+// The triage module is only partly mocked: `readTriagePage`, `isTriageUnavailable` and the state
+// constant are the real ones, so a fixture below is read exactly as a server payload would be.
+vi.mock('../../api/services/emailTriageService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/services/emailTriageService')>();
+  return { ...actual, default: { listTriage: (...args: unknown[]) => api.stoppedMail(...args) } };
+});
 vi.mock('../../api/services/extractionReviewService', () => ({
   default: { getNeedsReview: (...args: unknown[]) => api.needsReview(...args) },
 }));
@@ -71,10 +78,24 @@ vi.mock('../../api/services/customerAwardService', () => ({
 }));
 
 import InboxPage, { loadQueue } from './InboxPage';
+import { readTriagePage } from '../../api/services/emailTriageService';
+import type { InboxItem, QueueKey } from './inboxQueues';
 
 const empty = { items: [], totalCount: 0, pageNumber: 1, pageSize: 25 };
 
+/**
+ * The rows of a queue that DOES apply to this tenant. `loadQueue` answers null only for a channel
+ * the tenant does not have at all, and a mapping test that quietly accepted that would assert
+ * nothing — so it is a failure here, not an empty array.
+ */
+const rowsOf = async (key: QueueKey, context?: Parameters<typeof loadQueue>[1]): Promise<InboxItem[]> => {
+  const items = await loadQueue(key, context);
+  if (items === null) throw new Error(`Queue ${key} reported itself as not applicable to this tenant`);
+  return items;
+};
+
 const allQueuesEmpty = () => {
+  api.stoppedMail.mockResolvedValue(readTriagePage({ items: [], totalCount: 0, pageNumber: 1, pageSize: 25 }, 1));
   api.needsReview.mockResolvedValue(empty);
   api.outstandingLeads.mockResolvedValue(empty);
   api.assignedLeads.mockResolvedValue(empty);
@@ -130,7 +151,7 @@ describe('what is waiting on you', () => {
       ],
     });
 
-    const items = await loadQueue('leads-to-own');
+    const items = await rowsOf('leads-to-own');
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
@@ -158,7 +179,7 @@ describe('what is waiting on you', () => {
       ],
     });
 
-    const items = await loadQueue('leads-to-decide', {
+    const items = await rowsOf('leads-to-decide', {
       businessUnitId: 1,
       userId: 71,
     });
@@ -221,7 +242,7 @@ describe('what is waiting on you', () => {
       purchaseOrder(5, 'CANCELLED', '2026-08-24T00:00:00Z'),
     ]);
 
-    const items = await loadQueue('client-pos');
+    const items = await rowsOf('client-pos');
 
     expect(items.map((item) => item.id)).toEqual([1, 2]);
   });
@@ -286,6 +307,7 @@ describe('an empty queue is never a dead end', () => {
     await screen.findByText('You are clear.');
 
     for (const heading of [
+      /mail that needs a person/i,
       /documents to check/i,
       /enquiries without an owner/i,
       /my enquiries awaiting a decision/i,
@@ -380,5 +402,132 @@ describe('permissions decide what is even asked for', () => {
 
     expect(await screen.findByRole('button', { name: 'Open Roles & Permissions' })).toBeInTheDocument();
     expect(screen.getByText(/grant the modules it needs/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * The population this screen used to be blind to.
+ *
+ * Every other queue reads a row that already became something — a document with a lead behind it,
+ * an enquiry, an RFQ, a quote. A message that STOPPED became nothing at all: the backend filter
+ * requires that no Lead points at it, so `documents-to-check` (GET /api/Lead/needs-review) cannot
+ * carry it and no other queue here could either. The landing screen therefore said "You are
+ * clear." over inbound mail that was going nowhere, and the one screen that would have shown it
+ * is the one the reader had just been told there was no reason to open. On the live tenant that
+ * was 80 of 332 messages.
+ */
+describe('inbound mail that stopped is work, and the landing screen must say so', () => {
+  /** The server's own shape for a message held for a person: no lead, assembly at NeedsReview. */
+  const stoppedPayload = {
+    pageNumber: 1,
+    pageSize: 25,
+    totalCount: 1,
+    items: [
+      {
+        id: 6120,
+        receivedOn: '2026-08-30T05:12:00Z',
+        from: 'tenders@dana-cont.qa',
+        subject: 'RFQ 8891 — pipe supports',
+        outcome: 'Uncertain',
+        reasonCodes: ['no_signal'],
+        hasAttachments: true,
+        linkedBatchId: '3f0a5b6c-1d2e-4f70-8a91-0b2c3d4e5f60',
+        parseStatus: 'Queued',
+        attachmentCount: 1,
+        attachmentNames: ['bid-list.doc'],
+        bodySubmitted: true,
+        skippedAttachments: [],
+        assemblyState: 'NeedsReview',
+        assemblyReason: 'A part could not be read with confidence.',
+        expectedComponentCount: 2,
+        completedComponentCount: 2,
+        ingestedAtUtc: '2026-08-30T05:13:00Z',
+        stoppedInProcessing: false,
+      },
+    ],
+  };
+
+  /** An entitlement refusal, exactly as RequiresEntitlementAttribute writes it. */
+  const notEntitled = () =>
+    Object.assign(new Error('Request failed with status code 403'), {
+      isAxiosError: true,
+      response: {
+        status: 403,
+        data: {
+          type: 'https://nexora.invalid/problems/feature-not-entitled',
+          title: 'Feature is not entitled',
+          detail: 'Email intake is not included in this plan.',
+          status: 403,
+          entitlement: 'capability.email-intake',
+        },
+      },
+      config: {},
+    });
+
+  it('refuses to say you are clear while a message is waiting on a person', async () => {
+    api.stoppedMail.mockResolvedValue(readTriagePage(stoppedPayload, 1));
+
+    renderInbox();
+
+    expect(await screen.findByText('RFQ 8891 — pipe supports')).toBeInTheDocument();
+    // The sentence that was false. Every other queue is empty in this test, which is exactly the
+    // Monday morning the defect was found on.
+    expect(screen.queryByText('You are clear.')).toBeNull();
+    expect(screen.getByText(/1 thing needs you/i)).toBeInTheDocument();
+    const mail = section(/mail that needs a person/i);
+    expect(within(mail).getByText(/tenders@dana-cont.qa/)).toBeInTheDocument();
+    expect(within(mail).getByRole('button', { name: 'Open it' })).toBeInTheDocument();
+  });
+
+  it('asks the state question, because no outcome filter can answer it', async () => {
+    renderInbox();
+
+    // `stopped` is about where the message IS. Every `outcome` value is about what the arrival
+    // gate decided, and a message stops long after that — so a call without the state filter
+    // would list every message ever received and this queue would be meaningless.
+    await waitFor(() =>
+      expect(api.stoppedMail).toHaveBeenCalledWith({ state: 'stopped', page: 1, pageSize: 25 }));
+  });
+
+  it('maps a stopped message onto a row that says why it stopped', async () => {
+    api.stoppedMail.mockResolvedValue(readTriagePage(stoppedPayload, 1));
+
+    const items = await rowsOf('mail-to-rescue');
+
+    expect(items).toEqual([
+      {
+        id: 6120,
+        reference: 'RFQ 8891 — pipe supports',
+        party: 'tenders@dana-cont.qa',
+        detail: 'Needs review',
+        path: '/procurement/leads/inbound-mail',
+        actionLabel: 'Open it',
+        sortKey: '2026-08-30T05:12:00Z',
+      },
+    ]);
+  });
+
+  it('leaves the queue out for a tenant whose plan has no email intake, rather than banner it', async () => {
+    api.stoppedMail.mockRejectedValue(notEntitled());
+
+    renderInbox();
+
+    // An entitlement is a plan-level switch, not a role, so this refusal is permanent: rendered
+    // as an error it would put a red banner on the first screen after every sign-in, for ever.
+    await screen.findByText('You are clear.');
+    expect(screen.queryByRole('region', { name: /mail that needs a person/i })).toBeNull();
+    expect(screen.queryByText(/inbound mail could not be loaded/i)).toBeNull();
+  });
+
+  it('still renders a real outage as a failure, never as an absent queue', async () => {
+    api.stoppedMail.mockRejectedValue(outage());
+
+    renderInbox();
+
+    await screen.findByText(/inbound mail could not be loaded/i);
+    const mail = section(/mail that needs a person/i);
+    expect(within(mail).getByRole('button', { name: /try again/i })).toBeInTheDocument();
+    expect(within(mail).queryByText(/no message is waiting on a person/i)).toBeNull();
+    expect(screen.queryByText('You are clear.')).toBeNull();
   });
 });

@@ -572,9 +572,30 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             return new AssembleOutcome(null, null);
         }
 
+        // THE MERGED VERDICT, NOT A LITERAL. Ok was hard-coded here, and the persister reads this
+        // field for exactly two things: the "[NEEDS REVIEW]" marker it prefixes to the Lead's
+        // remarks — which is the ONLY place LeadRepository.GetNeedsReviewLeadsAsync recovers a
+        // reason from, so every email Lead in the review queue rendered with a blank one — and
+        // the auto-verify gate, which a hard Ok let a machine walk through. A body-only reply in
+        // an existing thread is the shape that costs money: the extractor asks "confirm this is a
+        // new request and not a restatement of one already in the system", the assembler said Ok,
+        // and the message was stamped verified by system:auto-verified-high-confidence and shown
+        // as Success without anybody being asked the question.
+        //
+        // NeedsReview wins over Ok, the same way External wins for provenance below: one part of
+        // a message that a person has to look at makes the message one a person has to look at.
+        //
+        // It is RECONSTRUCTED rather than carried, because the component result store holds no
+        // status column — only ReviewReason. That reconstruction is exact for every extractor
+        // this build has: ChunkedExtractionService and ConversationalExtractionService both
+        // derive the two together and a review reason is written exactly when the verdict was
+        // NeedsReview. Carrying the verdict itself on EmailInquiryComponentResult would be
+        // better and needs a migration; inferring it is not why the verdict was being lost.
         var outcome = new ChunkedExtractionOutcome
         {
-            Status = ExtractionOutcomeStatus.Ok,
+            Status = reviewReasons.Count > 0
+                ? ExtractionOutcomeStatus.NeedsReview
+                : ExtractionOutcomeStatus.Ok,
             Result = header with { Items = merged },
             ExpectedItemCount = expected,
             ExtractedItemCount = extracted,

@@ -276,6 +276,19 @@ public sealed class MailboxController(
             var stored = await context.EmailConfigurations.AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == id && x.BusinessUnitId == tenant, HttpContext.RequestAborted);
             if (stored is null) return NotFound("Mailbox not found.");
+
+            // ...but only back to the mailbox it belongs to. Every other connection parameter
+            // comes from the body, so spending the stored credential on a body-supplied endpoint
+            // turns this action into a way to READ a password nobody typed: hold Edit, name a
+            // host you control, and the server signs in there on your behalf — in the clear when
+            // UseSsl is false. Retyping the password lifts the restriction, because a caller who
+            // sends the secret already knows it.
+            if (!DialsStoredMailbox(stored, protocol, request.Host, request.Port,
+                    request.EmailAddress, request.Username, request.UseSsl))
+                return BadRequest(
+                    "Testing a different host, port or sign-in identity needs the mailbox password. "
+                    + "The stored one is only used to re-test the mailbox exactly as it is saved.");
+
             password = stored.Password;
         }
 
@@ -413,6 +426,18 @@ public sealed class MailboxController(
 
         if (request.VerifyBeforeSave)
         {
+            // Verification dials the endpoint in the BODY, and a failed one returns 422 before
+            // anything is written — so a kept credential verified against a substituted host is
+            // the same credential read that Test refuses, with no row change left behind to
+            // notice. Keeping the password to correct a typo is the convenience; paying it out
+            // to somewhere else is not. Retype it, or save the move unverified and let the poller
+            // report what it finds.
+            if (!rotating && !DialsStoredMailbox(row, row.Protocol, request.Host, request.Port,
+                    request.EmailAddress, request.Username, request.UseSsl))
+                return BadRequest(
+                    "Verifying a different host, port or sign-in identity needs the mailbox password. "
+                    + "Enter it, or save without verification.");
+
             var verification = await VerifyAsync(row.Protocol, request.Host, request.Port,
                 request.EmailAddress, request.Username, effectivePassword, request.UseSsl);
             if (verification is not null) return verification;
@@ -625,6 +650,34 @@ public sealed class MailboxController(
             smtp ? MailTransport.Smtp : MailTransport.Imap,
             host, port, tls, login, password,
             EmailProviderCatalog.InferKeyFromHost(host));
+    }
+
+    /// <summary>
+    /// Whether a probe built from these settings would sign in to the same place the stored row
+    /// already does. Compared through <see cref="TestRequestFor"/> rather than field by field:
+    /// that method is what decides the login identity and the TLS mode, so its output is the only
+    /// description of what actually reaches the wire — the login for IMAP is the address and for
+    /// SMTP the username, and a difference in either is a different sign-in.
+    /// </summary>
+    private static bool DialsStoredMailbox(
+        EmailConfiguration stored, string protocol, string host, int port,
+        string? emailAddress, string username, bool useSsl)
+    {
+        var attempt = TestRequestFor(
+            protocol, host, port, emailAddress ?? string.Empty, username, string.Empty, useSsl);
+        var asStored = TestRequestFor(
+            stored.Protocol, stored.Host, stored.Port, stored.EmailAddress, stored.Username,
+            string.Empty, stored.UseSsl);
+
+        return string.Equals(
+                   MailEndpointPolicy.Normalize(attempt.Host),
+                   MailEndpointPolicy.Normalize(asStored.Host), StringComparison.OrdinalIgnoreCase)
+            && attempt.Port == asStored.Port
+            && attempt.Direction == asStored.Direction
+            && attempt.Transport == asStored.Transport
+            && attempt.Tls == asStored.Tls
+            && string.Equals(
+                   attempt.Username.Trim(), asStored.Username.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     private bool TryTenant(out long tenant)

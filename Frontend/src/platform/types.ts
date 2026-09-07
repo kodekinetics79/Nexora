@@ -350,6 +350,79 @@ export interface TenantDataAsset {
   version: number;
 }
 
+/**
+ * One data boundary as the DEPLOYMENT declares it in `Platform:DataBoundaries`.
+ *
+ * Not a per-tenant fact and not editable from the console: it describes the estate this
+ * installation runs on, it is identical for every tenant, and it is the answer the register form
+ * used to ask an operator to remember.
+ */
+export interface PlatformDataBoundary {
+  assetType: TenantDataAsset['assetType'];
+  logicalKey: string;
+  opaqueProviderReference: string;
+  region: string;
+  classification: TenantDataAsset['classification'];
+  disposition: TenantDataAsset['disposition'];
+  backupPolicyReference: string;
+  backupPolicyVersion: number;
+}
+
+/**
+ * What the running server can read about its OWN database — the Neon endpoint id and region an
+ * operator would otherwise have to know. Always present; `isUsable` is false when the host shape
+ * says nothing (a self-hosted box, an IP), and then `basis` is the sentence explaining what was
+ * read and why nothing could be taken from it.
+ */
+export interface DatabaseSelfObservation {
+  host: string | null;
+  providerName: string | null;
+  opaqueProviderReference: string | null;
+  region: string | null;
+  basis: string;
+  isUsable: boolean;
+}
+
+export interface PlatformDataBoundaryManifest {
+  /** False when this deployment has declared nothing, which is what keeps the manual form. */
+  configured: boolean;
+  /** Where the answer came from: an Owner in the console, deployment configuration, or nowhere. */
+  source: 'console' | 'configuration' | 'none';
+  primaryPostgreSqlScope: PlatformDataBoundary | null;
+  boundaries: PlatformDataBoundary[];
+  /** Declarations the server refused, with the reason. Empty is the normal case. */
+  defects: { assetType: string; reason: string }[];
+  observation: DatabaseSelfObservation;
+  recordedBy: string | null;
+  recordedOn: string | null;
+  /** `observed-and-confirmed` when an Owner accepted what the server read; `entered` when typed. */
+  recordedBasis: string | null;
+  configurationKey: string;
+}
+
+/**
+ * Recording it. Provider reference and region are omitted on the one-click path, which means
+ * "what the server observed" and is recorded as such; sending them means the Owner typed them.
+ */
+export interface RecordPlatformDataBoundaryInput {
+  opaqueProviderReference?: string | null;
+  region?: string | null;
+  backupPolicyReference: string;
+  backupPolicyVersion: number;
+  reason?: string | null;
+}
+
+/** What applying the manifest to one tenant actually did. */
+export interface ApplyPlatformDataBoundariesResult {
+  /** Non-null when the tenant carried no region and the deployment's was recorded. */
+  dataRegionRecorded: string | null;
+  primaryScopeState: string | null;
+  evidenceReference: string | null;
+  registeredLogicalKeys: string[];
+  alreadyRegisteredLogicalKeys: string[];
+  decision: TenantActivationDataDecision;
+}
+
 export interface TenantActivationDataDecision {
   tenantId: string;
   dataGateReady: boolean;
@@ -966,6 +1039,17 @@ export interface ProvisionTenantInput extends TenantCompanyProfile {
   dataRegion: string | null;
 
   /**
+   * Which activation gates this tenant is held to. Null means PRODUCTION, where nothing is
+   * deferrable — the only safe default. Anything else is Owner-only on the server and needs
+   * `deploymentProfileReason`, because it decides that catalogued production prerequisites
+   * (a customer's storage estate, their identity provider, a tax authority) may be recorded as
+   * deferred rather than blocking.
+   */
+  deploymentProfile: TenantDeploymentProfile | null;
+  /** The approval recorded on the tenant. Required for every profile except PRODUCTION. */
+  deploymentProfileReason: string | null;
+
+  /**
    * The tenant's founding Super Administrator. Required: a tenant without one is a shell
    * nobody can log into, which is the state every portal-provisioned tenant used to land in.
    */
@@ -1050,6 +1134,8 @@ export interface ProvisionTenantResult {
  */
 export interface ProvisionTenantRequestBody {
   name: string;
+  deploymentProfile?: string | null;
+  deploymentProfileReason?: string | null;
   slug: string | null;
   legalName: string | null;
   registrationNumber: string | null;
@@ -1419,6 +1505,8 @@ export interface CreateSubscriptionInvoiceInput {
 }
 
 export interface TenantAiPolicy {
+  /** What this DEPLOYMENT pays for AI, read-only. Shown, never asked for. */
+  deploymentRateSummary: string;
   businessUnitId: string;
   isEnabled: boolean;
   externalProcessingAllowed: boolean;
@@ -1448,7 +1536,15 @@ export interface TenantAiPolicy {
   updatedBy: string;
 }
 
-export type UpdateTenantAiPolicyInput = Omit<TenantAiPolicy, 'businessUnitId' | 'updatedOn' | 'updatedBy'> & {
+/**
+ * No cost fields. What AI costs is one rate card for the deployment, not a per-tenant setting —
+ * the same number for every tenant calling the same endpoint.
+ */
+export type UpdateTenantAiPolicyInput = Omit<TenantAiPolicy,
+  'businessUnitId' | 'updatedOn' | 'updatedBy' | 'deploymentRateSummary'
+  | 'externalInputCostPerMillionTokens' | 'externalOutputCostPerMillionTokens'
+  | 'externalCostCurrency' | 'externalPricingVersion'
+  | 'localComputeCostPerHour' | 'ocrCostPerPage' | 'localCostCurrency'> & {
   reason: string;
 };
 
@@ -1487,13 +1583,21 @@ export interface AiProviderTrustView {
 }
 
 /**
- * How one control in the extraction chain stands.
+ * How one control in the extraction chain stands. None of the three non-Pass states below is a
+ * pass, and none of them is a failure either — telling them apart is what stops the report
+ * over-stating the work.
  *
- * `NotApplicable` is deliberately not a pass: it means the control cannot bite in this
- * configuration (a loopback deployment egresses nothing) or that an earlier closed control
- * removed the thing it tests. It neither blocks nor counts as ready.
+ * `NotApplicable`: the control cannot bite in this configuration at all — a loopback deployment
+ * egresses nothing, so its egress controls are greyed rather than ticked.
+ *
+ * `Blocked`: the control applies and simply was not reached, because one above it is closed.
+ * Opening that one settles this row with nobody touching it, so it is reported and never
+ * counted as a blocker.
+ *
+ * `Warn`: open, and still a decision somebody owes — a control satisfied only because nobody
+ * set it, where the unset value carries a standing cost. It never makes the report un-ready.
  */
-export type AiReadinessStatus = 'Pass' | 'Fail' | 'NotApplicable';
+export type AiReadinessStatus = 'Pass' | 'Fail' | 'NotApplicable' | 'Warn' | 'Blocked';
 
 export interface AiExtractionReadinessCheck {
   order: number;
@@ -1518,7 +1622,10 @@ export interface AiExtractionReadinessReport {
   unstructuredPayload: boolean;
   ready: boolean;
   firstBlockingReason: string | null;
+  /** Root causes only: controls closed on their own account, not ones waiting on those. */
   blockingCount: number;
+  /** Open, but carrying a standing decision. Never affects `ready`. */
+  warningCount: number;
   evaluatedOnUtc: string;
   checks: AiExtractionReadinessCheck[];
 }

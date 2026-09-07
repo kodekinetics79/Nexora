@@ -1,3 +1,4 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,6 +16,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -349,6 +351,168 @@ public sealed class PlatformDataBoundaryAutomationTests
 
     // ---- fixture ------------------------------------------------------------------------------
 
+    // ---- 6. the tenant that was provisioned before the deployment described itself -------------
+
+    /// <summary>
+    /// The gap the automation left behind. <see cref="PlatformDataBoundaryProvisioner"/> only ever
+    /// ran at one instant — the <c>data-boundaries</c> provisioning step — so every tenant created
+    /// before <c>Platform:DataBoundaries</c> was populated stayed on the manual path forever, which
+    /// is an operator typing this deployment's own provider reference and hashing an evidence
+    /// document about a database the platform runs itself. Nexora's own production service has
+    /// never had those keys set; every tenant on it is this tenant.
+    /// </summary>
+    [Fact]
+    public async Task A_tenant_provisioned_before_the_manifest_existed_is_repaired_without_an_operator_typing_anything()
+    {
+        using var harness = new ProvisioningHarness();
+        var tenantId = await ReadyTenantAsync(harness, "northwind-late", "turing@northwind.test");
+
+        Assert.Contains("data.residency-isolation", (await EvaluateAsync(harness, tenantId)).BlockingControls);
+
+        using var scope = harness.Scope();
+        var result = await ApplierFor(scope, Manifest()).ApplyAsync(tenantId, Owner(), null, default);
+
+        Assert.True(result.Decision.DataGateReady);
+        Assert.Equal("verified", result.PrimaryScopeState);
+        Assert.Contains(TenantDataAssetRegistryService.PostgreSqlLogicalKey, result.RegisteredLogicalKeys);
+        Assert.DoesNotContain("data.residency-isolation", (await EvaluateAsync(harness, tenantId)).BlockingControls);
+
+        // The row says a probe did this, not a person — the property that makes an automatic pass
+        // readable as an automatic pass six months later.
+        await using var db = harness.Context();
+        var asset = await db.Set<TenantDataAsset>().AsNoTracking()
+            .SingleAsync(x => x.TenantId == tenantId
+                              && x.LogicalKey == TenantDataAssetRegistryService.PostgreSqlLogicalKey);
+        Assert.Equal(TenantDataAssetStatuses.Verified, asset.Status);
+        Assert.Equal(PlatformAutomationActors.Provisioning, asset.VerifiedBy);
+        Assert.False(string.IsNullOrWhiteSpace(asset.VerificationEvidenceSha256));
+    }
+
+    /// <summary>
+    /// A tenant with no contractual region can never pass the control — the probe has nothing to
+    /// agree with — and the console's only answer used to be an operator typing a region into a
+    /// governed endpoint from memory. The deployment already knows where it puts tenants, so the
+    /// empty column is filled from the declaration and audited as having come from it.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_contractual_region_is_recorded_from_the_declaration_and_audited()
+    {
+        using var harness = new ProvisioningHarness();
+        var tenantId = await ReadyTenantAsync(harness, "northwind-noregion", "hamilton@northwind.test",
+            dataRegion: null);
+
+        using var scope = harness.Scope();
+        var result = await ApplierFor(scope, Manifest()).ApplyAsync(tenantId, Owner(), null, default);
+
+        Assert.Equal(Region, result.DataRegionRecorded);
+        await using var db = harness.Context();
+        Assert.Equal(Region,
+            (await db.Set<Tenant>().IgnoreQueryFilters().SingleAsync(x => x.Id == tenantId)).DataRegion);
+        Assert.Contains(await db.Set<PlatformAuditLog>().AsNoTracking()
+                .Where(x => x.ActAsTenantId == tenantId).ToListAsync(),
+            row => row.Action == PlatformDataBoundaryApplier.RegionAction);
+    }
+
+    /// <summary>
+    /// The line the convenience must not cross. A region that IS recorded is a contractual claim,
+    /// and a disagreement between it and the deployment is a fact somebody has to resolve — not a
+    /// column to be quietly corrected into a green tick. The whole action rolls back, region
+    /// backfill included, so the tenant is never left carrying a residency claim nobody verified.
+    /// </summary>
+    [Fact]
+    public async Task A_contractual_region_that_disagrees_is_refused_rather_than_rewritten()
+    {
+        using var harness = new ProvisioningHarness();
+        var tenantId = await ReadyTenantAsync(harness, "northwind-elsewhere", "clarke@northwind.test",
+            dataRegion: "me-central-1");
+
+        using var scope = harness.Scope();
+        var refusal = await Assert.ThrowsAsync<TenantDataAssetConflictException>(
+            () => ApplierFor(scope, Manifest()).ApplyAsync(tenantId, Owner(), null, default));
+        Assert.Contains("me-central-1", refusal.Message);
+
+        await using var db = harness.Context();
+        Assert.Equal("me-central-1",
+            (await db.Set<Tenant>().IgnoreQueryFilters().SingleAsync(x => x.Id == tenantId)).DataRegion);
+        Assert.Empty(await db.Set<TenantDataAsset>().AsNoTracking()
+            .Where(x => x.TenantId == tenantId).ToListAsync());
+    }
+
+    /// <summary>
+    /// A deployment that has declared nothing still gets no invented answer — it gets the keys it
+    /// has to set, in the error the console shows.
+    /// </summary>
+    [Fact]
+    public async Task An_undeclared_deployment_is_told_which_keys_to_set_rather_than_given_a_default()
+    {
+        using var harness = new ProvisioningHarness();
+        var tenantId = await ReadyTenantAsync(harness, "northwind-nokeys", "shannon@northwind.test");
+
+        using var scope = harness.Scope();
+        var refusal = await Assert.ThrowsAsync<TenantDataAssetValidationException>(
+            () => ApplierFor(scope, manifest: null).ApplyAsync(tenantId, Owner(), null, default));
+
+        Assert.Contains("Platform__DataBoundaries__PostgreSqlTenantScope__OpaqueProviderReference",
+            refusal.Message);
+        await using var db = harness.Context();
+        Assert.Empty(await db.Set<TenantDataAsset>().AsNoTracking()
+            .Where(x => x.TenantId == tenantId).ToListAsync());
+    }
+
+    /// <summary>
+    /// The wizard's "Data region" box is a free-text field an operator has no way to answer
+    /// correctly, and leaving it blank produced a tenant that could never be activated. Where the
+    /// deployment has declared a region, a blank box means "wherever this deployment puts tenants"
+    /// — and a filled one is still never overridden.
+    /// </summary>
+    [Fact]
+    public async Task Provisioning_fills_a_blank_data_region_from_the_declaration_and_never_overrides_a_supplied_one()
+    {
+        using var harness = new ProvisioningHarness(Manifest());
+
+        var blank = await ReadyTenantAsync(harness, "northwind-blankregion", "noether@northwind.test",
+            dataRegion: null);
+
+        // Submitted in a different case from the manifest's, which is the only way to tell
+        // "recorded what was typed" apart from "replaced by the declaration" when the two agree —
+        // and they have to agree, because a region the deployment cannot honour fails the probe
+        // and fails provisioning, which is the behaviour the disagreement tests already pin.
+        var supplied = await ReadyTenantAsync(harness, "northwind-ownregion", "cartwright@northwind.test",
+            dataRegion: "US-EAST-1");
+
+        await using var db = harness.Context();
+        Assert.Equal(Region,
+            (await db.Set<Tenant>().IgnoreQueryFilters().SingleAsync(x => x.Id == blank)).DataRegion);
+        Assert.Equal("US-EAST-1",
+            (await db.Set<Tenant>().IgnoreQueryFilters().SingleAsync(x => x.Id == supplied)).DataRegion);
+    }
+
+    /// <summary>
+    /// Built by hand rather than resolved from the harness so the manifest can differ from the one
+    /// the tenant was provisioned under — which is the entire situation these tests describe.
+    /// </summary>
+    private static IPlatformDataBoundaryApplier ApplierFor(
+        IServiceScope scope, IReadOnlyDictionary<string, string?>? manifest)
+    {
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var audit = scope.ServiceProvider.GetRequiredService<IPlatformAuditService>();
+        var registry = new TenantDataAssetRegistryService(db, audit);
+        var declared = new PlatformDataBoundaryManifest(new ConfigurationBuilder()
+            .AddInMemoryCollection(manifest ?? new Dictionary<string, string?>()).Build());
+        return new PlatformDataBoundaryApplier(db, declared,
+            new PlatformDataBoundaryProvisioner(db, declared, registry, new TenantPostgreSqlScopeProbe(), audit),
+            registry, audit);
+    }
+
+    /// <summary>
+    /// A console session as the server sees one: an email AND the platform user id every
+    /// privileged audit record is written against. An id-less principal is refused, which is a
+    /// property worth keeping accidental test fixtures away from.
+    /// </summary>
+    private static ClaimsPrincipal Owner() =>
+        new(new ClaimsIdentity(
+            [new Claim("email", "owner@nexora.app"), new Claim(JwtRegisteredClaimNames.Sub, "7")], "test"));
+
     private static async Task<long> ReadyPlanAsync(ProvisioningHarness harness)
     {
         await using var db = harness.Context();
@@ -370,7 +534,8 @@ public sealed class PlatformDataBoundaryAutomationTests
     /// Built by running the real provisioning engine, so the controls that read provisioning's own
     /// output — including the new data-boundary step — are answered by provisioning.
     /// </summary>
-    private static async Task<long> ReadyTenantAsync(ProvisioningHarness harness, string slug, string email)
+    private static async Task<long> ReadyTenantAsync(
+        ProvisioningHarness harness, string slug, string email, string? dataRegion = Region)
     {
         var planId = await ReadyPlanAsync(harness);
         long rateCardId;
@@ -394,7 +559,7 @@ public sealed class PlatformDataBoundaryAutomationTests
         // admin.first-activated is answered by a real user holding a real Owner-rank role.
         var execution = await harness.ProvisionAsync(ProvisioningHarness.Request(
             slug, email, planId, activation: AdminActivationMethods.Password,
-            password: "Correct-Horse-9!", dataRegion: Region));
+            password: "Correct-Horse-9!", dataRegion: dataRegion));
         Assert.Equal(ProvisioningExecutionState.Succeeded, execution.State);
         var tenantId = execution.TenantId!.Value;
 

@@ -370,9 +370,20 @@ export interface EmailFetchReport {
   newMessages?: number;
 }
 
-/** POST /api/Email/upload-leads-folder — the server acknowledges the write, nothing more. */
+/**
+ * POST /api/Email/upload-leads-folder.
+ *
+ * `uploaded` is the count the server actually WROTE, and it is not the number of files that were
+ * posted: FolderService skips a zero-byte upload, a filename left unusable by sanitising and a
+ * path-traversal filename, and carries on. Reporting the requested count was the original bug —
+ * EmailController answers with both halves precisely so the browser cannot repeat it. Both are
+ * optional so an older backend degrades to "not reported" rather than to a zero the caller would
+ * read as "nothing landed".
+ */
 export interface FolderUploadResultDTO {
   message?: string;
+  uploaded?: number;
+  skipped?: number;
 }
 
 export type LeadOccurrenceClassification =

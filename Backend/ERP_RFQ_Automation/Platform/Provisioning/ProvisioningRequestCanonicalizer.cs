@@ -74,6 +74,12 @@ public static class ProvisioningRequestCanonicalizer
             ["timeZoneId"] = Trim(request.TimeZoneId),
             ["locale"] = Trim(request.Locale),
             ["dataRegion"] = Trim(request.DataRegion),
+            // Part of the identity of the request, not decoration: two submissions that differ
+            // only by deployment profile ask for two different tenants, and an idempotency key
+            // that could not tell them apart would return the PRODUCTION one to an operator who
+            // asked for a demo.
+            ["deploymentProfile"] = Trim(request.DeploymentProfile)?.ToUpperInvariant(),
+            ["deploymentProfileReason"] = Trim(request.DeploymentProfileReason),
             ["planId"] = request.PlanId?.ToString(),
             ["billingMode"] = Trim(request.BillingMode)?.ToLowerInvariant(),
             ["billingModeReason"] = Trim(request.BillingModeReason),

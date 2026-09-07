@@ -15,12 +15,14 @@ public sealed class LeadIngestionController : ControllerBase
 {
     private readonly ILeadIdentityApplicationService _service;
     private readonly ISecurityScanRecoveryService _securityScanRecovery;
+    private readonly ICommercialAccessContext _commercialAccess;
     private readonly ILogger<LeadIngestionController> _log;
     public LeadIngestionController(
         ILeadIdentityApplicationService service,
         ISecurityScanRecoveryService securityScanRecovery,
+        ICommercialAccessContext commercialAccess,
         ILogger<LeadIngestionController> log)
-    { _service = service; _securityScanRecovery = securityScanRecovery; _log = log; }
+    { _service = service; _securityScanRecovery = securityScanRecovery; _commercialAccess = commercialAccess; _log = log; }
 
     [HttpGet("batches/{batchId:guid}")]
     [RequireModulePermission("Leads", PermissionAction.View)]
@@ -96,6 +98,12 @@ public sealed class LeadIngestionController : ControllerBase
     public async Task<IActionResult> Revisions(long leadId, CancellationToken ct)
     {
         if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+
+        // Every revision row carries the before and after JSON of a changed field, so this is the
+        // lead's commercial detail in another shape. It answers the same way GET api/leads/{id}
+        // does about the same id, rather than on the tenant predicate alone.
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
+
         return Ok(await _service.GetRevisionsAsync(bu, leadId, ct));
     }
 

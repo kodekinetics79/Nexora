@@ -323,9 +323,14 @@ public sealed class DocumentFileInspectionServiceTests
         var clean = await ScanWithClamServerAsync("stream: OK\0");
         var infected = await ScanWithClamServerAsync("stream: Win.Test.Signature FOUND\0");
 
-        Assert.Equal(MalwareScanStatus.Clean, clean.Status);
+        // Diagnostics carries the exception behind an Unavailable, so the next failure NAMES its
+        // mechanism instead of costing another investigation. The previous one was diagnosed as
+        // thread-pool starvation, which an 89ms failure against a 60s budget disproves.
+        Assert.True(clean.Status == MalwareScanStatus.Clean,
+            $"Expected Clean, got {clean.Status}: {clean.Reason} {clean.Diagnostics}");
         Assert.Equal("test-db-1", clean.Signature);
-        Assert.Equal(MalwareScanStatus.Infected, infected.Status);
+        Assert.True(infected.Status == MalwareScanStatus.Infected,
+            $"Expected Infected, got {infected.Status}: {infected.Reason} {infected.Diagnostics}");
         Assert.Equal("Win.Test.Signature", infected.Signature);
     }
 
@@ -503,8 +508,11 @@ public sealed class DocumentFileInspectionServiceTests
             using var client = await listener.AcceptTcpClientAsync();
             await using var stream = client.GetStream();
             var buffer = new byte[512];
-            var zeroFrameSeen = false;
-            while (!zeroFrameSeen)
+            // Accumulated, not tested per read. TCP is a byte stream: the four-byte terminator can
+            // arrive split across two reads, and a per-read scan never sees it — the loop then runs
+            // to EOF, writes no response, and the scanner reports the server unreachable.
+            var received = new List<byte>();
+            while (true)
             {
                 var read = await stream.ReadAsync(buffer);
                 if (read == 0)
@@ -512,11 +520,30 @@ public sealed class DocumentFileInspectionServiceTests
                     break;
                 }
 
-                zeroFrameSeen = read >= 4 &&
-                                buffer.AsSpan(0, read).IndexOf(new byte[] { 0, 0, 0, 0 }) >= 0;
+                received.AddRange(buffer.AsSpan(0, read).ToArray());
+                if (received.Count >= 4 && Terminated(received))
+                {
+                    break;
+                }
             }
 
             await stream.WriteAsync(Encoding.UTF8.GetBytes(response));
+            await stream.FlushAsync();
+
+            // Half-close, then drain to EOF before disposing.
+            //
+            // THE FLAKE. Closing a socket that still holds unread bytes in its receive buffer makes
+            // the kernel send RST rather than FIN. The scanner is concurrently reading the response;
+            // an RST reaches it as an IOException, which its catch maps to exactly
+            // MalwareScanStatus.Unavailable. It failed that way on 2026-08-19 and twice on
+            // 2026-09-06 — every time in under 100ms against a 60s budget, which is why raising the
+            // timeout never helped: nothing was ever timing out. The loop above stops the moment it
+            // SEES the terminator, so anything written after it is still unread, and whether there
+            // is anything depends on how the runner segmented the writes.
+            client.Client.Shutdown(SocketShutdown.Send);
+            while (await stream.ReadAsync(buffer) > 0)
+            {
+            }
         });
         var scanner = new ClamAvInstreamMalwareScanner(new ClamAvScannerOptions
         {
@@ -544,6 +571,20 @@ public sealed class DocumentFileInspectionServiceTests
         var result = await scanner.ScanAsync(content);
         await server.WaitAsync(TestWaits.Liveness);
         return result;
+    }
+
+    /// <summary>The four-zero INSTREAM terminator, found across read boundaries.</summary>
+    private static bool Terminated(List<byte> received)
+    {
+        for (var i = 0; i + 3 < received.Count; i++)
+        {
+            if (received[i] == 0 && received[i + 1] == 0 && received[i + 2] == 0 && received[i + 3] == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static int ReserveUnusedPort()

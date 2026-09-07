@@ -205,13 +205,14 @@ const OutstandingLeadsPage: React.FC = () => {
           <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: 0.5 }}>
             <EmailIcon sx={{ fontSize: 12 }} /> {p.row.clientemail}
           </Typography>
-          {(p.row.buyersName?.toLowerCase().includes('aramco') || p.row.buyersName?.toLowerCase().includes('sec')) && (
-            <Chip
-              label="KEY ACCOUNT"
-              size="small"
-              sx={{ height: 14, fontSize: '0.55rem', fontWeight: 900, bgcolor: 'error.main', color: 'white', mt: 0.5, borderRadius: 1 }}
-            />
-          )}
+          {/*
+            No KEY ACCOUNT badge here. It used to be drawn whenever the buyer name contained
+            "aramco" or "sec", which stamps a commercial classification on Secure Piping Supplies
+            and Second Industrial Co and withholds it from every strategic customer named
+            otherwise. Account standing lives on the customer (Customer.AccountTeamId, FR-CST-02)
+            and this row does not carry it, so the grid says nothing rather than asserting a fact
+            it did not compute and no administrator can change.
+          */}
         </Box>
       )
     },

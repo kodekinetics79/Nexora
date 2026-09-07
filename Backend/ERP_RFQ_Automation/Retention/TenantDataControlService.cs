@@ -13,6 +13,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.PlatformGovernance;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.Extensions.Logging;
 
 namespace ERP_RFQ_Automation.Retention;
@@ -77,6 +78,60 @@ public sealed class TenantDataControlService(
     private static readonly Regex EvidenceKeyShape = new(
         @"^Evidence/tenants/(?<bu>\d+)/(?<zone>quarantine|cleared|raw-mail)/sha256/(?<shard>[0-9a-f]{2})/(?<hash>[0-9a-f]{64})(?<ext>\.[a-z0-9]{1,11})?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>Lower-cased substring every recorded evidence pointer contains, whichever
+    /// provider wrote it — an absolute local path, an <c>s3://</c> URI or a bare key. Used only
+    /// to keep the untenanted pointer tables from being read whole; <see cref="KeysFromStorageUri"/>
+    /// still decides what actually reduces to a key.</summary>
+    private const string EvidenceMarker = "evidence";
+
+    /// <summary>Property-name shapes that can hold a pointer to a stored object.</summary>
+    private static readonly Regex PointerPropertyName = new(
+        @"(ObjectKey|ObjectUri|StorageKey|StorageUri|StoragePath|EvidenceKey|EvidenceUri|EvidencePath|FilePath|FileUri|RawEmailPath|BlobKey|BlobUri|DocumentPath|AttachmentPath)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Every place in the database that can hold a pointer to a stored object, and what this
+    /// sweep does about each. <see cref="ReferencedKeysAsync"/> reads all of them but the last:
+    /// <c>FieldEvidence.EvidenceKey</c> is a logical provenance identity built from row ids, not
+    /// a storage address, and there is nothing there to protect.
+    ///
+    /// <para>This list is the reason the sweep can claim anything at all. It was once implicit —
+    /// three tables read, five ignored — and the ones nobody had listed were proof of delivery,
+    /// mill certificates and customer purchase orders, whose objects the sweep deleted while
+    /// telling the tenant nothing pointed at them. A protected set enumerated by hand drifts;
+    /// what stops the drift is that the enumeration is now checked against the model itself.</para>
+    /// </summary>
+    private static readonly HashSet<string> ReviewedPointerColumns = new(StringComparer.Ordinal)
+    {
+        "SourceDocument.ObjectKey",
+        "EmailInquiryAssembly.RawEvidenceUri",
+        "EmailIngest.RawEmailPath",
+        "Attachment.FilePath",
+        "Image.FilePath",
+        "EmailInquiryComponent.EvidenceUri",
+        "ExtractionJob.StoragePath",
+        "FieldEvidence.EvidenceKey"
+    };
+
+    /// <summary>
+    /// The first pointer-shaped column in the live model that nobody has decided about, or null
+    /// when the sweep has been taught every one of them.
+    ///
+    /// <para>Asked of the model rather than of a migration list, so a column added by anyone in
+    /// any release is seen. A name is not proof that a column holds a storage pointer — but a
+    /// column named like one that nobody has reviewed is precisely the state that destroyed
+    /// evidence here, and the honest answer to it is to stop, not to guess.</para>
+    /// </summary>
+    internal static string? UnreviewedPointerColumn(IModel model) =>
+        model.GetEntityTypes()
+            .SelectMany(entity => entity.GetProperties()
+                .Where(property => property.ClrType == typeof(string)
+                    && PointerPropertyName.IsMatch(property.Name))
+                .Select(property => $"{entity.ShortName()}.{property.Name}"))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .FirstOrDefault(column => !ReviewedPointerColumns.Contains(column));
 
     private static DateTime SettledCutoff(DateTime now) => now.AddHours(-SettleHours);
 
@@ -240,6 +295,16 @@ public sealed class TenantDataControlService(
         if (await TenantHoldBlocksAsync(tenantId, ct))
             return new OrphanScan([], [], "A legal hold is active on this tenant. Nothing can be deleted.");
 
+        // Fail closed on a database this sweep has not been taught. "Nothing points at these
+        // bytes" is only true if every place a pointer can live has been looked at, so an
+        // unreviewed pointer column makes the whole claim unprovable and the bucket is withdrawn
+        // rather than offered. Naming the column is the point: it turns a permanent silent
+        // refusal into a one-line fix in ReferencedKeysAsync.
+        if (UnreviewedPointerColumn(db.Model) is { } unreviewed)
+            return new OrphanScan([], [], "This cleanup has not been taught to check "
+                + $"{unreviewed}, so it cannot prove these files are unused. Nothing has been "
+                + "deleted. Report this so the check can be added.");
+
         var prefix = TenantPrefix(tenantId);
         IReadOnlyList<StoredEvidenceObject> stored;
         try
@@ -322,6 +387,11 @@ public sealed class TenantDataControlService(
     /// that row has already asserted its bytes are destroyed, so an object still sitting under
     /// its hash is by definition unreferenced. A row in <c>PurgeRequested</c> is mid-purge and
     /// keeps its claim: sweeping underneath an in-flight purge would race its own tombstone.</para>
+    ///
+    /// <para>Every source read here is listed in <see cref="ReviewedPointerColumns"/>, and the
+    /// scan refuses to run if the database has grown a pointer column that list does not name.
+    /// A protected set kept by hand drifts silently, and the thing it drifts into is deleting
+    /// evidence a live row still points at.</para>
     /// </summary>
     private async Task<ReferencedEvidence> ReferencedKeysAsync(long tenantId, CancellationToken ct)
     {
@@ -365,7 +435,76 @@ public sealed class TenantDataControlService(
             foreach (var key in KeysFromStorageUri(path))
                 keys.Add(key);
 
+        // Evidence whose ONLY pointer is an attachment row. Proof of delivery, material-lot
+        // certificates and the customer's own purchase-order document are each written straight
+        // to the cleared zone and recorded here — none of the three creates a source document —
+        // so before this net a tenant-owner sweep classified a live POD as an orphan, destroyed
+        // the bytes, and left the row pointing at nothing. Those objects are the legal evidence
+        // behind a delivery or an order and there is no second copy.
+        //
+        // Attachments carry no tenant column. The per-parent-type allow-list that would give
+        // them one is the same hand-kept enumeration this whole method is now guarded against,
+        // and it is not needed: only a row whose path reduces to a key can matter, and a key
+        // names its own business unit. A tombstoned row has already surrendered its bytes and
+        // holds no claim. Images are read on the same terms — nothing writes evidence there
+        // today, but "no writer does this yet" is a fact about today, not a property to delete on.
+        var attachments = await db.Attachments.AsNoTracking()
+            .Where(x => !x.FilePath.StartsWith(LegacyAttachmentPurgeResolver.TombstonePrefix)
+                && x.FilePath.ToLower().Contains(EvidenceMarker))
+            .Select(x => new { Uri = x.FilePath, Hash = x.ContentSha256 })
+            .ToListAsync(ct);
+        foreach (var attachment in attachments)
+            Protect(tenantId, keys, hashes, attachment.Uri, attachment.Hash);
+
+        var images = await db.Images.AsNoTracking()
+            .Where(x => x.FilePath.ToLower().Contains(EvidenceMarker))
+            .Select(x => x.FilePath)
+            .ToListAsync(ct);
+        foreach (var path in images)
+            Protect(tenantId, keys, hashes, path, null);
+
+        // The per-part object of an assembled message, and the immutable copy the extraction
+        // queue was handed. Both usually have a source document behind them, which is exactly
+        // why they were missed: "usually" is not a guarantee, and a source document that has
+        // been purged releases its claim while these rows keep pointing at the object.
+        var components = await db.EmailInquiryComponents.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId && x.EvidenceUri != null)
+            .Select(x => new { Uri = x.EvidenceUri, Hash = x.ContentHash })
+            .ToListAsync(ct);
+        foreach (var component in components)
+            Protect(tenantId, keys, hashes, component.Uri, component.Hash);
+
+        var jobs = await db.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId)
+            .Select(x => new { Uri = x.StoragePath, Hash = x.ContentHash })
+            .ToListAsync(ct);
+        foreach (var job in jobs)
+            Protect(tenantId, keys, hashes, job.Uri, job.Hash);
+
         return new ReferencedEvidence(keys, hashes);
+    }
+
+    /// <summary>
+    /// Folds one row's recorded pointer into the protected set.
+    ///
+    /// <para>The digest is only claimed when the path actually reduces to a key under THIS
+    /// tenant's prefix. A hash recorded beside a path that points somewhere else is not a claim
+    /// on these bytes, and treating every recorded digest as one would protect the whole store
+    /// and quietly retire the sweep.</para>
+    /// </summary>
+    private static void Protect(long tenantId, HashSet<string> keys, HashSet<string> hashes,
+        string? storageUri, string? contentHash)
+    {
+        var prefix = TenantPrefix(tenantId);
+        var claimsThisTenant = false;
+        foreach (var key in KeysFromStorageUri(storageUri))
+        {
+            keys.Add(key);
+            claimsThisTenant |= key.StartsWith(prefix, StringComparison.Ordinal);
+        }
+
+        if (claimsThisTenant && !string.IsNullOrWhiteSpace(contentHash))
+            hashes.Add(contentHash.Trim());
     }
 
     /// <summary>
@@ -779,8 +918,8 @@ public sealed class TenantDataControlService(
                 bytesFreed = purge.BytesFreed,
                 provedUnreferencedBy = new[]
                 {
-                    "no source document row holds this key",
-                    "no source document row holds its opposite-zone sibling",
+                    "no live row holds this key",
+                    "no live row holds its opposite-zone sibling",
                     "no live row holds its content hash",
                     "the key matches the shape this system writes"
                 },
