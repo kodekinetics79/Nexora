@@ -35,6 +35,22 @@ public class Tenant
     /// </summary>
     public long? PrimaryBusinessUnitId { get; set; }
 
+    /// <summary>
+    /// Optimistic-concurrency token, incremented by every governed write to this row.
+    ///
+    /// WHY THIS EXISTS. Thirty-six concurrency tokens already guard rate cards, statements,
+    /// invoices, AI policy and provisioning executions — and none guarded the tenant itself.
+    /// Every tenant write was read-modify-write with no token and no lock, and two of the
+    /// console's screens issue the SAME full-object profile PUT, each echoing the seventeen
+    /// fields it is not editing from its own snapshot. Two operators, or one operator in two
+    /// tabs, silently overwrote each other and nothing recorded that it happened.
+    ///
+    /// It is a plain counter rather than xmin because the console has to be able to SHOW it:
+    /// the aggregate read returns it as an ETag and a write echoes it back as If-Match, so a
+    /// stale editor is refused with 412 instead of landing on top of somebody else's edit.
+    /// </summary>
+    public long Version { get; set; } = 1;
+
     public DateTime CreatedOn { get; set; } = DateTime.UtcNow;
 
     public string? CreatedBy { get; set; }

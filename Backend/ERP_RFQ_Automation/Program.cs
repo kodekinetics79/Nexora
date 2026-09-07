@@ -326,6 +326,12 @@ builder.Services.AddSingleton<ERP_RFQ_Automation.Security.ITenantSessionCache>(
     services => services.GetRequiredService<ERP_RFQ_Automation.Security.TenantSessionValidator>());
 builder.Services.AddPlatformEntitlements();
 builder.Services.AddTenantActivationPolicy();
+
+// The single read behind the redesigned customer screen. Composes facts that eleven separate
+// per-tab reads already served to the same caller; writes nothing.
+builder.Services.AddScoped<
+    ERP_RFQ_Automation.Platform.Configuration.ITenantConfigurationService,
+    ERP_RFQ_Automation.Platform.Configuration.TenantConfigurationService>();
 builder.Services.AddPlatformBilling(builder.Configuration);
 builder.Services.AddScoped<IGeneralDropdownRepository, GeneralDropdownRepository>();
 builder.Services.AddScoped<ICustomerRepository, CustomerRepository>();

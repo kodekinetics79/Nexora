@@ -91,13 +91,25 @@ public sealed class EntitlementClaimPostgreSqlTests : IAsyncLifetime
             Weight = 1
         };
         ctx.Set<Plan>().Add(plan);
+        // PrimaryBusinessUnitId is a real foreign key since 20260907111347, and a Billable tenant
+        // (the default mode) needs an invoice recipient since 20260907111522.
+        ctx.Set<ERP_RFQ_Automation.Models.BusinessUnit>().Add(new()
+        {
+            Id = PlannedBu,
+            BusinessUnitCode = "CAPTEST",
+            BusinessUnitName = "Cap test unit",
+            IsActive = true,
+            CreatedBy = "test",
+            CreatedOn = DateTime.UtcNow
+        });
         ctx.Set<Tenant>().Add(new Tenant
         {
             Name = "Cap Test Tenant",
             Slug = "cap-test",
             Status = TenantStatus.Active,
             Plan = plan,
-            PrimaryBusinessUnitId = PlannedBu
+            PrimaryBusinessUnitId = PlannedBu,
+            BillingContactEmail = "ap@cap-test.test"
         });
         await ctx.SaveChangesAsync();
 

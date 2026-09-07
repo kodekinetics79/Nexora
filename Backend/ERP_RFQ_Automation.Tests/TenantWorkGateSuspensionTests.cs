@@ -183,6 +183,10 @@ public sealed class TenantWorkGateSuspensionTests
         await harness.SeedTenantAsync(Active, status: null, "duplicate-owner-bu");
         await using (var db = harness.Context())
         {
+            // Two owners of one business unit is refused by the database since 20260907111347.
+            // The fail-closed guarantee below is defence in depth and is kept exercised rather
+            // than retired with the defect — see SharedBusinessUnitFixture.
+            await SharedBusinessUnitFixture.AllowAsync(db, Active);
             db.Set<Tenant>().AddRange(
                 new Tenant
                 {
@@ -190,6 +194,7 @@ public sealed class TenantWorkGateSuspensionTests
                     Slug = $"duplicate-first-{firstStatus.ToString().ToLowerInvariant()}",
                     Status = firstStatus,
                     PrimaryBusinessUnitId = Active,
+                    BillingContactEmail = "ap+first@fixture.test",
                     CreatedBy = "tests",
                     CreatedOn = DateTime.UtcNow
                 },
@@ -199,6 +204,7 @@ public sealed class TenantWorkGateSuspensionTests
                     Slug = $"duplicate-second-{secondStatus.ToString().ToLowerInvariant()}",
                     Status = secondStatus,
                     PrimaryBusinessUnitId = Active,
+                    BillingContactEmail = "ap+second@fixture.test",
                     CreatedBy = "tests",
                     CreatedOn = DateTime.UtcNow.AddSeconds(1)
                 });

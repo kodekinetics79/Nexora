@@ -305,6 +305,7 @@ public sealed class GoldenJourneyGovernedTenantTests : IDisposable
                 Status = TenantStatus.Active,
                 PlanId = null,
                 PrimaryBusinessUnitId = businessUnit.Id,
+                BillingContactEmail = "ap+golden-a@fixture.test",
                 CreatedBy = "tests",
                 CreatedOn = DateTime.UtcNow
             });
@@ -322,11 +323,14 @@ public sealed class GoldenJourneyGovernedTenantTests : IDisposable
     /// <summary>
     /// The seeder repairs a stable canonical row while runtime authorization rejects ambiguity.
     ///
-    /// <para>Nothing keeps a business unit to one Tenant row: there is no unique index on
-    /// <c>PrimaryBusinessUnitId</c>. The development fixture seeder still needs deterministic
-    /// repair semantics, so it attaches the plan to the lowest-id row rather than whichever row
-    /// the engine happens to return. That does not confer runtime authority: TenantAccessService
-    /// observes both owners and refuses the ambiguous mapping.
+    /// <para>A business unit is now held to one Tenant row: 20260907111347 adds the unique index
+    /// on <c>PrimaryBusinessUnitId</c> that this test used to note the absence of, because two
+    /// tenants resolving to one row-level-security scope is a cross-tenant data merge. The
+    /// fixture lifts that index deliberately (see <see cref="SharedBusinessUnitFixture"/>) so the
+    /// determinism below stays exercised: the development seeder still needs to attach the plan
+    /// to the lowest-id row rather than whichever row the engine happens to return, and
+    /// TenantAccessService still refuses an ambiguous mapping at runtime. Both are defence in
+    /// depth now rather than the only defence.
     /// </para>
     ///
     /// <para><b>Why the SQL is asserted as well as the outcome.</b> On SQLite a <c>bigint</c> primary
@@ -356,6 +360,7 @@ public sealed class GoldenJourneyGovernedTenantTests : IDisposable
                 CreatedOn = DateTime.UtcNow
             });
             await ctx.SaveChangesAsync();
+            await SharedBusinessUnitFixture.AllowAsync(ctx, businessUnitId);
 
             // Written HIGHER id first, so physical order and id order disagree on any engine that
             // returns the former.
@@ -373,6 +378,7 @@ public sealed class GoldenJourneyGovernedTenantTests : IDisposable
                     Status = TenantStatus.Active,
                     PlanId = null,
                     PrimaryBusinessUnitId = businessUnitId,
+                    BillingContactEmail = $"ap+{slug}@fixture.test",
                     CreatedBy = "tests",
                     CreatedOn = DateTime.UtcNow
                 });

@@ -42,6 +42,7 @@ PG_CONTAINER="nexora-local-pg-${PG_PORT}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
 
+
 # Local-only credentials. Emails default; PASSWORDS DELIBERATELY DO NOT.
 #
 # SEC-G9: both passwords used to carry a literal `${VAR:-<default>}` fallback, so the operator
@@ -59,6 +60,32 @@ CHECKER_PASSWORD="${NEXORA_CHECKER_PASSWORD:-}"
 log()  { printf '\033[1;36m[nexora]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[nexora]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[nexora]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# LAN REVIEW MODE — off by default, and it must stay off by default.
+#
+# The loopback binding above is not decoration: this console is the platform control plane,
+# and the run seeds a Platform Owner into it. Binding it to every interface puts that sign-in
+# form on the office network. That is sometimes exactly what is wanted — somebody else has to
+# click through a redesign before it is merged — so it is available, but only when asked for
+# by name, and it says out loud what it just exposed.
+#
+#   NEXORA_LAN_ACCESS=1 ./scripts/local/run-platform-console.sh
+#
+# BIND_HOST is what the two servers listen on. PUBLIC_HOST is the address a REVIEWER types.
+# They are separate because the script's own seeding curls and health probes must keep using
+# loopback regardless — they run on this machine, and routing them over the LAN only adds a
+# way for them to fail.
+LAN_ACCESS="${NEXORA_LAN_ACCESS:-0}"
+if [[ "$LAN_ACCESS" == "1" ]]; then
+  PUBLIC_HOST="${NEXORA_PUBLIC_HOST:-$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')}"
+  [[ -n "$PUBLIC_HOST" ]] || die "NEXORA_LAN_ACCESS=1 but no LAN address could be detected; set NEXORA_PUBLIC_HOST."
+  BIND_HOST="0.0.0.0"
+else
+  PUBLIC_HOST="127.0.0.1"
+  BIND_HOST="127.0.0.1"
+fi
+PUBLIC_BACKEND_URL="http://${PUBLIC_HOST}:${BACKEND_PORT}"
+PUBLIC_FRONTEND_URL="http://${PUBLIC_HOST}:${FRONTEND_PORT}"
 
 BACKEND_PID=""
 FRONTEND_PID=""
@@ -225,12 +252,13 @@ log "Starting the API on $BACKEND_URL (applying ~200 migrations on first run)."
   Observability__Prometheus__ScrapeKey="$APP_SECRET" \
   Platform__BootstrapOwnerEmail="$OWNER_EMAIL" \
   Platform__BootstrapOwnerPassword="$OWNER_PASSWORD" \
-  Notifications__AppBaseUrl="$FRONTEND_URL" \
+  Notifications__AppBaseUrl="$PUBLIC_FRONTEND_URL" \
   Notifications__OutboundGuard__Mode="$OUTBOUND_GUARD" \
   Security__SecretProtectionKey="$SECRET_PROTECTION_KEY" \
   Cors__AllowedOrigins__0="$FRONTEND_URL" \
+  Cors__AllowedOrigins__1="$PUBLIC_FRONTEND_URL" \
   ASPNETCORE_ENVIRONMENT=Development \
-  ASPNETCORE_URLS="$BACKEND_URL" \
+  ASPNETCORE_URLS="http://${BIND_HOST}:${BACKEND_PORT}" \
   dotnet run --no-build --no-launch-profile
 ) >"$RUN_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
@@ -373,7 +401,7 @@ log "Starting the frontend on $FRONTEND_URL."
 (
   cd "$FRONTEND_DIR"
   [[ -d node_modules ]] || npm ci
-  VITE_API_BASE_URL="$BACKEND_URL" npx vite --port "$FRONTEND_PORT" --strictPort --host 127.0.0.1
+  VITE_API_BASE_URL="$PUBLIC_BACKEND_URL" npx vite --port "$FRONTEND_PORT" --strictPort --host "$BIND_HOST"
 ) >"$RUN_DIR/frontend.log" 2>&1 &
 FRONTEND_PID=$!
 
@@ -382,10 +410,18 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
+if [[ "$LAN_ACCESS" == "1" ]]; then
+  LAN_BANNER="this machine AND anything on your network — the platform sign-in is exposed on ${PUBLIC_HOST}"
+  warn "LAN access is ON. The platform control-plane sign-in is reachable from your whole network."
+else
+  LAN_BANNER="this machine only (loopback). Re-run with NEXORA_LAN_ACCESS=1 to share it."
+fi
+
 cat <<BANNER
 
   ────────────────────────────────────────────────────────────────
-   Operator console   ${FRONTEND_URL}/platform/tenants
+   Operator console   ${PUBLIC_FRONTEND_URL}/platform/tenants
+   Reachable from     ${LAN_BANNER}
    Email              ${OWNER_EMAIL}
    Password           the value of \$NEXORA_OWNER_PASSWORD (not printed)
    MFA seed file      ${RUN_DIR}/platform-owner-mfa-secret (mode 600; never printed)
@@ -404,7 +440,7 @@ cat <<BANNER
    directly. Paste it into the browser to finish as the customer would.
 
    To make mail actually leave this box: configure SMTP at
-   ${FRONTEND_URL}/platform/email, and re-run with
+   ${PUBLIC_FRONTEND_URL}/platform/email, and re-run with
    NEXORA_OUTBOUND_GUARD=Live. With the guard on DraftOnly (the default)
    nothing is transmitted however correct the SMTP settings are, and a
    test send will say so rather than appearing to succeed.

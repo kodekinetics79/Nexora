@@ -361,6 +361,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             {
                 Id = 89_901, Name = "HTTP Tenant A", Slug = "http-tenant-a",
                 Status = TenantStatus.Active, Plan = plan, PrimaryBusinessUnitId = TenantA,
+                // BillingMode defaults to Billable, which since 20260907111522 requires an invoice recipient.
+                BillingContactEmail = "ap+http-a@fixture.test",
                 Entitlements = enabledFeatures,
                 CreatedOn = now.UtcDateTime, CreatedBy = "release-01b-tests"
             },
@@ -368,6 +370,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             {
                 Id = 89_902, Name = "HTTP Tenant B", Slug = "http-tenant-b",
                 Status = TenantStatus.Active, Plan = plan, PrimaryBusinessUnitId = TenantB,
+                // BillingMode defaults to Billable, which since 20260907111522 requires an invoice recipient.
+                BillingContactEmail = "ap+http-b@fixture.test",
                 Entitlements = enabledFeatures,
                 CreatedOn = now.UtcDateTime, CreatedBy = "release-01b-tests"
             });

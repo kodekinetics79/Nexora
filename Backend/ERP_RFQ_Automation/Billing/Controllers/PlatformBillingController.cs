@@ -806,6 +806,20 @@ public class PlatformBillingController : ControllerBase
                    "the issue date to compute when the invoice falls due, so a value outside that " +
                    "range produces an invoice that is either overdue on issue or effectively never due.";
 
+        // A charged tenant must STATE its terms. This write is a full replace, so omitting the
+        // field clears it, and a null leaves the tenant billable on paper with no basis for a due
+        // date — its invoices then age against nothing and dunning has no ladder to climb.
+        //
+        // ZERO IS EXPLICITLY ALLOWED, and the range check above already says so: nought days is
+        // "due on receipt", which is a term real customers sign. A first draft of this rule
+        // refused it, and Zero_payment_terms_is_accepted_because_due_on_receipt_is_a_real_term
+        // caught that — a range check that also refuses a legitimate value is not a stricter
+        // control, it is a different defect.
+        if (tenant.BillingMode == TenantBillingMode.Billable && request.PaymentTermsDays is null)
+            return "paymentTermsDays is required for a Billable tenant. It is added to the issue date " +
+                   "to compute when the invoice falls due, so without it the invoice has no due date " +
+                   "to age against and nothing can chase it. Use 0 for due on receipt, or 30 for net 30.";
+
         if (request.ContractStartOn is DateTime start && request.ContractEndOn is DateTime end
             && end <= start)
             return "contractEndOn must fall after contractStartOn.";

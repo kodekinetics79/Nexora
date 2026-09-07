@@ -11,6 +11,10 @@ const PLATFORM_HOME = '/platform/overview';
 const OverviewPage = lazy(() => import('./pages/OverviewPage'));
 const TenantsPage = lazy(() => import('./pages/TenantsPage'));
 const TenantDetailPage = lazy(() => import('./pages/TenantDetailPage'));
+// The redesigned single-page customer screen. Mounted ALONGSIDE the twelve-tab screen rather
+// than replacing it, so the two can be compared on the same data before anything is retired —
+// and so every ?tab= deep link already pasted into a support ticket keeps working.
+const CustomerPage = lazy(() => import('./pages/CustomerPage'));
 const PipelinePage = lazy(() => import('./pages/PipelinePage'));
 const PlansFlagsPage = lazy(() => import('./pages/PlansFlagsPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
@@ -56,6 +60,7 @@ export default function PlatformRoutes() {
             <Route path="overview" element={<OverviewPage />} />
             <Route path="tenants" element={<TenantsPage />} />
             <Route path="tenants/:id" element={<TenantDetailPage />} />
+            <Route path="customers/:id" element={<CustomerPage />} />
             <Route path="pipeline" element={<PipelinePage />} />
             <Route path="plans" element={<PlansFlagsPage />} />
             <Route path="users" element={<PlatformUsersPage />} />

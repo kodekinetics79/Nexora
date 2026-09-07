@@ -364,18 +364,22 @@ public sealed class PlatformPlansAndOverviewTests
         Assert.Equal(0.5, commercial.GetProperty("quotesOrderedPct").GetDouble(), 3);
     }
 
+
+
     [Fact]
     public async Task Overview_attributes_activity_to_every_tenant_claiming_the_business_unit()
     {
-        // Two tenants sharing a primary business unit is a real state (see the /pipeline test
-        // below). The leaderboard must not drop one of them or double the fleet totals.
+        // A tenant pair sharing one business unit is now refused by the database; see
+        // AllowSharedBusinessUnitFixtureAsync. The leaderboard must still not drop one of them
+        // or double the fleet totals, so the guarantee is pinned rather than retired.
         using var db = new TestDb();
         await using (var seed = db.ContextFor(null))
         {
+            await SharedBusinessUnitFixture.AllowAsync(seed, 42, 43);
             seed.Set<Tenant>().AddRange(
-                new Tenant { Name = "Busy", Slug = "busy", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42 },
-                new Tenant { Name = "Twin", Slug = "twin", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42 },
-                new Tenant { Name = "Idle", Slug = "idle", Status = TenantStatus.Active, PrimaryBusinessUnitId = 43 });
+                new Tenant { Name = "Busy", Slug = "busy", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42, BillingContactEmail = "ap@busy.test" },
+                new Tenant { Name = "Twin", Slug = "twin", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42, BillingContactEmail = "ap@twin.test" },
+                new Tenant { Name = "Idle", Slug = "idle", Status = TenantStatus.Active, PrimaryBusinessUnitId = 43, BillingContactEmail = "ap@idle.test" });
             seed.Set<ExtractionJob>().AddRange(
                 NewJob(42, ExtractionStatus.Succeeded),
                 NewJob(42, ExtractionStatus.Succeeded),
@@ -470,9 +474,10 @@ public sealed class PlatformPlansAndOverviewTests
         using var db = new TestDb();
         await using (var seed = db.ContextFor(null))
         {
+            await SharedBusinessUnitFixture.AllowAsync(seed, 42);
             seed.Set<Tenant>().AddRange(
-                new Tenant { Name = "First", Slug = "first", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42 },
-                new Tenant { Name = "Second", Slug = "second", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42 });
+                new Tenant { Name = "First", Slug = "first", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42, BillingContactEmail = "ap@first.test" },
+                new Tenant { Name = "Second", Slug = "second", Status = TenantStatus.Active, PrimaryBusinessUnitId = 42, BillingContactEmail = "ap@second.test" });
             seed.Set<ExtractionJob>().Add(new ExtractionJob
             {
                 BatchId = Guid.NewGuid(),

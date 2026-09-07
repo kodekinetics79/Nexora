@@ -174,24 +174,59 @@ public static class TenantLifecycleHarness
     /// </summary>
     public static ClaimsPrincipal SecondApprover() => Operator("second-owner@example.test", 23);
 
+    /// <summary>
+    /// <para><c>BillingContactEmail</c> is set because <c>BillingMode</c> defaults to
+    /// <c>Billable</c> and 20260907111522 refuses a Billable tenant with no invoice recipient —
+    /// the state where invoicing throws and offboarding can never complete. Every fixture that
+    /// omitted it was seeding a tenant the product cannot actually produce.</para>
+    /// </summary>
     public static Tenant NewTenant(string slug, TenantStatus status, long? primaryBusinessUnitId = null) => new()
     {
         Name = $"Offboarding {slug}",
         Slug = slug,
         Status = status,
         PrimaryBusinessUnitId = primaryBusinessUnitId,
+        BillingContactEmail = $"ap+{slug}@fixture.test",
         CreatedBy = "test",
         CreatedOn = DateTime.UtcNow
     };
 
+    /// <summary>
+    /// <para>The business unit is materialised when one is asked for, because 20260907111347 made
+    /// <c>PrimaryBusinessUnitId</c> a real foreign key. Pointing a tenant at a unit that does not
+    /// exist used to be free; it is the dangling isolation pointer that makes a tenant's own data
+    /// invisible to it, so the fixture now has to be as honest as production.</para>
+    /// </summary>
     public static async Task<Tenant> SeedTenantAsync(
         TenantLifecycleTestDb db, string slug, TenantStatus status, long? primaryBusinessUnitId = null)
     {
         await using var seed = db.ContextFor(null);
+        if (primaryBusinessUnitId is long unitId)
+            await EnsureBusinessUnitAsync(seed, unitId, slug);
         var tenant = NewTenant(slug, status, primaryBusinessUnitId);
         seed.Set<Tenant>().Add(tenant);
         await seed.SaveChangesAsync();
         return tenant;
+    }
+
+    /// <summary>Creates the business unit a tenant's isolation pointer must reference, if absent.</summary>
+    public static async Task EnsureBusinessUnitAsync(
+        ErpRfqAutomationContext context, long businessUnitId, string label)
+    {
+        var exists = await context.Set<BusinessUnit>().IgnoreQueryFilters()
+            .AnyAsync(x => x.Id == businessUnitId);
+        if (exists) return;
+
+        context.Set<BusinessUnit>().Add(new BusinessUnit
+        {
+            Id = businessUnitId,
+            BusinessUnitCode = $"BU{businessUnitId}",
+            BusinessUnitName = $"Unit for {label}",
+            IsActive = true,
+            CreatedBy = "test",
+            CreatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
     }
 
     /// <summary>

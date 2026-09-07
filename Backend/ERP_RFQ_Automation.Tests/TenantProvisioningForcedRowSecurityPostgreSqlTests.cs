@@ -221,8 +221,10 @@ public sealed class TenantProvisioningForcedRowSecurityPostgreSqlTests(ForcedRow
     public async Task Creating_a_platform_tenant_seeds_its_meter_source_policies()
     {
         await ForcedRowSecurityOwnerDatabase.ExecuteAsync(database.OwnerConnectionString, $"""
-            INSERT INTO platform."Tenants" ("Id", "Name", "Slug", "Status", "CreatedOn")
-            VALUES ({PlatformTenantId}, 'Provisioning Co', 'provisioning-co', 'Active', now());
+            INSERT INTO platform."Tenants"
+                ("Id", "Name", "Slug", "Status", "CreatedOn", "BillingContactEmail")
+            VALUES ({PlatformTenantId}, 'Provisioning Co', 'provisioning-co', 'Active', now(),
+                    'billing@provisioning-co.test');
             """);
 
         Assert.Equal(16L, await CountAsSuperuserAsync(

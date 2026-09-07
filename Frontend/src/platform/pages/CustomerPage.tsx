@@ -1,0 +1,377 @@
+import { useMemo } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import {
+  Alert, Box, Button, Card, CardContent, Chip, Divider, Tooltip, Typography,
+} from '@mui/material';
+import {
+  ArrowBack as BackIcon,
+  ArrowForward as GoIcon,
+  InfoOutlined as WhyIcon,
+  LockOutlined as LockedIcon,
+  TuneOutlined as AdvancedIcon,
+} from '@mui/icons-material';
+import Stack from '../components/Flex';
+import { platformApi } from '../api/client';
+import { platformErrorMessage } from '../api/apiError';
+import { platformKeys } from '../api/queryKeys';
+import PageHeader from '../components/PageHeader';
+import { ErrorState, LoadingState } from '../components/States';
+import type {
+  TenantConfigurationBlocker, TenantConfigurationField, TenantConfigurationSlice,
+  TenantConfigurationView,
+} from '../types';
+
+/**
+ * THE CUSTOMER SCREEN — one page where there were twelve tabs.
+ *
+ * WHAT WAS WRONG. The tab strip was a map of the backend's controllers, not of anybody's work:
+ * each tab owned one API surface, so no tab was a task and every real task crossed four to six
+ * of them. "Switch a customer on" spanned Activation, Profile & access, Commercial, Data &
+ * storage and Users. Behind those tabs sat sixty-eight independent mutations, exactly one
+ * dirty-state commit bar, and no navigate-away guard anywhere — and the wizard that created a
+ * customer ended by reporting success on a workspace nobody could log into.
+ *
+ * WHAT THIS IS. One read (`GET .../configuration`) and one vertical page: where the customer
+ * stands, what is blocking them and who has to clear it, then the settings themselves as
+ * read-only rows carrying the server's own answer about who may change each group.
+ *
+ * WHAT THIS DELIBERATELY IS NOT. It is not yet the write path. Editing still hands off to the
+ * existing audited endpoints — which is why each group links to the surface that owns it rather
+ * than pretending to save here. Merging the writes needs the If-Match plumbing to land first:
+ * a page that commits five former tabs at once makes a stale overwrite MORE likely, not less,
+ * because one commit carries edits somebody may have started ten minutes ago. The tenant row
+ * only grew a concurrency token in 20260907111347; until every writer honours it, a single
+ * save button here would be a new defect wearing the redesign's clothes.
+ */
+export default function CustomerPage() {
+  const { id = '' } = useParams();
+  const navigate = useNavigate();
+
+  const configuration = useQuery({
+    queryKey: platformKeys.tenantConfiguration(id),
+    queryFn: () => platformApi.getTenantConfiguration(id),
+    enabled: id !== '',
+  });
+
+  // The trading name is not in the configuration read — that read is about POSITION, not
+  // identity — so the header still asks for the tenant record. Two reads, not eleven.
+  const tenantQuery = useQuery({
+    queryKey: platformKeys.tenant(id),
+    queryFn: () => platformApi.getTenant(id),
+    enabled: id !== '',
+  });
+
+  const view = configuration.data;
+  const blockers = view?.blockers ?? [];
+
+  const groupedBlockers = useMemo(() => {
+    const byOwner = new Map<string, TenantConfigurationBlocker[]>();
+    for (const blocker of blockers) {
+      const list = byOwner.get(blocker.owner) ?? [];
+      list.push(blocker);
+      byOwner.set(blocker.owner, list);
+    }
+    return [...byOwner.entries()];
+  }, [blockers]);
+
+  if (configuration.isLoading || tenantQuery.isLoading) {
+    return <LoadingState label="Loading customer…" minHeight="60vh" />;
+  }
+
+  if (configuration.isError || !view) {
+    return (
+      <Box>
+        <Button startIcon={<BackIcon />} onClick={() => navigate('/platform/tenants')} sx={{ mb: 2 }}>
+          Back to customers
+        </Button>
+        <ErrorState
+          message={platformErrorMessage(configuration.error, 'This customer could not be loaded.')}
+          onRetry={() => configuration.refetch()}
+        />
+      </Box>
+    );
+  }
+
+  const { state, nextAction, slices } = view;
+  const tenant = tenantQuery.data;
+
+  return (
+    <Box>
+      <Button
+        startIcon={<BackIcon />}
+        onClick={() => navigate('/platform/tenants')}
+        sx={{ mb: 1.5 }}
+        color="inherit"
+      >
+        Customers
+      </Button>
+
+      <PageHeader
+        title={tenant?.name ?? `Customer ${view.tenantId}`}
+        subtitle={tenant?.legalName ?? tenant?.slug ?? undefined}
+        actions={
+          <Tooltip
+            describeChild
+            title="Audit, AI governance, data residency, provisioning diagnostics and offboarding — the screens a salesperson never opens"
+          >
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<AdvancedIcon />}
+              onClick={() => navigate(`/platform/tenants/${encodeURIComponent(id)}`)}
+            >
+              Advanced
+            </Button>
+          </Tooltip>
+        }
+      />
+
+      <StatusRibbon state={state} />
+
+      {/*
+        The one sentence a rep needs. Provisioning used to report success on a workspace nobody
+        could enter, and finding out cost four tabs; the server now says which it is and what
+        happens next, and this renders that verbatim rather than deciding for itself.
+      */}
+      {nextAction && (
+        <Alert
+          severity={blockers.length > 0 || state.legalHoldActive ? 'warning' : 'success'}
+          icon={false}
+          sx={{ mt: 2.5, borderLeft: 3, borderColor: 'warning.main' }}
+        >
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{nextAction.label}</Typography>
+          <Typography variant="body2" sx={{ mt: 0.25 }}>{nextAction.detail}</Typography>
+        </Alert>
+      )}
+
+      {blockers.length > 0 && (
+        <Card variant="outlined" sx={{ mt: 2.5 }}>
+          <CardContent>
+            <Typography variant="h6" sx={{ fontWeight: 700 }}>What is blocking this customer</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
+              Grouped by who has to act. Nothing here is a setting a salesperson is expected to
+              answer alone.
+            </Typography>
+
+            <Stack spacing={2.5}>
+              {groupedBlockers.map(([owner, items]) => (
+                <Box key={owner}>
+                  <Chip
+                    size="small"
+                    label={owner}
+                    color={owner === 'Finance' ? 'warning' : owner === 'Owner' ? 'error' : 'default'}
+                    sx={{ fontWeight: 700, mb: 1 }}
+                  />
+                  <Stack spacing={1.25}>
+                    {items.map((blocker) => (
+                      <Box
+                        key={blocker.code}
+                        sx={{ pl: 1.5, borderLeft: 2, borderColor: 'divider' }}
+                      >
+                        <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{blocker.title}</Typography>
+                        <Typography variant="body2" color="text.secondary">{blocker.detail}</Typography>
+                        {/*
+                          The control code stays, small and last. It is what a support ticket
+                          quotes — but it is not what the screen leads with, which is the whole
+                          difference between this and the fourteen raw cards it replaces.
+                        */}
+                        <Typography
+                          variant="caption"
+                          color="text.disabled"
+                          sx={{ fontFamily: 'monospace' }}
+                        >
+                          {blocker.code}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      <Box
+        sx={{
+          mt: 2.5,
+          display: 'grid',
+          gap: 2.5,
+          gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
+        }}
+      >
+        {slices.map((slice) => <SliceCard key={slice.key} slice={slice} tenantId={id} />)}
+      </Box>
+
+      <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 3 }}>
+        Read {view.version === 1 ? 'at version 1' : `at version ${view.version}`} · every group
+        above is written by its own audited endpoint, and this screen changes none of them yet.
+      </Typography>
+    </Box>
+  );
+}
+
+/**
+ * Contract and trial dates arrive as full timestamps because they are DateTime on the wire, and
+ * a renewal date rendered as `2027-08-31T00:00:00` is precisely the raw-record leakage this
+ * screen exists to stop. The time component is not merely noise here — it is meaningless: these
+ * are calendar dates a contract names, with no clock attached.
+ */
+function asDate(value: string): string {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+/** Where the customer stands, on one line, always visible. */
+function StatusRibbon({ state }: { state: TenantConfigurationView['state'] }) {
+  const items: Array<{ label: string; value: string; tone?: 'warn' | 'bad' }> = [
+    { label: 'Status', value: state.status, tone: state.status === 'Active' ? undefined : 'warn' },
+    { label: 'Billing', value: state.billingMode },
+    { label: 'Plan', value: state.planCode ?? 'None yet' },
+  ];
+  if (state.contractEndOn) items.push({ label: 'Renews', value: asDate(state.contractEndOn) });
+  if (state.trialEndsOn) items.push({ label: 'Trial ends', value: asDate(state.trialEndsOn) });
+  if (state.deploymentProfile !== 'Production') {
+    items.push({ label: 'Workspace', value: state.deploymentProfile, tone: 'warn' });
+  }
+  if (state.offboardingStage !== 'NotScheduled') {
+    items.push({ label: 'Offboarding', value: state.offboardingStage, tone: 'bad' });
+  }
+  if (state.legalHoldActive) items.push({ label: 'Legal hold', value: 'Active', tone: 'bad' });
+
+  return (
+    <Box
+      sx={{
+        mt: 2,
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 3,
+        px: 2,
+        py: 1.5,
+        borderRadius: 1,
+        border: '1px solid',
+        borderColor: 'divider',
+        bgcolor: 'action.hover',
+      }}
+    >
+      {items.map((item) => (
+        <Box key={item.label}>
+          <Typography
+            variant="caption"
+            sx={{ textTransform: 'uppercase', letterSpacing: '0.08em', color: 'text.secondary' }}
+          >
+            {item.label}
+          </Typography>
+          <Typography
+            variant="body2"
+            sx={{
+              fontWeight: 700,
+              color: item.tone === 'bad' ? 'error.main' : item.tone === 'warn' ? 'warning.main' : 'text.primary',
+            }}
+          >
+            {item.value}
+          </Typography>
+        </Box>
+      ))}
+      {state.statusReason && (
+        <Box sx={{ flexBasis: '100%' }}>
+          <Typography variant="body2" color="text.secondary">{state.statusReason}</Typography>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+function SliceCard({ slice, tenantId }: { slice: TenantConfigurationSlice; tenantId: string }) {
+  const surface = SLICE_SURFACES[slice.key];
+  return (
+    <Card variant="outlined">
+      <CardContent>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+          <Typography variant="h6" sx={{ fontWeight: 700, flex: 1 }}>{slice.label}</Typography>
+          {!slice.editable && (
+            // The server decides this, not a role name guessed on the client. A disabled control
+            // that does not say who CAN use it is the pattern that sent operators to ask in Slack.
+            <Tooltip describeChild title={slice.requiredAuthority}>
+              <Chip
+                size="small"
+                icon={<LockedIcon sx={{ fontSize: 15 }} />}
+                label={slice.requiredAuthority}
+                variant="outlined"
+              />
+            </Tooltip>
+          )}
+        </Stack>
+
+        <Divider sx={{ my: 1.5 }} />
+
+        <Box component="dl" sx={{ m: 0, display: 'grid', gap: 1.25 }}>
+          {slice.fields.map((field) => <FieldRow key={field.key} field={field} />)}
+        </Box>
+
+        {slice.editable && surface && (
+          <Button
+            size="small"
+            endIcon={<GoIcon />}
+            sx={{ mt: 2 }}
+            href={`/platform/tenants/${encodeURIComponent(tenantId)}?tab=${surface}`}
+          >
+            Change this
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function FieldRow({ field }: { field: TenantConfigurationField }) {
+  return (
+    <Box sx={{ display: 'flex', gap: 2, alignItems: 'baseline' }}>
+      <Typography
+        component="dt"
+        variant="body2"
+        color="text.secondary"
+        sx={{ minWidth: 150, flexShrink: 0 }}
+      >
+        {field.label}
+      </Typography>
+      <Typography
+        component="dd"
+        variant="body2"
+        sx={{ m: 0, fontWeight: field.value ? 600 : 400, color: field.value ? 'text.primary' : 'text.disabled' }}
+      >
+        {field.value ?? 'Not set'}
+        {/*
+          A derived value is not keyboard input, and saying WHERE it comes from is what removes
+          it from the operator's job. Region, currency, locale and quotas were free-text boxes
+          that a rep could not correctly answer and a typo in which blocked activation from a
+          different screen than the one that caused it.
+        */}
+        {field.derived && field.source && (
+          <Tooltip describeChild title={field.source}>
+            <WhyIcon
+              sx={{ fontSize: 14, ml: 0.75, verticalAlign: 'middle', color: 'text.disabled' }}
+              aria-label={`Why this value: ${field.source}`}
+            />
+          </Tooltip>
+        )}
+      </Typography>
+    </Box>
+  );
+}
+
+/**
+ * Where each group is still edited today. Kept as a map rather than served by the API because
+ * these are CONSOLE routes, not endpoints — the endpoint that owns each slice is already on the
+ * wire as `slice.endpoint`, and that is the one that must not drift.
+ */
+const SLICE_SURFACES: Record<string, string | undefined> = {
+  identity: 'profile-access',
+  operating: 'data-storage',
+  commercial: 'commercial',
+  modules: 'entitlements',
+  deployment: 'activation',
+};

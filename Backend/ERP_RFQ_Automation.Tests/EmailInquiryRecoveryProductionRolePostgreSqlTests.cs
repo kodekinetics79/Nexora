@@ -429,9 +429,10 @@ public sealed class EmailInquiryRecoveryProductionRolePostgreSqlTests : IAsyncLi
     private Task SeedPlatformTenantAsync(long tenantId, long primaryBusinessUnitId) =>
         ExecuteAsync(_superuserConnectionString, $"""
             INSERT INTO platform."Tenants"
-                ("Id", "Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn", "BillingMode")
+                ("Id", "Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn", "BillingMode",
+                 "BillingContactEmail")
             VALUES ({tenantId}, 'Role lane tenant {tenantId}', 'role-lane-{tenantId}', 'Active',
-                    {primaryBusinessUnitId}, now(), 'Billable')
+                    {primaryBusinessUnitId}, now(), 'Billable', 'ap+role-lane@fixture.test')
             ON CONFLICT DO NOTHING;
             """);
 

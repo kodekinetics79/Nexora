@@ -33,6 +33,19 @@ public sealed class TenantDataAssetRegistryPostgreSqlTests
         await context.Database.MigrateAsync();
         try
         {
+            // The unit the isolation pointer references: PrimaryBusinessUnitId became a real
+            // foreign key in 20260907111347, so a tenant can no longer point at a unit that does
+            // not exist. BillingContactEmail is set because BillingMode defaults to Billable and
+            // 20260907111522 refuses a Billable tenant with no invoice recipient.
+            context.Set<ERP_RFQ_Automation.Models.BusinessUnit>().Add(new()
+            {
+                Id = BusinessUnitId,
+                BusinessUnitCode = "PGASSET",
+                BusinessUnitName = "PostgreSQL asset unit",
+                IsActive = true,
+                CreatedBy = "test",
+                CreatedOn = DateTime.UtcNow
+            });
             context.Set<Tenant>().Add(new Tenant
             {
                 Id = TenantId,
@@ -40,6 +53,7 @@ public sealed class TenantDataAssetRegistryPostgreSqlTests
                 Slug = "postgresql-asset-tenant-983001",
                 Status = TenantStatus.Provisioning,
                 PrimaryBusinessUnitId = BusinessUnitId,
+                BillingContactEmail = "ap@postgresql-asset.test",
                 DataRegion = "us-east-1"
             });
             await context.SaveChangesAsync();

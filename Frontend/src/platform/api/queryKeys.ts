@@ -14,6 +14,8 @@ export const platformKeys = {
   tenants: () => [...platformKeys.all, 'tenants'] as const,
   tenant: (id: string) => [...platformKeys.all, 'tenant', id] as const,
   tenantOperations: (id: string) => [...platformKeys.all, 'tenant', id, 'operations'] as const,
+  // Nested under the tenant so ANY tenant mutation refreshes the customer screen's one read.
+  tenantConfiguration: (id: string) => [...platformKeys.all, 'tenant', id, 'configuration'] as const,
   tenantInvitations: (id: string) => [...platformKeys.all, 'tenant', id, 'admin-invitations'] as const,
   // The tenant's own staff accounts and the roles they can hold. Nested under the tenant key so
   // a mutation on one user invalidates the roster it came from and nothing wider.

@@ -551,14 +551,47 @@ public sealed class BillingExecutionRoleGrantsPostgreSqlTests
         TenantAccessService.ResetPrivilegeProbes();
     }
 
-    /// <summary>Rewrites the seeded tenant's commercial terms out-of-band, as a legacy row would carry them.</summary>
+    /// <summary>
+    /// Rewrites the seeded tenant's commercial terms out-of-band, as a legacy row would carry them.
+    ///
+    /// <para>An UNRECORDED EXEMPTION — a non-Billable mode with no written justification — is the
+    /// state these tests are about, and since 20260907111522_TenantCommercialInvariants the
+    /// database refuses to accept one. That refusal is the point of the constraint and is not
+    /// being weakened here: every product write path (both provisioning doors and
+    /// SetTenantCommercialTerms) already demanded a fifteen-character reason, so the only way
+    /// such a row exists is that it PREDATES the rule. The constraint ships NOT VALID precisely
+    /// so those historical rows keep working, and this helper reproduces one the only way a test
+    /// can — by lifting the constraint for the out-of-band write and putting it back exactly as
+    /// the migration leaves it, the same shape as this class's existing GRANT/REVOKE juggling.</para>
+    /// </summary>
     private async Task SetBillingModeAsync(TenantBillingMode mode, string? reason)
     {
-        await using var context = _database.ContextFor(null);
-        var tenant = await context.Set<Tenant>().IgnoreQueryFilters().FirstAsync(t => t.Id == TenantId);
-        tenant.BillingMode = mode;
-        tenant.BillingModeReason = reason;
-        await context.SaveChangesAsync();
+        var simulatingLegacyRow = mode != TenantBillingMode.Billable && string.IsNullOrWhiteSpace(reason);
+
+        if (simulatingLegacyRow)
+            await ExecuteAsync("""
+                ALTER TABLE platform."Tenants" DROP CONSTRAINT IF EXISTS "CK_Tenants_NonBillableHasReason";
+                """);
+        try
+        {
+            await using var context = _database.ContextFor(null);
+            var tenant = await context.Set<Tenant>().IgnoreQueryFilters().FirstAsync(t => t.Id == TenantId);
+            tenant.BillingMode = mode;
+            tenant.BillingModeReason = reason;
+            await context.SaveChangesAsync();
+        }
+        finally
+        {
+            if (simulatingLegacyRow)
+                await ExecuteAsync("""
+                    ALTER TABLE platform."Tenants"
+                        ADD CONSTRAINT "CK_Tenants_NonBillableHasReason"
+                        CHECK (
+                            "BillingMode" = 'Billable'
+                            OR length(btrim(coalesce("BillingModeReason", ''))) >= 15
+                        ) NOT VALID;
+                    """);
+        }
     }
 
     private async Task ExecuteAsync(string sql)
@@ -642,6 +675,10 @@ public sealed class BillingExecutionRoleGrantsPostgreSqlTests
             PrimaryBusinessUnitId = BusinessUnitId,
             RateCardId = RateCardId,
             BillingMode = TenantBillingMode.Billable,
+            // A Billable tenant must have an invoice recipient (CK_Tenants_BillableIsInvoiceable).
+            // Note this fixture deliberately keeps PlanId null when withPlan is false: that is the
+            // UnplannedTenantAllowance state, and it stays representable.
+            BillingContactEmail = "billing@grants.test",
             CreatedBy = "tests",
             CreatedOn = createdOn ?? DateTime.UtcNow
         });

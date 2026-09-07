@@ -791,8 +791,9 @@ public sealed class RedTeamControlPlanePostgreSqlTests
         await using (var command = new NpgsqlCommand(
             """
             INSERT INTO platform."Tenants"
-                ("Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn", "CreatedBy")
-            VALUES (@name, @slug, 'Archived', @unit, now(), 'redteam')
+                ("Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn", "CreatedBy",
+                 "BillingContactEmail")
+            VALUES (@name, @slug, 'Archived', @unit, now(), 'redteam', 'billing@redteam.test')
             RETURNING "Id";
             """, connection))
         {
@@ -1009,8 +1010,10 @@ public sealed class RedTeamControlPlanePostgreSqlTests
         long tenantId;
         await using (var command = new NpgsqlCommand(
             """
-            INSERT INTO platform."Tenants" ("Name", "Slug", "Status", "CreatedOn", "CreatedBy")
-            VALUES ('Red team revenue probe', @slug, 'Active', now(), 'redteam')
+            INSERT INTO platform."Tenants"
+                ("Name", "Slug", "Status", "CreatedOn", "CreatedBy", "BillingContactEmail")
+            VALUES ('Red team revenue probe', @slug, 'Active', now(), 'redteam',
+                    'billing@redteam.test')
             RETURNING "Id";
             """, connection))
         {

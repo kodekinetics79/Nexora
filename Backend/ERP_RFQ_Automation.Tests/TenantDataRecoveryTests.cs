@@ -209,7 +209,14 @@ public sealed class TenantDataRecoveryTests
         context.Set<Tenant>().Add(new Tenant
         {
             Id = 41, Name = "Recovery tenant", Slug = "recovery-tenant", Status = TenantStatus.Archived,
-            PrimaryBusinessUnitId = 410, DataRegion = "us-east-1"
+            // A PURGED tenant has no business unit: the purge destroys public."BusinessUnits" while
+            // platform."Tenants" survives as an operator record, and the foreign key added in
+            // 20260907111347 is ON DELETE SET NULL precisely so that tombstone stays valid. The
+            // fixture pointed at unit 410, which never existed and which nothing here reads — null
+            // is both what the constraint requires and what production actually holds.
+            PrimaryBusinessUnitId = null, DataRegion = "us-east-1",
+            // BillingMode defaults to Billable, which since 20260907111522 needs a recipient.
+            BillingContactEmail = "ap@recovery-tenant.test"
         });
         context.Set<TenantOffboarding>().Add(new TenantOffboarding
         {

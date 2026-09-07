@@ -115,6 +115,7 @@ import type {
   RecordTenantDataRecoveryEvidenceInput,
   UpsertPlanInput,
   TenantModules,
+  TenantConfigurationView
 } from '../types';
 
 export interface AuditQuery {
@@ -173,6 +174,8 @@ export interface PlatformApi {
   getOverview(windowDays: OverviewWindow): Promise<OverviewMetrics>;
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
+  /** One read for the customer screen: state, slices, blockers and the next action. */
+  getTenantConfiguration(id: string): Promise<TenantConfigurationView>;
   updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
   updateTenantDataRegion(id: string, input: UpdateTenantDataRegionInput): Promise<Tenant>;
   /** Owner-gated. The only writer of the deployment profile and its approval record. */
@@ -1115,6 +1118,8 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   getTenant: async (id) =>
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
+  getTenantConfiguration: async (id) =>
+    (await platformHttp.get<TenantConfigurationView>(`/api/platform/tenants/${id}/configuration`)).data,
   updateTenantProfile: async (id, input) =>
     normalizeTenant((await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/profile`, input)).data),
   updateTenantDataRegion: async (id, input) =>

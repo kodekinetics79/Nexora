@@ -2470,3 +2470,73 @@ export interface TenantModules {
   planCode: string | null;
   modules: TenantModuleGrant[];
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tenant configuration: the single read behind the customer screen.
+//
+// The tenant detail screen used to fire eleven reads across eight controllers, one per tab,
+// and no single response could answer "where does this customer stand" — which is why no
+// screen ever did. `GET /api/platform/tenants/{id}/configuration` is that answer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A value the operator does NOT type: `derived` values render read-only with their `source`. */
+export interface TenantConfigurationField {
+  key: string;
+  label: string;
+  value: string | null;
+  derived: boolean;
+  source: string | null;
+}
+
+/**
+ * One authority-scoped group of settings. `editable` is the SERVER's answer for this caller,
+ * so the console stops guessing from a role name and offering buttons that are certain to 403.
+ */
+export interface TenantConfigurationSlice {
+  key: string;
+  label: string;
+  editable: boolean;
+  requiredAuthority: string;
+  /** The endpoint that owns this slice. Screens merge; authorities and audit verbs do not. */
+  endpoint: string;
+  fields: TenantConfigurationField[];
+}
+
+/** Something between this customer and working software, in words a salesperson can act on. */
+export interface TenantConfigurationBlocker {
+  code: string;
+  title: string;
+  detail: string;
+  /** Who has to act: Finance, Sales or Support, Owner, or waiting on the customer. */
+  owner: string;
+  resolveSlice: string | null;
+}
+
+export interface TenantNextAction {
+  label: string;
+  detail: string;
+  slice: string | null;
+}
+
+export interface TenantConfigurationState {
+  status: string;
+  statusReason: string | null;
+  billingMode: string;
+  deploymentProfile: string;
+  planCode: string | null;
+  offboardingStage: string;
+  legalHoldActive: boolean;
+  trialEndsOn: string | null;
+  contractEndOn: string | null;
+}
+
+export interface TenantConfigurationView {
+  tenantId: number;
+  /** Concurrency token, echoed back as If-Match once the merged screen writes. */
+  version: number;
+  state: TenantConfigurationState;
+  slices: TenantConfigurationSlice[];
+  activation: TenantActivationDecision | null;
+  blockers: TenantConfigurationBlocker[];
+  nextAction: TenantNextAction | null;
+}

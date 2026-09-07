@@ -26,6 +26,13 @@ namespace ERP_RFQ_Automation.Platform.Controllers;
 [Authorize(Policy = PlatformPolicies.PlatformScope)]
 public class TenantsController : ControllerBase
 {
+    /// <summary>
+    /// Payment terms applied when a provisioning request does not state them. Net 30 is the
+    /// term the console already names as the fallback in its own helper text; before this it
+    /// was not applied anywhere, so the field simply stayed null and blocked activation later.
+    /// </summary>
+    private const int DefaultPaymentTermsDays = 30;
+
     private readonly ErpRfqAutomationContext _context;
     private readonly IPlatformAuditService _audit;
     private readonly ILogger<TenantsController> _logger;
@@ -673,7 +680,13 @@ public class TenantsController : ControllerBase
                     TrialEndsOn = request.TrialEndsOn,
                     ContractStartOn = request.ContractStartOn,
                     ContractEndOn = request.ContractEndOn,
-                    PaymentTermsDays = request.PaymentTermsDays,
+                    // Net 30 rather than null. A null here is not "unspecified", it is a tenant
+                    // that reaches activation and stops: the commercial.approved-terms control
+                    // requires positive payment terms, so the omission surfaces days later as a
+                    // blocked go-live on a different screen than the form that caused it. Thirty
+                    // days is the term the account-contact editor already tells operators it
+                    // falls back to, so this makes the stated default the actual one.
+                    PaymentTermsDays = request.PaymentTermsDays ?? DefaultPaymentTermsDays,
                     PurchaseOrderReference = Normalize(request.PurchaseOrderReference),
                     BillingContactName = Normalize(request.BillingContactName),
                     // Statements have to reach somebody. Absent a dedicated AP contact, the
@@ -1151,6 +1164,16 @@ public class TenantsController : ControllerBase
         return new string(chars);
     }
 
+    // Owner, like both of its siblings.
+    //
+    // This attribute was missing, so the action fell back to the class-level PlatformScope —
+    // which ReadOnlyOps, the DEFAULT role for a newly created platform user, satisfies. The
+    // console hides the whole AI governance tab behind isOwner, so nothing in the product
+    // revealed the gap: the response was one curl away for the lowest-privileged operator on
+    // the platform, and it discloses every tenant's allowed provider, model, egress policy,
+    // residency, retention window and token budget. PUT (:1188) and the provider authorize and
+    // revoke verbs were Owner-gated all along; only the read was open.
+    [Authorize(Policy = PlatformPolicies.Owner)]
     [HttpGet("{id:long}/ai-policy")]
     public async Task<ActionResult<TenantAiPolicyDto>> GetAiPolicy(long id, CancellationToken ct)
     {

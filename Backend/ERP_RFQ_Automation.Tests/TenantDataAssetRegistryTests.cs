@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Security.Claims;
+using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.DataAssets;
 using ERP_RFQ_Automation.Platform.Models;
@@ -22,6 +23,7 @@ public sealed class TenantDataAssetRegistryTests
     {
         using var database = new TestDb();
         await using var context = database.ContextFor(null);
+        context.Set<BusinessUnit>().Add(PrimaryBusinessUnit());
         context.Set<Tenant>().Add(Tenant());
         await context.SaveChangesAsync();
         var registry = Registry(context);
@@ -62,6 +64,7 @@ public sealed class TenantDataAssetRegistryTests
         await using var context = database.ContextFor(null);
         var tenant = Tenant();
         tenant.Status = status;
+        context.Set<BusinessUnit>().Add(PrimaryBusinessUnit());
         context.Set<Tenant>().Add(tenant);
         await context.SaveChangesAsync();
         var registry = Registry(context);
@@ -80,6 +83,7 @@ public sealed class TenantDataAssetRegistryTests
     {
         using var database = new TestDb();
         await using var context = database.ContextFor(null);
+        context.Set<BusinessUnit>().Add(PrimaryBusinessUnit());
         context.Set<Tenant>().Add(Tenant());
         await context.SaveChangesAsync();
         var registry = Registry(context);
@@ -100,6 +104,7 @@ public sealed class TenantDataAssetRegistryTests
     {
         using var database = new TestDb();
         await using var context = database.ContextFor(null);
+        context.Set<BusinessUnit>().Add(PrimaryBusinessUnit());
         context.Set<Tenant>().Add(Tenant());
         await context.SaveChangesAsync();
         var registry = Registry(context);
@@ -125,6 +130,7 @@ public sealed class TenantDataAssetRegistryTests
         using var database = new TestDb();
         await using (var seed = database.ContextFor(null))
         {
+            seed.Set<BusinessUnit>().Add(PrimaryBusinessUnit());
             seed.Set<Tenant>().Add(Tenant());
             await seed.SaveChangesAsync();
         }
@@ -158,7 +164,25 @@ public sealed class TenantDataAssetRegistryTests
         Slug = "asset-registry-tenant",
         Status = TenantStatus.Provisioning,
         PrimaryBusinessUnitId = BusinessUnitId,
+        // BillingMode defaults to Billable, and 20260907111522 refuses a Billable tenant with no
+        // invoice recipient — the state where invoicing throws and offboarding cannot complete.
+        BillingContactEmail = "ap@asset-registry.test",
         DataRegion = "us-east-1"
+    };
+
+    /// <summary>
+    /// The unit the tenant's isolation pointer references. Required since 20260907111347 made
+    /// PrimaryBusinessUnitId a real foreign key: a tenant pointing at a business unit that does
+    /// not exist is the dangling pointer that makes a tenant's own data invisible to it.
+    /// </summary>
+    private static BusinessUnit PrimaryBusinessUnit() => new()
+    {
+        Id = BusinessUnitId,
+        BusinessUnitCode = "ASSETREG",
+        BusinessUnitName = "Asset registry unit",
+        IsActive = true,
+        CreatedBy = "test",
+        CreatedOn = DateTime.UtcNow
     };
 
     private static RegisterTenantDataAssetRequest Registration() => new(

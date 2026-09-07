@@ -110,6 +110,8 @@ public sealed class TenantWorkGateHarness : IDisposable
                 Slug = slug,
                 Status = resolved,
                 PrimaryBusinessUnitId = businessUnitId,
+                // BillingMode defaults to Billable, which since 20260907111522 requires an invoice recipient.
+                BillingContactEmail = $"ap+{slug}@fixture.test",
                 CreatedBy = "tests",
                 CreatedOn = DateTime.UtcNow
             });

@@ -815,6 +815,39 @@ public partial class ErpRfqAutomationContext
 
             // The billing run's working set: every tenant that should produce a statement.
             e.HasIndex(x => new { x.Status, x.BillingMode });
+
+            // THE ISOLATION KEY. PrimaryBusinessUnitId is what row-level security isolates on,
+            // what the purge executor resolves a tenant's data through, and what tenant access
+            // checks resolve to — and until now it was a bare nullable bigint with no foreign
+            // key, no unique index and no check. Two Tenants rows carrying the same value is a
+            // complete cross-tenant data merge, and the database would have accepted it.
+            //
+            // The index is FILTERED on NOT NULL for two reasons: a tenant is provisioned before
+            // its business unit exists, and a PURGED tenant keeps its row as an operator record
+            // while its BusinessUnit is destroyed. Both are legitimately null, and many nulls
+            // must not collide with each other.
+            e.HasIndex(x => x.PrimaryBusinessUnitId)
+                .IsUnique()
+                .HasFilter("\"PrimaryBusinessUnitId\" IS NOT NULL");
+
+            // SET NULL, deliberately, NOT Restrict.
+            //
+            // Restrict is the reflex for an identity column and it would BREAK TENANT PURGE:
+            // platform."Tenants" is classified OperatorRecord and survives a purge as a
+            // tombstone, while the tenant's public."BusinessUnits" row is destroyed by it. A
+            // restricting foreign key would refuse that delete and strand the purge half-done.
+            // SET NULL says the true thing instead — the workspace this tenant pointed at is
+            // gone — and still makes a DANGLING pointer impossible, which is the integrity the
+            // constraint is actually for.
+            e.HasOne<BusinessUnit>()
+                .WithMany()
+                .HasForeignKey(x => x.PrimaryBusinessUnitId)
+                .HasConstraintName("FK_Tenants_BusinessUnits_PrimaryBusinessUnitId")
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // Optimistic concurrency. See Tenant.Version for why the tenant row had none.
+            e.Property(x => x.Version).IsConcurrencyToken().HasDefaultValue(1L);
+
         });
         modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformAuditLog>(e =>
         {
