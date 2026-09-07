@@ -35,10 +35,10 @@ import {
   Tune as PlansIcon,
   Workspaces as TenantsIcon,
   LightMode as SunIcon,
-  Bolt as BoltIcon,
 } from '@mui/icons-material';
 import { useAppTheme } from '../../context/ThemeContext';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
+import BrandMark from '../../components/common/BrandMark';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import type { PlatformPermissions } from '../auth/permissions';
 import SkipLink, { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
@@ -94,21 +94,17 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Toolbar sx={{ px: 2.5 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <Box
-            sx={{
-              width: 36,
-              height: 36,
-              borderRadius: 2,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: 'linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%)',
-              color: '#fff',
-              boxShadow: '0 6px 16px rgba(99,102,241,0.4)',
-            }}
-          >
-            <BoltIcon sx={{ fontSize: 22 }} />
-          </Box>
+          {/*
+            THE NEXORA MARK, not a stand-in for it. This was a Material lightning bolt in a
+            hard-coded indigo-to-cyan gradient — a logo the company does not own, in two colours
+            from a palette it does not use — sitting directly above the word NEXORA. The real
+            extruded-N has existed in components/common/BrandMark all along and the customer-facing
+            sign-in renders it correctly; only the operator console drew its own.
+            `face` is left to default to brass rather than reading the tenant's chosen primary:
+            this is Nexora's own control plane, so it wears Nexora's colour whatever a tenant has
+            picked for their workspace.
+          */}
+          <BrandMark size={36} title="" />
           <Box sx={{ lineHeight: 1 }}>
             <Typography sx={{ fontWeight: 900, fontSize: 17, letterSpacing: '-0.5px' }}>NEXORA</Typography>
             <Typography sx={{ fontWeight: 700, fontSize: 9.5, letterSpacing: '0.16em', color: 'primary.main', textTransform: 'uppercase' }}>
@@ -125,7 +121,12 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           size="small"
           label={
             permissions.role
-              ? `${permissions.role.toUpperCase()} · scope=platform`
+              // The ROLE is the informative half and stays: which controls this console offers is
+              // decided by it. "scope=platform" is dropped — it is identical on every operator
+              // session ever, so it carries no information, and the sign-in screen goes to the
+              // trouble of keeping that exact string off the page (there is a test for it) while
+              // this chip printed it on every screen behind it.
+              ? permissions.role.toUpperCase()
               : 'ROLE NOT RECOGNISED · read-only'
           }
           sx={{
@@ -134,9 +135,14 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             fontWeight: 700,
             fontSize: '0.65rem',
             letterSpacing: 0.4,
-            bgcolor: mode === 'dark' ? 'rgba(99,102,241,0.15)' : 'rgba(99,102,241,0.1)',
-            color: '#6366f1',
-            border: '1px solid rgba(99,102,241,0.25)',
+            // Graphite, the brand's quiet second voice, rather than the indigo this carried.
+            // Brass is reserved for the thing the operator is meant to act on — which is never
+            // a label describing their own role.
+            bgcolor: mode === 'dark' ? 'rgba(163,169,181,0.16)' : 'rgba(58,64,80,0.08)',
+            color: 'secondary.main',
+            borderColor: mode === 'dark' ? 'rgba(163,169,181,0.32)' : 'rgba(58,64,80,0.22)',
+            borderStyle: 'solid',
+            borderWidth: 1,
           }}
         />
       </Box>

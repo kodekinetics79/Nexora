@@ -42,15 +42,25 @@ describe('PlatformLoginScreen MFA challenge', () => {
     expect(screen.getByRole('link', { name: 'Back to tenant sign-in' })).toHaveAttribute('href', '/login');
   });
 
-  it('uses customer language first and keeps the session boundary in contextual help', async () => {
+  /**
+   * The rule this protects is unchanged and is the important half: the operator sign-in says
+   * what it is in words a person would use, and the session-boundary jargon never appears.
+   *
+   * What changed is the mechanism. The explanation used to sit behind a help affordance beside
+   * the heading, which rendered as a bare "?" hanging off the title — read on screen as a
+   * rendering fault rather than as help. It also explained what the Platform Console IS to a
+   * reader who cannot reach this page without already being an authorised operator, and who is
+   * here to type a password rather than to learn what they are signing into. Somebody who
+   * arrived by mistake has "Back to tenant sign-in", which is the answer they actually need.
+   *
+   * So the affordance is gone and the jargon rule is now absolute rather than deferred.
+   */
+  it('uses customer language and never shows the session-boundary jargon', () => {
     render(<PlatformLoginScreen />);
 
     expect(screen.getByText('Sign in with your platform operator account.')).toBeVisible();
-    expect(screen.queryByText('scope=platform')).not.toBeInTheDocument();
-
-    fireEvent.mouseOver(screen.getByRole('button', { name: 'Learn more about Platform Console' }));
-
-    expect(await screen.findByRole('tooltip')).toHaveTextContent(/dedicated scope=platform session/i);
+    expect(screen.queryByText(/scope=platform/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Learn more about Platform Console/i })).not.toBeInTheDocument();
   });
 
   it('does not treat a password-accepted MFA challenge as a broken login', async () => {

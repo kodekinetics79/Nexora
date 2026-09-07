@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import BrandMark from '../../components/common/BrandMark';
 import {
   Alert,
   Box,
@@ -14,7 +15,6 @@ import {
   Typography,
 } from '@mui/material';
 import {
-  Bolt as BoltIcon,
   LockOutlined as LockIcon,
   MailOutlined as MailIcon,
   Visibility,
@@ -24,7 +24,6 @@ import { usePlatformAuth } from '../auth/usePlatformAuth';
 import type { PlatformMfaChallenge } from '../auth/usePlatformAuth';
 import { platformErrorMessage } from '../api/apiError';
 import { fmtTrustWindow } from './format';
-import FeatureHelp from '../../components/common/FeatureHelp';
 
 /**
  * The platform-owner sign-in screen. Rendered in place by `PlatformGuard` when
@@ -99,32 +98,25 @@ export default function PlatformLoginScreen() {
     >
       <Paper sx={{ maxWidth: 440, width: '100%', p: { xs: 3, sm: 4 }, borderRadius: 4 }}>
         <Stack spacing={1.5} sx={{ mb: 3, textAlign: 'center', alignItems: 'center' }}>
-          <Box
-            sx={{
-              width: 56,
-              height: 56,
-              borderRadius: 3,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: 'linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%)',
-              color: '#fff',
-              boxShadow: '0 10px 24px -8px rgba(99,102,241,0.6)',
-            }}
-          >
-            <BoltIcon sx={{ fontSize: 30 }} />
-          </Box>
+          {/*
+            The same substitute mark stood here as in the sidebar — a Material lightning bolt in
+            an indigo-to-cyan gradient — and this is the FIRST thing an operator sees, beside the
+            customer sign-in that renders the real brass N correctly. One product, two logos.
+          */}
+          <BrandMark size={56} title="" />
           <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0.25 }}>
-              <Typography variant="h5" component="h1" sx={{ fontWeight: 900, letterSpacing: '-0.5px' }}>
-                Platform Console
-              </Typography>
-              <FeatureHelp
-                label="Platform Console"
-                description="A separate control plane for authorized platform operators. It uses a dedicated scope=platform session rather than a tenant account. Platform Owners can administer, offboard, and permanently delete tenants here; a tenant administrator cannot delete an entire tenant."
-                placement="right"
-              />
-            </Box>
+            {/*
+              No help affordance on a sign-in screen. The tooltip that stood here explained what
+              the Platform Console IS — to a reader who cannot reach this page without already
+              being an authorised operator, and who is here to type a password rather than to
+              learn what they are signing into. On screen it rendered as a bare "?" hanging off
+              the heading, which reads as a rendering fault rather than as help. The explanation
+              itself is not lost: it belongs where somebody is deciding whether to use a control,
+              not where they are proving who they are.
+            */}
+            <Typography variant="h5" component="h1" sx={{ fontWeight: 900, letterSpacing: '-0.5px' }}>
+              Platform Console
+            </Typography>
             <Typography
               sx={{
                 fontWeight: 700,
