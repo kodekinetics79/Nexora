@@ -25,6 +25,9 @@ public sealed class TenantConfigurationService(
     public async Task<TenantConfigurationView?> ReadAsync(
         long tenantId, ClaimsPrincipal actor, CancellationToken ct = default)
     {
+        var role = actor.FindFirst(PlatformAuthConstants.PlatformRoleClaim)?.Value;
+        var actorIsOwner = role == nameof(PlatformRole.Owner);
+
         var tenant = await db.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
             .Include(x => x.Plan)
             .SingleOrDefaultAsync(x => x.Id == tenantId, ct);
@@ -35,8 +38,16 @@ public sealed class TenantConfigurationService(
         // retention clock — the defect that shipped when they were two fetches.
         var offboarding = await db.Set<TenantOffboarding>().IgnoreQueryFilters().AsNoTracking()
             .SingleOrDefaultAsync(x => x.TenantId == tenantId, ct);
-        var holdActive = await db.Set<TenantLegalHold>().IgnoreQueryFilters().AsNoTracking()
-            .AnyAsync(x => x.TenantId == tenantId && x.ReleasedOn == null, ct);
+        // OWNER ONLY. TenantLegalHoldsController is class-level [Authorize(Owner)] and the
+        // offboarding status DTO carries no hold field at all — so whether a customer is under
+        // legal hold is Owner-privileged information everywhere else in this control plane.
+        // Surfacing it from an endpoint gated only on PlatformScope would have handed it to
+        // ReadOnlyOps, the DEFAULT role for a new platform user, along with a sentence explaining
+        // that deletion is frozen. An active hold is a litigation or regulatory signal about a
+        // named customer; it is not lifecycle trivia.
+        var holdActive = actorIsOwner
+            && await db.Set<TenantLegalHold>().IgnoreQueryFilters().AsNoTracking()
+                .AnyAsync(x => x.TenantId == tenantId && x.ReleasedOn == null, ct);
 
         // OPTIONAL, and a null one degrades to "no blockers known" rather than "no blockers".
         // An unwired evaluator must never be able to report a customer as clear.
@@ -44,10 +55,8 @@ public sealed class TenantConfigurationService(
         if (activation is not null)
             decision = await activation.EvaluateAsync(tenantId, ct);
 
-        var role = actor.FindFirst(PlatformAuthConstants.PlatformRoleClaim)?.Value;
-        var isOwner = role == nameof(PlatformRole.Owner);
-        var canAdministerTenants = isOwner || role == nameof(PlatformRole.SupportAdmin);
-        var canAdministerBilling = isOwner || role == nameof(PlatformRole.BillingAdmin);
+        var canAdministerTenants = actorIsOwner || role == nameof(PlatformRole.SupportAdmin);
+        var canAdministerBilling = actorIsOwner || role == nameof(PlatformRole.BillingAdmin);
 
         var state = new TenantConfigurationState(
             tenant.Status.ToString(),
@@ -60,7 +69,7 @@ public sealed class TenantConfigurationService(
             tenant.TrialEndsOn,
             tenant.ContractEndOn);
 
-        var slices = BuildSlices(tenant, canAdministerTenants, canAdministerBilling, isOwner);
+        var slices = BuildSlices(tenant, canAdministerTenants, canAdministerBilling, actorIsOwner);
         var blockers = BuildBlockers(decision);
 
         return new TenantConfigurationView(
@@ -93,8 +102,10 @@ public sealed class TenantConfigurationService(
         // not correctly answer — currency and locale follow from the country, the region follows
         // from where the deployment's database actually is — and each is the source of a whole
         // class of typo that blocked activation from a different screen than the one that caused it.
+        // dataRegion is written by the OWNER-GATED data-region endpoint, not by the profile PUT.
+        // Naming the profile endpoint here was the drift this field was added to prevent.
         new("operating", "Operating defaults", false, "Derived — not keyboard input",
-            $"PUT /api/platform/tenants/{t.Id}/profile",
+            $"PUT /api/platform/tenants/{t.Id}/data-region",
             [
                 new("baseCurrencyCode", "Currency", t.BaseCurrencyCode, true,
                     "Fixed at provisioning from the customer's country; changing it would restate every price already quoted."),
@@ -204,6 +215,8 @@ public sealed class TenantConfigurationService(
         Tenant tenant, TenantActivationDecision? decision,
         IReadOnlyList<TenantConfigurationBlocker> blockers, bool holdActive)
     {
+        // holdActive is already false for a non-Owner (see ReadAsync), so this sentence — which
+        // states that a named customer is under legal hold — can only reach an Owner.
         if (holdActive)
             return new("Under legal hold", "Deletion and erasure are refused until the hold is released.", null);
 

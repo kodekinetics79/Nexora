@@ -899,6 +899,20 @@ public class PlatformBillingController : ControllerBase
                 await tx.CommitAsync(ct);
             });
         }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Somebody else wrote this tenant between our read and our save. Adding the
+            // concurrency token turned a silent last-write-wins into an exception — and this
+            // blanket catch would have turned that exception into a 500 reading "Tenant billing
+            // update failed.", which is worse for the operator than the defect it replaced.
+            // A conflict is not a server error: it is a fact about the world the caller can act on.
+            return Conflict(new
+            {
+                error = "This customer was changed by somebody else while you had it open. "
+                      + "Reload to see their change, then reapply yours.",
+                code = "tenant.concurrent-modification"
+            });
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Billing mutation {Action} failed for tenant {TenantId}.", auditAction, tenantId);
@@ -935,6 +949,35 @@ public class PlatformBillingController : ControllerBase
             return $"billingMode '{mode}' means this tenant is not charged; billingModeReason is required and must " +
                    $"be at least {MinimumBillingModeReasonLength} characters so the exemption is attributable to a " +
                    "real decision.";
+
+        // BECOMING Billable has to re-examine what invoicing needs, because ValidateAccountContact
+        // only guards the other direction. The bypass was two legitimate calls: set Internal (which
+        // permits clearing the invoice recipient), clear it, then set Billable again — this method
+        // never looked at the recipient or the terms, so the tenant came back charged and
+        // unbillable. On a live tenant the new CHECK constraint now catches it, but as a 500 with a
+        // constraint name in it; on a Suspended or Archived tenant the constraint is out of scope
+        // and nothing caught it at all. Both are closed here, in the endpoint, with a sentence.
+        if (mode == TenantBillingMode.Billable)
+        {
+            if (tenant.BillingContactEmail is null)
+                return "This tenant has no invoice recipient, so making it Billable would produce invoices " +
+                       "that cannot be issued — and it could not be offboarded either, because offboarding " +
+                       "requires a finalized invoice. Set a billing contact first " +
+                       "(PUT /api/platform/billing/tenants/{id}/account-contact), then set the billing mode.";
+
+            // PAYMENT TERMS ARE DELIBERATELY NOT CHECKED HERE, though the hole is real.
+            //
+            // A first draft refused the conversion when PaymentTermsDays was null, and it broke
+            // converting a trial to paid — the ordinary path, on a tenant that had simply never been
+            // asked for terms. This endpoint cannot set them either: they live on account-contact.
+            // So the refusal would have told an operator to go to another screen to satisfy a rule
+            // this screen invented, which is precisely the cross-screen dependency the console
+            // redesign exists to remove.
+            //
+            // The control already sits where it belongs: commercial.approved-terms holds the tenant
+            // out of Active until the terms are there, so nothing can be INVOICED without them. A
+            // second, earlier copy of that rule buys no safety and costs a working conversion.
+        }
 
         if (mode == TenantBillingMode.Trial)
         {

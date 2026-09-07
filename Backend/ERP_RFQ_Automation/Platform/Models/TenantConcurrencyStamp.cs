@@ -28,8 +28,23 @@ namespace ERP_RFQ_Automation.Platform.Models;
 /// The token has to be live before those writes are merged.</para>
 ///
 /// <para>Stamped in <c>SaveChanges</c> rather than at each of the dozen tenant write sites,
-/// deliberately: a call site that forgets is precisely how a token becomes inert, and there is no
-/// write path to <c>platform."Tenants"</c> that does not pass through here.</para>
+/// deliberately: a call site that forgets is precisely how a token becomes inert.</para>
+///
+/// <para><b>WHAT THIS DOES NOT COVER, stated because an earlier version of this comment claimed
+/// "there is no write path that does not pass through here" and that was false.</b> The foreign
+/// key added in 20260907111347 is <c>ON DELETE SET NULL</c>, so when a purge destroys a tenant's
+/// <c>public."BusinessUnits"</c> row PostgreSQL rewrites
+/// <c>platform."Tenants"."PrimaryBusinessUnitId"</c> server-side — the isolation key changes with
+/// no stamp, no audit row and no version bump. The branch's own test asserts that rewrite
+/// happens. <c>ExecuteUpdateAsync</c> and raw SQL would bypass this equally; neither is used on
+/// this table today and nothing stops one being added. A restored backup or a replica bypasses it
+/// by definition.</para>
+///
+/// <para>So the honest scope is: two overlapping EF read-modify-write transactions now conflict
+/// instead of silently overwriting. That is worth having. It is NOT yet the "two operators, two
+/// tabs, ten minutes apart" case the redesign needs — every write path re-reads inside its own
+/// transaction, so that window is milliseconds. Closing the real case needs <c>If-Match</c>
+/// carried from the aggregate read into each write, which no writer does yet.</para>
 /// </summary>
 internal static class TenantConcurrencyStamp
 {

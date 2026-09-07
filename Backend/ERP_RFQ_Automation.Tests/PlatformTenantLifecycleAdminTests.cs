@@ -495,6 +495,7 @@ public sealed class PlatformTenantLifecycleAdminTests
 
     private static Tenant NewTenant(string slug, TenantStatus status) => new()
     {
+        BillingContactEmail = "ap@fixture.test",
         Name = "Lifecycle Tenant",
         Slug = slug,
         Status = status,

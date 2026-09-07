@@ -369,6 +369,7 @@ public class PlatformSecurityRegressionTests
 
     private static Tenant ActiveTenant(string slug) => new()
     {
+        BillingContactEmail = "ap@fixture.test",
         Name = "Active Tenant",
         Slug = slug,
         Status = TenantStatus.Active,

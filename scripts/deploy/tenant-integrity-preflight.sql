@@ -12,10 +12,28 @@
 -- isolates customer data has been resolving two customers to one scope. Stop and
 -- investigate before touching the schema.
 --
--- Checks 3-6 gate the commercial CHECK constraints. Those constraints ship as NOT VALID
--- precisely so legacy rows do not block a deploy — but you still need to know how many
--- there are, because VALIDATE CONSTRAINT in the following release will fail until they
--- are remediated.
+-- Checks 3-6 gate the commercial CHECK constraints, and they are NOT merely a VALIDATE-time
+-- concern. READ THIS BEFORE DEPLOYING.
+--
+-- NOT VALID means PostgreSQL does not SCAN the table when the constraint is added, so the
+-- migration itself cannot fail on legacy rows. It does NOT mean legacy rows are exempt
+-- afterwards: the constraint is re-evaluated on EVERY UPDATE of a row, including updates that
+-- touch none of the constrained columns. A pre-existing Active + Billable tenant with a null
+-- invoice recipient therefore becomes UNWRITABLE the moment these constraints land -- it cannot
+-- be renamed, cannot be suspended, cannot have its status changed during an incident. Verified
+-- empirically against this schema, not assumed.
+--
+-- So any row returned by checks 3-6 must be REMEDIATED BEFORE THE DEPLOY, not before a later
+-- VALIDATE. Treat them as blockers, not as a backlog.
+--
+-- LOCKS. This release is not instantaneous: CREATE UNIQUE INDEX (not CONCURRENTLY) holds SHARE
+-- on platform."Tenants", and ADD FOREIGN KEY holds ACCESS EXCLUSIVE on it plus SHARE ROW
+-- EXCLUSIVE on public."BusinessUnits" while it scans. Tenant writes block for the duration.
+--
+-- MIGRATIONS APPLY AT STARTUP by default (Database:ApplyMigrationsOnStartup). A duplicate found
+-- by check 1 is therefore not a failed script -- it is a crash-looping deploy, the same shape as
+-- the inotify outage. Run this BEFORE the release, and consider disabling startup migration for
+-- this one.
 
 \echo '=============================================================='
 \echo ' 1. Tenants sharing a primary business unit  (MUST be empty)'

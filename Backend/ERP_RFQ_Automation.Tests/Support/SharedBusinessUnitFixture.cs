@@ -38,6 +38,25 @@ public static class SharedBusinessUnitFixture
     /// </summary>
     public static async Task AllowAsync(ErpRfqAutomationContext context, params long[] businessUnitIds)
     {
+        // SQLITE ONLY, AND THE GUARD IS THE POINT.
+        //
+        // Every caller today runs on a per-test in-memory SQLite database, where dropping an index
+        // dies with the connection. The PostgreSQL lane is the opposite: ONE database shared by the
+        // whole test collection, migrated once. A single Postgres caller would drop this index
+        // permanently for the remainder of the run and silently disable the cross-tenant-merge
+        // guard for every test after it — which is precisely the shape of masking that lets a real
+        // regression through green. The DROP is also unqualified, and on PostgreSQL the index lives
+        // in schema "platform", so IF EXISTS would swallow the miss and the test would fail later
+        // on a unique violation with a misleading message.
+        //
+        // Fail loudly rather than quietly do the wrong thing.
+        if (!context.Database.IsSqlite())
+            throw new InvalidOperationException(
+                "SharedBusinessUnitFixture is SQLite-only. The PostgreSQL lane shares one database "
+                + "across the collection, so dropping IX_Tenants_PrimaryBusinessUnitId there would "
+                + "disable the cross-tenant-merge guard for every test that follows. Exercise the "
+                + "ambiguous-mapping guarantees by making the QUERY ambiguous instead of the table.");
+
         await context.Database.ExecuteSqlRawAsync($"DROP INDEX IF EXISTS \"{UniqueIndexName}\";");
 
         foreach (var id in businessUnitIds)

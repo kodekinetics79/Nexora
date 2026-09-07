@@ -740,6 +740,7 @@ public sealed class BillingRunAndProrationPostgreSqlTests
 
     private Tenant NewTenant(long id, string slug, long? businessUnitId, DateTime? billingStartsOn) => new()
     {
+        BillingContactEmail = "ap@fixture.test",
         Id = id,
         Name = $"Proration Tenant {id}",
         Slug = $"{slug}-{id}",
