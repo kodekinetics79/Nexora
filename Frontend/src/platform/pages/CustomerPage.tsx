@@ -14,10 +14,12 @@ import Stack from '../components/Flex';
 import { platformApi } from '../api/client';
 import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import PageHeader from '../components/PageHeader';
 import { ErrorState, LoadingState } from '../components/States';
 import CommitBar from '../components/CommitBar';
 import { useStagedChanges } from '../components/useStagedChanges';
+import PeopleSection from './customer/PeopleSection';
 import type {
   TenantConfigurationBlocker, TenantConfigurationField, TenantConfigurationSlice,
   TenantConfigurationView,
@@ -48,6 +50,7 @@ import type {
 export default function CustomerPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
+  const permissions = usePlatformPermissions();
 
   const configuration = useQuery({
     queryKey: platformKeys.tenantConfiguration(id),
@@ -358,6 +361,19 @@ export default function CustomerPage() {
             onChange={slice.key === 'commercial' ? stagedCommercial.set : staged.set}
           />
         ))}
+      </Box>
+
+      {/*
+        People sits below the settings and outside the commit bar, deliberately: inviting somebody
+        and taking somebody out of service are acts with their own audit verbs and their own
+        immediate effect, not edits that should sit in a draft waiting for a Save button.
+      */}
+      <Box sx={{ mt: 2.5 }}>
+        <PeopleSection
+          tenantId={id}
+          canAdminister={permissions.canAdministerTenants}
+          isOwner={permissions.isOwner}
+        />
       </Box>
 
       {saveError && <Alert severity="error" sx={{ mt: 2.5 }}>{saveError}</Alert>}
