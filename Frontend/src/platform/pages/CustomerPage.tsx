@@ -1,12 +1,11 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Alert, Box, Button, Card, CardContent, Chip, Divider, Tooltip, Typography,
+  Alert, Box, Button, Card, CardContent, Chip, Divider, TextField, Tooltip, Typography,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
-  ArrowForward as GoIcon,
   InfoOutlined as WhyIcon,
   LockOutlined as LockedIcon,
   TuneOutlined as AdvancedIcon,
@@ -17,6 +16,8 @@ import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
 import PageHeader from '../components/PageHeader';
 import { ErrorState, LoadingState } from '../components/States';
+import CommitBar from '../components/CommitBar';
+import { useStagedChanges } from '../components/useStagedChanges';
 import type {
   TenantConfigurationBlocker, TenantConfigurationField, TenantConfigurationSlice,
   TenantConfigurationView,
@@ -62,8 +63,90 @@ export default function CustomerPage() {
     enabled: id !== '',
   });
 
+  const queryClient = useQueryClient();
   const view = configuration.data;
   const blockers = view?.blockers ?? [];
+
+  // Only the identity slice is writable from this page today; commercial terms and modules are
+  // still owned by their own screens. Stated here rather than implied, so the gap is visible.
+  const identity = view?.slices.find((x) => x.key === 'identity');
+  const identityLabels = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of identity?.fields ?? []) out[f.key] = f.label;
+    return out;
+  }, [identity]);
+  const identityInitial = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of identity?.fields ?? []) out[f.key] = f.value ?? '';
+    return out;
+  }, [identity]);
+
+  const staged = useStagedChanges<Record<string, string>>(identityInitial, identityLabels);
+  const { rebase } = staged;
+  // Adopt a newly loaded server state as the baseline, but never while the operator has unsaved
+  // edits — a background refetch silently discarding somebody's typing is the defect the old
+  // profile tab had, where saving the region wiped a half-typed company profile.
+  const dirtyRef = staged.dirty;
+  useEffect(() => {
+    if (!dirtyRef) rebase(identityInitial);
+  }, [identityInitial, dirtyRef, rebase]);
+
+  // The version the edits were started from. Sent as If-Match so a write that lost a race is
+  // refused rather than landing on top of somebody else's change.
+  const [baseVersion, setBaseVersion] = useState<number | null>(null);
+  useEffect(() => {
+    if (!dirtyRef && view) setBaseVersion(view.version);
+  }, [view, dirtyRef]);
+
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const commit = useMutation({
+    mutationFn: async (reason: string) => {
+      const tenant = tenantQuery.data;
+      if (!tenant) throw new Error('The customer record is not loaded.');
+      const v = (key: string) => {
+        const value = staged.draft[key]?.trim();
+        return value === undefined || value === '' ? null : value;
+      };
+      return platformApi.updateTenantProfile(id, {
+        name: tenant.name,
+        legalName: v('legalName'),
+        registrationNumber: v('registrationNumber'),
+        taxNumber: v('taxNumber'),
+        countryCode: v('countryCode'),
+        industry: v('industry'),
+        website: v('website'),
+        addressLine1: v('addressLine1'),
+        addressLine2: tenant.addressLine2,
+        city: v('city'),
+        stateProvince: tenant.stateProvince,
+        postalCode: v('postalCode'),
+        phone: v('phone'),
+        contactEmail: v('contactEmail'),
+        logoUrl: tenant.logoUrl,
+        timeZoneId: tenant.timeZoneId,
+        locale: tenant.locale,
+        reason,
+      }, baseVersion ?? undefined);
+    },
+    onSuccess: () => {
+      setSaveError(null);
+      queryClient.invalidateQueries({ queryKey: platformKeys.tenantConfiguration(id) });
+      queryClient.invalidateQueries({ queryKey: platformKeys.tenant(id) });
+      queryClient.invalidateQueries({ queryKey: platformKeys.customers() });
+    },
+    onError: (error) => setSaveError(platformErrorMessage(
+      error,
+      'The changes were not saved. Nothing on this customer has been altered.',
+    )),
+  });
+
+  // Leaving with unsaved edits used to lose them silently — switching tabs unmounted the form.
+  useEffect(() => {
+    if (!staged.dirty) return undefined;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [staged.dirty]);
 
   const groupedBlockers = useMemo(() => {
     const byOwner = new Map<string, TenantConfigurationBlocker[]>();
@@ -201,12 +284,31 @@ export default function CustomerPage() {
           gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
         }}
       >
-        {slices.map((slice) => <SliceCard key={slice.key} slice={slice} tenantId={id} />)}
+        {slices.map((slice) => (
+          <SliceCard
+            key={slice.key}
+            slice={slice}
+            editing={slice.key === 'identity' && slice.editable}
+            draft={staged.draft}
+            onChange={staged.set}
+          />
+        ))}
       </Box>
 
+      {saveError && <Alert severity="error" sx={{ mt: 2.5 }}>{saveError}</Alert>}
+
+      <CommitBar
+        changes={staged.changes}
+        busy={commit.isPending}
+        onDiscard={staged.discard}
+        onCommit={(reason) => commit.mutate(reason)}
+      />
+
       <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 3 }}>
-        Read {view.version === 1 ? 'at version 1' : `at version ${view.version}`} · every group
-        above is written by its own audited endpoint, and this screen changes none of them yet.
+        Version {view.version} · company details are edited here and saved through the audited
+        profile endpoint with the version above as If-Match. Contract, modules and deployment are
+        still written by their own screens — reachable from Advanced — and are shown read-only
+        until their commit paths move here too.
       </Typography>
     </Box>
   );
@@ -285,8 +387,14 @@ function StatusRibbon({ state }: { state: TenantConfigurationView['state'] }) {
   );
 }
 
-function SliceCard({ slice, tenantId }: { slice: TenantConfigurationSlice; tenantId: string }) {
-  const surface = SLICE_SURFACES[slice.key];
+function SliceCard({
+  slice, editing, draft, onChange,
+}: {
+  slice: TenantConfigurationSlice;
+  editing: boolean;
+  draft: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+}) {
   return (
     <Card variant="outlined">
       <CardContent>
@@ -308,20 +416,28 @@ function SliceCard({ slice, tenantId }: { slice: TenantConfigurationSlice; tenan
 
         <Divider sx={{ my: 1.5 }} />
 
-        <Box component="dl" sx={{ m: 0, display: 'grid', gap: 1.25 }}>
-          {slice.fields.map((field) => <FieldRow key={field.key} field={field} />)}
+        <Box component="dl" sx={{ m: 0, display: 'grid', gap: editing ? 2 : 1.25 }}>
+          {slice.fields.map((field) => (
+            editing && !field.derived ? (
+              <TextField
+                key={field.key}
+                size="small"
+                label={field.label}
+                value={draft[field.key] ?? ''}
+                onChange={(e) => onChange(field.key, e.target.value)}
+              />
+            ) : (
+              <FieldRow key={field.key} field={field} />
+            )
+          ))}
         </Box>
 
-        {slice.editable && surface && (
-          <Button
-            size="small"
-            endIcon={<GoIcon />}
-            sx={{ mt: 2 }}
-            href={`/platform/tenants/${encodeURIComponent(tenantId)}?tab=${surface}`}
-          >
-            Change this
-          </Button>
-        )}
+        {/*
+          No per-card save button, on purpose. Every edit on this page leaves through the single
+          commit bar at the bottom — the console used to carry sixty-eight independent saves and
+          exactly one dirty-state bar between them, which is how an operator edited two sections,
+          pressed one button, and silently persisted half their work.
+        */}
       </CardContent>
     </Card>
   );
@@ -363,15 +479,3 @@ function FieldRow({ field }: { field: TenantConfigurationField }) {
   );
 }
 
-/**
- * Where each group is still edited today. Kept as a map rather than served by the API because
- * these are CONSOLE routes, not endpoints — the endpoint that owns each slice is already on the
- * wire as `slice.endpoint`, and that is the one that must not drift.
- */
-const SLICE_SURFACES: Record<string, string | undefined> = {
-  identity: 'profile-access',
-  operating: 'data-storage',
-  commercial: 'commercial',
-  modules: 'entitlements',
-  deployment: 'activation',
-};

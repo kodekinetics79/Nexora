@@ -33,6 +33,25 @@ public class TenantsController : ControllerBase
     /// </summary>
     private const int DefaultPaymentTermsDays = 30;
 
+    /// <summary>
+    /// The version an If-Match header asserts, or null when the caller expressed no opinion.
+    ///
+    /// <para>Accepts both <c>W/"12"</c> and <c>12</c> because the configuration read emits the
+    /// weak form and a hand-written client will not. Anything unparseable is treated as no
+    /// opinion rather than as a failed precondition: a malformed header is a caller bug, and
+    /// turning it into a 412 would make it look like a concurrency conflict, which is the one
+    /// thing that would send somebody debugging in exactly the wrong direction.</para>
+    /// </summary>
+    private static long? IfMatchVersion(HttpRequest request)
+    {
+        var header = request.Headers.IfMatch.ToString();
+        if (string.IsNullOrWhiteSpace(header) || header == "*") return null;
+        var value = header.Trim();
+        if (value.StartsWith("W/", StringComparison.OrdinalIgnoreCase)) value = value[2..];
+        value = value.Trim('"');
+        return long.TryParse(value, out var version) ? version : null;
+    }
+
     private readonly ErpRfqAutomationContext _context;
     private readonly IPlatformAuditService _audit;
     private readonly ILogger<TenantsController> _logger;
@@ -108,6 +127,34 @@ public class TenantsController : ControllerBase
         if (!ModelState.IsValid) return BadRequest(ModelState);
         if (ValidateEditableProfile(request) is string validationError)
             return BadRequest(new { error = validationError });
+
+        // If-Match, honoured properly rather than merely offered.
+        //
+        // Two console surfaces issue this exact full-object PUT, each echoing the seventeen
+        // fields it is not editing from its own snapshot, and the customer screen now commits
+        // several former tabs in one act — so the window in which somebody else's edit can be
+        // silently overwritten is minutes wide, not milliseconds. The tenant carries a Version
+        // that TenantConcurrencyStamp advances on every write and the configuration read serves
+        // as an ETag; this is the half that closes the loop.
+        //
+        // Absent header = no opinion, which keeps every existing caller working. A PRESENT header
+        // that disagrees is refused, and refused with the current version so the caller can say
+        // what changed rather than just "try again".
+        if (IfMatchVersion(Request) is long expectedVersion)
+        {
+            var current = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+                .Where(t => t.Id == id).Select(t => (long?)t.Version).FirstOrDefaultAsync(ct);
+            if (current is null) return NotFound();
+            if (current != expectedVersion)
+                return StatusCode(StatusCodes.Status412PreconditionFailed, new
+                {
+                    error = "This customer was changed by somebody else while you had it open. "
+                          + "Reload to see their change, then reapply yours.",
+                    code = "tenant.stale-write",
+                    expectedVersion,
+                    currentVersion = current,
+                });
+        }
 
         var actor = User.FindFirst("email")?.Value ?? "platform";
         var now = DateTime.UtcNow;

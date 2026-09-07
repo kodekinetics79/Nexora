@@ -9,7 +9,6 @@ import PlatformLayout from './components/PlatformLayout';
 const PLATFORM_HOME = '/platform/overview';
 
 const OverviewPage = lazy(() => import('./pages/OverviewPage'));
-const TenantsPage = lazy(() => import('./pages/TenantsPage'));
 const TenantDetailPage = lazy(() => import('./pages/TenantDetailPage'));
 // The redesigned single-page customer screen. Mounted ALONGSIDE the twelve-tab screen rather
 // than replacing it, so the two can be compared on the same data before anything is retired —
@@ -61,9 +60,21 @@ export default function PlatformRoutes() {
             <Route index element={<Navigate to={PLATFORM_HOME} replace />} />
             <Route path="overview" element={<OverviewPage />} />
             <Route path="customers" element={<CustomersPage />} />
-            {/* The twelve-tab screen and its list stay mounted so every ?tab= link already
-                pasted into a support ticket keeps resolving, and so the two can be compared. */}
-            <Route path="tenants" element={<TenantsPage />} />
+
+            {/*
+              THE OLD TENANT LIST IS RETIRED. It answered none of the questions an operator opens
+              this screen with, and leaving it mounted "for comparison" is how a redesign becomes
+              a second screen nobody uses instead of a replacement.
+            */}
+            <Route path="tenants" element={<Navigate to="/platform/customers" replace />} />
+
+            {/*
+              The twelve-tab screen survives at ONE address and only as the Advanced surface: it
+              still owns contract, module and deployment writes, which have not moved yet, and
+              every ?tab= link already pasted into a support ticket has to keep resolving. It is
+              no longer where anybody lands — the customer page is — and when the remaining write
+              paths move, this route goes with them.
+            */}
             <Route path="tenants/:id" element={<TenantDetailPage />} />
             {/* Ahead of :id, or "new" is read as a tenant id and the page tries to load it. */}
             <Route path="customers/new" element={<NewCustomerPage />} />

@@ -179,7 +179,13 @@ export interface PlatformApi {
   getTenantConfiguration(id: string): Promise<TenantConfigurationView>;
   /** The customer list: one row per tenant, each carrying its own next action. */
   listCustomers(): Promise<CustomerListRow[]>;
-  updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
+  /**
+   * @param expectedVersion the tenant Version the edit was started from. Sent as If-Match, so a
+   *   write that lost a race is refused with 412 instead of overwriting somebody else's change.
+   */
+  updateTenantProfile(
+    id: string, input: UpdateTenantProfileInput, expectedVersion?: number,
+  ): Promise<Tenant>;
   updateTenantDataRegion(id: string, input: UpdateTenantDataRegionInput): Promise<Tenant>;
   /** Owner-gated. The only writer of the deployment profile and its approval record. */
   setTenantDeploymentProfile(id: string, input: SetTenantDeploymentProfileInput): Promise<Tenant>;
@@ -1125,8 +1131,14 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<TenantConfigurationView>(`/api/platform/tenants/${id}/configuration`)).data,
   listCustomers: async () =>
     (await platformHttp.get<CustomerListRow[]>('/api/platform/customers')).data,
-  updateTenantProfile: async (id, input) =>
-    normalizeTenant((await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/profile`, input)).data),
+  updateTenantProfile: async (id, input, expectedVersion) =>
+    normalizeTenant((await platformHttp.put<BackendTenant>(
+      `/api/platform/tenants/${id}/profile`,
+      input,
+      // If-Match is what makes the single commit bar safe. Omitted when the caller has no
+      // version to assert, which keeps the older per-tab callers working unchanged.
+      expectedVersion == null ? undefined : { headers: { 'If-Match': `W/"${expectedVersion}"` } },
+    )).data),
   updateTenantDataRegion: async (id, input) =>
     normalizeTenant(
       (await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/data-region`, input)).data,

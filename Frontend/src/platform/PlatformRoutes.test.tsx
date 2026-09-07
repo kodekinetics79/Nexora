@@ -16,7 +16,9 @@ vi.mock('./components/PlatformLayout', async () => {
   return { default: () => <Outlet /> };
 });
 vi.mock('./pages/OverviewPage', () => ({ default: () => <div>overview page</div> }));
-vi.mock('./pages/TenantsPage', () => ({ default: () => <div>tenants page</div> }));
+vi.mock('./pages/CustomersPage', () => ({ default: () => <div>customers page</div> }));
+vi.mock('./pages/NewCustomerPage', () => ({ default: () => <div>new customer</div> }));
+vi.mock('./pages/CustomerPage', () => ({ default: () => <div>customer page</div> }));
 vi.mock('./pages/TenantDetailPage', () => ({ default: () => <div>tenant detail page</div> }));
 vi.mock('./pages/PipelinePage', () => ({ default: () => <div>pipeline page</div> }));
 vi.mock('./pages/PlansFlagsPage', () => ({ default: () => <div>plans page</div> }));
