@@ -1,4 +1,4 @@
-import { Alert, Box, Chip, Slider, TextField, Typography } from '@mui/material'
+import { Alert, Box, Chip, TextField, Typography } from '@mui/material'
 import Stack from '../../components/Flex'
 import type { TenantAiPolicy } from '../../types'
 
@@ -13,6 +13,13 @@ import type { TenantAiPolicy } from '../../types'
  *
  * The conversion factor is served by the API rather than kept here, so the console and the ledger
  * cannot drift apart.
+ *
+ * <b>Why presets and a number, and no slider.</b> A slider was the obvious control and it was the
+ * wrong one twice over. Across a range of 1 to 10,000 documents it cannot land on a figure anybody
+ * negotiated, so every real answer came from the field beside it anyway. And MUI's Slider is not
+ * used anywhere else in the product: pulling it in added 19.5 KB to the shared vendor chunk that
+ * EVERY page load fetches — the salesperson opening a quote pays for a control on one admin
+ * dialog — and put the build 18,891 bytes over a budget that had 641 bytes of headroom.
  */
 export default function AllowanceMeter({
   policy,
@@ -28,7 +35,6 @@ export default function AllowanceMeter({
   const perDocument = policy.tokensPerDocument || 12_000
   const presets = policy.allowancePresets?.length ? policy.allowancePresets : [100, 500, 2_000, 10_000]
   const tokens = documents * perDocument
-  const max = presets[presets.length - 1]
 
   return (
     <Stack spacing={1.5}>
@@ -62,32 +68,20 @@ export default function AllowanceMeter({
       </Stack>
 
       {!uncapped && (
-        <>
-          <Slider
-            value={Math.min(documents, max)}
-            min={0}
-            max={max}
-            step={50}
-            marks={presets.map((p) => ({ value: p, label: p >= 1000 ? `${p / 1000}k` : `${p}` }))}
-            valueLabelDisplay="auto"
-            onChange={(_, value) => onChange({ documents: Array.isArray(value) ? value[0] : value, uncapped: false })}
-            aria-label="Adjust documents per month"
+        <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+          <TextField
+            size="small"
+            type="number"
+            label="Documents / month"
+            value={documents}
+            onChange={(event) => onChange({ documents: Number(event.target.value), uncapped: false })}
+            sx={{ maxWidth: 190 }}
+            slotProps={{ htmlInput: { min: 1, step: 50, 'aria-label': 'Documents per month' } }}
           />
-          <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-            <TextField
-              size="small"
-              type="number"
-              label="Documents / month"
-              value={documents}
-              onChange={(event) => onChange({ documents: Number(event.target.value), uncapped: false })}
-              sx={{ maxWidth: 190 }}
-              slotProps={{ htmlInput: { min: 1, 'aria-label': 'Documents per month' } }}
-            />
-            <Typography variant="body2" color="text.secondary">
-              = <strong>{tokens.toLocaleString()}</strong> tokens a month, at {perDocument.toLocaleString()} per document.
-            </Typography>
-          </Stack>
-        </>
+          <Typography variant="body2" color="text.secondary">
+            = <strong>{tokens.toLocaleString()}</strong> tokens a month, at {perDocument.toLocaleString()} per document.
+          </Typography>
+        </Stack>
       )}
 
       {uncapped && (
