@@ -89,7 +89,8 @@ export default function PeopleSection({
   });
 
   const rows = users.data ?? [];
-  const active = rows.filter((u) => u.isActive).length;
+  const awaiting = rows.filter((u) => u.invitation?.status === 'Pending').length;
+  const active = rows.filter((u) => u.isActive && u.invitation?.status !== 'Pending').length;
 
   return (
     <Card variant="outlined">
@@ -98,7 +99,9 @@ export default function PeopleSection({
           <Typography variant="h6" sx={{ fontWeight: 700, flex: 1 }}>
             People
             <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 1 }}>
-              {active} active of {rows.length}
+              {awaiting > 0
+                ? `${active} signed in, ${awaiting} still to accept`
+                : `${active} of ${rows.length} active`}
             </Typography>
           </Typography>
           {canAdminister && (
@@ -131,14 +134,14 @@ export default function PeopleSection({
                     <Typography variant="body2">{user.roleName ?? '—'}</Typography>
                   </TableCell>
                   <TableCell>
-                    {!user.isActive ? (
-                      <Chip size="small" label="Inactive" variant="outlined" />
-                    ) : user.invitation && user.invitation.status === 'Pending' ? (
+                    {user.invitation?.status === 'Pending' ? (
                       // The old tab said in prose that deactivating withdraws an outstanding
                       // link, while showing nothing about who had one. Now the row says so.
                       <Tooltip describeChild title="They have not signed in yet. Taking them out of service withdraws this link.">
                         <Chip size="small" label="Awaiting first sign-in" color="warning" variant="outlined" />
                       </Tooltip>
+                    ) : !user.isActive ? (
+                      <Chip size="small" label="Taken out of service" variant="outlined" />
                     ) : (
                       <Chip size="small" label="Active" color="success" variant="outlined" />
                     )}
@@ -149,7 +152,7 @@ export default function PeopleSection({
                     </Typography>
                   </TableCell>
                   <TableCell align="right" sx={{ pr: 0 }}>
-                    {canAdminister && (user.isActive ? (
+                    {canAdminister && (user.isActive || user.invitation?.status === 'Pending' ? (
                       <Button
                         size="small" color="inherit"
                         onClick={() => { setDeactivating(user); setReason(''); setError(null); }}
