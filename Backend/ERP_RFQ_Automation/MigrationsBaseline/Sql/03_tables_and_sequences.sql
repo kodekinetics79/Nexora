@@ -2304,7 +2304,7 @@ $nexora_idem$;
 CREATE TABLE IF NOT EXISTS public."AiProcessingPolicies" (
     "BusinessUnitId" bigint NOT NULL,
     "IsEnabled" boolean NOT NULL,
-    "ExternalProcessingAllowed" boolean NOT NULL,
+    "ExternalProcessingAllowed" boolean DEFAULT true NOT NULL,
     "AllowedPurposes" character varying(500) NOT NULL,
     "AllowedProvider" character varying(100),
     "AllowedModel" character varying(255),
@@ -2320,7 +2320,7 @@ CREATE TABLE IF NOT EXISTS public."AiProcessingPolicies" (
     "MaxTokensPerDocument" bigint,
     "AllowedDataClassifications" character varying(300) DEFAULT 'Public,Internal'::character varying NOT NULL,
     "DataResidency" character varying(100) DEFAULT 'TenantApprovedRegion'::character varying NOT NULL,
-    "EgressPolicy" character varying(100) DEFAULT 'RedactedFieldsOnly'::character varying NOT NULL,
+    "EgressPolicy" character varying(100) DEFAULT 'FullDocument'::character varying NOT NULL,
     "ExternalDependencyCeilingPercent" numeric(5,2) DEFAULT 10.0 NOT NULL,
     "InputOutputAuditAllowed" boolean DEFAULT false NOT NULL,
     "LocalComputeCostPerHour" numeric(18,6),
@@ -2338,9 +2338,14 @@ CREATE TABLE IF NOT EXISTS public."AiProcessingPolicies" (
         AND length(trim("AllowedDataClassifications")) > 0
         AND length(trim("EgressPolicy")) > 0
         AND length(trim("DataResidency")) > 0
+        -- Redaction and privacy review still ride with external processing. AllowedProvider and
+        -- AllowedModel no longer do: unset means "any provider, any model", which the enforcement
+        -- chain already treats as satisfied, and which the destination allow-list narrows anyway
+        -- by refusing anything that is not the configured endpoint. Requiring them here forced
+        -- three fields to change in one keystroke and made the switch impossible to set from a
+        -- migration or a trigger, neither of which can know which endpoint the deployment runs.
         AND (NOT "ExternalProcessingAllowed"
-             OR ("RedactionRequired" AND "PrivacyReviewRequired"
-                 AND "AllowedProvider" IS NOT NULL AND "AllowedModel" IS NOT NULL)))
+             OR ("RedactionRequired" AND "PrivacyReviewRequired")))
 );
 
 ALTER TABLE ONLY public."AiProcessingPolicies" FORCE ROW LEVEL SECURITY;

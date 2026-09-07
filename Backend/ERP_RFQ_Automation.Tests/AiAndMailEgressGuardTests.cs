@@ -346,6 +346,10 @@ public sealed class AiAndMailEgressGuardTests
             Seed.EnsureBusinessUnit(seed, tenantId);
             var policy = AiProcessingPolicy.CreateSecureDefault(tenantId, "test", DateTime.UtcNow);
             policy.ExternalProcessingAllowed = true;
+            // Set explicitly, because it is no longer the shipped default. The rule under test is
+            // unchanged and still enforced: a tenant that narrows its egress to redacted fields
+            // refuses whole documents even to an endpoint it has authorized.
+            policy.EgressPolicy = AiEgressPolicies.RedactedFieldsOnly;
             seed.AiProcessingPolicies.Add(policy);
             seed.AiExternalProviderAuthorizations.Add(new AiExternalProviderAuthorization
             {

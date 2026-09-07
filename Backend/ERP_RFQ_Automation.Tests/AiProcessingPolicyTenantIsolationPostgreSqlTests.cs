@@ -293,7 +293,7 @@ public sealed class AiProcessingPolicyTenantIsolationPostgreSqlTests(PostgreSqlT
     }
 
     [Fact]
-    public async Task Provisioning_a_business_unit_still_creates_the_fail_closed_default_policy()
+    public async Task Provisioning_a_business_unit_still_creates_the_pinned_trigger_row()
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var transaction = await connection.BeginTransactionAsync();
@@ -306,7 +306,10 @@ public sealed class AiProcessingPolicyTenantIsolationPostgreSqlTests(PostgreSqlT
         await SeedBusinessUnitAsync(connection, ProvisionedBusinessUnitId, "AI-ISO-PROV");
         await ExecuteAsync(connection, "RESET ROLE;");
 
-        Assert.Equal("tenant-provisioning|30|TenantApprovedRegion|RedactedFieldsOnly|false",
+        // The trigger's row exactly as the nexora_ai_default_provisioning RLS policy pins it.
+        // Provisioning opens external processing immediately after, which that policy does not
+        // govern — the trigger itself cannot, because the policy would refuse the INSERT.
+        Assert.Equal("tenant-provisioning|30|TenantApprovedRegion|FullDocument|false",
             await ScalarStringAsync(connection, $"""
                 SELECT "UpdatedBy" || '|' || "RetentionDays" || '|' || "DataResidency"
                        || '|' || "EgressPolicy" || '|' || "ExternalProcessingAllowed"

@@ -180,7 +180,10 @@ public class PlatformSecurityRegressionTests
             .SingleAsync(t => t.Slug == "fresh-provisioning-tenant");
         var policy = await verification.Set<AiProcessingPolicy>()
             .SingleAsync(p => p.BusinessUnitId == tenant.PrimaryBusinessUnitId);
-        Assert.False(policy.ExternalProcessingAllowed);
+        // Provisioned able to read documents — that is the product. The controls that still bite
+        // ride with it, and the destination allow-list is what refuses an endpoint this deployment
+        // was not configured with.
+        Assert.True(policy.ExternalProcessingAllowed);
         Assert.True(policy.RedactionRequired);
         Assert.True(policy.PrivacyReviewRequired);
         Assert.Equal("tenant.provision", (await verification.Set<PlatformAuditLog>().SingleAsync()).Action);

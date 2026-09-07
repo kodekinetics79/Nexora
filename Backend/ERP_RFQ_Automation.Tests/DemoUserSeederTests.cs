@@ -123,7 +123,7 @@ public sealed class DemoUserSeederTests : IDisposable
     }
 
     [Fact]
-    public async Task Seeder_provisions_one_fail_closed_ai_policy()
+    public async Task Seeder_provisions_one_ai_policy_able_to_read_documents()
     {
         var config = Config(new()
         {
@@ -137,7 +137,10 @@ public sealed class DemoUserSeederTests : IDisposable
 
         await using var db = NewContext();
         var policy = await db.Set<AiProcessingPolicy>().SingleAsync();
-        Assert.False(policy.ExternalProcessingAllowed);
+        // Able to read documents, because that is the product — the destination allow-list, not
+        // this switch, is what refuses an endpoint the deployment was not configured with.
+        Assert.True(policy.ExternalProcessingAllowed);
+        // The controls that still bite are unchanged, and still ride with external processing.
         Assert.True(policy.RedactionRequired);
         Assert.True(policy.PrivacyReviewRequired);
         Assert.Equal(10m, policy.ExternalDependencyCeilingPercent);

@@ -153,12 +153,25 @@ public sealed class AiProcessingPolicy
     {
         BusinessUnitId = businessUnitId,
         IsEnabled = true,
-        ExternalProcessingAllowed = false,
+        // TRUE. Reading documents with the configured model IS the product: this deployment
+        // resolves exactly one inference endpoint, off-host, and a tenant with this switch closed
+        // gets no extraction at all. A default that breaks the contracted feature is not a safe
+        // default — it is a support ticket every operator has to clear before the customer can do
+        // anything, and it only ever has one correct answer.
+        //
+        // What the customer agreed to is settled once, in the contract and the deployment's own
+        // configuration, not re-asked per tenant. The controls that still bite are the ones that
+        // can genuinely differ: the allow-list refuses any destination that is NOT the configured
+        // one, and the token ceiling rations what a tenant may spend.
+        ExternalProcessingAllowed = true,
         AllowedPurposes = "RfqExtraction,BoqDraft",
         ExternalDependencyCeilingPercent = 10m,
         RedactionRequired = true,
         AllowedDataClassifications = "Public,Internal",
-        EgressPolicy = "RedactedFieldsOnly",
+        // FullDocument. You cannot redact fields in a scanned raster before extraction, because
+        // locating the fields IS the extraction — "RedactedFieldsOnly" on a scanned PDF returns
+        // nothing at all. It is not the conservative choice for this input; it is the broken one.
+        EgressPolicy = AiEgressPolicies.FullDocument,
         DataResidency = "TenantApprovedRegion",
         RetentionDays = 30,
         InputOutputAuditAllowed = false,
