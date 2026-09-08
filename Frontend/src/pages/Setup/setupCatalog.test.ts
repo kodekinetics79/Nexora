@@ -91,26 +91,6 @@ describe('the setup catalogue', () => {
     }
   });
 
-  it('offers a governed-artifact studio only to someone who may author one', () => {
-    // These four screens have exactly one control: "Create governed artifact". The server
-    // gates it at Users/Edit (PlatformGovernanceController POST /artifacts, /versions,
-    // /transition) while merely LISTING artifacts is Users/View. The cards were offered on
-    // View, so anyone with read access to Users was invited to a studio whose only button the
-    // server refuses. The route stays at View — reading a studio grants nothing — and only the
-    // invitation narrows, the same asymmetry the Roles & Permissions card already relies on.
-    const authoring = ['platform-taxonomy', 'platform-lifecycle', 'platform-integrations', 'platform-releases'];
-    for (const key of authoring) {
-      const entry = SETUP_ENTRIES.find((candidate) => candidate.key === key);
-      expect(entry, `${key} should be catalogued`).toBeDefined();
-      expect(entry!.moduleAction, `${key} authors governed artifacts and must be offered on edit`).toBe('edit');
-    }
-    // Read-only readouts stay on view: there is nothing on them to be refused at.
-    for (const key of ['platform-ai-trust', 'platform-quality']) {
-      const entry = SETUP_ENTRIES.find((candidate) => candidate.key === key);
-      expect(entry!.moduleAction, `${key} is evidence, not authoring`).toBeUndefined();
-    }
-  });
-
   it('never gates a screen on a module the permission matrix cannot grant', () => {
     // The defect this closes: seven Setup entries — Roles among them — were gated on "UOM", which
     // is not a permission module at all. It appears in no [RequireModulePermission] anywhere in

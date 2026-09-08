@@ -416,14 +416,26 @@ public sealed class AiExtractionReadinessService(
         // Counting it printed a fourteenth red row whose instruction was "authorize this
         // destination (controls 5-7)" while those very controls read Satisfied six rows above,
         // and turned two closed settings into "3 controls blocking".
-        var recent = await AiPolicyDenials.RecentProviderClassesAsync(db.AiRequests, businessUnitId, ct);
-        var ratio = AiPolicyDenials.ExternalDependencyRatio(recent) * 100m;
+        // The forecast is quoted as UNAUTHORIZED, so it must be measured that way.
+        // AiPolicyDenials.ExternalDependencyRatio is a class-only primitive — it never sees the
+        // authorization receipt, so it counted approved calls too. On a deployment with no
+        // loopback endpoint that printed "one more UNAUTHORIZED external call would be 100.0%"
+        // at a tenant whose every call was approved: the same sentence-versus-number mismatch
+        // the Trust Center banner carried, on a row served to the same tenant by the same
+        // controller. The evaluator is the one projection that applies the exemption.
+        var snapshot = await AiExternalDependencyEvaluator.EvaluateAsync(
+            db.AiRequests, businessUnitId, policy.ExternalDependencyCeilingPercent, ct);
+        var unauthorized = snapshot.External - snapshot.AuthorizedExternal;
+        // "+1 on both sides" is the call being considered: this is a forecast, not a history
+        // report, and it keeps the shape AiPolicyDenials.ExternalDependencyRatio established.
+        var ratio = 100m * (unauthorized + 1m) / (snapshot.Total + 1m);
 
         return new(order, AiReadinessCodes.DependencyCeiling, title, AiReadinessStatus.Blocked, null,
             $"waiting on control {waitingOn.Order} ({waitingOn.Title}) — once that is open, this "
             + "destination's own grant exempts the call from the ratio. For reference: one more "
-            + $"UNAUTHORIZED external call would be {ratio:0.0}% of the last {recent.Count + 1} "
-            + $"governed calls, against ExternalDependencyCeilingPercent = "
+            + $"UNAUTHORIZED external call would be {ratio:0.0}% of the last {snapshot.Total + 1} "
+            + $"governed calls ({snapshot.AuthorizedExternal} authorized call(s) in that sample "
+            + "are exempt and excluded), against ExternalDependencyCeilingPercent = "
             + $"{policy.ExternalDependencyCeilingPercent}",
             string.Empty, string.Empty, detail);
     }

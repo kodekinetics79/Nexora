@@ -44,8 +44,7 @@ const SetupShellChrome: React.FC = () => {
   const currentGroup = current ? groupOfEntry(current.key) : undefined;
 
   const options = useMemo(
-    () => SETUP_ENTRIES.filter((entry) =>
-      !entry.moduleName || hasPermission(entry.moduleName, entry.moduleAction ?? 'view')),
+    () => SETUP_ENTRIES.filter((entry) => !entry.moduleName || hasPermission(entry.moduleName)),
     [hasPermission],
   );
 

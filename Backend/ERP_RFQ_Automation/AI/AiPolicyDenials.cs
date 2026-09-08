@@ -146,7 +146,20 @@ internal static class AiPolicyDenials
         IReadOnlyList<AiProviderClass> recentProviderClasses, decimal ceilingPercent) =>
         ExternalDependencyRatio(recentProviderClasses) > ceilingPercent / 100m;
 
-    /// <summary>The forecast ratio itself, so an operator can be shown the number.</summary>
+    /// <summary>
+    /// The forecast ratio itself, so an operator can be shown the number.
+    ///
+    /// <para><b>This counts EVERY external call, authorized or not, and is not a measure of
+    /// unauthorized dependency.</b> It takes provider classes only — it never sees
+    /// <see cref="AiRequest.ExternalAuthorizationId"/> — so on a deployment whose inference
+    /// endpoint is not loopback it returns 1.0 for a tenant whose every call was approved.
+    /// That is harmless at its one remaining call site, where it is defence in depth behind
+    /// <c>liveAuthorizationId is null</c> and therefore only ever evaluated for a call that
+    /// has no authorization anyway. It is NOT safe for reporting: presenting this number to a
+    /// tenant, or comparing it to the ceiling outside that guard, reproduces the standing
+    /// false breach the AI Trust banner and the readiness row both carried. Reporting callers
+    /// use <see cref="AiExternalDependencyEvaluator"/>, which applies the exemption.</para>
+    /// </summary>
     internal static decimal ExternalDependencyRatio(IReadOnlyList<AiProviderClass> recentProviderClasses) =>
         (recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m)
         / (recentProviderClasses.Count + 1m);

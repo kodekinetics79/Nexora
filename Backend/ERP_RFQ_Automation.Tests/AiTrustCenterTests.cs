@@ -168,6 +168,114 @@ public sealed class AiTrustCenterTests
         Assert.True(view.Usage.DependencyCeilingBreached);
     }
 
+    [Fact]
+    public async Task A_ledger_predating_the_authorization_receipt_does_not_breach()
+    {
+        // ExternalAuthorizationId has only been written on every authorized external
+        // reservation since 555c5b8 (2026-08-10); the column arrived on 2026-08-04 and nothing
+        // backfills it. So an older authorized call is indistinguishable from an unauthorized
+        // one. Measured over an unbounded window those rows vote forever: twelve of them, with
+        // nothing else in the ledger, reported 100% dependency and a red ceiling banner beside
+        // a card reading "Monthly requests 0". The sample is bounded to the period the screen
+        // reports on, which excludes them by construction.
+        using var database = new TestDb();
+        await using var context = database.ContextFor(62_061);
+        Seed.BusinessUnit(context, 62_061);
+        var policy = Policy(62_061);
+        policy.ExternalDependencyCeilingPercent = 10;
+        context.AiProcessingPolicies.Add(policy);
+        var lastMonth = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0,
+            DateTimeKind.Utc).AddDays(-5);
+        for (var i = 0; i < 12; i++)
+        {
+            var legacy = Request(62_061, AiProviderClass.External, 0.10m);
+            legacy.CreatedOn = lastMonth;
+            context.AiRequests.Add(legacy);
+        }
+        await context.SaveChangesAsync();
+
+        var view = await new AiTrustCenterService(context, Resolver()).GetAsync(62_061, default);
+
+        Assert.False(view.Usage.DependencyCeilingBreached);
+        Assert.Equal(0m, view.Usage.ExternalDependencyPercent);
+        // And the percentage is reconcilable with the counters beside it: both say nothing
+        // happened this month, instead of "100% of zero calls".
+        Assert.Equal(0, view.Usage.Requests);
+        Assert.Equal(0, view.Dependency.Total);
+    }
+
+    [Fact]
+    public async Task A_denied_reservation_is_not_counted_as_egress()
+    {
+        // A refusal never reached a provider. Counted, the tile read "0 / 20 (0 authorized)"
+        // for twenty REFUSALS — the control working, rendered as twenty unapproved calls.
+        using var database = new TestDb();
+        await using var context = database.ContextFor(62_071);
+        Seed.BusinessUnit(context, 62_071);
+        context.AiProcessingPolicies.Add(Policy(62_071));
+        for (var i = 0; i < 20; i++)
+        {
+            var denied = Request(62_071, AiProviderClass.External, null);
+            denied.Status = AiCallStatuses.Denied;
+            context.AiRequests.Add(denied);
+        }
+        await context.SaveChangesAsync();
+
+        var view = await new AiTrustCenterService(context, Resolver()).GetAsync(62_071, default);
+
+        Assert.Equal(0, view.Usage.ExternalRequests);
+        Assert.Equal(0, view.Usage.Requests);
+        Assert.Equal(20, view.Usage.DeniedRequests);
+        Assert.False(view.Usage.DependencyCeilingBreached);
+    }
+
+    [Fact]
+    public async Task Monthly_counters_report_the_whole_month_not_the_ledger_page()
+    {
+        // One capped query answered two different questions. The ledger tab shows the most
+        // recent calls and is paged at 100; the counters above it claim to describe the month,
+        // and silently saturated at the same 100 — so every total under them was wrong by the
+        // overflow, on exactly the tenants busy enough to care.
+        using var database = new TestDb();
+        await using var context = database.ContextFor(62_081);
+        Seed.BusinessUnit(context, 62_081);
+        context.AiProcessingPolicies.Add(Policy(62_081));
+        for (var i = 0; i < 150; i++)
+            context.AiRequests.Add(Request(62_081, AiProviderClass.Local, null));
+        await context.SaveChangesAsync();
+
+        var view = await new AiTrustCenterService(context, Resolver()).GetAsync(62_081, default);
+
+        Assert.Equal(150, view.Usage.Requests);
+        Assert.Equal(150, view.Usage.LocalRequests);
+        // The ledger itself stays a page.
+        Assert.Equal(100, view.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_share_over_a_fractional_ceiling_breaches_it()
+    {
+        // The breach was decided on the ROUNDED share while the ceiling is stored to two
+        // decimals and validated to 0..10, so 2 unauthorized in 79 — 2.53%, genuinely over a
+        // 2.5% ceiling — rounded to 2.5 and 2.5 > 2.5 is false. Judged exact, reported rounded.
+        using var database = new TestDb();
+        await using var context = database.ContextFor(62_091);
+        Seed.BusinessUnit(context, 62_091);
+        var policy = Policy(62_091);
+        policy.ExternalDependencyCeilingPercent = 2.5m;
+        context.AiProcessingPolicies.Add(policy);
+        for (var i = 0; i < 2; i++)
+            context.AiRequests.Add(Request(62_091, AiProviderClass.External, 0.10m));
+        for (var i = 0; i < 77; i++)
+            context.AiRequests.Add(Request(62_091, AiProviderClass.Local, null));
+        await context.SaveChangesAsync();
+
+        var view = await new AiTrustCenterService(context, Resolver()).GetAsync(62_091, default);
+
+        Assert.Equal(2.5m, view.Usage.ExternalDependencyPercent);
+        Assert.True(view.Usage.DependencyCeilingBreached);
+    }
+
     /// <summary>No base URL configured resolves to the loopback default → LocalFirst.</summary>
     private static AiProviderEndpointResolver Resolver(string? baseUrl = null) => new(
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>

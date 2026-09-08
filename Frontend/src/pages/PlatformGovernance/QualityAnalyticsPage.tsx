@@ -25,8 +25,16 @@ export default function QualityAnalyticsPage() {
     queryFn: () => platformGovernanceService.getQualityAnalytics(windowDays, drilldown),
     enabled: tab === 0,
   });
-  const selectedMetric = useMemo(() => quality.data?.metrics.find((metric) =>
-    metric.key === selection?.metricKey), [quality.data, selection]);
+  const selectedMetric = useMemo(() => {
+    const metrics = quality.data?.metrics;
+    if (!metrics || !selection) return undefined;
+    // Falls back to the cohort when a recommendation names no metric. The backend gives every
+    // recommendation a metric key now, but an older one does not, and Vercel ships ahead of
+    // Render — without this the record table would reload while the explanation vanished and
+    // every card un-pressed, changing the page with nothing on screen saying why.
+    return metrics.find((metric) => metric.key === selection.metricKey)
+      ?? metrics.find((metric) => metric.drilldownKey === selection.drilldownKey);
+  }, [quality.data, selection]);
 
   return (
     <Box sx={{ maxWidth: 1600, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -54,7 +62,10 @@ export default function QualityAnalyticsPage() {
               {quality.data.metrics.map((metric) => <QualityMetricCard
                 key={metric.key}
                 metric={metric}
-                selected={selection?.metricKey === metric.key}
+                // Keyed off the RESOLVED metric, so the pressed card and the explanation below
+                // it always name the same thing — including when the fallback above had to
+                // resolve a recommendation that named no metric.
+                selected={selectedMetric?.key === metric.key}
                 onSelect={() => setSelection({ metricKey: metric.key, drilldownKey: metric.drilldownKey })}
               />)}
             </Box>

@@ -155,7 +155,7 @@ describe('AiTrustCenterPage authority boundary', () => {
     renderPage();
 
     expect(await screen.findByText(
-      /Unauthorized external dependency is 25\.00%, above the 5\.00% ceiling, across the last 40 of 50 governed calls/i,
+      /Unauthorized external dependency is 25\.0%, above the 5\.00% ceiling, across the last 40 of 50 governed calls/i,
     )).toBeVisible();
   });
 });

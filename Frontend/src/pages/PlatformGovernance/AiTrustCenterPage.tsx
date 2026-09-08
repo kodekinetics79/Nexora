@@ -33,7 +33,7 @@ export default function AiTrustCenterPage() {
           any deployment whose inference endpoint is not loopback showed a standing breach
           that enforcement was not acting on. It now quotes the figure the ceiling is applied
           to, and names the sample so the number can be reconciled with the ledger below. */}
-      {usage.dependencyCeilingBreached && <Alert severity="warning" icon={<WarningAmber />} sx={{ mb: 2 }}>Unauthorized external dependency is {usage.externalDependencyPercent.toFixed(2)}%, above the {policy.externalDependencyCeilingPercent.toFixed(2)}% ceiling, across the last {view.data.dependency.total} of {view.data.dependency.windowSize} governed calls. Calls under an active provider authorization are exempt and are not counted here.</Alert>}
+      {usage.dependencyCeilingBreached && <Alert severity="warning" icon={<WarningAmber />} sx={{ mb: 2 }}>Unauthorized external dependency is {usage.externalDependencyPercent.toFixed(1)}%, above the {policy.externalDependencyCeilingPercent.toFixed(2)}% ceiling, across the last {view.data.dependency.total} of {view.data.dependency.windowSize} governed calls. Calls under an active provider authorization are exempt and are not counted here.</Alert>}
 
       <Paper variant="outlined" sx={{ mb: 2 }}><Tabs value={tab} onChange={(_event, value) => setTab(value)} variant="scrollable" scrollButtons="auto"><Tab label="Overview" /><Tab label="Policy" /><Tab label="Request ledger" /><Tab label="Audit history" /></Tabs></Paper>
 
