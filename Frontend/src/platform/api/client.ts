@@ -1201,6 +1201,10 @@ const httpPlatformApi: PlatformApi = {
   recordPlatformDataBoundary: async (input) =>
     normalizePlatformDataBoundaryManifest(
       (await platformHttp.put<WireRecord>('/api/platform/data-boundaries', {
+        // The whole point of the retry after a 409. Omitted here, the second request is byte for
+        // byte the first one, the server refuses it for the same reason, and the operator is left
+        // pressing a button that re-renders the refusal that offered it.
+        reregisterConflictingTenants: input.reregisterConflictingTenants ?? false,
         // Sent as null rather than omitted so "use what you observed" is an explicit statement on
         // the wire, not the absence of one.
         opaqueProviderReference: input.opaqueProviderReference ?? null,
