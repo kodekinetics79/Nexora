@@ -110,6 +110,64 @@ public sealed class AiTrustCenterTests
         Assert.Equal(nameof(InferencePosture.ExternalAuthorized), view.InferencePosture);
     }
 
+    [Fact]
+    public async Task Authorized_egress_is_reported_but_does_not_breach_the_ceiling()
+    {
+        // The defect this closes. On any deployment whose inference endpoint is not loopback
+        // every call is classified External — correctly, that is the whole point of
+        // AiProviderEndpoint failing closed — so the Trust Center's own raw external/total
+        // share sat at 100% forever and the screen carried a standing red ceiling breach.
+        // Enforcement was denying nothing: AiGovernanceService exempts a call holding a live
+        // allow-list receipt, and every one of these holds one. The screen now measures the
+        // same thing the enforcer does, so the egress is REPORTED — 5 of 5 external — and the
+        // ceiling is silent.
+        using var database = new TestDb();
+        await using var context = database.ContextFor(62_041);
+        Seed.BusinessUnit(context, 62_041);
+        var policy = Policy(62_041);
+        policy.ExternalDependencyCeilingPercent = 10;
+        context.AiProcessingPolicies.Add(policy);
+        for (var i = 0; i < 5; i++)
+            context.AiRequests.Add(Request(62_041, AiProviderClass.External, 0.10m, authorizationId: 77));
+        await context.SaveChangesAsync();
+
+        var view = await new AiTrustCenterService(context, Resolver()).GetAsync(62_041, default);
+
+        Assert.Equal(5, view.Usage.ExternalRequests);
+        Assert.Equal(5, view.Usage.AuthorizedExternalRequests);
+        Assert.Equal(0m, view.Usage.ExternalDependencyPercent);
+        Assert.False(view.Usage.DependencyCeilingBreached);
+        // The sample is published so the percentage can be reconciled against the ledger.
+        Assert.Equal(5, view.Dependency.External);
+        Assert.Equal(5, view.Dependency.AuthorizedExternal);
+        Assert.False(view.Dependency.CeilingBreached);
+    }
+
+    [Fact]
+    public async Task Unauthorized_egress_still_breaches_the_ceiling()
+    {
+        // The exemption is for authorized calls only. An external call with no receipt on the
+        // row consumes the ceiling exactly as before — the fix narrows what counts, it does
+        // not switch the control off.
+        using var database = new TestDb();
+        await using var context = database.ContextFor(62_051);
+        Seed.BusinessUnit(context, 62_051);
+        var policy = Policy(62_051);
+        policy.ExternalDependencyCeilingPercent = 10;
+        context.AiProcessingPolicies.Add(policy);
+        for (var i = 0; i < 3; i++)
+            context.AiRequests.Add(Request(62_051, AiProviderClass.External, 0.10m, authorizationId: 77));
+        context.AiRequests.Add(Request(62_051, AiProviderClass.External, 0.10m));
+        await context.SaveChangesAsync();
+
+        var view = await new AiTrustCenterService(context, Resolver()).GetAsync(62_051, default);
+
+        Assert.Equal(4, view.Usage.ExternalRequests);
+        Assert.Equal(3, view.Usage.AuthorizedExternalRequests);
+        Assert.Equal(25m, view.Usage.ExternalDependencyPercent);
+        Assert.True(view.Usage.DependencyCeilingBreached);
+    }
+
     /// <summary>No base URL configured resolves to the loopback default → LocalFirst.</summary>
     private static AiProviderEndpointResolver Resolver(string? baseUrl = null) => new(
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -128,8 +186,10 @@ public sealed class AiTrustCenterTests
         UpdatedOn = DateTime.UtcNow, UpdatedBy = "test"
     };
 
-    private static AiRequest Request(long tenantId, AiProviderClass providerClass, decimal? cost) => new()
+    private static AiRequest Request(long tenantId, AiProviderClass providerClass, decimal? cost,
+        long? authorizationId = null) => new()
     {
+        ExternalAuthorizationId = authorizationId,
         Id = Guid.NewGuid(), BusinessUnitId = tenantId, Operation = "RfqExtraction",
         IdempotencyKey = Guid.NewGuid().ToString("N"), PromptHash = new string('A', 64),
         PromptVersion = "v1", Provider = providerClass == AiProviderClass.Local ? "local" : "external",

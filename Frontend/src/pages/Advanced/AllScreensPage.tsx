@@ -27,7 +27,8 @@ const AllScreensPage: React.FC = () => {
   const visiblePrimaryNav = useMemo(
     () => PRIMARY_NAV.filter((item) => {
       if (item.key === 'setup') {
-        return SETUP_ENTRIES.some((entry) => !entry.moduleName || hasPermission(entry.moduleName));
+        return SETUP_ENTRIES.some((entry) =>
+          !entry.moduleName || hasPermission(entry.moduleName, entry.moduleAction ?? 'view'));
       }
       return !item.moduleName || hasPermission(item.moduleName);
     }),

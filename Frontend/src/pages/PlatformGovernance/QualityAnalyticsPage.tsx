@@ -13,14 +13,20 @@ import { QualityMetricCard, QualityRecommendationButton } from './QualityAnalyti
 export default function QualityAnalyticsPage() {
   const [tab, setTab] = useState(0);
   const [windowDays, setWindowDays] = useState(30);
-  const [drilldown, setDrilldown] = useState<string | undefined>();
+  // Both the metric that was clicked and the evidence cohort it drills into. They are not the
+  // same thing: several metrics legitimately share a drilldown — "External AI dependency" and
+  // "Unauthorized external AI dependency" both list the documents that went external, because
+  // an occurrence record carries no per-call authorization to narrow further. Keying selection
+  // on the cohort alone lit up every card sharing it and explained the wrong one.
+  const [selection, setSelection] = useState<{ metricKey: string; drilldownKey: string }>();
+  const drilldown = selection?.drilldownKey;
   const quality = useQuery({
     queryKey: ['quality-analytics', windowDays, drilldown],
     queryFn: () => platformGovernanceService.getQualityAnalytics(windowDays, drilldown),
     enabled: tab === 0,
   });
   const selectedMetric = useMemo(() => quality.data?.metrics.find((metric) =>
-    metric.drilldownKey === drilldown), [quality.data, drilldown]);
+    metric.key === selection?.metricKey), [quality.data, selection]);
 
   return (
     <Box sx={{ maxWidth: 1600, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -48,8 +54,8 @@ export default function QualityAnalyticsPage() {
               {quality.data.metrics.map((metric) => <QualityMetricCard
                 key={metric.key}
                 metric={metric}
-                selected={drilldown === metric.drilldownKey}
-                onSelect={() => setDrilldown(metric.drilldownKey)}
+                selected={selection?.metricKey === metric.key}
+                onSelect={() => setSelection({ metricKey: metric.key, drilldownKey: metric.drilldownKey })}
               />)}
             </Box>
             {selectedMetric && <Alert severity="success" icon={<InsightsOutlined />} sx={{ mb: 2 }}>
@@ -76,7 +82,7 @@ export default function QualityAnalyticsPage() {
                     priority={item.priority}
                     recommendation={item.recommendation}
                     evidence={item.evidence}
-                    onSelect={() => setDrilldown(item.drilldownKey)}
+                    onSelect={() => setSelection({ metricKey: item.metricKey, drilldownKey: item.drilldownKey })}
                   />)}</Stack>
                 </Paper>
                 <Paper variant="outlined" sx={{ p: 2 }}><Typography variant="subtitle1" sx={{ fontWeight: 750, mb: 1 }}>Leading exception causes</Typography>

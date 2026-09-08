@@ -73,6 +73,7 @@ export interface AiTrustCenterView {
   policy: AiTrustPolicy;
   usage: {
     requests: number; localRequests: number; externalRequests: number;
+    authorizedExternalRequests: number;
     externalDependencyPercent: number; dependencyCeilingBreached: boolean;
     deniedRequests: number; failedRequests: number; injectionDetections: number;
     inputTokens: number; outputTokens: number; reservedTokens: number; settledTokens: number;
@@ -88,6 +89,17 @@ export interface AiTrustCenterView {
   audit: Array<{ id: number; action: string; reason: string; actorUserId: number; occurredOn: string }>;
   /** Deployment stance resolved once at startup; read-only telemetry, not a control. */
   inferencePosture: 'LocalFirst' | 'ExternalAuthorized';
+  /**
+   * The external-dependency control's own sample — the same projection the enforcer uses, over
+   * the last `windowSize` governed calls. `externalSharePercent` is the UNAUTHORIZED share:
+   * external calls carrying an allow-list receipt are counted in `authorizedExternal` and
+   * excluded from it, which is why a deployment can be 100% external and 0% dependent.
+   */
+  dependency: {
+    total: number; local: number; external: number; authorizedExternal: number;
+    unresolved: number; externalSharePercent: number; ceilingPercent: number;
+    windowSize: number; ceilingBreached: boolean;
+  };
 }
 
 export interface ArchiveDocumentItem {
@@ -116,7 +128,9 @@ export interface QualityAnalyticsView {
     localProcessing: boolean; externalProcessing: boolean; processingReused: boolean;
     actualCost: number; costStatus: string }>;
   recommendations: Array<{ priority: string; title: string; recommendation: string;
-    evidence: string; drilldownKey: string }>;
+    evidence: string; drilldownKey: string;
+    /** The metric this was judged on. Distinct from drilldownKey: metrics share cohorts. */
+    metricKey: string }>;
   definitionVersion: string; accuracyLimitation: string;
 }
 

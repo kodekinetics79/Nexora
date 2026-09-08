@@ -16,8 +16,14 @@ public sealed record QualityDrilldownItem(long OccurrenceId, string FileName, Da
     string IntakeStatus, string ProcessingStatus, string ProcessingPath, bool HumanReview,
     bool LocalProcessing, bool ExternalProcessing, bool ProcessingReused, decimal ActualCost,
     string CostStatus);
+/// <summary>
+/// A recommendation and the evidence behind it. <paramref name="MetricKey"/> names the metric
+/// it was judged on — separate from <paramref name="DrilldownKey"/>, which names the cohort of
+/// documents to list, because several metrics share one cohort. Empty when a recommendation is
+/// not about a single metric.
+/// </summary>
 public sealed record QualityRecommendation(string Priority, string Title, string Recommendation,
-    string Evidence, string DrilldownKey);
+    string Evidence, string DrilldownKey, string MetricKey = "");
 public sealed record QualityAnalyticsView(DateTimeOffset From, DateTimeOffset To,
     IReadOnlyList<QualityMetric> Metrics, IReadOnlyList<QualityCause> ExceptionCauses,
     IReadOnlyList<QualityDrilldownItem> Records, IReadOnlyList<QualityRecommendation> Recommendations,
@@ -84,6 +90,11 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
         var touchless = leadPaths.Count(x => x.ProcessingPath != LeadProcessingPath.HumanReview);
         var localAi = ai.Count(x => x.ProviderClass == AiProviderClass.Local);
         var externalAi = ai.Count(x => x.ProviderClass == AiProviderClass.External);
+        // External calls carrying an allow-list receipt. Reported, but exempt from the
+        // ceiling — see AiGovernanceService's `liveAuthorizationId is null` denial.
+        var authorizedExternalAi = ai.Count(x => x.ProviderClass == AiProviderClass.External
+            && x.ExternalAuthorizationId != null);
+        var unauthorizedExternalAi = externalAi - authorizedExternalAi;
         var governedAi = localAi + externalAi;
         var localAiOccurrences = ai.Where(x => x.ProviderClass == AiProviderClass.Local
                 && x.SourceDocumentOccurrenceId.HasValue)
@@ -114,7 +125,17 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             Rate("local-processing", "Local AI processing", localAi, governedAi,
                 "Local governed AI requests / local plus external governed AI requests.", "local-ai", thresholds.MinimumSampleSize),
             Rate("external-dependency", "External AI dependency", externalAi, governedAi,
-                "External governed AI requests / local plus external governed AI requests.", "external-ai", thresholds.MinimumSampleSize),
+                "External governed AI requests / local plus external governed AI requests. Egress as it happened, authorized or not — this is the number an auditor asks for, and it carries no threshold.", "external-ai", thresholds.MinimumSampleSize),
+            // The share the ceiling is actually enforced against. Published alongside the raw
+            // figure rather than replacing it: on a deployment with no loopback endpoint the
+            // raw share is 100% and the unauthorized share is 0%, and an auditor needs to see
+            // both — the first says everything left the box, the second says everything that
+            // left it was approved. Reporting only the raw share made the recommendation
+            // below fire "Critical" forever; reporting only this one would have hidden the
+            // egress entirely.
+            Rate("unauthorized-external-dependency", "Unauthorized external AI dependency",
+                unauthorizedExternalAi, governedAi,
+                "External governed AI requests with no allow-list authorization receipt / local plus external governed AI requests. This is the ratio the external-dependency ceiling governs.", "external-ai", thresholds.MinimumSampleSize),
             Rate("correction-reuse", "Processing reuse", reused, occurrences.Count,
                 "Occurrences reusing parser, OCR, local-model or prior processing / all intake occurrences.", "processing-reuse", thresholds.MinimumSampleSize),
             Duration("turnaround-p50", "Extraction turnaround p50", durationMinutes, .50m),
@@ -204,14 +225,19 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             output.Add(new("High", "Reduce repeated review demand",
                 "Evaluate the leading exception against the current document skill and rule versions.",
                 $"Human review is {review.Value}% ({review.Numerator}/{review.Denominator}); leading cause: {causes.FirstOrDefault()?.Code ?? "not classified"}.",
-                "human-review"));
-        var external = metrics.Single(x => x.Key == "external-dependency");
+                "human-review", "human-review"));
+        // Judged on the UNAUTHORIZED share, which is what the ceiling governs and what the
+        // sentence below has always claimed to be reporting. Judging the raw external share
+        // against it raised a permanent Critical on every deployment whose inference endpoint
+        // is not loopback, while enforcement denied nothing — a recommendation nobody can act
+        // on trains an auditor to ignore the ones that matter.
+        var external = metrics.Single(x => x.Key == "unauthorized-external-dependency");
         if (external.Denominator >= thresholds.MinimumSampleSize
             && external.Value > thresholds.ExternalDependencyCeilingPercent)
             output.Add(new("Critical", "Review external dependency against the allow-list",
                 "Inspect external call evidence and move supported operations to approved local paths.",
-                $"External dependency is {external.Value}% ({external.Numerator}/{external.Denominator}), above the {thresholds.ExternalDependencyCeilingPercent}% ceiling that enforcement applies to unauthorized external calls (allow-list-authorized calls are exempt).",
-                "external-ai"));
+                $"Unauthorized external dependency is {external.Value}% ({external.Numerator}/{external.Denominator}), above the {thresholds.ExternalDependencyCeilingPercent}% ceiling. Allow-list-authorized calls are exempt and are excluded from this figure.",
+                "external-ai", "unauthorized-external-dependency"));
         if (output.Count == 0)
             output.Add(new("Monitor", "No threshold breach in the selected cohort",
                 "Continue collecting validated outcomes and labeled evaluation examples.",

@@ -214,11 +214,13 @@ public sealed class AiRequest
     public string? ErrorCode { get; set; }
 
     /// <summary>
-    /// Set only when this reservation was EXEMPTED from the external-dependency ceiling:
-    /// the id of the live <see cref="AiExternalProviderAuthorization"/> that covered the
-    /// endpoint at reservation time. Lets the ledger answer "which calls went external
-    /// under whose authorization". Null for local calls, for external calls under the
-    /// ceiling (no exemption was needed), and for denied calls.
+    /// The id of the live <see cref="AiExternalProviderAuthorization"/> that covered the
+    /// endpoint at reservation time, recorded on EVERY authorized external reservation
+    /// whatever the dependency ratio then said about it. Lets the ledger answer "which calls
+    /// went external under whose authorization", and it is the receipt the ceiling exemption
+    /// is computed from — see <see cref="AiExternalDependencyEvaluator"/>. Null for local
+    /// calls and for denied calls, and never null for a succeeded external one: an
+    /// unauthorized external reservation is refused outright by the allow-list gate.
     /// </summary>
     public long? ExternalAuthorizationId { get; set; }
 

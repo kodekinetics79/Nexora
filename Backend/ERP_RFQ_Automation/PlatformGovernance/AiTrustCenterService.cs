@@ -17,7 +17,8 @@ public sealed record AiTrustPolicyState(
     long Version, DateTime UpdatedOn, string UpdatedBy);
 
 public sealed record AiTrustUsageSummary(
-    int Requests, int LocalRequests, int ExternalRequests, decimal ExternalDependencyPercent,
+    int Requests, int LocalRequests, int ExternalRequests, int AuthorizedExternalRequests,
+    decimal ExternalDependencyPercent,
     bool DependencyCeilingBreached, int DeniedRequests, int FailedRequests,
     int InjectionDetections, long InputTokens, long OutputTokens, long ReservedTokens,
     long SettledTokens, long? SoftTokenLimit, long? HardTokenLimit,
@@ -35,7 +36,7 @@ public sealed record AiTrustAuditItem(
 public sealed record AiTrustCenterView(
     AiTrustPolicyState Policy, AiTrustUsageSummary Usage,
     IReadOnlyList<AiTrustRequestItem> Requests, IReadOnlyList<AiTrustAuditItem> Audit,
-    string InferencePosture);
+    string InferencePosture, AiExternalDependencySnapshot Dependency);
 
 public sealed class AiTrustCenterService(
     ErpRfqAutomationContext db, IAiProviderEndpointResolver endpointResolver)
@@ -51,7 +52,18 @@ public sealed class AiTrustCenterService(
         var budget = await db.AiBudgetPeriods.AsNoTracking().SingleOrDefaultAsync(
             x => x.BusinessUnitId == tenantId && x.PeriodStartUtc == period, ct);
         var external = requests.Count(x => x.ProviderClass == AiProviderClass.External);
-        var dependency = requests.Count == 0 ? 0m : decimal.Round(external * 100m / requests.Count, 2);
+        var authorizedExternal = requests.Count(x => x.ProviderClass == AiProviderClass.External
+            && x.ExternalAuthorizationId != null);
+        // The ceiling governs UNAUTHORIZED external usage, and nothing else. Enforcement has
+        // always known that — AiGovernanceService denies on the ratio only when
+        // `liveAuthorizationId is null` — and AiExternalDependencyEvaluator is the one
+        // projection of that rule. This screen used to compute its own raw external/total
+        // share instead, so any deployment whose inference endpoint is not loopback reported
+        // a permanent ceiling breach: every call external, every call authorized, not one of
+        // them denied. The banner even said authorized calls were exempt while the number
+        // beside it applied no such exemption. One definition, shared with the enforcer.
+        var dependencySnapshot = await AiExternalDependencyEvaluator.EvaluateAsync(
+            db.AiRequests, tenantId, policy.ExternalDependencyCeilingPercent, ct);
         var costs = requests.Where(x => x.ProviderClass == AiProviderClass.External
                 && x.EstimatedCost.HasValue && !string.IsNullOrWhiteSpace(x.CostCurrency))
             .GroupBy(x => x.CostCurrency!.ToUpperInvariant())
@@ -62,8 +74,9 @@ public sealed class AiTrustCenterService(
             .Select(x => new AiTrustAuditItem(x.Id, x.Action, x.Reason, x.ActorUserId, x.OccurredOn))
             .ToListAsync(ct);
         return new(Map(policy), new(requests.Count,
-                requests.Count(x => x.ProviderClass == AiProviderClass.Local), external, dependency,
-                dependency > policy.ExternalDependencyCeilingPercent,
+                requests.Count(x => x.ProviderClass == AiProviderClass.Local), external,
+                authorizedExternal, dependencySnapshot.ExternalSharePercent,
+                dependencySnapshot.CeilingBreached,
                 requests.Count(x => x.Status == AiCallStatuses.Denied),
                 requests.Count(x => x.Status == AiCallStatuses.Failed),
                 requests.Count(x => x.InjectionDetected), requests.Sum(x => x.InputTokens),
@@ -77,7 +90,12 @@ public sealed class AiTrustCenterService(
             // Read-only, resolved once at startup: the deployment's declared inference
             // stance (LocalFirst / ExternalAuthorized). Informational — enforcement lives
             // in the allow-list gate and the ceiling logic, never here.
-            endpointResolver.Posture.ToString());
+            endpointResolver.Posture.ToString(),
+            // The control's own sample, published whole: the window it was measured over, how
+            // many of its external calls carried an authorization, and the share that remained
+            // unauthorized. Without it the screen shows a percentage nobody can reconcile
+            // against the month-to-date counters beside it, which are a different sample.
+            dependencySnapshot);
     }
 
     private async Task<AiProcessingPolicy> PolicyAsync(long tenantId, CancellationToken ct) =>

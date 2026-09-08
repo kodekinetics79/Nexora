@@ -44,6 +44,13 @@ export interface CatalogEntry {
   path: string;
   icon: React.ReactNode;
   moduleName?: string;
+  /**
+   * Action within `moduleName` the card is offered on, default `view`. See
+   * `Setup/setupCatalog.tsx` for why an authoring screen carries `edit`: a card is an
+   * invitation, and offering one the server refuses at the first click is worse than
+   * not offering it.
+   */
+  moduleAction?: 'view' | 'create' | 'edit' | 'delete';
   keywords?: string[];
   managerOnly?: boolean;
   seeAlso?: { label: string; path: string; note: string };
@@ -226,7 +233,8 @@ const CatalogHub: React.FC<CatalogHubProps> = ({
 
   const permitted = useMemo(
     () => (entry: CatalogEntry) =>
-      (!entry.managerOnly || isManager) && (!entry.moduleName || hasPermission(entry.moduleName)),
+      (!entry.managerOnly || isManager)
+      && (!entry.moduleName || hasPermission(entry.moduleName, entry.moduleAction ?? 'view')),
     [hasPermission, isManager],
   );
 

@@ -59,6 +59,17 @@ export interface SetupEntry {
   icon: ReactNode;
   /** Permission module gating the destination. Must match the route's `PermissionGuard`. */
   moduleName?: string;
+  /**
+   * The action within `moduleName` this card is offered on, defaulting to `view`.
+   *
+   * A card is an invitation to do the thing the screen is for. For a read-only screen that is
+   * `view` and the route gate says everything. For a screen whose entire purpose is authoring —
+   * the governed-artifact studios, whose only control is "Create governed artifact" — `view`
+   * offers the card to people the server will refuse at the first click, so those carry `edit`.
+   * Deliberately TIGHTER than the route, the same way the Roles & Permissions card is: reading
+   * the screen still works for anyone the route admits, it is only the invitation that narrows.
+   */
+  moduleAction?: 'view' | 'create' | 'edit' | 'delete';
   /** Extra search terms — the words someone types when they don't know our label. */
   keywords?: string[];
   /**
@@ -326,6 +337,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/admin/platform/taxonomy',
         icon: <TaxonomyIcon />,
         moduleName: 'Users',
+        moduleAction: 'edit',
         keywords: ['taxonomy', 'skills', 'schema', 'extraction', 'validation', 'document type'],
       },
       {
@@ -344,6 +356,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/admin/platform/lifecycle',
         icon: <LifecycleIcon />,
         moduleName: 'Users',
+        moduleAction: 'edit',
         keywords: ['model', 'rule', 'dataset', 'promotion', 'provenance', 'rollback', 'evaluation'],
       },
       {
@@ -369,6 +382,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/admin/platform/integrations',
         icon: <IntegrationIcon />,
         moduleName: 'Users',
+        moduleAction: 'edit',
         keywords: ['connector', 'api', 'webhook', 'erp', 'sync', 'integration'],
       },
       {
@@ -378,6 +392,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/admin/platform/releases',
         icon: <ReleaseIcon />,
         moduleName: 'Users',
+        moduleAction: 'edit',
         keywords: ['release', 'test suite', 'approval', 'rollback', 'deploy', 'change control'],
       },
       {
