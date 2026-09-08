@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { Box, CircularProgress } from '@mui/material';
 import PlatformGuard from './components/PlatformGuard';
 import PlatformLayout from './components/PlatformLayout';
@@ -9,10 +9,7 @@ import PlatformLayout from './components/PlatformLayout';
 const PLATFORM_HOME = '/platform/overview';
 
 const OverviewPage = lazy(() => import('./pages/OverviewPage'));
-const TenantDetailPage = lazy(() => import('./pages/TenantDetailPage'));
-// The redesigned single-page customer screen. Mounted ALONGSIDE the twelve-tab screen rather
-// than replacing it, so the two can be compared on the same data before anything is retired —
-// and so every ?tab= deep link already pasted into a support ticket keeps working.
+/** The single customer screen. There is no second one. */
 const CustomerPage = lazy(() => import('./pages/CustomerPage'));
 const CustomersPage = lazy(() => import('./pages/CustomersPage'));
 const NewCustomerPage = lazy(() => import('./pages/NewCustomerPage'));
@@ -25,6 +22,21 @@ const SupportPage = lazy(() => import('./pages/SupportPage'));
 const SecurityPage = lazy(() => import('./pages/SecurityPage'));
 const EmailSettingsPage = lazy(() => import('./pages/EmailSettingsPage'));
 const PlatformAuthenticationPage = lazy(() => import('./pages/PlatformAuthenticationPage'));
+
+/**
+ * `/platform/tenants/:id` → `/platform/customers/:id`, keeping the query string.
+ *
+ * The old address was a whole second console for the same customer. Deleting it outright would
+ * have broken every link already written into a support ticket, and `<Navigate>` alone cannot do
+ * this: it needs the `:id` out of the path and the `?tab=` off the end, both of which are only
+ * available inside a routed component. The customer page reads that `tab` key and opens the
+ * matching section, so an old link lands exactly where it used to.
+ */
+function RedirectTenantToCustomer() {
+  const { id = '' } = useParams();
+  const { search } = useLocation();
+  return <Navigate to={`/platform/customers/${encodeURIComponent(id)}${search}`} replace />;
+}
 
 export const PlatformLoader = () => (
   <Box
@@ -69,13 +81,12 @@ export default function PlatformRoutes() {
             <Route path="tenants" element={<Navigate to="/platform/customers" replace />} />
 
             {/*
-              The twelve-tab screen survives at ONE address and only as the Advanced surface: it
-              still owns contract, module and deployment writes, which have not moved yet, and
-              every ?tab= link already pasted into a support ticket has to keep resolving. It is
-              no longer where anybody lands — the customer page is — and when the remaining write
-              paths move, this route goes with them.
+              THE TAB HOST IS GONE. Its ten panels are sections on the customer page now, so this
+              address has nothing of its own left to render — it forwards, carrying the query
+              string so a `?tab=lifecycle` link in a year-old support ticket still opens
+              offboarding rather than dumping somebody at the top of a page.
             */}
-            <Route path="tenants/:id" element={<TenantDetailPage />} />
+            <Route path="tenants/:id" element={<RedirectTenantToCustomer />} />
             {/* Ahead of :id, or "new" is read as a tenant id and the page tries to load it. */}
             <Route path="customers/new" element={<NewCustomerPage />} />
             <Route path="customers/:id" element={<CustomerPage />} />

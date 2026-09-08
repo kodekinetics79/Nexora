@@ -54,6 +54,7 @@ import type {
   TenantRevenueRisk,
 } from '../types';
 import PageHeader from '../components/PageHeader';
+import GuardedAction from '../components/GuardedAction';
 import PageSection from '../components/PageSection';
 import StatTile from '../components/StatTile';
 import { Dash, SoftChip } from '../components/StatusChip';
@@ -422,6 +423,7 @@ export default function BillingPage() {
                       <TableCell sx={{ fontWeight: 700 }}>Rate card</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Last statement</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Why it is at risk</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }} align="right">Action</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -430,7 +432,7 @@ export default function BillingPage() {
                         key={row.tenantId}
                         hover
                         sx={{ cursor: 'pointer' }}
-                        onClick={() => navigate(`/platform/tenants/${row.tenantId}?tab=commercial`)}
+                        onClick={() => navigate(`/platform/customers/${row.tenantId}?section=commercial`)}
                       >
                         <TableCell>
                           <Typography variant="body2" sx={{ fontWeight: 700 }}>
@@ -495,6 +497,25 @@ export default function BillingPage() {
                             </Stack>
                           )}
                         </TableCell>
+                        {/*
+                          The row has always navigated to the tab that fixes this. The only thing
+                          advertising it was `cursor: pointer`, which appears on hover and never on
+                          a touch screen — so an operator reading "No pinned rate card" was being
+                          shown a problem with no visible way out, three times over. Naming the
+                          action costs one column and turns the board from a report into a queue.
+                        */}
+                        <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              navigate(`/platform/customers/${row.tenantId}?section=commercial`);
+                            }}
+                          >
+                            {row.leakReasons.length === 0 ? 'Open' : 'Fix this'}
+                          </Button>
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -535,19 +556,23 @@ export default function BillingPage() {
             slotProps={{ inputLabel: { shrink: true } }}
           />
           <Box sx={{ flex: 1 }} />
-          <Tooltip title={tenantId ? 'Compute (or recompute) the Draft statement for this tenant-period' : 'Select a tenant first'}>
-            <span>
-              <Button
-                variant="contained"
-                startIcon={<ComputeIcon />}
-                disabled={!tenantId || !periodValid || computeMutation.isPending}
-                onClick={() => computeMutation.mutate()}
-                sx={{ fontWeight: 700 }}
-              >
-                {computeMutation.isPending ? 'Computing…' : 'Compute statement'}
-              </Button>
-            </span>
-          </Tooltip>
+          {/*
+            The reason this is unavailable used to live in a hover tooltip. An operator only finds
+            a tooltip by guessing that hovering a dead button will explain it — and a keyboard or
+            touch user never finds it at all. GuardedAction prints it in the layout instead, and
+            makes the silent version impossible: there is no `disabled` prop to reach for.
+          */}
+          <GuardedAction
+            label="Compute statement"
+            startIcon={<ComputeIcon />}
+            busy={computeMutation.isPending}
+            busyLabel="Computing…"
+            onClick={() => computeMutation.mutate()}
+            blockers={[
+              ...(tenantId ? [] : [{ reason: 'Choose which customer this statement is for.' }]),
+              ...(periodValid ? [] : [{ reason: 'The period must be a month, written as YYYY-MM.' }]),
+            ]}
+          />
         </Stack>
       </Paper>
 

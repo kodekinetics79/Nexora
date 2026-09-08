@@ -21,9 +21,10 @@ import { ErrorState, LoadingState } from '../components/States';
 import CommitBar from '../components/CommitBar';
 import { useStagedChanges } from '../components/useStagedChanges';
 import PeopleSection from './customer/PeopleSection';
+import CustomerAdvanced from './customer/CustomerAdvanced';
 import { COUNTRY_CODES, countryLabel } from '../components/localeData';
 import type {
-  TenantConfigurationBlocker, TenantConfigurationField, TenantConfigurationSlice,
+  TenantConfigurationField, TenantConfigurationSlice,
   TenantConfigurationView,
 } from '../types';
 
@@ -312,16 +313,6 @@ export default function CustomerPage() {
     return () => window.removeEventListener('beforeunload', warn);
   }, [staged.dirty, stagedCommercial.dirty]);
 
-  const groupedBlockers = useMemo(() => {
-    const byOwner = new Map<string, TenantConfigurationBlocker[]>();
-    for (const blocker of blockers) {
-      const list = byOwner.get(blocker.owner) ?? [];
-      list.push(blocker);
-      byOwner.set(blocker.owner, list);
-    }
-    return [...byOwner.entries()];
-  }, [blockers]);
-
   if (configuration.isLoading || tenantQuery.isLoading) {
     return <LoadingState label="Loading customer…" minHeight="60vh" />;
   }
@@ -359,20 +350,19 @@ export default function CustomerPage() {
         title={tenant?.name ?? `Customer ${view.tenantId}`}
         subtitle={tenant?.legalName ?? tenant?.slug ?? undefined}
         actions={
-          <Tooltip
-            describeChild
-            title="Audit, AI governance, data residency, provisioning diagnostics and offboarding — the screens a salesperson never opens"
+          // This used to navigate to /platform/tenants/:id — a SECOND console for the same
+          // customer, with ten tabs of its own. That was the two-doors defect: the same record
+          // rendered as two different products depending on which link you clicked. Everything
+          // that lived there is now further down this page, so this only scrolls.
+          <Button
+            size="small"
+            variant="outlined"
+            color="inherit"
+            startIcon={<AdvancedIcon />}
+            onClick={() => document.getElementById('customer-advanced')?.scrollIntoView({ behavior: 'smooth' })}
           >
-            <Button
-              size="small"
-              variant="outlined"
-              color="inherit"
-              startIcon={<AdvancedIcon />}
-              onClick={() => navigate(`/platform/tenants/${encodeURIComponent(id)}`)}
-            >
-              Advanced
-            </Button>
-          </Tooltip>
+            Everything else
+          </Button>
         }
       />
 
@@ -397,58 +387,35 @@ export default function CustomerPage() {
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: '68ch' }}>
             {nextAction.detail}
           </Typography>
+          {/* The one route from "something is wrong" to the controls that fix it. Without this the
+              operator has to know that the answer is inside a collapsed section further down. */}
+          {blockers.length > 0 && (
+            <Button
+              size="small"
+              sx={{ mt: 0.5, ml: -1, fontWeight: 700 }}
+              onClick={() => {
+                // The section list already opens whatever `?section=` names, so this drives the
+                // URL rather than reaching into the child's state — and the resulting address is
+                // one an operator can paste into a ticket.
+                navigate(`/platform/customers/${encodeURIComponent(id)}?section=activation`, { replace: true });
+                requestAnimationFrame(() =>
+                  document.getElementById('customer-advanced')?.scrollIntoView({ behavior: 'smooth' }));
+              }}
+            >
+              Show me the {blockers.length} outstanding {blockers.length === 1 ? 'item' : 'items'}
+            </Button>
+          )}
         </Box>
       )}
 
-      {blockers.length > 0 && (
-        <Box sx={{ mt: 4 }}>
-            <Typography
-              sx={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em' }}
-            >What is blocking this customer</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
-              Grouped by who has to act. Nothing here is a setting a salesperson is expected to
-              answer alone.
-            </Typography>
-
-            <Stack spacing={2.5}>
-              {groupedBlockers.map(([owner, items]) => (
-                <Box key={owner}>
-                  <Typography
-                    sx={{
-                      fontSize: 11, fontWeight: 700, letterSpacing: '0.08em',
-                      textTransform: 'uppercase', color: 'text.secondary', mb: 1,
-                    }}
-                  >
-                    {owner}
-                  </Typography>
-                  <Stack spacing={1.25}>
-                    {items.map((blocker) => (
-                      <Box
-                        key={blocker.code}
-                        sx={{ pl: 1.5, borderLeft: 2, borderColor: 'divider' }}
-                      >
-                        <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{blocker.title}</Typography>
-                        <Typography variant="body2" color="text.secondary">{blocker.detail}</Typography>
-                        {/*
-                          The control code stays, small and last. It is what a support ticket
-                          quotes — but it is not what the screen leads with, which is the whole
-                          difference between this and the fourteen raw cards it replaces.
-                        */}
-                        <Typography
-                          variant="caption"
-                          color="text.disabled"
-                          sx={{ fontFamily: 'monospace' }}
-                        >
-                          {blocker.code}
-                        </Typography>
-                      </Box>
-                    ))}
-                  </Stack>
-                </Box>
-              ))}
-            </Stack>
-        </Box>
-      )}
+      {/*
+        THE BLOCKER LIST THAT STOOD HERE IS GONE. It was the third of four renderings of the same
+        five blockers on one page — the ribbon counted them, the line above named the first one,
+        this listed all of them grouped by owner, and the activation section below listed them
+        AGAIN with the buttons that actually clear them. Four passes over identical facts is not
+        thoroughness; it is why this page read as scattered. The one with the fix buttons wins,
+        and the line above now points at it.
+      */}
 
       <Box
         sx={{
@@ -458,7 +425,13 @@ export default function CustomerPage() {
           gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
         }}
       >
-        {slices.map((slice) => (
+        {/*
+          Only the slices this page can EDIT. `modules` and `deployment` were rendered here too,
+          read-only, while "What they are allowed to use" and the activation section below show the
+          same facts with the controls that change them. A read-only card whose editable twin is
+          further down the same page is not context, it is a second place to look.
+        */}
+        {slices.filter((slice) => slice.key !== 'modules' && slice.key !== 'deployment').map((slice) => (
           <SliceCard
             key={slice.key}
             slice={slice}
@@ -498,11 +471,14 @@ export default function CustomerPage() {
         onCommit={(reason) => commit.mutate(reason)}
       />
 
+      {tenant && <CustomerAdvanced tenant={tenant} outstandingCount={blockers.length} />}
+
       <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 3 }}>
         Version {view.version} · company details and the contract are edited here and saved
         through their own audited endpoints — the profile write carries the version above as
-        If-Match. Plan, billing mode, module access and deployment are still written by their own
-        screens, reachable from Advanced, and are shown read-only until those paths move too.
+        If-Match. Plan, billing mode, module access and deployment are written by the sections
+        under “Everything else”, each through its own audited endpoint, and are shown read-only
+        above.
       </Typography>
     </Box>
   );

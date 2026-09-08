@@ -35,6 +35,7 @@ import { platformErrorMessage, platformErrorStatus } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
 import PageHeader from '../components/PageHeader';
 import RoleGate from '../components/RoleGate';
+import GuardedAction from '../components/GuardedAction';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { ErrorState, LoadingState } from '../components/States';
@@ -915,34 +916,22 @@ export default function EmailSettingsPage() {
         <Box sx={{ mt: 2 }}>
           <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.platformEmail}>
             {(roleBlocked) => (
-              <Tooltip title={!roleBlocked && saveBlockedBecause ? saveBlockedBecause : ''}>
-                <Box component="span" sx={{ display: 'inline-flex' }}>
-                  <Button
-                    variant="contained"
-                    startIcon={<SaveIcon />}
-                    disabled={roleBlocked || saveMutation.isPending || saveBlockedBecause !== null}
-                    onClick={() => saveMutation.mutate()}
-                  >
-                    {saveMutation.isPending ? 'Saving…' : 'Save email settings'}
-                  </Button>
-                </Box>
-              </Tooltip>
+              <GuardedAction
+                label="Save email settings"
+                startIcon={<SaveIcon />}
+                busy={saveMutation.isPending}
+                busyLabel="Saving…"
+                onClick={() => saveMutation.mutate()}
+                blockers={[
+                  ...(roleBlocked ? [{ reason: REQUIRED_ROLE_COPY.platformEmail }] : []),
+                  ...(!roleBlocked && saveBlockedBecause ? [{ reason: saveBlockedBecause }] : []),
+                ]}
+              />
             )}
           </RoleGate>
-          {/* On screen, not only on hover. A tooltip an operator never thinks to hover over is
-              the same as no explanation at all, and this is the exact spot where the previous
-              build looked broken. */}
-          {permissions.isOwner && saveBlockedBecause && (
-            // Neutral when there is simply nothing to do. Red on a screen an operator only came
-            // back to LOOK at is what taught them the screen was broken.
-            <Typography
-              variant="caption"
-              color={dirty ? 'error' : 'text.secondary'}
-              sx={{ display: 'block', mt: 1 }}
-            >
-              {saveBlockedBecause}
-            </Typography>
-          )}
+          {/* The inline caption that used to sit here said exactly what GuardedAction now prints
+              under the button. Two copies of the same sentence, one of them conditional on a
+              different predicate, is how they drift apart. */}
         </Box>
       </Paper>
 
@@ -986,15 +975,22 @@ export default function EmailSettingsPage() {
             sx={{ minWidth: 320 }}
           />
           <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.platformEmail}>
-            {(disabled) => (
-              <Button
+            {(roleBlocked) => (
+              // This was the one control in the console that went grey with no reason anywhere —
+              // not even a tooltip. An empty Recipient box beside a dead Send button reads as a
+              // broken feature rather than an unfilled field.
+              <GuardedAction
+                label="Send test email"
                 variant="outlined"
                 startIcon={<TestSendIcon />}
-                disabled={disabled || sendMutation.isPending || !testRecipient.trim()}
+                busy={sendMutation.isPending}
+                busyLabel="Sending…"
                 onClick={() => sendMutation.mutate()}
-              >
-                {sendMutation.isPending ? 'Sending…' : 'Send test email'}
-              </Button>
+                blockers={[
+                  ...(roleBlocked ? [{ reason: REQUIRED_ROLE_COPY.platformEmail }] : []),
+                  ...(testRecipient.trim() ? [] : [{ reason: 'Enter the address to send the test to.' }]),
+                ]}
+              />
             )}
           </RoleGate>
         </Stack>

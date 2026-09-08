@@ -10,7 +10,7 @@ import type {
 } from '../../types';
 import ActivationPolicyPanel from './ActivationPolicyPanel';
 import LifecycleTab from './LifecycleTab';
-import TenantDetailPage from '../TenantDetailPage';
+import CustomerAdvanced from '../customer/CustomerAdvanced';
 
 /**
  * These behaviour tests used to live in DataStorageTab.test.tsx, then moved to Lifecycle with the
@@ -413,29 +413,43 @@ describe('ActivationPolicyPanel', () => {
    * It also pins the ORDER. Leading the row is the property; being present somewhere in an
    * eleven-tab scroller is what it looked like the last two times.
    */
-  it('is rendered on its own tab, first in the row, and no longer on Lifecycle', async () => {
+  it('leads the customer page\'s section list, and opens on ?section=activation', async () => {
     vi.spyOn(platformApi, 'getTenant').mockResolvedValue(tenant);
     vi.spyOn(platformApi, 'getOffboarding').mockRejectedValue(new Error('not needed for this assertion'));
 
     render(
-      <MemoryRouter initialEntries={['/platform/tenants/9?tab=activation']}>
+      <MemoryRouter initialEntries={['/platform/customers/9?section=activation']}>
         <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
           <SnackbarProvider>
-            <Routes><Route path="/platform/tenants/:id" element={<TenantDetailPage />} /></Routes>
+            <Routes>
+              <Route
+                path="/platform/customers/:id"
+                element={<CustomerAdvanced tenant={tenant} outstandingCount={5} />}
+              />
+            </Routes>
           </SnackbarProvider>
         </QueryClientProvider>
       </MemoryRouter>,
     );
 
-    // Overview moved to the customer screen, so activation leads. The property being pinned is
-    // prominence, not the number two.
-    const tabs = await screen.findAllByRole('tab');
-    expect(tabs[0]).toHaveTextContent('Activation');
-    expect(tabs[1]).toHaveTextContent('Offboarding & deletion');
-    expect(screen.getByRole('button', { name: 'Offboard / delete tenant' })).toBeVisible();
+    // The order property the tab strip used to carry. Activation leads because it is the only
+    // surface naming the blocking controls or carrying the Activate button.
+    // The section picker is a tablist; DOM order is the order an operator reads.
+    const pills = await screen.findAllByRole('tab');
+    expect(pills[0]).toHaveTextContent('Getting this customer live');
+    // And it carries the outstanding count, which is the whole reason this is a pill and not a
+    // bare tab: you can see there is something behind it without opening it.
+    expect(pills[0]).toHaveTextContent('5');
+    expect(pills[0]).toHaveAttribute('aria-selected', 'true');
 
+    // Opened because the URL named it. Nothing auto-expands: this panel renders all fifteen
+    // controls, so opening it by default buried the rest of the page under mostly-green checks.
+    // The customer page carries a "Show me the N outstanding items" button that sets this param.
     expect(await screen.findByText('Authoritative tenant activation')).toBeVisible();
     expect(await screen.findByRole('button', { name: 'Activate tenant' })).toBeInTheDocument();
+
+    // Offboarding is still reachable, by name, without a red button in the page header.
+    expect(screen.getByText('Ending this customer')).toBeVisible();
   });
 
   /**
