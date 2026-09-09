@@ -64,6 +64,7 @@ public sealed class DocxTableParser
     private static readonly HashSet<string> FirstWordOnlyAliases = new(StringComparer.Ordinal) { "date" };
 
     private readonly NativeSpreadsheetParser _grid;
+    private readonly DocxFormBlockParser _form = new();
 
     public DocxTableParser(NativeSpreadsheetParser grid) => _grid = grid;
 
@@ -103,6 +104,19 @@ public sealed class DocxTableParser
             // item named "Payment Terms" with no quantity. One mapped column is not a line-item
             // table; it is a table that happens to contain a word we recognise.
             if (rows.Count > 0 && rows[0].FieldColumnNumbers.Count < MinimumMappedFieldsForLineItems)
+                rows = Array.Empty<RfqSpreadsheetRow>();
+
+            // A table that is not a GRID may still be a FORM — the same line items stated down the
+            // page, one label-and-value row at a time, repeated per item. Aramco/ASMO e-bidding
+            // exports are shaped exactly that way, and reading them as a grid finds nothing: the
+            // header is "Name | Alternative | Value", which names no commercial field. Before this
+            // fallback such a document went to prose, where every one of its 51,496 table rows was
+            // counted as a line item and the cost ceiling refused the lot — a real 1,514-line RFP
+            // turned away on a count that was wrong by a factor of thirty-four.
+            if (rows.Count == 0)
+                rows = _form.Parse(grid, sourceDocumentName, $"Table {tableOrdinal}");
+
+            if (rows.Count == 0)
                 continue;
 
             foreach (var row in rows)

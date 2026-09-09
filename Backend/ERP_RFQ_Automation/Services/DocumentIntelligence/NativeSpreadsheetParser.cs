@@ -472,6 +472,25 @@ public sealed class NativeSpreadsheetParser
         [RfqSpreadsheetFields.AgreementReference] = new[] { "agreementreference", "agreementno", "contractno", "contractreference", "framecontract", "agreement" },
     };
 
+    /// <summary>
+    /// The field a single header/label spelling names, or null when it names none.
+    ///
+    /// <para>Exposed so a document that states its fields DOWN the page — a Word RFP where every
+    /// line item is a block of "Quantity: 1 each" / "Requested Delivery Date: …" rows — resolves
+    /// its labels through exactly the same vocabulary a column header does. A second alias list
+    /// for the transposed case would drift from this one, and then the same word would mean
+    /// different things depending on which way the document happened to be laid out.</para>
+    /// </summary>
+    public static string? FieldForHeader(string? header)
+    {
+        var normalized = NormalizeHeader(header);
+        if (normalized.Length == 0) return null;
+        foreach (var field in FieldAliases)
+            if (field.Value.Contains(normalized, StringComparer.Ordinal))
+                return field.Key;
+        return null;
+    }
+
     private static Dictionary<string, int> BuildFieldColumnMap(IReadOnlyDictionary<int, string> headers)
     {
         var normalizedHeaders = headers.ToDictionary(
