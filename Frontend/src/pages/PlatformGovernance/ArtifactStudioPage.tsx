@@ -9,6 +9,8 @@ import {
 import {
   Add, Archive, CheckCircleOutlined, EditNote, History, Publish, Restore, Science,
 } from '@mui/icons-material';
+import { AlertTitle } from '@mui/material';
+import { useAuth } from '../../context/AuthContext';
 import { platformGovernanceService, type GovernedArtifactSummary, type GovernedArtifactType } from '../../api/services/platformGovernanceService';
 
 const definitions: Record<GovernedArtifactType, string> = {
@@ -38,6 +40,12 @@ export default function ArtifactStudioPage({ title, subtitle, types }: Props) {
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [open, setOpen] = useState(false);
+  // Users/Edit is what PlatformGovernanceController requires for POST /artifacts, /versions
+  // and /transition; listing and reading history are Users/View. Asked as an ACTION, so a
+  // stale permission snapshot suppresses authoring without touching the read view — see the
+  // ordering in AuthContext.hasPermission, which fails closed for non-view deliberately.
+  const { hasPermission } = useAuth();
+  const canAuthor = hasPermission('Users', 'edit');
   const [versionOpen, setVersionOpen] = useState(false);
   const [type, setType] = useState<GovernedArtifactType>(types[0]);
   const [name, setName] = useState('');
@@ -114,8 +122,23 @@ export default function ArtifactStudioPage({ title, subtitle, types }: Props) {
           <Typography variant="h5" sx={{ fontWeight: 750 }}>{title}</Typography>
           <Typography variant="body2" color="text.secondary">{subtitle}</Typography>
         </Box>
-        <Button variant="contained" startIcon={<Add />} onClick={startCreate}>Create governed artifact</Button>
+        <Button variant="contained" startIcon={<Add />} onClick={startCreate} disabled={!canAuthor}>Create governed artifact</Button>
       </Stack>
+
+      {/* A control that cannot work says why, in words, right where it is disabled — the same
+          answer StorageRetentionPage gives, for the same reason. Reading is a real permission
+          here: the list, every version and the immutable activity ledger are all served on
+          Users/View, and they are the audit trail a read-only governance reviewer is entitled
+          to. Hiding the screen from them to spare a refused click would cost more than it
+          saves, so the door stays open and the seven mutating controls carry the refusal. */}
+      {!canAuthor && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Read-only governance view</AlertTitle>
+          You can inspect every governed artifact here, with its full version history and
+          activity ledger. Creating a version, promoting one or rolling one back needs edit
+          permission on the Users module.
+        </Alert>
+      )}
 
       {(list.isError || create.isError || createVersion.isError || transition.isError) && (
         <Alert severity="error" sx={{ mb: 2 }}>The governance request could not be completed. Review the definition, permissions, and current version.</Alert>
@@ -152,13 +175,13 @@ export default function ArtifactStudioPage({ title, subtitle, types }: Props) {
             <Stack sx={{ gap: 2 }}>
               <Box><Typography variant="h6" sx={{ fontWeight: 750 }}>{selected.name}</Typography><Typography variant="body2" color="text.secondary">{selected.description || 'No description'}</Typography></Box>
               <Stack direction="row" sx={{ gap: 1, flexWrap: 'wrap' }}>
-                {selected.status !== 'Archived' && <Button size="small" variant="outlined" startIcon={<EditNote />} onClick={startVersion}>Create version</Button>}
-                {selected.status === 'Draft' && <Button size="small" variant="outlined" startIcon={<Science />} onClick={() => transition.mutate({ artifact: selected, action: 'TEST' })}>Send to test</Button>}
-                {selected.status === 'Test' && <Button size="small" variant="contained" startIcon={<Publish />} onClick={() => transition.mutate({ artifact: selected, action: 'PUBLISH' })}>Publish</Button>}
-                {selected.status !== 'Archived' && <Button size="small" color="inherit" startIcon={<Archive />} onClick={() => transition.mutate({ artifact: selected, action: 'ARCHIVE' })}>Archive</Button>}
-                {selected.status === 'Archived' && <Button size="small" startIcon={<Restore />} onClick={() => transition.mutate({ artifact: selected, action: 'RESTORE' })}>Restore</Button>}
+                {selected.status !== 'Archived' && <Button size="small" variant="outlined" startIcon={<EditNote />} onClick={startVersion} disabled={!canAuthor}>Create version</Button>}
+                {selected.status === 'Draft' && <Button size="small" variant="outlined" startIcon={<Science />} onClick={() => transition.mutate({ artifact: selected, action: 'TEST' })} disabled={!canAuthor}>Send to test</Button>}
+                {selected.status === 'Test' && <Button size="small" variant="contained" startIcon={<Publish />} onClick={() => transition.mutate({ artifact: selected, action: 'PUBLISH' })} disabled={!canAuthor}>Publish</Button>}
+                {selected.status !== 'Archived' && <Button size="small" color="inherit" startIcon={<Archive />} onClick={() => transition.mutate({ artifact: selected, action: 'ARCHIVE' })} disabled={!canAuthor}>Archive</Button>}
+                {selected.status === 'Archived' && <Button size="small" startIcon={<Restore />} onClick={() => transition.mutate({ artifact: selected, action: 'RESTORE' })} disabled={!canAuthor}>Restore</Button>}
                 {detail.data?.versions.filter((version) => version.publishedOn && version.versionNumber !== selected.productionVersionNumber).map((version) => (
-                  <Button key={version.id} size="small" color="warning" startIcon={<Restore />} onClick={() => transition.mutate({ artifact: selected, action: 'ROLLBACK', targetVersionNumber: version.versionNumber })}>Rollback to v{version.versionNumber}</Button>
+                  <Button key={version.id} size="small" color="warning" startIcon={<Restore />} onClick={() => transition.mutate({ artifact: selected, action: 'ROLLBACK', targetVersionNumber: version.versionNumber })} disabled={!canAuthor}>Rollback to v{version.versionNumber}</Button>
                 ))}
               </Stack>
               <Divider />
@@ -182,7 +205,7 @@ export default function ArtifactStudioPage({ title, subtitle, types }: Props) {
           <TextField label="Definition JSON" value={definitionJson} onChange={(event) => setDefinitionJson(event.target.value)} multiline minRows={10} required slotProps={{ htmlInput: { spellCheck: false } }} />
           <TextField label="Change summary" value={changeSummary} onChange={(event) => setChangeSummary(event.target.value)} required />
         </Stack></DialogContent>
-        <DialogActions><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="contained" disabled={!name.trim() || !artifactKey.trim() || create.isPending} onClick={() => create.mutate({ artifactType: type, artifactKey, name, description, definitionJson, changeSummary })}>Create draft</Button></DialogActions>
+        <DialogActions><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="contained" disabled={!canAuthor || !name.trim() || !artifactKey.trim() || create.isPending} onClick={() => create.mutate({ artifactType: type, artifactKey, name, description, definitionJson, changeSummary })}>Create draft</Button></DialogActions>
       </Dialog>
 
       <Dialog open={versionOpen} onClose={() => setVersionOpen(false)} fullWidth maxWidth="md">
@@ -194,7 +217,7 @@ export default function ArtifactStudioPage({ title, subtitle, types }: Props) {
         </Stack></DialogContent>
         <DialogActions>
           <Button onClick={() => setVersionOpen(false)}>Cancel</Button>
-          <Button variant="contained" disabled={!selected || !changeSummary.trim() || createVersion.isPending}
+          <Button variant="contained" disabled={!canAuthor || !selected || !changeSummary.trim() || createVersion.isPending}
             onClick={() => selected && createVersion.mutate({ artifact: selected, definition: definitionJson, summary: changeSummary })}>Create draft version</Button>
         </DialogActions>
       </Dialog>

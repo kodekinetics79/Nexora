@@ -13,14 +13,28 @@ import { QualityMetricCard, QualityRecommendationButton } from './QualityAnalyti
 export default function QualityAnalyticsPage() {
   const [tab, setTab] = useState(0);
   const [windowDays, setWindowDays] = useState(30);
-  const [drilldown, setDrilldown] = useState<string | undefined>();
+  // Both the metric that was clicked and the evidence cohort it drills into. They are not the
+  // same thing: several metrics legitimately share a drilldown — "External AI dependency" and
+  // "Unauthorized external AI dependency" both list the documents that went external, because
+  // an occurrence record carries no per-call authorization to narrow further. Keying selection
+  // on the cohort alone lit up every card sharing it and explained the wrong one.
+  const [selection, setSelection] = useState<{ metricKey: string; drilldownKey: string }>();
+  const drilldown = selection?.drilldownKey;
   const quality = useQuery({
     queryKey: ['quality-analytics', windowDays, drilldown],
     queryFn: () => platformGovernanceService.getQualityAnalytics(windowDays, drilldown),
     enabled: tab === 0,
   });
-  const selectedMetric = useMemo(() => quality.data?.metrics.find((metric) =>
-    metric.drilldownKey === drilldown), [quality.data, drilldown]);
+  const selectedMetric = useMemo(() => {
+    const metrics = quality.data?.metrics;
+    if (!metrics || !selection) return undefined;
+    // Falls back to the cohort when a recommendation names no metric. The backend gives every
+    // recommendation a metric key now, but an older one does not, and Vercel ships ahead of
+    // Render — without this the record table would reload while the explanation vanished and
+    // every card un-pressed, changing the page with nothing on screen saying why.
+    return metrics.find((metric) => metric.key === selection.metricKey)
+      ?? metrics.find((metric) => metric.drilldownKey === selection.drilldownKey);
+  }, [quality.data, selection]);
 
   return (
     <Box sx={{ maxWidth: 1600, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -48,8 +62,11 @@ export default function QualityAnalyticsPage() {
               {quality.data.metrics.map((metric) => <QualityMetricCard
                 key={metric.key}
                 metric={metric}
-                selected={drilldown === metric.drilldownKey}
-                onSelect={() => setDrilldown(metric.drilldownKey)}
+                // Keyed off the RESOLVED metric, so the pressed card and the explanation below
+                // it always name the same thing — including when the fallback above had to
+                // resolve a recommendation that named no metric.
+                selected={selectedMetric?.key === metric.key}
+                onSelect={() => setSelection({ metricKey: metric.key, drilldownKey: metric.drilldownKey })}
               />)}
             </Box>
             {selectedMetric && <Alert severity="success" icon={<InsightsOutlined />} sx={{ mb: 2 }}>
@@ -76,7 +93,7 @@ export default function QualityAnalyticsPage() {
                     priority={item.priority}
                     recommendation={item.recommendation}
                     evidence={item.evidence}
-                    onSelect={() => setDrilldown(item.drilldownKey)}
+                    onSelect={() => setSelection({ metricKey: item.metricKey, drilldownKey: item.drilldownKey })}
                   />)}</Stack>
                 </Paper>
                 <Paper variant="outlined" sx={{ p: 2 }}><Typography variant="subtitle1" sx={{ fontWeight: 750, mb: 1 }}>Leading exception causes</Typography>

@@ -1,0 +1,298 @@
+{
+  "_comment": [
+    "The first governed version of each registry, as data.",
+    "Read by scripts/local/seed-governed-artifacts.py and by",
+    "GovernedArtifactSeedTests, which runs every definition here through the real",
+    "PlatformGovernanceService.ValidateDefinition and a real create-and-promote.",
+    "A definition that drifts out of contract fails the build rather than failing at",
+    "4pm in front of whoever is configuring a tenant.",
+    "IMPORTANT: of these types only QualityMetricSet is read by running code",
+    "(QualityAnalyticsService.ThresholdsAsync). The rest are a governance record."
+  ],
+  "artifacts": [
+    {
+      "artifactType": "CommercialTaxonomy",
+      "artifactKey": "customer-rfq",
+      "name": "Customer RFQ",
+      "description": "What the platform reads from an inbound customer request for quotation.",
+      "definition": {
+        "documentType": "CustomerRfq",
+        "fieldGroups": [
+          {
+            "key": "header",
+            "label": "Header",
+            "fields": [
+              "customerName",
+              "customerReference",
+              "rfqDate",
+              "dueDate",
+              "currency"
+            ]
+          },
+          {
+            "key": "delivery",
+            "label": "Delivery",
+            "fields": [
+              "deliveryLocation",
+              "incoterm",
+              "requestedDeliveryDate"
+            ]
+          },
+          {
+            "key": "contact",
+            "label": "Contact",
+            "fields": [
+              "contactName",
+              "contactEmail",
+              "contactPhone"
+            ]
+          }
+        ],
+        "lineSchema": [
+          {
+            "key": "lineNumber",
+            "type": "integer",
+            "required": true
+          },
+          {
+            "key": "description",
+            "type": "string",
+            "required": true
+          },
+          {
+            "key": "manufacturerPartNumber",
+            "type": "string",
+            "required": false
+          },
+          {
+            "key": "quantity",
+            "type": "decimal",
+            "required": true
+          },
+          {
+            "key": "unitOfMeasure",
+            "type": "string",
+            "required": true
+          },
+          {
+            "key": "targetUnitPrice",
+            "type": "decimal",
+            "required": false
+          }
+        ],
+        "validationRules": [
+          {
+            "key": "quantity-positive",
+            "applies": "line",
+            "assert": "quantity > 0",
+            "onFailure": "ReviewRequired"
+          },
+          {
+            "key": "line-count-conserved",
+            "applies": "document",
+            "assert": "extractedLineCount == sourceLineCount",
+            "onFailure": "ReviewRequired"
+          },
+          {
+            "key": "currency-known",
+            "applies": "document",
+            "assert": "currency in tenantCurrencies",
+            "onFailure": "ReviewRequired"
+          }
+        ],
+        "confidenceThreshold": 0.85,
+        "evidenceRequired": true,
+        "labels": {
+          "en": "Customer RFQ"
+        }
+      }
+    },
+    {
+      "artifactType": "CommercialTaxonomy",
+      "artifactKey": "supplier-quote",
+      "name": "Supplier Quote",
+      "description": "What the platform reads from a supplier's priced response.",
+      "definition": {
+        "documentType": "SupplierQuote",
+        "fieldGroups": [
+          {
+            "key": "header",
+            "label": "Header",
+            "fields": [
+              "supplierName",
+              "quoteReference",
+              "quoteDate",
+              "validUntil",
+              "currency"
+            ]
+          },
+          {
+            "key": "commercial",
+            "label": "Commercial",
+            "fields": [
+              "paymentTerms",
+              "incoterm",
+              "leadTimeDays"
+            ]
+          }
+        ],
+        "lineSchema": [
+          {
+            "key": "lineNumber",
+            "type": "integer",
+            "required": true
+          },
+          {
+            "key": "description",
+            "type": "string",
+            "required": true
+          },
+          {
+            "key": "manufacturerPartNumber",
+            "type": "string",
+            "required": false
+          },
+          {
+            "key": "quantity",
+            "type": "decimal",
+            "required": true
+          },
+          {
+            "key": "unitPrice",
+            "type": "decimal",
+            "required": true
+          },
+          {
+            "key": "leadTimeDays",
+            "type": "integer",
+            "required": false
+          }
+        ],
+        "validationRules": [
+          {
+            "key": "unit-price-present",
+            "applies": "line",
+            "assert": "unitPrice > 0",
+            "onFailure": "ReviewRequired"
+          },
+          {
+            "key": "validity-in-future",
+            "applies": "document",
+            "assert": "validUntil >= quoteDate",
+            "onFailure": "ReviewRequired"
+          }
+        ],
+        "confidenceThreshold": 0.85,
+        "evidenceRequired": true,
+        "labels": {
+          "en": "Supplier Quote"
+        }
+      }
+    },
+    {
+      "artifactType": "Model",
+      "artifactKey": "extraction-primary",
+      "name": "Primary extraction model",
+      "description": "The inference endpoint this deployment calls for document extraction.",
+      "definition": {
+        "modelKind": "HostedGeneralPurpose",
+        "purpose": "DocumentExtraction",
+        "endpointReference": "ai-provider-authorization:ollama",
+        "evaluationDatasetKey": "extraction-corpus",
+        "external": true,
+        "provider": "Ollama",
+        "model": "deepseek-v4-pro",
+        "notes": "Reached over the network, so classified External and governed by the AI Trust allow-list rather than by the local-first ceiling."
+      }
+    },
+    {
+      "artifactType": "Connector",
+      "artifactKey": "mailbox-primary",
+      "name": "Primary mailbox",
+      "description": "The mail door that feeds the ingestion queue.",
+      "definition": {
+        "connectorType": "Imap",
+        "contractVersion": "1.0",
+        "baseUrlReference": "tenant-mailbox:primary",
+        "authMode": "Password",
+        "credentialReference": "tenant-mailbox:primary",
+        "actions": [
+          {
+            "key": "poll-inbox",
+            "direction": "Inbound",
+            "description": "Fetch unread commercial mail."
+          },
+          {
+            "key": "mark-processed",
+            "direction": "Outbound",
+            "description": "Flag a handled message."
+          }
+        ],
+        "eventTriggers": [
+          {
+            "key": "message-received",
+            "emits": "IngestionQueued"
+          }
+        ],
+        "webhooks": [],
+        "polling": {
+          "enabled": true,
+          "minutes": 5
+        },
+        "fieldMappings": [
+          {
+            "source": "subject",
+            "target": "inquiry.subject"
+          },
+          {
+            "source": "from",
+            "target": "inquiry.senderAddress"
+          },
+          {
+            "source": "attachments[]",
+            "target": "inquiry.documents[]"
+          }
+        ],
+        "idempotency": {
+          "required": true,
+          "key": "messageId"
+        },
+        "retryPolicy": {
+          "maxAttempts": 5,
+          "backoff": "Exponential",
+          "initialSeconds": 30
+        },
+        "deadLetterPolicy": {
+          "enabled": true,
+          "afterAttempts": 5,
+          "queue": "ingestion-dead-letter"
+        },
+        "rateLimit": {
+          "requestsPerMinute": 60
+        },
+        "health": {
+          "probe": "poll-inbox",
+          "intervalMinutes": 15,
+          "failureThreshold": 3
+        },
+        "sandbox": {
+          "available": false,
+          "reason": "Mailbox polling is exercised against a test mailbox."
+        }
+      }
+    },
+    {
+      "artifactType": "QualityMetricSet",
+      "artifactKey": "default-thresholds",
+      "name": "Default quality thresholds",
+      "description": "The thresholds Quality Analytics judges output by. Read at runtime.",
+      "definition": {
+        "windowDays": 30,
+        "minimumSampleSize": 30,
+        "reviewRateWarningPercent": 20,
+        "externalDependencyCeilingPercent": 10,
+        "turnaroundP95WarningMinutes": 15
+      }
+    }
+  ]
+}

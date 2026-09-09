@@ -73,6 +73,7 @@ export interface AiTrustCenterView {
   policy: AiTrustPolicy;
   usage: {
     requests: number; localRequests: number; externalRequests: number;
+    authorizedExternalRequests: number;
     externalDependencyPercent: number; dependencyCeilingBreached: boolean;
     deniedRequests: number; failedRequests: number; injectionDetections: number;
     inputTokens: number; outputTokens: number; reservedTokens: number; settledTokens: number;
@@ -88,7 +89,60 @@ export interface AiTrustCenterView {
   audit: Array<{ id: number; action: string; reason: string; actorUserId: number; occurredOn: string }>;
   /** Deployment stance resolved once at startup; read-only telemetry, not a control. */
   inferencePosture: 'LocalFirst' | 'ExternalAuthorized';
+  /**
+   * The external-dependency control's own sample — the same projection the enforcer uses, over
+   * the last `windowSize` governed calls. `externalSharePercent` is the UNAUTHORIZED share:
+   * external calls carrying an allow-list receipt are counted in `authorizedExternal` and
+   * excluded from it, which is why a deployment can be 100% external and 0% dependent.
+   */
+  dependency: {
+    total: number; local: number; external: number; authorizedExternal: number;
+    unresolved: number; externalSharePercent: number; ceilingPercent: number;
+    windowSize: number; ceilingBreached: boolean;
+  };
 }
+
+/**
+ * What an OLDER backend sends. Render and Vercel deploy independently and Vercel is much
+ * faster, so for a few minutes after a release the new bundle talks to the previous API. The
+ * dependency snapshot and the authorized count are recent additions, and the page reads
+ * `dependency.total` inside the breach banner — precisely the branch an old backend still
+ * takes, because its ceiling maths was the raw external share. Unguarded that is a TypeError
+ * inside the app-level ErrorBoundary, i.e. the whole SPA drops to the error fallback for
+ * exactly the tenant that prompted the fix. Normalised on the way in, the same way
+ * operationalReadinessService already handles its own widened payload.
+ */
+type AiTrustCenterWire = Omit<AiTrustCenterView, 'usage' | 'dependency'> & {
+  usage: Omit<AiTrustCenterView['usage'], 'authorizedExternalRequests'>
+    & { authorizedExternalRequests?: number };
+  dependency?: AiTrustCenterView['dependency'];
+};
+
+export const normalizeAiTrustCenter = (wire: AiTrustCenterWire): AiTrustCenterView => {
+  const usage = {
+    ...wire.usage,
+    authorizedExternalRequests: wire.usage.authorizedExternalRequests ?? 0,
+  };
+  if (wire.dependency) return { ...wire, usage, dependency: wire.dependency };
+  // No snapshot means the old ceiling maths produced this percentage: it is the RAW external
+  // share, so report it as the sample rather than inventing an authorized count we were not
+  // told. The banner degrades to the old sentence's meaning instead of crashing.
+  return {
+    ...wire,
+    usage,
+    dependency: {
+      total: usage.requests,
+      local: usage.localRequests,
+      external: usage.externalRequests,
+      authorizedExternal: usage.authorizedExternalRequests,
+      unresolved: 0,
+      externalSharePercent: usage.externalDependencyPercent,
+      ceilingPercent: wire.policy.externalDependencyCeilingPercent,
+      windowSize: usage.requests,
+      ceilingBreached: usage.dependencyCeilingBreached,
+    },
+  };
+};
 
 export interface ArchiveDocumentItem {
   occurrenceId: number; sourceDocumentId: number; fileName: string; mimeType: string;
@@ -113,10 +167,14 @@ export interface QualityAnalyticsView {
   exceptionCauses: Array<{ category: string; code: string; count: number }>;
   records: Array<{ occurrenceId: number; fileName: string; ingestedOn: string; intakeStatus: string;
     processingStatus: string; processingPath: string; humanReview: boolean;
-    localProcessing: boolean; externalProcessing: boolean; processingReused: boolean;
+    localProcessing: boolean; externalProcessing: boolean;
+    /** Had external AI with no allow-list receipt — a strict subset of externalProcessing. */
+    unauthorizedExternalProcessing: boolean; processingReused: boolean;
     actualCost: number; costStatus: string }>;
   recommendations: Array<{ priority: string; title: string; recommendation: string;
-    evidence: string; drilldownKey: string }>;
+    evidence: string; drilldownKey: string;
+    /** The metric this was judged on. Distinct from drilldownKey: metrics share cohorts. */
+    metricKey: string }>;
   definitionVersion: string; accuracyLimitation: string;
 }
 
@@ -583,8 +641,8 @@ export const platformGovernanceService = {
     return data;
   },
   getAiTrust: async () => {
-    const { data } = await axiosInstance.get<AiTrustCenterView>('/api/platform-governance/ai-trust');
-    return data;
+    const { data } = await axiosInstance.get<AiTrustCenterWire>('/api/platform-governance/ai-trust');
+    return normalizeAiTrustCenter(data);
   },
   searchArchive: async (params: { search?: string; documentType?: string; status?: string; sort?: string }) => {
     const { data } = await axiosInstance.get<ArchiveSearchResult>('/api/platform-governance/archive',

@@ -15,9 +15,23 @@ public sealed record QualityCause(string Category, string Code, long Count);
 public sealed record QualityDrilldownItem(long OccurrenceId, string FileName, DateTimeOffset IngestedOn,
     string IntakeStatus, string ProcessingStatus, string ProcessingPath, bool HumanReview,
     bool LocalProcessing, bool ExternalProcessing, bool ProcessingReused, decimal ActualCost,
-    string CostStatus);
+    string CostStatus,
+    /// <summary>
+    /// This occurrence had at least one external call with NO allow-list receipt — the
+    /// population the ceiling governs, and a strict subset of
+    /// <paramref name="ExternalProcessing"/>. Separate because the Critical recommendation
+    /// links to evidence, and listing approved egress under "unauthorized" is the same
+    /// mislabelling the recommendation itself was fixed for.
+    /// </summary>
+    bool UnauthorizedExternalProcessing = false);
+/// <summary>
+/// A recommendation and the evidence behind it. <paramref name="MetricKey"/> names the metric
+/// it was judged on — separate from <paramref name="DrilldownKey"/>, which names the cohort of
+/// documents to list, because several metrics share one cohort. Empty when a recommendation is
+/// not about a single metric.
+/// </summary>
 public sealed record QualityRecommendation(string Priority, string Title, string Recommendation,
-    string Evidence, string DrilldownKey);
+    string Evidence, string DrilldownKey, string MetricKey = "");
 public sealed record QualityAnalyticsView(DateTimeOffset From, DateTimeOffset To,
     IReadOnlyList<QualityMetric> Metrics, IReadOnlyList<QualityCause> ExceptionCauses,
     IReadOnlyList<QualityDrilldownItem> Records, IReadOnlyList<QualityRecommendation> Recommendations,
@@ -82,14 +96,51 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             CommercialDocumentReviewStatus.AutoClassified or CommercialDocumentReviewStatus.Confirmed);
         var leadDecisions = leadPaths.Count;
         var touchless = leadPaths.Count(x => x.ProcessingPath != LeadProcessingPath.HumanReview);
-        var localAi = ai.Count(x => x.ProviderClass == AiProviderClass.Local);
-        var externalAi = ai.Count(x => x.ProviderClass == AiProviderClass.External);
-        var governedAi = localAi + externalAi;
-        var localAiOccurrences = ai.Where(x => x.ProviderClass == AiProviderClass.Local
+        // A DENIED reservation is not a governed call and was never egress: it is the control
+        // working. Those rows carry ProviderClass.External with a null receipt — the refusal
+        // never reached a provider, so there was no authorization to record — which made them
+        // indistinguishable from unauthorized egress to any count that does not exclude them.
+        // Counting them inverted this screen: because the allow-list gate refuses every
+        // unauthorized external reservation outright, a SUCCEEDED external row always carries
+        // a receipt, so on current data a denial was the only thing that could make the
+        // unauthorized share nonzero. The better the gate worked, the louder the alarm.
+        var governedCalls = ai.Where(x => x.Status != AiCallStatuses.Denied).ToList();
+        var localAi = governedCalls.Count(x => x.ProviderClass == AiProviderClass.Local);
+        var externalAi = governedCalls.Count(x => x.ProviderClass == AiProviderClass.External);
+        var authorizedExternalAi = governedCalls.Count(x => x.ProviderClass == AiProviderClass.External
+            && x.ExternalAuthorizationId != null);
+        // One definition, computed by the enforcement projection over THIS screen's cohort, so
+        // the number here and the number on AI Trust differ only by the window an operator
+        // chose — never by the rule. Recomputing the share locally is what let the two screens
+        // disagree on both the numerator (denials) and the denominator (Unknown provider class).
+        // Floored at the receipt era. This screen's window is operator-chosen and reaches back
+        // a year, so unlike AI Trust's month it can still see rows written before the
+        // authorization receipt was recorded on every authorized call. Those cannot be
+        // classified, and counting them as unauthorized made the 90- and 365-day cohorts carry
+        // a Critical that the 30-day cohort did not — the same tenant, the same second, two
+        // verdicts, decided by a dropdown.
+        var classifiable = governedCalls
+            .Where(x => x.CreatedOn >= AiExternalDependencyEvaluator.ReceiptRecordingBegan)
+            .ToList();
+        var dependency = AiExternalDependencyEvaluator.Evaluate(
+            classifiable.Select(x => new AiExternalDependencyEvaluator.GovernedCall(
+                x.ProviderClass, x.ExternalAuthorizationId, x.Status)).ToList(),
+            thresholds.ExternalDependencyCeilingPercent);
+        var unauthorizedExternalAi = dependency.External - dependency.AuthorizedExternal;
+        var governedAi = dependency.Total;
+        var localAiOccurrences = governedCalls.Where(x => x.ProviderClass == AiProviderClass.Local
                 && x.SourceDocumentOccurrenceId.HasValue)
             .Select(x => x.SourceDocumentOccurrenceId!.Value).ToHashSet();
-        var externalAiOccurrences = ai.Where(x => x.ProviderClass == AiProviderClass.External
+        var externalAiOccurrences = governedCalls.Where(x => x.ProviderClass == AiProviderClass.External
                 && x.SourceDocumentOccurrenceId.HasValue)
+            .Select(x => x.SourceDocumentOccurrenceId!.Value).ToHashSet();
+        // The Critical recommendation links to evidence, so the evidence has to be the
+        // documents it is actually about. An earlier comment claimed an occurrence carries no
+        // per-call authorization to narrow by; it does — the same AiRequest rows that build the
+        // set above carry both the receipt and the occurrence id.
+        var unauthorizedExternalAiOccurrences = classifiable
+            .Where(x => x.ProviderClass == AiProviderClass.External
+                && x.ExternalAuthorizationId == null && x.SourceDocumentOccurrenceId.HasValue)
             .Select(x => x.SourceDocumentOccurrenceId!.Value).ToHashSet();
         var reused = occurrences.Count(x => x.Occurrence.ProcessingReused || x.Occurrence.ParserReused
             || x.Occurrence.OcrReused || x.Occurrence.LocalModelReused);
@@ -114,7 +165,17 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             Rate("local-processing", "Local AI processing", localAi, governedAi,
                 "Local governed AI requests / local plus external governed AI requests.", "local-ai", thresholds.MinimumSampleSize),
             Rate("external-dependency", "External AI dependency", externalAi, governedAi,
-                "External governed AI requests / local plus external governed AI requests.", "external-ai", thresholds.MinimumSampleSize),
+                "External governed AI requests / all governed AI requests. Egress as it happened, authorized or not, excluding denied reservations, which never reached a provider. This is the number an auditor asks for, and it carries no threshold.", "external-ai", thresholds.MinimumSampleSize),
+            // The share the ceiling is actually enforced against. Published alongside the raw
+            // figure rather than replacing it: on a deployment with no loopback endpoint the
+            // raw share is 100% and the unauthorized share is 0%, and an auditor needs to see
+            // both — the first says everything left the box, the second says everything that
+            // left it was approved. Reporting only the raw share made the recommendation
+            // below fire "Critical" forever; reporting only this one would have hidden the
+            // egress entirely.
+            Rate("unauthorized-external-dependency", "Unauthorized external AI dependency",
+                unauthorizedExternalAi, governedAi,
+                "External governed AI requests with no allow-list authorization receipt / all governed AI requests. Denied reservations are excluded: a refusal is the control working, not egress. This is the ratio the external-dependency ceiling governs.", "unauthorized-external-ai", thresholds.MinimumSampleSize),
             Rate("correction-reuse", "Processing reuse", reused, occurrences.Count,
                 "Occurrences reusing parser, OCR, local-model or prior processing / all intake occurrences.", "processing-reuse", thresholds.MinimumSampleSize),
             Duration("turnaround-p50", "Extraction turnaround p50", durationMinutes, .50m),
@@ -152,9 +213,14 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
                 externalAiOccurrences.Contains(x.Occurrence.Id) || path?.ExternalAiUsed == true,
                 x.Occurrence.ProcessingReused || x.Occurrence.ParserReused || x.Occurrence.OcrReused
                     || x.Occurrence.LocalModelReused,
-                x.Occurrence.TotalActualCost, x.Occurrence.CostStatus);
+                x.Occurrence.TotalActualCost, x.Occurrence.CostStatus,
+                // Deliberately NOT falling back to path.ExternalAiUsed the way the line above
+                // does: that flag records that external AI was used, not whether it was
+                // authorized, so treating it as unauthorized would put approved egress back
+                // into the cohort this arm exists to separate.
+                unauthorizedExternalAiOccurrences.Contains(x.Occurrence.Id));
         }).Where(x => MatchesDrilldown(x, drilldown)).OrderByDescending(x => x.IngestedOn).Take(100).ToList();
-        var recommendations = Recommendations(metrics, causes, thresholds);
+        var recommendations = Recommendations(metrics, causes, thresholds, dependency);
         return new(fromDate, toDate, metrics, causes, records, recommendations, thresholds.DefinitionVersion,
             "None of the rates on this page is an extraction accuracy, and none should be quoted as one. "
             + "They describe validation outcomes, routing and throughput. Measured accuracy requires labelled "
@@ -187,6 +253,7 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
     {
         "human-review" => item.HumanReview || item.IntakeStatus == IntakeOccurrenceStatus.ReviewRequired.ToString(),
         "external-ai" => item.ExternalProcessing,
+        "unauthorized-external-ai" => item.UnauthorizedExternalProcessing,
         "local-ai" => item.LocalProcessing,
         "processing-reuse" => item.ProcessingReused,
         "terminal-intake" => item.IntakeStatus is "Resolved" or "ReviewRequired" or "Rejected" or "DeadLetter",
@@ -195,7 +262,7 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
 
     private static IReadOnlyList<QualityRecommendation> Recommendations(
         IReadOnlyList<QualityMetric> metrics, IReadOnlyList<QualityCause> causes,
-        QualityThresholds thresholds)
+        QualityThresholds thresholds, AiExternalDependencySnapshot dependency)
     {
         var output = new List<QualityRecommendation>();
         var review = metrics.Single(x => x.Key == "human-review");
@@ -204,19 +271,32 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             output.Add(new("High", "Reduce repeated review demand",
                 "Evaluate the leading exception against the current document skill and rule versions.",
                 $"Human review is {review.Value}% ({review.Numerator}/{review.Denominator}); leading cause: {causes.FirstOrDefault()?.Code ?? "not classified"}.",
-                "human-review"));
-        var external = metrics.Single(x => x.Key == "external-dependency");
-        if (external.Denominator >= thresholds.MinimumSampleSize
-            && external.Value > thresholds.ExternalDependencyCeilingPercent)
+                "human-review", "human-review"));
+        // Judged on the UNAUTHORIZED share, which is what the ceiling governs and what the
+        // sentence below has always claimed to be reporting. Judging the raw external share
+        // against it raised a permanent Critical on every deployment whose inference endpoint
+        // is not loopback, while enforcement denied nothing — a recommendation nobody can act
+        // on trains an auditor to ignore the ones that matter.
+        var external = metrics.Single(x => x.Key == "unauthorized-external-dependency");
+        // The VERDICT comes from the evaluator, not from re-comparing the card's displayed
+        // value. Quality Analytics renders every rate at two decimals while the evaluator
+        // reports one, so comparing the rendered number would let the two screens disagree
+        // about a breach at a fractional ceiling even though they now count identical rows —
+        // the same rounded-comparison hole that let 2.53% sit quietly under a 2.5% ceiling.
+        // Precision may differ between screens; the decision may not.
+        if (external.Denominator >= thresholds.MinimumSampleSize && dependency.CeilingBreached)
             output.Add(new("Critical", "Review external dependency against the allow-list",
                 "Inspect external call evidence and move supported operations to approved local paths.",
-                $"External dependency is {external.Value}% ({external.Numerator}/{external.Denominator}), above the {thresholds.ExternalDependencyCeilingPercent}% ceiling that enforcement applies to unauthorized external calls (allow-list-authorized calls are exempt).",
-                "external-ai"));
+                $"Unauthorized external dependency is {external.Value}% ({external.Numerator}/{external.Denominator}), above the {thresholds.ExternalDependencyCeilingPercent}% ceiling. Allow-list-authorized calls are exempt and are excluded from this figure.",
+                "unauthorized-external-ai", "unauthorized-external-dependency"));
         if (output.Count == 0)
             output.Add(new("Monitor", "No threshold breach in the selected cohort",
                 "Continue collecting validated outcomes and labeled evaluation examples.",
                 "Measured review and external-dependency rates remain within default governance thresholds, or evidence is insufficient.",
-                "terminal-intake"));
+                // Named for the metric it is about, like every other recommendation. Left empty
+                // it selected a cohort with nothing on screen explaining the change: the record
+                // table reloaded, the explanation alert vanished and every card un-pressed.
+                "terminal-intake", "straight-through"));
         return output;
     }
 

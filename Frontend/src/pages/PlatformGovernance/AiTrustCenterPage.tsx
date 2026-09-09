@@ -28,13 +28,18 @@ export default function AiTrustCenterPage() {
         inspect the effective controls and evidence here; request policy changes through your Platform Admin.
       </Alert>
       {!policy.isEnabled && <Alert severity="error" icon={<Security />} sx={{ mb: 2 }}>Emergency shutdown is active. AI processing is disabled for this tenant.</Alert>}
-      {usage.dependencyCeilingBreached && <Alert severity="warning" icon={<WarningAmber />} sx={{ mb: 2 }}>External dependency is {usage.externalDependencyPercent.toFixed(2)}%, above the {policy.externalDependencyCeilingPercent.toFixed(2)}% ceiling that governs unauthorized external calls. Calls under an active provider authorization are exempt from the ceiling.</Alert>}
+      {/* Raised on the UNAUTHORIZED share only. The banner used to quote the raw external
+          share while promising, in the same sentence, that authorized calls were exempt — so
+          any deployment whose inference endpoint is not loopback showed a standing breach
+          that enforcement was not acting on. It now quotes the figure the ceiling is applied
+          to, and names the sample so the number can be reconciled with the ledger below. */}
+      {usage.dependencyCeilingBreached && <Alert severity="warning" icon={<WarningAmber />} sx={{ mb: 2 }}>Unauthorized external dependency is {usage.externalDependencyPercent.toFixed(1)}%, above the {policy.externalDependencyCeilingPercent.toFixed(2)}% ceiling, across the last {view.data.dependency.total} of {view.data.dependency.windowSize} governed calls. Calls under an active provider authorization are exempt and are not counted here.</Alert>}
 
       <Paper variant="outlined" sx={{ mb: 2 }}><Tabs value={tab} onChange={(_event, value) => setTab(value)} variant="scrollable" scrollButtons="auto"><Tab label="Overview" /><Tab label="Policy" /><Tab label="Request ledger" /><Tab label="Audit history" /></Tabs></Paper>
 
       {tab === 0 && <>
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', lg: 'repeat(4, 1fr)' }, gap: 1.5, mb: 2 }}>
-          {[['Monthly requests', usage.requests], ['Local / external', `${usage.localRequests} / ${usage.externalRequests}`], ['Tokens settled', usage.settledTokens.toLocaleString()], ['Estimated external cost', estimatedCost]].map(([label, value]) => <Paper key={label} variant="outlined" sx={{ p: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" sx={{ fontWeight: 750 }}>{value}</Typography></Paper>)}
+          {[['Monthly requests', usage.requests], ['Local / external', `${usage.localRequests} / ${usage.externalRequests}${usage.externalRequests > 0 ? ` (${usage.authorizedExternalRequests} authorized)` : ''}`], ['Tokens settled', usage.settledTokens.toLocaleString()], ['Estimated external cost', estimatedCost]].map(([label, value]) => <Paper key={label} variant="outlined" sx={{ p: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" sx={{ fontWeight: 750 }}>{value}</Typography></Paper>)}
         </Box>
         <Paper variant="outlined" sx={{ p: 2 }}><Typography variant="subtitle1" sx={{ fontWeight: 750, mb: 1 }}>Trust posture</Typography>
           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(3, 1fr)' }, gap: 2 }}>
