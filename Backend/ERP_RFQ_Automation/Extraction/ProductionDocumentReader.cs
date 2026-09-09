@@ -1256,6 +1256,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         //
         // This is the check that would have stopped a 2,241-row material cross-reference from
         // becoming 102 chunks, five leases and a dead letter blaming the reader.
+        var reading = SpreadsheetReading.Of(rendered);
         var evidence = SpreadsheetBidEvidence.Assess(rendered);
         if (evidence.ShouldRefuseAsNonBid)
         {
@@ -1268,6 +1269,44 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 $"This spreadsheet was read in full — {evidence.RowCount} row(s) across "
                 + $"{evidence.ColumnCount} column(s) — but no line states a quantity, a price, a "
                 + "unit or a date, so there is nothing in it that can be quoted.");
+        }
+
+        // The headers were not recognised, but the CELLS may still say which column is which.
+        // Getting this right is worth far more than the model call it saves: a spreadsheet on the
+        // model path is chunked, and above roughly 650 detected items it is refused outright by
+        // the pre-flight ceiling — so a genuine large enquiry from a client whose spellings we
+        // have never seen is currently not read expensively, it is not read at all. Inference
+        // puts it back on the deterministic path, which has no size limit and costs nothing.
+        //
+        // Refusing to infer is always safe: the document simply keeps today's behaviour.
+        var inference = SpreadsheetFieldInference.Infer(reading);
+        if (inference.IsUsable)
+        {
+            var headerMap = new Dictionary<int, string>();
+            if (reading.Header is not null)
+                for (var i = 0; i < reading.Header.Count; i++)
+                    headerMap[i + 1] = reading.Header[i];
+
+            var inferredRows = _spreadsheetParser.ParseRowsWithFields(
+                reading.Body.Select(row => (IReadOnlyList<string?>)row.Cast<string?>().ToList()).ToList(),
+                inference.FieldColumns, headerMap, reading.HeaderRowNumber, name, format);
+
+            if (inferredRows.Count > 0)
+            {
+                _log.LogInformation(
+                    "{Format} workbook {Name} had no recognised column layout, but its content "
+                    + "identified the fields: {Explanation} Read {Rows} line(s) deterministically; "
+                    + "no model call was made.",
+                    format, name, inference.Explanation, inferredRows.Count);
+                return Structured(job, name, inferredRows.ToList());
+            }
+        }
+        else
+        {
+            _log.LogInformation(
+                "{Format} workbook {Name}: content did not identify a usable field mapping ({Reason}); "
+                + "falling back to unstructured text extraction.",
+                format, name, inference.Explanation);
         }
 
         _log.LogInformation(
