@@ -286,6 +286,20 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
     serverReasonWins: true,
   },
   /**
+   * ChunkedExtractionService.DocumentTooLargeCode. Selected by MARKER rather than by code — see
+   * REASON_MARKERS below for why the code alone never arrives.
+   */
+  extraction_document_too_large: {
+    title: 'This document is larger than the reader handles in one pass',
+    whatHappened:
+      'This file was read, but it holds far more line items than one document is allowed to spend on reading. Nothing was charged and no AI service was contacted.',
+    nextAction:
+      'If this really is one very large enquiry, split it and upload the parts. If it is a catalogue, a price list or an item cross-reference, it belongs in master data rather than lead ingestion. Retrying the same file will reach the same answer.',
+    category: 'content',
+    isRetryable: false,
+    serverReasonWins: false,
+  },
+  /**
    * NotABidDocumentException, surfaced as the intake reason "not_a_bid".
    *
    * The only entry here whose subject is the DOCUMENT rather than the system, and the copy has to
@@ -423,6 +437,35 @@ export const hasIntakeErrorExplanation = (code: string | null | undefined): bool
  * (LeadIdentityApplicationService.IntakeReasons reads it straight out of
  * `last_error_details->>'reason'`), so it is passed through as the server reason.
  */
+/**
+ * Markers carried inside the RECORDED REASON, mapped to the entry that explains them.
+ *
+ * Needed because on PostgreSQL the occurrence's error_code is not written by the worker at all —
+ * a database trigger owns it (Migrations/20260725035352_Release01CTransactionalIntakeHardening.cs)
+ * and writes the bucket value 'extraction_dead_letter' for every abandoned job, whatever the
+ * cause. So a specific code never reaches this file in production, and keying only on the code
+ * meant the most precise copy we had could never be selected: a spreadsheet that was read
+ * perfectly and simply was not an enquiry still appeared under "We could not read this document".
+ *
+ * The extractor already stamps a closed, machine-readable marker into the reason precisely so the
+ * refusal has ONE name from the service to the screen. Reading it here is what makes that true at
+ * the last step. Matched in order, most specific first.
+ */
+const REASON_MARKERS: ReadonlyArray<readonly [string, keyof typeof INTAKE_ERRORS]> = [
+  ['[NOT_A_BID]', 'not_a_bid'],
+  ['EXTRACTION_DOCUMENT_TOO_LARGE', 'extraction_document_too_large'],
+  ['EXTRACTION_AI_NOT_AUTHORIZED', 'extraction_ai_not_authorized'],
+];
+
+/** The entry a recorded reason names outright, or null when it names none. */
+const entryFromReasons = (reasons?: string[] | null): IntakeErrorEntry | null => {
+  if (!Array.isArray(reasons)) return null;
+  for (const [marker, key] of REASON_MARKERS)
+    if (reasons.some((reason) => typeof reason === 'string' && reason.includes(marker)))
+      return INTAKE_ERRORS[key];
+  return null;
+};
+
 export const explainIntakeItem = (item: {
   errorCode?: string | null;
   intakeStatus?: string | null;
@@ -432,7 +475,12 @@ export const explainIntakeItem = (item: {
   const serverReason = Array.isArray(item.reasons)
     ? item.reasons.find((reason) => presentableServerText(reason) !== null) ?? null
     : null;
-  const explanation = explainIntakeError(item.errorCode, serverReason);
+  // The marker outranks the code: it names the actual cause, while the code is a bucket the
+  // database trigger stamped on every dead letter alike.
+  const marked = entryFromReasons(item.reasons);
+  const explanation = marked !== null
+    ? resolve(marked, serverReason)
+    : explainIntakeError(item.errorCode, serverReason);
 
   if (item.recoverableSecurityHold === true) {
     // Guarantee infrastructure framing even for a code we have no copy for.

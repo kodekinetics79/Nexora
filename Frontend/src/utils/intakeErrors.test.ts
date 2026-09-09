@@ -432,6 +432,44 @@ describe('extraction-phase failures', () => {
     expect(explained.whatHappened).not.toMatch(/nothing was sent to any outside service/i);
   });
 
+  it('explains a non-bid by its reason marker, because the code is always the bucket', () => {
+    // THE LAST-STEP GAP. On PostgreSQL the occurrence error_code is written by a database
+    // trigger, which stamps 'extraction_dead_letter' on every abandoned job regardless of cause.
+    // Keying only on the code meant the precise copy could never be chosen in production: a
+    // spreadsheet read perfectly from end to end still appeared under "We could not read this
+    // document", which is the exact false apology this work exists to remove.
+    const explained = explainIntakeItem({
+      errorCode: 'extraction_dead_letter',
+      reasons: ['[NOT_A_BID] This spreadsheet was read in full — 2241 row(s) across 4 column(s) — but no line states a quantity, a price, a unit or a date.'],
+    });
+
+    expect(explained.title).toBe('This file does not look like an enquiry');
+    expect(explained.title).not.toMatch(/could not read/i);
+    expect(explained.whatHappened).toMatch(/read this spreadsheet in full/i);
+    expect(explained.nextAction).toMatch(/master data/i);
+    expect(explained.isRetryable).toBe(false);
+  });
+
+  it('explains a ceiling refusal by its marker too', () => {
+    const explained = explainIntakeItem({
+      errorCode: 'extraction_dead_letter',
+      reasons: ['[EXTRACTION_DOCUMENT_TOO_LARGE] This document was read as 2224 line item(s).'],
+    });
+
+    expect(explained.title).toMatch(/larger than the reader handles/i);
+    expect(explained.nextAction).not.toMatch(/switched off/i);
+  });
+
+  it('falls back to the bucket when no marker is present', () => {
+    // CONTROL: the marker path must not swallow the ordinary case.
+    const explained = explainIntakeItem({
+      errorCode: 'extraction_dead_letter',
+      reasons: ['Something went wrong while reading this file.'],
+    });
+
+    expect(explained.title).toBe('We could not read this document');
+  });
+
   it('keeps the deterministic-format workaround on the entry where it is actually true', () => {
     // The advice removed from the bucket above is correct for THIS cause and stays here, where
     // the cause is known rather than guessed.
