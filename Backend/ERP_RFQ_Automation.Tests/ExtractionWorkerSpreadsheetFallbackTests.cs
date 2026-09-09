@@ -196,6 +196,66 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
             $"stored error is {stored.Length} chars; it must survive the 4,000-char LastError column intact");
     }
 
+    [Fact]
+    public void ComposeFailureReason_OnAPermanentRefusal_KeepsTheReasonShortEnoughToBeShown()
+    {
+        // The reason a real dead letter explained NOTHING to the operator who hit it.
+        //
+        // The fallback note is ~300 characters on its own. Prefixed onto a refusal it produced a
+        // string of ~560, and the batch screen renders a recorded reason only when the WHOLE
+        // string clears a 300-character presentability gate (Frontend/src/utils/apiErrors.ts).
+        // So the sentence naming the cause was inside the string that was withheld, and the
+        // operator was left with the bucket's guess — which told them to switch on AI reading
+        // that was already on and had nothing to do with the refusal.
+        const string note =
+            "The XLSX spreadsheet was read successfully, but its column layout was not recognized "
+            + "by the deterministic RFQ mapper. Its sheet content was rendered to text and routed to "
+            + "AI-assisted extraction; if no authorized AI provider is available for this tenant, the "
+            + "document is held for review instead.";
+        var outcome = new ChunkedExtractionOutcome
+        {
+            Status = ExtractionOutcomeStatus.Failed,
+            PermanentFailure = true,
+            ReviewReason = $"[{ChunkedExtractionService.DocumentTooLargeCode}] This document was read "
+                + "as 2224 line item(s), far more than one document is allowed to spend on reading.",
+            Diagnostics = new List<string> { "Chunk ceiling: 102 chunk(s) required for 2224 detected item(s)." }
+        };
+
+        var stored = ExtractionWorker.ComposeFailureReason(outcome, note);
+
+        // The refusal leads, so the operator-facing sentence is the one that names the cause.
+        Assert.StartsWith($"[{ChunkedExtractionService.DocumentTooLargeCode}]", stored);
+        Assert.DoesNotContain(note, stored[..stored.IndexOf("[diagnostics:", StringComparison.Ordinal)]);
+
+        // Nothing is lost: the context support needs is still recorded, just demoted.
+        Assert.Contains(note, stored);
+        Assert.Contains("Chunk ceiling:", stored);
+
+        // And classification still works off the marker wherever it sits.
+        Assert.Equal(ExtractionDeadLetterService.DocumentTooLargeCategory,
+            ExtractionDeadLetterService.ClassifyFailure(stored));
+    }
+
+    [Fact]
+    public void ComposeFailureReason_OnARetryableFailure_StillPrefixesTheFallbackNote()
+    {
+        // CONTROL. The demotion above is scoped to PERMANENT outcomes. A retryable failure is
+        // still read whole by a human during triage, and its composition is unchanged — this
+        // test passes both before and after the fix.
+        var outcome = new ChunkedExtractionOutcome
+        {
+            Status = ExtractionOutcomeStatus.Failed,
+            PermanentFailure = false,
+            ReviewReason = "All chunks failed; no data extracted.",
+            Diagnostics = new List<string>()
+        };
+
+        var stored = ExtractionWorker.ComposeFailureReason(outcome, "The XLSX spreadsheet was read successfully.");
+
+        Assert.StartsWith(
+            "The XLSX spreadsheet was read successfully. All chunks failed; no data extracted.", stored);
+    }
+
     // ---- harness ----------------------------------------------------------
 
     /// <summary>

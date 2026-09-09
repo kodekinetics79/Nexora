@@ -612,6 +612,15 @@ public sealed class ExtractionDeadLetterService(
     /// <summary>Tenant-facing name for a document refused because AI processing is not authorized.</summary>
     internal const string AiNotAuthorizedCategory = "AI_NOT_AUTHORIZED";
 
+    /// <summary>
+    /// The pre-flight chunk-ceiling refusal. Distinct from AI_NOT_AUTHORIZED because the two
+    /// prescriptions are opposites: that one is cleared by authorizing a provider, this one is
+    /// not affected by any provider setting at all — the ceiling is reached before a provider is
+    /// consulted. Reporting both as EXTRACTION_FAILURE sent operators to the AI trust centre to
+    /// fix a document that was simply too large.
+    /// </summary>
+    internal const string DocumentTooLargeCategory = "DOCUMENT_TOO_LARGE";
+
     /// <summary>The evidence record survives but its bytes do not — distinct from
     /// EVIDENCE_INTEGRITY, which means the bytes are present and altered.</summary>
     internal const string EvidenceMissingCategory = "EVIDENCE_MISSING";
@@ -637,9 +646,13 @@ public sealed class ExtractionDeadLetterService(
     internal static bool CanRetry(string category, bool sourceLost, bool securityBlocker) =>
         !sourceLost && !securityBlocker && !IsUnchangedSourceTerminal(category);
 
+    // DOCUMENT_TOO_LARGE belongs here and AI_NOT_AUTHORIZED deliberately does not: authorizing a
+    // provider makes that retry succeed, whereas the chunk count is a function of the bytes alone,
+    // so no setting an operator can reach changes the answer for this same file.
     private static bool IsUnchangedSourceTerminal(string category) => category is
         EvidenceIntegrityCategory or OcrPixelLimitExceededCategory
-        or PasswordProtectedCategory or UnsupportedDocumentCategory;
+        or PasswordProtectedCategory or UnsupportedDocumentCategory
+        or DocumentTooLargeCategory;
 
     /// <summary>
     /// What the operator must DO about this category, in words, or null where the category
@@ -655,6 +668,7 @@ public sealed class ExtractionDeadLetterService(
     internal static string? OperatorAction(string category) => category switch
     {
         AiNotAuthorizedCategory => ChunkedExtractionService.AiNotAuthorizedOperatorAction,
+        DocumentTooLargeCategory => ChunkedExtractionService.DocumentTooLargeOperatorAction,
         "MALWARE" => "The stored file failed malware inspection. It cannot be retried until a "
             + "platform owner clears the disposition; recovery is blocked by design.",
         EvidenceBucketMismatchCategory => "NOTHING IS LOST. This document's bytes are intact in "
@@ -707,6 +721,11 @@ public sealed class ExtractionDeadLetterService(
         // structured-fallback note onto the stored reason.
         if (error.Contains(ChunkedExtractionService.AiNotAuthorizedCode, StringComparison.Ordinal))
             return AiNotAuthorizedCategory;
+        // Also on its own closed marker rather than on prose, and likewise ahead of the generic
+        // rules below — the refusal sentence is ordinary English and would otherwise fall through
+        // to EXTRACTION_FAILURE, which is what made it indistinguishable from a model timeout.
+        if (error.Contains(ChunkedExtractionService.DocumentTooLargeCode, StringComparison.Ordinal))
+            return DocumentTooLargeCategory;
         // BEFORE the integrity rule, whose prose this message also contains: a missing object
         // and an altered one are different incidents and only one of them is a corruption bug.
         if (error.Contains(EvidenceIntegrityException.BucketMismatchMarker, StringComparison.Ordinal))

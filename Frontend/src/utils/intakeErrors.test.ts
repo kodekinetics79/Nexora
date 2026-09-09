@@ -415,11 +415,28 @@ describe('extraction-phase failures', () => {
     expect(explained.whatHappened).not.toContain('Processing stopped for this file');
   });
 
-  it('tells the rep where the answer is and what usually causes it', () => {
+  it('tells the rep where the answer is without asserting a cause it cannot know', () => {
     const explained = explainIntakeError('extraction_dead_letter');
 
+    // Still says WHERE the answer is. That part was always right.
     expect(explained.nextAction).toMatch(/administrator/i);
-    // The workaround that works TODAY, without any configuration change.
+
+    // What changed: this is a BUCKET, and it used to state a specific cause as fact — that AI
+    // reading is "switched off for this tenant by default" — then prescribe uploading the lines
+    // as a spreadsheet instead. On the dead letter that prompted this change both halves were
+    // wrong: the tenant HAD an authorized provider, and the document already WAS a spreadsheet,
+    // refused by the chunk ceiling before any provider was consulted.
+    expect(explained.nextAction).not.toMatch(/switched off|spreadsheet/i);
+
+    // Same defect in the other sentence: only some members of this bucket stop before egress.
+    expect(explained.whatHappened).not.toMatch(/nothing was sent to any outside service/i);
+  });
+
+  it('keeps the deterministic-format workaround on the entry where it is actually true', () => {
+    // The advice removed from the bucket above is correct for THIS cause and stays here, where
+    // the cause is known rather than guessed.
+    const explained = explainIntakeError('extraction_ai_not_authorized');
+
     expect(explained.nextAction).toMatch(/spreadsheet/i);
   });
 

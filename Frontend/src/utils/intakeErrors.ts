@@ -259,10 +259,22 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
   },
   extraction_dead_letter: {
     title: 'We could not read this document',
+    /*
+     * BOTH sentences below used to assert things this bucket cannot know, and both were wrong on
+     * a real dead letter. "Nothing was sent to any outside service" is only true for the failures
+     * that stop before a model call; and the old next-action stated as fact that AI reading is
+     * "switched off for this tenant by default", then told the reader to have it switched on.
+     * On the batch that prompted this fix an AI provider WAS authorized, the document was refused
+     * by the chunk ceiling before any provider was consulted, and enabling anything would have
+     * changed nothing — so the screen sent an operator to the AI trust centre to fix a
+     * spreadsheet that was simply too large. A bucket must describe only what every member of the
+     * bucket shares; the specific cause travels as the recorded reason and, for an administrator,
+     * as ExtractionDeadLetterService.OperatorAction.
+     */
     whatHappened:
-      'This file passed the security scan but reading it did not produce any lines. Your document is stored safely and unchanged — nothing was lost, and nothing was sent to any outside service.',
+      'This file passed the security scan, but reading it finished without producing any usable lines. Your document is stored safely and unchanged.',
     nextAction:
-      'Ask an administrator to open Tenant Admin Operations and look at this batch. The usual cause is a scanned or PDF document that needs AI reading, which is switched off for this tenant by default. Spreadsheets and Word files whose lines sit in a table are read without it.',
+      'Ask an administrator to open Tenant Admin Operations and look at this batch — the reason recorded for this file is shown there, with what to do about it. Retrying the same file without changing anything is unlikely to help.',
     category: 'content',
     // Retrying changes nothing until the underlying condition changes, and offering a button that
     // cannot work is how the last version of this screen wasted a rep's afternoon.

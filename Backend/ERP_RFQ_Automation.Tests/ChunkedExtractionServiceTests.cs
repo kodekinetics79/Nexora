@@ -344,6 +344,86 @@ public class ChunkedExtractionServiceTests
         KEY:SHAFT,SQUARE,10 MM X 10 MM LG
         """;
 
+    // ------------------------------------------------- the cost gate must be TERMINAL
+
+    [Fact]
+    public async Task The_chunk_ceiling_refuses_permanently_and_reports_a_cause_an_operator_can_read()
+    {
+        // THE PRODUCTION DEFECT. A tenant uploaded a 2,241-row workbook whose columns the
+        // deterministic mapper did not recognise. It fell through to the model path, cleared the
+        // allow-list gate (that tenant DOES have an authorized provider), and was then refused by
+        // this ceiling — 102 chunks for 2,224 detected items against a limit of 30.
+        //
+        // The refusal was right. Everything after it was wrong: the outcome was retryable, so the
+        // worker re-asked a question whose answer is a pure function of bytes it had already read,
+        // five times, before dead-lettering. Chunk count cannot change between attempts.
+        var llm = new LocalExplodingLlm();
+        var service = NewService(llm);
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(((ILLMService)llm).MaxOutputTokens);
+
+        var outcome = await service.ExtractUnstructuredAsync(
+            Doc(Rows(perChunk * (ChunkedExtractionService.MaxChunksPerDocument + 1) + 1)));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+
+        // The whole point: one attempt, not five. Reverting this to the default `permanent: false`
+        // restores an hour of exponential backoff against a settled answer.
+        Assert.True(outcome.PermanentFailure,
+            "a ceiling computed from the input alone was reported as retryable");
+
+        // The ceiling exists to stop spending, so nothing may be spent proving it.
+        Assert.False(llm.WasCalled);
+
+        // CLASSIFIABLE, and not as the AI refusal — the two prescriptions are opposites, and
+        // reporting this one as AI_NOT_AUTHORIZED sends an operator to authorize a provider that
+        // was never consulted and whose authorization changes nothing here.
+        var stored = ExtractionWorker.ComposeFailureReason(outcome, structuredFallbackNote: null);
+        Assert.Contains(ChunkedExtractionService.DocumentTooLargeCode, stored);
+        Assert.Equal(ExtractionDeadLetterService.DocumentTooLargeCategory,
+            ExtractionDeadLetterService.ClassifyFailure(stored));
+        Assert.NotEqual(ExtractionDeadLetterService.AiNotAuthorizedCategory,
+            ExtractionDeadLetterService.ClassifyFailure(stored));
+
+        // Retrying the same bytes cannot succeed, so the dead-letter screen must not offer it.
+        Assert.False(ExtractionDeadLetterService.CanRetry(
+            ExtractionDeadLetterService.DocumentTooLargeCategory, sourceLost: false, securityBlocker: false));
+        Assert.NotNull(ExtractionDeadLetterService.OperatorAction(
+            ExtractionDeadLetterService.DocumentTooLargeCategory));
+
+        // The refusal SENTENCE has to survive the operator UI's 300-character presentability gate
+        // (Frontend/src/utils/apiErrors.ts MAX_MESSAGE_LENGTH). The long form did not, so the one
+        // screen that had to explain the dead letter showed only "diagnostic detail was recorded
+        // for support and is not shown here".
+        Assert.True(outcome.ReviewReason!.Length <= 300,
+            $"the operator-facing reason is {outcome.ReviewReason.Length} characters and will be withheld");
+
+        // The chunk arithmetic is still recorded for support, just not in the sentence.
+        Assert.Contains(outcome.Diagnostics, d => d.Contains("Chunk ceiling:"));
+    }
+
+    /// <summary>
+    /// Local-class sibling of <see cref="ExplodingLlm"/>. The allow-list gate runs BEFORE the
+    /// chunk ceiling and denies an External provider whenever no trust service is wired, so an
+    /// External stub can never reach the ceiling under test — it would prove the wrong refusal.
+    /// </summary>
+    private sealed class LocalExplodingLlm : ILLMService
+    {
+        public bool WasCalled { get; private set; }
+        public AiProviderClass ProviderClass => AiProviderClass.Local;
+
+        public Task<LeadExtractionResult?> ExtractLeadDataAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+        {
+            WasCalled = true;
+            throw new InvalidOperationException(
+                "The ceiling must refuse before any model call is made.");
+        }
+
+        public Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<BoqDraftResult?>(null);
+    }
+
     /// <summary>Fails loudly if anything asks it to think. The point of the test is that
     /// nothing should.</summary>
     private sealed class ExplodingLlm : ILLMService

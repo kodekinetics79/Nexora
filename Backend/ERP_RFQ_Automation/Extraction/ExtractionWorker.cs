@@ -790,13 +790,30 @@ public sealed class ExtractionWorker : BackgroundService
         ChunkedExtractionOutcome outcome, string? structuredFallbackNote)
     {
         var reason = outcome.ReviewReason ?? "Extraction produced no usable result.";
-        if (!string.IsNullOrWhiteSpace(structuredFallbackNote))
-            reason = $"{structuredFallbackNote} {reason}";
 
         var details = outcome.Diagnostics
             .Where(d => !string.IsNullOrWhiteSpace(d)
                 && !string.Equals(d, outcome.ReviewReason, StringComparison.Ordinal))
             .ToList();
+
+        // The structured-fallback note is CONTEXT — "this spreadsheet's columns were not
+        // recognized, so its text was routed to the model path" — not the reason the job failed.
+        // Prefixing it is harmless on a retryable failure, where a human reads the whole stored
+        // string during triage. On a PERMANENT refusal it actively hid the answer: the note runs
+        // to ~300 characters on its own, the operator UI renders a recorded reason only when the
+        // WHOLE string clears a 300-character presentability gate
+        // (Frontend/src/utils/apiErrors.ts), and the sum never cleared it. A real dead letter
+        // therefore reached the batch screen as "diagnostic detail was recorded for support and
+        // is not shown here" — with the one sentence naming the cause sitting inside the string
+        // that was withheld. Demoted to diagnostics: support keeps every word, and the operator
+        // gets the sentence that says what happened.
+        if (!string.IsNullOrWhiteSpace(structuredFallbackNote))
+        {
+            if (outcome.PermanentFailure)
+                details.Insert(0, structuredFallbackNote);
+            else
+                reason = $"{structuredFallbackNote} {reason}";
+        }
         if (details.Count == 0)
             return reason;
 
