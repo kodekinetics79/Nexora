@@ -335,6 +335,44 @@ public sealed class NativeSpreadsheetParser
         return rows;
     }
 
+    /// <summary>
+    /// Builds rows from an ALREADY DECIDED field mapping, rather than working one out from header
+    /// spellings.
+    ///
+    /// <para>Exists so a sheet whose headings no alias recognises can still be read
+    /// deterministically, using a mapping inferred from column content
+    /// (<see cref="SpreadsheetFieldInference"/>). Everything downstream — evidence addresses,
+    /// materiality, transcription — is the shared code every other format already goes through;
+    /// only the question "which column is which" is answered differently.</para>
+    /// </summary>
+    public IReadOnlyList<RfqSpreadsheetRow> ParseRowsWithFields(
+        IReadOnlyList<IReadOnlyList<string?>> dataRows,
+        IReadOnlyDictionary<string, int> fieldColumns,
+        IReadOnlyDictionary<int, string> headers,
+        int headerRowNumber,
+        string sourceDocumentName,
+        string worksheetName)
+    {
+        var columns = new Dictionary<string, int>(fieldColumns, StringComparer.Ordinal);
+        var headerMap = new Dictionary<int, string>(headers);
+        var rows = new List<RfqSpreadsheetRow>();
+
+        for (var index = 0; index < dataRows.Count; index++)
+        {
+            var cells = dataRows[index];
+            var rowNumber = headerRowNumber + index + 1;
+            string? Cell(string field) => ReadCell(columns, field,
+                column => column <= cells.Count ? cells[column - 1] : null);
+
+            var row = CreateRow(sourceDocumentName, worksheetName, headerRowNumber, rowNumber,
+                headerMap, columns, Cell);
+            if (IsMaterial(row))
+                rows.Add(row);
+        }
+
+        return rows;
+    }
+
     /// <summary>Rows examined from the top of a sheet when looking for the header.</summary>
     private const int HeaderScanWindow = 25;
 

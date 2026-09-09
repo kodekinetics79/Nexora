@@ -197,6 +197,68 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
     }
 
     [Fact]
+    public async Task ALargeEnquiryWithUnknownHeaders_IsReadDeterministically_PastTheOldCeiling()
+    {
+        // THE POINT OF THE CONTENT PATH, and the case that is lost revenue today.
+        //
+        // 900 lines whose column headings match no alias in the product. Before inference this
+        // document did not merely cost money to read — it was NOT READ AT ALL: the model path
+        // chunks it, and above roughly 650 detected items the pre-flight ceiling refuses it
+        // outright, so a real enquiry from a client with unfamiliar spellings dead-lettered.
+        // Reading the cells puts it back on the deterministic path, which has no size limit.
+        var queue = new RecordingQueue(CreateJob(804, "grosse-anfrage.xlsx", "xlsx"));
+        var llm = new StubLlm(AiProviderClass.External); // any call at all fails the run
+        var persister = new RecordingPersister();
+        using var services = BuildServices(queue, LargeUnknownHeaderEnquiry(900), llm, persister);
+        var worker = CreateWorker(services);
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            var outcome = await persister.Persisted.Task.WaitAsync(TestWaits.Liveness);
+
+            // Not one model call, on a document far past the chunk ceiling.
+            Assert.Equal(0, llm.CallCount);
+            Assert.Equal(ExtractionProcessingPath.DeterministicRules, outcome.ProcessingPath);
+            Assert.NotEqual(ExtractionOutcomeStatus.Failed, outcome.Status);
+            Assert.NotNull(outcome.CanonicalImport);
+
+            // And it did not dead-letter, which is what it does on main today.
+            Assert.False(queue.PermanentFailure.Task.IsCompleted);
+            Assert.False(queue.RetryableFailure.Task.IsCompleted);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A genuine enquiry of <paramref name="lines"/> rows whose headings no alias matches, with a
+    /// leading POSITION column — the trap that profiles like a small quantity — so the fixture
+    /// exercises the sequence guard at scale rather than only in the unit tests.
+    /// </summary>
+    private static byte[] LargeUnknownHeaderEnquiry(int lines)
+    {
+        OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
+        using var package = new OfficeOpenXml.ExcelPackage();
+        var worksheet = package.Workbook.Worksheets.Add("Anfrage");
+        worksheet.Cells[1, 1].Value = "Pos";
+        worksheet.Cells[1, 2].Value = "Artikelnummer";
+        worksheet.Cells[1, 3].Value = "Bezeichnung";
+        worksheet.Cells[1, 4].Value = "Menge";
+        for (var i = 0; i < lines; i++)
+        {
+            worksheet.Cells[i + 2, 1].Value = (i + 1).ToString();
+            worksheet.Cells[i + 2, 2].Value = $"9020{172740 + i}";
+            worksheet.Cells[i + 2, 3].Value = $"VALVE,GATE,{2 + i % 8} IN CLASS 150 CARBON STEEL";
+            worksheet.Cells[i + 2, 4].Value = (1 + i % 40).ToString();
+        }
+        return package.GetAsByteArray();
+    }
+
+    [Fact]
     public async Task ACrossReferenceSheet_IsRefusedAsANonBid_WithoutReachingAModel()
     {
         // WIRING, not unit. SpreadsheetBidEvidence has its own tests; this proves the floor is
@@ -402,16 +464,21 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
 
     /// <summary>A workbook the deterministic parser cannot map a single column of.</summary>
     /// <summary>
-    /// Headers no alias list recognises, on a document that IS a genuine enquiry — three lines,
-    /// each stating a count.
+    /// Headers no alias list recognises, on a document that IS a genuine enquiry, and whose
+    /// quantity is AMBIGUOUS — an ordered count beside a pack size, either of which could be the
+    /// quantity.
     ///
-    /// <para>The quantity column matters. This fixture used to be a single row of three text
-    /// columns, which made it indistinguishable from a catalogue, and once the content floor
-    /// (SpreadsheetBidEvidence) landed it would have been refused as a non-bid before ever
-    /// reaching the external-provider gate this test exists to exercise. The test would still
-    /// have gone green on the wrong refusal. An unrecognised LAYOUT and an absence of commercial
-    /// CONTENT are different things, and the fixture has to be the first without being the
-    /// second.</para>
+    /// <para>The fixture has been sharpened twice, both times because a new deterministic step
+    /// would otherwise have claimed the document before it reached the external-provider gate
+    /// this test exists to exercise — and the test would have gone green on the wrong refusal
+    /// each time. First the content floor (SpreadsheetBidEvidence): the original single row of
+    /// three text columns was indistinguishable from a catalogue, so a quantity was added. Then
+    /// field inference (SpreadsheetFieldInference): one unambiguous quantity is now read straight
+    /// off the cells with no model at all, so a second candidate column was added to make the
+    /// inference decline, which is what a real ordered/packed sheet does.</para>
+    ///
+    /// <para>Three properties have to hold together, and they are easy to lose one at a time: an
+    /// unrecognised LAYOUT, present commercial CONTENT, and an AMBIGUOUS mapping.</para>
     /// </summary>
     private static byte[] UnrecognizableWorkbook()
     {
@@ -422,18 +489,22 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         worksheet.Cells[1, 2].Value = "Narrative";
         worksheet.Cells[1, 3].Value = "Owner";
         worksheet.Cells[1, 4].Value = "Count";
+        worksheet.Cells[1, 5].Value = "Pack";
         worksheet.Cells[2, 1].Value = "MAT-88001";
         worksheet.Cells[2, 2].Value = "Ball valve DN50 PN16 stainless";
         worksheet.Cells[2, 3].Value = "Jubail Plant";
         worksheet.Cells[2, 4].Value = "6";
+        worksheet.Cells[2, 5].Value = "12";
         worksheet.Cells[3, 1].Value = "MAT-88002";
         worksheet.Cells[3, 2].Value = "Gate valve DN80 PN16 carbon steel";
         worksheet.Cells[3, 3].Value = "Jubail Plant";
         worksheet.Cells[3, 4].Value = "12";
+        worksheet.Cells[3, 5].Value = "6";
         worksheet.Cells[4, 1].Value = "MAT-88003";
         worksheet.Cells[4, 2].Value = "Check valve DN50 PN16 stainless";
         worksheet.Cells[4, 3].Value = "Ras Tanura";
         worksheet.Cells[4, 4].Value = "3";
+        worksheet.Cells[4, 5].Value = "24";
         return package.GetAsByteArray();
     }
 
