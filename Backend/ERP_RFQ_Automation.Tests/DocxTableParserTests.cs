@@ -137,6 +137,58 @@ public sealed class DocxTableParserTests
 
     // ------------------------------------------------------------------------------ helpers
 
+    [Fact]
+    public void AFormShapedRfp_IsReadThroughTheParser_WithoutAModel()
+    {
+        // WIRING, not unit. DocxFormBlockParser has its own tests; this proves the fallback is
+        // REACHABLE from the entry point every real document takes, and that it fires only after
+        // the grid attempt has found nothing.
+        //
+        // The document is the Aramco/ASMO e-bidding shape in miniature: one table whose header is
+        // "Name | Alternative | Value" — naming no commercial field, so the grid reader correctly
+        // declines it — followed by a block of labels repeated per item. Before this fallback the
+        // whole document went to prose, where every TABLE ROW counted as a line item; on the real
+        // 1,514-line RFP that produced ~103,000 items and the cost ceiling refused the lot.
+        var rows = new List<string[]> { new[] { "Name", "Alternative", "Value" } };
+        foreach (var (heading, description, qty, material) in new[]
+                 {
+                     ("8 BATTERY: LEAD ACID", "BATTERY: LEAD ACID, 12 V, 6 CELLS", "1 each", "000000002000008534"),
+                     ("9 BEARING Shell", "BEARING Shell two halves for DE and NDE", "4 each", "000000002000010473"),
+                     ("10 BEARING SLEEVE", "BEARING SLEEVE, SHELL", "2 set", "000000002000010961")
+                 })
+        {
+            rows.Add(new[] { heading, string.Empty, string.Empty });
+            rows.Add(new[] { description, string.Empty, string.Empty });
+            rows.Add(new[] { "Price", string.Empty, string.Empty });
+            rows.Add(new[] { "Quantity", string.Empty, qty });
+            rows.Add(new[] { "Extended Price", string.Empty, string.Empty });
+            rows.Add(new[] { "Requested Delivery Date", string.Empty, "Fri, 1 Jan, 2027" });
+            rows.Add(new[] { "Material Number", string.Empty, material });
+            rows.Add(new[] { "Remarks", string.Empty, string.Empty });
+        }
+
+        var parsed = new DocxTableParser(new NativeSpreadsheetParser())
+            .Parse(BuildDocxWithRows(rows), "RFP 6000000003.docx");
+
+        Assert.Equal(3, parsed.Count);
+        Assert.Equal("BATTERY: LEAD ACID, 12 V, 6 CELLS", parsed[0].ProductName);
+        Assert.Equal("1", parsed[0].Quantity);
+        Assert.Equal("each", parsed[0].UnitOfMeasure);
+        Assert.Equal("000000002000008534", parsed[0].ManufacturerPartNumber);
+
+        // The buyer asks US for the price; nothing may be read into it.
+        Assert.All(parsed, r => Assert.Null(r.UnitPrice));
+    }
+
+    private static byte[] BuildDocxWithRows(IReadOnlyList<string[]> rows)
+        => BuildDocument(body =>
+        {
+            var table = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            foreach (var cells in rows)
+                table.AppendChild(Row(cells));
+            body.AppendChild(table);
+        });
+
     private static byte[] BuildDocx(params string[] paragraphs)
         => BuildDocument(body =>
         {
