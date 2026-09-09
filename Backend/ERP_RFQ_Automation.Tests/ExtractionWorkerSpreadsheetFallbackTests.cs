@@ -197,6 +197,55 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
     }
 
     [Fact]
+    public async Task ACrossReferenceSheet_IsRefusedAsANonBid_WithoutReachingAModel()
+    {
+        // WIRING, not unit. SpreadsheetBidEvidence has its own tests; this proves the floor is
+        // REACHABLE on the path every real document takes, and that it fires BEFORE the model
+        // path rather than after — the mistake that let the Aramco template ship and never run.
+        //
+        // The document here is the production one in miniature: read perfectly, understood
+        // completely, and holding nothing anybody could quote.
+        var queue = new RecordingQueue(CreateJob(803, "cross-reference.xlsx", "xlsx"));
+        var llm = new StubLlm(AiProviderClass.External, Ext.Result(Ext.Items(3, 0.9), 0.9));
+        using var services = BuildServices(queue, CrossReferenceWorkbook(), llm, new RecordingPersister());
+        var worker = CreateWorker(services);
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            var recordedError = await queue.PermanentFailure.Task.WaitAsync(TestWaits.Liveness);
+
+            // One attempt. A second reading of the same bytes reaches the same conclusion.
+            Assert.False(queue.RetryableFailure.Task.IsCompleted);
+
+            // Nothing was spent discovering that there was nothing to extract.
+            Assert.Equal(0, llm.CallCount);
+
+            // The reason says the document was READ, and does not claim a failure to read it.
+            Assert.Contains(NotABidDocumentException.Marker, recordedError);
+            Assert.Contains("read in full", recordedError);
+            Assert.Contains("nothing in it that can be quoted", recordedError);
+
+            // Classified apart from "no reader could parse this" — the prescriptions differ, and
+            // asking the sender to resend a spreadsheet that arrived intact helps nobody.
+            Assert.Equal(ExtractionDeadLetterService.NotABidCategory,
+                ExtractionDeadLetterService.ClassifyFailure(recordedError));
+            Assert.NotEqual(ExtractionDeadLetterService.UnsupportedDocumentCategory,
+                ExtractionDeadLetterService.ClassifyFailure(recordedError));
+
+            Assert.False(ExtractionDeadLetterService.CanRetry(
+                ExtractionDeadLetterService.NotABidCategory, sourceLost: false, securityBlocker: false));
+            Assert.Contains("master data",
+                ExtractionDeadLetterService.OperatorAction(ExtractionDeadLetterService.NotABidCategory)!);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+        }
+    }
+
+    [Fact]
     public void ComposeFailureReason_OnAPermanentRefusal_KeepsTheReasonShortEnoughToBeShown()
     {
         // The reason a real dead letter explained NOTHING to the operator who hit it.
@@ -352,6 +401,18 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
     }
 
     /// <summary>A workbook the deterministic parser cannot map a single column of.</summary>
+    /// <summary>
+    /// Headers no alias list recognises, on a document that IS a genuine enquiry — three lines,
+    /// each stating a count.
+    ///
+    /// <para>The quantity column matters. This fixture used to be a single row of three text
+    /// columns, which made it indistinguishable from a catalogue, and once the content floor
+    /// (SpreadsheetBidEvidence) landed it would have been refused as a non-bid before ever
+    /// reaching the external-provider gate this test exists to exercise. The test would still
+    /// have gone green on the wrong refusal. An unrecognised LAYOUT and an absence of commercial
+    /// CONTENT are different things, and the fixture has to be the first without being the
+    /// second.</para>
+    /// </summary>
     private static byte[] UnrecognizableWorkbook()
     {
         OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
@@ -360,9 +421,39 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         worksheet.Cells[1, 1].Value = "Section";
         worksheet.Cells[1, 2].Value = "Narrative";
         worksheet.Cells[1, 3].Value = "Owner";
+        worksheet.Cells[1, 4].Value = "Count";
         worksheet.Cells[2, 1].Value = "MAT-88001";
         worksheet.Cells[2, 2].Value = "Ball valve DN50 PN16 stainless";
         worksheet.Cells[2, 3].Value = "Jubail Plant";
+        worksheet.Cells[2, 4].Value = "6";
+        worksheet.Cells[3, 1].Value = "MAT-88002";
+        worksheet.Cells[3, 2].Value = "Gate valve DN80 PN16 carbon steel";
+        worksheet.Cells[3, 3].Value = "Jubail Plant";
+        worksheet.Cells[3, 4].Value = "12";
+        worksheet.Cells[4, 1].Value = "MAT-88003";
+        worksheet.Cells[4, 2].Value = "Check valve DN50 PN16 stainless";
+        worksheet.Cells[4, 3].Value = "Ras Tanura";
+        worksheet.Cells[4, 4].Value = "3";
+        return package.GetAsByteArray();
+    }
+
+    /// <summary>A real cross-reference: identifiers and text, no quantity, price, unit or date.</summary>
+    private static byte[] CrossReferenceWorkbook()
+    {
+        OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
+        using var package = new OfficeOpenXml.ExcelPackage();
+        var worksheet = package.Workbook.Worksheets.Add("Sheet1");
+        worksheet.Cells[1, 1].Value = "ASMO Item#";
+        worksheet.Cells[1, 2].Value = "ARAMCO Item #";
+        worksheet.Cells[1, 3].Value = "MSG Descreption";
+        worksheet.Cells[1, 4].Value = "MSG #";
+        for (var i = 0; i < 12; i++)
+        {
+            worksheet.Cells[i + 2, 1].Value = $"20000086{34 + i}";
+            worksheet.Cells[i + 2, 2].Value = $"10007207{28 + i}";
+            worksheet.Cells[i + 2, 3].Value = "Spares, UPS (061100)";
+            worksheet.Cells[i + 2, 4].Value = "61100";
+        }
         return package.GetAsByteArray();
     }
 

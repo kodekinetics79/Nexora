@@ -1245,6 +1245,31 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             throw new DocumentParsingException(
                 $"The {format} workbook was read successfully but contains no cell content to extract.");
 
+        // CONTENT FLOOR, before the model path rather than after it.
+        //
+        // An unrecognized column layout is not evidence of anything on its own — first-contact
+        // customer files land here constantly and most are ordinary enquiries whose headers we
+        // have not seen. But the CELLS say whether there is anything to quote, and they say it
+        // without a model, without a header alias, and in any language. A sheet with no
+        // quantity, no price, no unit and no date anywhere in it is not an enquiry, and sending
+        // it to a model cannot make it one — it can only spend money discovering the same thing.
+        //
+        // This is the check that would have stopped a 2,241-row material cross-reference from
+        // becoming 102 chunks, five leases and a dead letter blaming the reader.
+        var evidence = SpreadsheetBidEvidence.Assess(rendered);
+        if (evidence.ShouldRefuseAsNonBid)
+        {
+            _log.LogInformation(
+                "{Format} workbook {Name} was read in full ({Rows} row(s), {Columns} column(s)) but "
+                + "carries no quantity, price, unit or date column; refusing as a non-bid document. "
+                + "No model call was made.",
+                format, name, evidence.RowCount, evidence.ColumnCount);
+            throw new NotABidDocumentException(
+                $"This spreadsheet was read in full — {evidence.RowCount} row(s) across "
+                + $"{evidence.ColumnCount} column(s) — but no line states a quantity, a price, a "
+                + "unit or a date, so there is nothing in it that can be quoted.");
+        }
+
         _log.LogInformation(
             "{Format} workbook {Name} was read but no RFQ column layout was recognized; " +
             "falling back to unstructured text extraction.",
@@ -1410,6 +1435,21 @@ public sealed class UnsupportedDocumentFormatException : DocumentParsingExceptio
 {
     public const string Marker = "[UNSUPPORTED_DOCUMENT]";
     public UnsupportedDocumentFormatException(string message) : base($"{Marker} {message}") { }
+}
+
+/// <summary>
+/// The document was read completely and correctly, and holds nothing that can be quoted.
+///
+/// <para>NOT a parse failure, and the distinction is the whole point: every other exception here
+/// means "we could not read this", while this one means "we read it perfectly and it is not an
+/// enquiry". Reporting the second as the first is what put a material cross-reference on an
+/// operator's screen under the words "We could not read this document", next to advice to switch
+/// on an AI service that was already switched on.</para>
+/// </summary>
+public sealed class NotABidDocumentException : DocumentParsingException
+{
+    public const string Marker = "[NOT_A_BID]";
+    public NotABidDocumentException(string message) : base($"{Marker} {message}") { }
 }
 
 public sealed class PasswordProtectedDocumentException : DocumentParsingException

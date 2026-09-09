@@ -286,6 +286,28 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
     serverReasonWins: true,
   },
   /**
+   * NotABidDocumentException, surfaced as the intake reason "not_a_bid".
+   *
+   * The only entry here whose subject is the DOCUMENT rather than the system, and the copy has to
+   * carry that distinction or it re-creates the bug it exists to fix. A 2,241-row material
+   * cross-reference was reported as "We could not read this document" — which was false twice
+   * over: it was read completely, and the reason it went nowhere had nothing to do with reading.
+   * Nothing here apologises, because nothing malfunctioned.
+   */
+  not_a_bid: {
+    title: 'This file does not look like an enquiry',
+    whatHappened:
+      'We read this spreadsheet in full and every row came through. But no line states a quantity, a price, a unit or a date, so there is nothing in it that can be quoted. Your document is stored safely and unchanged, and nothing was sent to any outside service.',
+    nextAction:
+      'If this is a catalogue, a price list or an item cross-reference, it belongs in master data rather than lead ingestion. If it was meant to be an enquiry, ask the sender for the version that states quantities. Retrying this file will reach the same answer.',
+    category: 'content',
+    // Nothing about the file will differ on a second reading.
+    isRetryable: false,
+    // Our sentence already names the finding precisely; the server's is written for an
+    // administrator and says the same thing at greater length.
+    serverReasonWins: false,
+  },
+  /**
    * ChunkedExtractionService.AiNotAuthorizedCode ("EXTRACTION_AI_NOT_AUTHORIZED"), lower-cased
    * because normalizeCode folds case. This is the single most common reason a document dies in
    * the current deployment, so it gets its own entry rather than the bucket's guess.

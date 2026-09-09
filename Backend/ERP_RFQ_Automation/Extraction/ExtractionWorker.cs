@@ -536,6 +536,10 @@ public sealed class ExtractionWorker : BackgroundService
                 {
                     PasswordProtectedDocumentException => "password_protected",
                     UnsupportedDocumentFormatException => "unsupported_format",
+                    // Its own reason, because it is the one member of this family that is not a
+                    // failure to read. Sharing "document_parse_failed" would tell an operator the
+                    // reader broke on a document the reader understood completely.
+                    NotABidDocumentException => "not_a_bid",
                     _ => "document_parse_failed"
                 };
                 if (!await queue.FailPermanentlyAsync(job.Id, workerId, job.Attempts,

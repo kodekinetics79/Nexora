@@ -621,6 +621,13 @@ public sealed class ExtractionDeadLetterService(
     /// </summary>
     internal const string DocumentTooLargeCategory = "DOCUMENT_TOO_LARGE";
 
+    /// <summary>
+    /// Read in full, understood, and not an enquiry. Kept apart from UNSUPPORTED_DOCUMENT — which
+    /// means no reader could parse it — because the operator's next step is completely different:
+    /// nothing is wrong with the file, it was simply sent to the wrong place.
+    /// </summary>
+    internal const string NotABidCategory = "NOT_A_BID_DOCUMENT";
+
     /// <summary>The evidence record survives but its bytes do not — distinct from
     /// EVIDENCE_INTEGRITY, which means the bytes are present and altered.</summary>
     internal const string EvidenceMissingCategory = "EVIDENCE_MISSING";
@@ -652,7 +659,7 @@ public sealed class ExtractionDeadLetterService(
     private static bool IsUnchangedSourceTerminal(string category) => category is
         EvidenceIntegrityCategory or OcrPixelLimitExceededCategory
         or PasswordProtectedCategory or UnsupportedDocumentCategory
-        or DocumentTooLargeCategory;
+        or DocumentTooLargeCategory or NotABidCategory;
 
     /// <summary>
     /// What the operator must DO about this category, in words, or null where the category
@@ -669,6 +676,12 @@ public sealed class ExtractionDeadLetterService(
     {
         AiNotAuthorizedCategory => ChunkedExtractionService.AiNotAuthorizedOperatorAction,
         DocumentTooLargeCategory => ChunkedExtractionService.DocumentTooLargeOperatorAction,
+        NotABidCategory => "Nothing is wrong with this file and nothing failed. It was read in "
+            + "full, and no line in it states a quantity, a price, a unit or a date — so there is "
+            + "nothing that could be quoted. This is almost always a catalogue, a price list or an "
+            + "item cross-reference that belongs in master data rather than lead ingestion. "
+            + "Retrying it cannot change the answer. If it was meant to be an enquiry, ask the "
+            + "sender for the version that states quantities.",
         "MALWARE" => "The stored file failed malware inspection. It cannot be retried until a "
             + "platform owner clears the disposition; recovery is blocked by design.",
         EvidenceBucketMismatchCategory => "NOTHING IS LOST. This document's bytes are intact in "
@@ -726,6 +739,11 @@ public sealed class ExtractionDeadLetterService(
         // to EXTRACTION_FAILURE, which is what made it indistinguishable from a model timeout.
         if (error.Contains(ChunkedExtractionService.DocumentTooLargeCode, StringComparison.Ordinal))
             return DocumentTooLargeCategory;
+        // BEFORE the UNSUPPORTED rule below. This document is entirely supported; saying otherwise
+        // would send the operator to ask the sender for "a PDF or spreadsheet version" of a
+        // spreadsheet that arrived and read perfectly.
+        if (error.Contains(NotABidDocumentException.Marker, StringComparison.Ordinal))
+            return NotABidCategory;
         // BEFORE the integrity rule, whose prose this message also contains: a missing object
         // and an altered one are different incidents and only one of them is a corruption bug.
         if (error.Contains(EvidenceIntegrityException.BucketMismatchMarker, StringComparison.Ordinal))
