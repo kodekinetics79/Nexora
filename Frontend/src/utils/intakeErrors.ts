@@ -259,10 +259,22 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
   },
   extraction_dead_letter: {
     title: 'We could not read this document',
+    /*
+     * BOTH sentences below used to assert things this bucket cannot know, and both were wrong on
+     * a real dead letter. "Nothing was sent to any outside service" is only true for the failures
+     * that stop before a model call; and the old next-action stated as fact that AI reading is
+     * "switched off for this tenant by default", then told the reader to have it switched on.
+     * On the batch that prompted this fix an AI provider WAS authorized, the document was refused
+     * by the chunk ceiling before any provider was consulted, and enabling anything would have
+     * changed nothing — so the screen sent an operator to the AI trust centre to fix a
+     * spreadsheet that was simply too large. A bucket must describe only what every member of the
+     * bucket shares; the specific cause travels as the recorded reason and, for an administrator,
+     * as ExtractionDeadLetterService.OperatorAction.
+     */
     whatHappened:
-      'This file passed the security scan but reading it did not produce any lines. Your document is stored safely and unchanged — nothing was lost, and nothing was sent to any outside service.',
+      'This file passed the security scan, but reading it finished without producing any usable lines. Your document is stored safely and unchanged.',
     nextAction:
-      'Ask an administrator to open Tenant Admin Operations and look at this batch. The usual cause is a scanned or PDF document that needs AI reading, which is switched off for this tenant by default. Spreadsheets and Word files whose lines sit in a table are read without it.',
+      'Ask an administrator to open Tenant Admin Operations and look at this batch — the reason recorded for this file is shown there, with what to do about it. Retrying the same file without changing anything is unlikely to help.',
     category: 'content',
     // Retrying changes nothing until the underlying condition changes, and offering a button that
     // cannot work is how the last version of this screen wasted a rep's afternoon.
@@ -272,6 +284,42 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
     // ExtractionDeadLetterService.OperatorAction returns a fixed, tenant-safe prescription per
     // category. When the server sends one, it is better than the guess above.
     serverReasonWins: true,
+  },
+  /**
+   * ChunkedExtractionService.DocumentTooLargeCode. Selected by MARKER rather than by code — see
+   * REASON_MARKERS below for why the code alone never arrives.
+   */
+  extraction_document_too_large: {
+    title: 'This document is larger than the reader handles in one pass',
+    whatHappened:
+      'This file was read, but it holds far more line items than one document is allowed to spend on reading. Nothing was charged and no AI service was contacted.',
+    nextAction:
+      'If this really is one very large enquiry, split it and upload the parts. If it is a catalogue, a price list or an item cross-reference, it belongs in master data rather than lead ingestion. Retrying the same file will reach the same answer.',
+    category: 'content',
+    isRetryable: false,
+    serverReasonWins: false,
+  },
+  /**
+   * NotABidDocumentException, surfaced as the intake reason "not_a_bid".
+   *
+   * The only entry here whose subject is the DOCUMENT rather than the system, and the copy has to
+   * carry that distinction or it re-creates the bug it exists to fix. A 2,241-row material
+   * cross-reference was reported as "We could not read this document" — which was false twice
+   * over: it was read completely, and the reason it went nowhere had nothing to do with reading.
+   * Nothing here apologises, because nothing malfunctioned.
+   */
+  not_a_bid: {
+    title: 'This file does not look like an enquiry',
+    whatHappened:
+      'We read this spreadsheet in full and every row came through. But no line states a quantity, a price, a unit or a date, so there is nothing in it that can be quoted. Your document is stored safely and unchanged, and nothing was sent to any outside service.',
+    nextAction:
+      'If this is a catalogue, a price list or an item cross-reference, it belongs in master data rather than lead ingestion. If it was meant to be an enquiry, ask the sender for the version that states quantities. Retrying this file will reach the same answer.',
+    category: 'content',
+    // Nothing about the file will differ on a second reading.
+    isRetryable: false,
+    // Our sentence already names the finding precisely; the server's is written for an
+    // administrator and says the same thing at greater length.
+    serverReasonWins: false,
   },
   /**
    * ChunkedExtractionService.AiNotAuthorizedCode ("EXTRACTION_AI_NOT_AUTHORIZED"), lower-cased
@@ -389,6 +437,35 @@ export const hasIntakeErrorExplanation = (code: string | null | undefined): bool
  * (LeadIdentityApplicationService.IntakeReasons reads it straight out of
  * `last_error_details->>'reason'`), so it is passed through as the server reason.
  */
+/**
+ * Markers carried inside the RECORDED REASON, mapped to the entry that explains them.
+ *
+ * Needed because on PostgreSQL the occurrence's error_code is not written by the worker at all —
+ * a database trigger owns it (Migrations/20260725035352_Release01CTransactionalIntakeHardening.cs)
+ * and writes the bucket value 'extraction_dead_letter' for every abandoned job, whatever the
+ * cause. So a specific code never reaches this file in production, and keying only on the code
+ * meant the most precise copy we had could never be selected: a spreadsheet that was read
+ * perfectly and simply was not an enquiry still appeared under "We could not read this document".
+ *
+ * The extractor already stamps a closed, machine-readable marker into the reason precisely so the
+ * refusal has ONE name from the service to the screen. Reading it here is what makes that true at
+ * the last step. Matched in order, most specific first.
+ */
+const REASON_MARKERS: ReadonlyArray<readonly [string, keyof typeof INTAKE_ERRORS]> = [
+  ['[NOT_A_BID]', 'not_a_bid'],
+  ['EXTRACTION_DOCUMENT_TOO_LARGE', 'extraction_document_too_large'],
+  ['EXTRACTION_AI_NOT_AUTHORIZED', 'extraction_ai_not_authorized'],
+];
+
+/** The entry a recorded reason names outright, or null when it names none. */
+const entryFromReasons = (reasons?: string[] | null): IntakeErrorEntry | null => {
+  if (!Array.isArray(reasons)) return null;
+  for (const [marker, key] of REASON_MARKERS)
+    if (reasons.some((reason) => typeof reason === 'string' && reason.includes(marker)))
+      return INTAKE_ERRORS[key];
+  return null;
+};
+
 export const explainIntakeItem = (item: {
   errorCode?: string | null;
   intakeStatus?: string | null;
@@ -398,7 +475,12 @@ export const explainIntakeItem = (item: {
   const serverReason = Array.isArray(item.reasons)
     ? item.reasons.find((reason) => presentableServerText(reason) !== null) ?? null
     : null;
-  const explanation = explainIntakeError(item.errorCode, serverReason);
+  // The marker outranks the code: it names the actual cause, while the code is a bucket the
+  // database trigger stamped on every dead letter alike.
+  const marked = entryFromReasons(item.reasons);
+  const explanation = marked !== null
+    ? resolve(marked, serverReason)
+    : explainIntakeError(item.errorCode, serverReason);
 
   if (item.recoverableSecurityHold === true) {
     // Guarantee infrastructure framing even for a code we have no copy for.

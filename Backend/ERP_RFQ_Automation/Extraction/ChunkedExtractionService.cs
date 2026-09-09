@@ -278,6 +278,29 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         + "the deployment at a local model on a loopback address. Until one of those is done, "
         + "only spreadsheets and Word documents whose lines are in a table can be read.";
 
+    /// <summary>
+    /// The machine-readable marker for the pre-flight chunk-ceiling refusal below.
+    ///
+    /// <para>Exists for the same reason <see cref="AiNotAuthorizedCode"/> does: the ceiling is a
+    /// DECISION about the input, and without a closed token it reached the operator as a generic
+    /// EXTRACTION_FAILURE indistinguishable from a model timeout — so the one screen built to
+    /// explain lost work offered a retry that could never succeed.</para>
+    /// </summary>
+    internal const string DocumentTooLargeCode = "EXTRACTION_DOCUMENT_TOO_LARGE";
+
+    /// <summary>
+    /// What an operator must actually DO about a ceiling refusal. Deliberately does NOT mention
+    /// AI authorization: the ceiling is reached before any provider is consulted, so telling an
+    /// administrator to switch a model on describes a state that has no bearing on this refusal.
+    /// </summary>
+    internal const string DocumentTooLargeOperatorAction =
+        "This document was read, but it holds far more line items than one document is allowed to "
+        + "spend on reading. Nothing was charged and no AI service was contacted. Retrying the "
+        + "unchanged file cannot succeed. Two causes are worth separating before anything else: "
+        + "either it genuinely is a very large bid, in which case split it and ingest the parts as "
+        + "new work; or it is not a bid at all — a catalogue, a price list or a material "
+        + "cross-reference — in which case it does not belong in lead ingestion.";
+
     private readonly ILLMService _llm;
     private readonly ICanonicalRfqNormalizer _normalizer;
     private readonly ILogger<ChunkedExtractionService> _log;
@@ -583,12 +606,28 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 "Refusing {Document} before extraction: {Chunks} chunk(s) for {Expected} detected "
                 + "item(s) exceeds the {Limit}-chunk ceiling. No model call was made.",
                 input.SourceDocumentName, chunks.Count, expected, MaxChunksPerDocument);
+            // PERMANENT on the first attempt. Chunk count is a pure function of the bytes that
+            // were already read, so re-asking it is re-asking a settled question: a real 2,241-row
+            // sheet burned five leases on five identical refusals before dead-lettering with a
+            // reason nobody could act on. Same correction already made for the allow-list gate
+            // above; the gate itself is unchanged, only the reporting.
+            //
+            // The sentence is kept SHORT on purpose. It is stored as the job's failure reason and
+            // rendered to operators through a 300-character presentability gate
+            // (Frontend/src/utils/apiErrors.ts), and the long form was silently withheld from the
+            // one screen that needed it. The chunk arithmetic belongs in diagnostics, not here.
             return Failed(expected,
-                $"This document was read as {expected} line item(s), which would take "
-                + $"{chunks.Count} model calls — more than the {MaxChunksPerDocument} allowed for "
-                + "one document. Nothing was charged. It is either larger than the automatic "
-                + "reader handles or its layout was mis-read; a person should look before it is "
-                + "processed.", input);
+                $"[{DocumentTooLargeCode}] This document was read as {expected} line item(s), far "
+                + "more than one document is allowed to spend on reading. Nothing was charged and "
+                + "no AI service was contacted. Check whether it is really a bid before retrying.",
+                input,
+                // Appended to the diagnostics ALREADY collected rather than replacing them: by
+                // this point the list can hold the authorized-provider descriptor, and support
+                // reading a refusal wants to know which provider was live when it happened.
+                Append(diagnostics,
+                    $"Chunk ceiling: {chunks.Count} chunk(s) required for {expected} detected "
+                    + $"item(s), against a {MaxChunksPerDocument}-chunk limit. No model call was made."),
+                permanent: true);
         }
 
         diagnostics.Add($"Document split into {chunks.Count} chunk(s) for {expected} line item(s).");
@@ -1248,6 +1287,14 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     /// consumers that read only <see cref="ChunkedExtractionOutcome.Diagnostics"/> still
     /// see it.
     /// </param>
+    /// <summary>Adds a line to a diagnostics list and returns it, so a refusal can extend the
+    /// context already gathered instead of replacing it.</summary>
+    private static List<string> Append(List<string> diagnostics, string line)
+    {
+        diagnostics.Add(line);
+        return diagnostics;
+    }
+
     private static ChunkedExtractionOutcome Failed(
         int expected, string reason, DocumentExtractionInput? input = null, List<string>? diagnostics = null,
         bool permanent = false)
