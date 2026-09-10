@@ -5,8 +5,11 @@ import type {
   SaveFitAssessmentRequest,
   SaveParticipationRequest,
 } from '../../../api/services/leadDecisionService';
-import type { LifecycleState } from '../../../api/services/commercialLifecycleService';
-import type { DecisionMap, EditableLineDecision } from '../Workbench/workbenchRules';
+import type { LifecycleState, LifecycleTransitionOption } from '../../../api/services/commercialLifecycleService';
+import { parseDateSafe } from '../../../utils/dates';
+import { TERMINAL_BLOCKERS, type DecisionMap, type EditableLineDecision } from '../Workbench/workbenchRules';
+
+export { TERMINAL_BLOCKERS };
 
 /**
  * The rules behind the one-screen lead decision.
@@ -81,14 +84,17 @@ export const buildFitRequest = (
 
 /**
  * True when the saved assessment already says what the controls say, so a second save would
- * only mint a new version and force participation to be recommitted for nothing.
+ * only mint a new version and force participation to be recommitted for nothing. A saved
+ * NOT_FIT verdict never matches "no concerns": the server treats it as non-actionable whatever
+ * its criteria say, so it must be re-recorded as the rep now sees it.
  */
 export const fitMatchesSaved = (fit: FitAssessmentDTO | null | undefined, concern: ConcernState, codes: string[]): boolean => {
   if (!fit || fit.version <= 0) return false;
   const byCode = new Map(fit.criteria.map((criterion) => [criterion.code, criterion]));
   if (!codes.every((code) => byCode.has(code))) return false;
   if (!concern.raised) {
-    return fit.criteria.every((criterion) => criterion.decision === 'PASS' || criterion.decision === 'NOT_APPLICABLE');
+    return fit.overallDecision !== 'NOT_FIT'
+      && fit.criteria.every((criterion) => criterion.decision === 'PASS' || criterion.decision === 'NOT_APPLICABLE');
   }
   const saved = new Set(fit.criteria.filter((criterion) => criterion.decision === 'CONCERN').map((criterion) => criterion.code));
   const wanted = new Set(concern.codes);
@@ -123,6 +129,33 @@ export const buildParticipationRequest = (
   }),
 });
 
+/**
+ * One canonical shape for what the rep has entered, so two objects that mean the same thing
+ * serialise the same way. The unsaved-work guard compares JSON strings, and the decision map is
+ * rebuilt from the server after every save with keys in a different order.
+ */
+export const normalizeDecisions = (decisions: DecisionMap): DecisionMap => {
+  const normalized: DecisionMap = {};
+  for (const key of Object.keys(decisions).map(Number).sort((a, b) => a - b)) {
+    const value = decisions[key];
+    if (!value) continue;
+    normalized[key] = {
+      decision: value.decision,
+      ...(value.reasonCode ? { reasonCode: value.reasonCode } : {}),
+      ...(value.note?.trim() ? { note: value.note.trim() } : {}),
+      ...(value.productId ? { productId: value.productId } : {}),
+      ...(value.quantity != null && Number.isFinite(value.quantity) ? { quantity: value.quantity } : {}),
+      ...(value.unitOfMeasure ? { unitOfMeasure: value.unitOfMeasure } : {}),
+      ...(value.currency ? { currency: value.currency } : {}),
+    };
+  }
+  return normalized;
+};
+
+export const normalizeConcern = (concern: ConcernState): ConcernState => (concern.raised
+  ? { raised: true, codes: [...concern.codes].sort(), note: concern.note.trim() }
+  : NO_CONCERN);
+
 /** How a line names itself to a person. */
 export const lineLabel = (line: Pick<LeadDecisionLineDTO, 'lineItemNo' | 'id'>): string =>
   line.lineItemNo?.trim() || String(line.id);
@@ -130,7 +163,10 @@ export const lineLabel = (line: Pick<LeadDecisionLineDTO, 'lineItemNo' | 'id'>):
 export const lineTitle = (line: LeadDecisionLineDTO): string =>
   line.productName?.trim() || line.description?.trim() || line.sourceText?.trim() || `Line ${lineLabel(line)}`;
 
-export type LineNeedKind = 'choice' | 'clarify' | 'quantity' | 'unit' | 'currency' | 'source' | 'missing-source' | 'attention' | 'reason';
+export type LineNeedKind =
+  | 'choice' | 'clarify' | 'quantity' | 'unit' | 'currency'
+  | 'unit-unconfigured' | 'currency-unconfigured'
+  | 'source' | 'missing-source' | 'attention' | 'reason';
 
 export interface LineNeed {
   kind: LineNeedKind;
@@ -138,9 +174,13 @@ export interface LineNeed {
 }
 
 const validCode = (value: string | undefined, allowed: Set<string>): boolean =>
-  Boolean(value?.trim()) && (allowed.size === 0 || allowed.has(value!.trim().toUpperCase()));
+  Boolean(value?.trim()) && allowed.has(value!.trim().toUpperCase());
 
-/** What one line still needs before it can be part of a committed decision, in fix order. */
+/**
+ * What one line still needs before it can be part of a committed decision, in fix order. The
+ * server requires an active tenant unit and currency on every Bid line; a tenant that has
+ * configured none cannot pass, and the sentence must say so rather than let the commit fail.
+ */
 export const lineNeeds = (
   line: LeadDecisionLineDTO,
   decision: EditableLineDecision | undefined,
@@ -153,8 +193,10 @@ export const lineNeeds = (
   const needs: LineNeed[] = [];
   if (choice === 'Bid') {
     if (!decision?.quantity || !Number.isFinite(decision.quantity) || decision.quantity <= 0) needs.push({ kind: 'quantity', line });
-    if (!validCode(decision?.unitOfMeasure, unitCodes)) needs.push({ kind: 'unit', line });
-    if (!validCode(decision?.currency, currencyCodes)) needs.push({ kind: 'currency', line });
+    if (unitCodes.size === 0) needs.push({ kind: 'unit-unconfigured', line });
+    else if (!validCode(decision?.unitOfMeasure, unitCodes)) needs.push({ kind: 'unit', line });
+    if (currencyCodes.size === 0) needs.push({ kind: 'currency-unconfigured', line });
+    else if (!validCode(decision?.currency, currencyCodes)) needs.push({ kind: 'currency', line });
     if (line.verificationStatus === 'MISSING_SOURCE') needs.push({ kind: 'missing-source', line });
     else if (line.verificationStatus !== 'VERIFIED') needs.push({ kind: 'source', line });
     if (line.needsAttention && (decision?.note?.trim().length ?? 0) < 5) needs.push({ kind: 'attention', line });
@@ -179,6 +221,12 @@ export const needSentence = (need: LineNeed, leadId: number): { sentence: string
     case 'quantity': return { sentence: `Enter the quantity for line ${label}.` };
     case 'unit': return { sentence: `Choose the unit for line ${label}.` };
     case 'currency': return { sentence: `Choose the currency for line ${label}.` };
+    case 'unit-unconfigured': return {
+      sentence: 'Your organisation has no units of measure set up, so nothing can be quoted yet. Ask an administrator to add them under Setup.',
+    };
+    case 'currency-unconfigured': return {
+      sentence: 'Your organisation has no currencies set up, so nothing can be quoted yet. Ask an administrator to add them under Setup.',
+    };
     case 'source': return {
       sentence: `Check what Nexora read for line ${label} against the document.`,
       action: { label: 'Check the document', path: `/procurement/extraction/review/${leadId}`, intent: 'check-document' },
@@ -200,12 +248,10 @@ const SELF_RESOLVED_BLOCKERS = new Set([
   'PARTICIPATION_UNRESOLVED',
   'SOURCE_CRITICAL_FIELDS_UNVERIFIED',
   'SOURCE_UNAVAILABLE',
-  'SOURCE_LINEAGE_INCOMPLETE',
-  'LEAD_NOT_ELIGIBLE',
 ]);
 
-/** Blocker codes that mean the record is finished or needs an administrator, not the rep. */
-export const TERMINAL_BLOCKERS = new Set(['LEGACY_RFQ', 'INCONSISTENT_CONVERTED_STATE', 'RFQ_REVISION_REQUIRED']);
+/** The one eligibility refusal the page clears itself, by qualifying the lead on the way. */
+const NOT_QUALIFIED_MESSAGE = /only a qualified lead/i;
 
 export type NextThing =
   | { kind: 'ready' }
@@ -224,12 +270,17 @@ export interface NextThingInput {
 
 export const QUALIFIED = 'QUALIFIED';
 
+/** The lifecycle transition that qualifies the lead, when one is needed and allowed. */
+export const qualificationTransition = (lifecycle?: LifecycleState | null): LifecycleTransitionOption | null => {
+  if (!lifecycle || lifecycle.currentStatusCode === QUALIFIED) return null;
+  return lifecycle.allowedTransitions.find((option) => option.statusCode === QUALIFIED) ?? null;
+};
+
 /** Whether promotion will need the lead qualified first, and whether the server allows that. */
 export const qualificationStep = (lifecycle?: LifecycleState | null): 'none' | 'transition' | 'impossible' => {
   if (!lifecycle) return 'none';
   if (lifecycle.currentStatusCode === QUALIFIED) return 'none';
-  if (lifecycle.allowedTransitions.some((option) => option.statusCode === QUALIFIED)) return 'transition';
-  return 'impossible';
+  return qualificationTransition(lifecycle) ? 'transition' : 'impossible';
 };
 
 /**
@@ -272,22 +323,32 @@ export const nextThing = ({ workbench, decisions, concern, lifecycle, leadId }: 
   if (allSkipped) return { kind: 'decline' };
   if (concern.raised) return { kind: 'concern' };
 
-  const foreign = workbench.blockers.find((blocker) => !SELF_RESOLVED_BLOCKERS.has(blocker.code) && !TERMINAL_BLOCKERS.has(blocker.code));
+  // Eligibility is one server code for several refusals. Not-yet-qualified is cleared by the
+  // button itself; a duplicate flag or unapproved facts are not, and must be said in the
+  // server's words with the way out.
+  const foreign = workbench.blockers.find((blocker) => {
+    if (SELF_RESOLVED_BLOCKERS.has(blocker.code) || TERMINAL_BLOCKERS.has(blocker.code)) return false;
+    if (blocker.code === 'LEAD_NOT_ELIGIBLE' && NOT_QUALIFIED_MESSAGE.test(blocker.message)) return false;
+    return true;
+  });
   if (foreign) {
     return {
       kind: 'blocked',
       sentence: foreign.message,
-      action: foreign.actionLabel && foreign.actionPath?.startsWith('/') ? { label: foreign.actionLabel, path: foreign.actionPath } : undefined,
+      action: foreign.code === 'LEAD_NOT_ELIGIBLE'
+        ? { label: 'Open the lead', path: `/procurement/leads/view/${leadId}` }
+        : foreign.actionLabel && foreign.actionPath?.startsWith('/')
+          ? { label: foreign.actionLabel, path: foreign.actionPath }
+          : undefined,
     };
   }
   return { kind: 'ready' };
 };
 
-/** Whole days until a bid closes, negative when it has passed, null when there is no date. */
+/** Whole days until a bid closes, negative when it has passed, null when there is no real date. */
 export const daysUntil = (iso: string | null | undefined, now: Date = new Date()): number | null => {
-  if (!iso) return null;
-  const due = new Date(iso);
-  if (Number.isNaN(due.getTime())) return null;
+  const due = parseDateSafe(iso);
+  if (!due) return null;
   return Math.ceil((due.getTime() - now.getTime()) / 86_400_000);
 };
 
@@ -296,13 +357,4 @@ export const dueSentence = (days: number | null): string => {
   if (days < 0) return `Closed ${-days} day${days === -1 ? '' : 's'} ago`;
   if (days === 0) return 'Due today';
   return `${days} day${days === 1 ? '' : 's'} left`;
-};
-
-export const recommendationLabel = (recommendation: string | undefined): string => {
-  switch ((recommendation ?? '').toLowerCase()) {
-    case 'bid': return 'Bid';
-    case 'skip': return 'Skip';
-    case 'review': return 'Review';
-    default: return 'No read yet';
-  }
 };

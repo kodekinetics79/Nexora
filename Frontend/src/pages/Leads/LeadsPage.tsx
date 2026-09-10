@@ -27,7 +27,8 @@ import {
 import useColumnPreferences from '../../hooks/useColumnPreferences';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
 import leadService, { type LeadResponseDTO } from '../../api/services/leadService';
-import decisionService, { type LeadDecisionSummary } from '../../api/services/decisionService';
+import decisionService from '../../api/services/decisionService';
+import { DECISION_META, decisionFacts } from './decisionRead';
 import LateIngestedBadge from './LateIngestedBadge';
 import ClientCell from './ClientCell';
 import ResolveClientDialog from './ResolveClientDialog';
@@ -132,41 +133,6 @@ const leadStatus = (row: LeadResponseDTO): StatusMeta => {
 // cell, on the model path it is the model's own self-report against a rubric in
 // its own prompt — so the column is gone. The "Status" column already carries
 // the fact a user can act on: whether a person has reviewed the document.
-
-// Plain-language rendering of the Decision Brief recommendation — raw enum
-// values ("bid"/"review"/"skip") are never shown to users.
-interface DecisionMeta {
-  label: string;
-  color: 'success' | 'warning' | 'default';
-}
-
-const DECISION_META: Record<string, DecisionMeta | undefined> = {
-  bid: { label: 'Worth bidding', color: 'success' },
-  review: { label: 'Needs a look', color: 'warning' },
-  skip: { label: 'Likely skip', color: 'default' },
-};
-
-/** Plain-language facts for the Decision chip tooltip. */
-const decisionFacts = (s: LeadDecisionSummary): string[] => {
-  const facts: string[] = [];
-  if (s.estimatedValue != null) {
-    facts.push(`Est. value: ${s.estimatedValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}`);
-  }
-  if (s.coveragePct != null) {
-    facts.push(`We stock ~${Math.round(s.coveragePct)}%`);
-  }
-  if (s.daysLeft != null) {
-    if (s.daysLeft < 0) {
-      const overdueDays = Math.abs(s.daysLeft);
-      facts.push(`${overdueDays} ${overdueDays === 1 ? 'day' : 'days'} past deadline`);
-    } else if (s.daysLeft === 0) {
-      facts.push('Due today');
-    } else {
-      facts.push(`${s.daysLeft} ${s.daysLeft === 1 ? 'day' : 'days'} left`);
-    }
-  }
-  return facts;
-};
 
 // ---------------------------------------------------------------------------
 // Owner filter

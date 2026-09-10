@@ -111,6 +111,14 @@ describe('what counts as a change', () => {
     expect(isRealChange({ changeType: 'Removed', scope: 'Line', path: '$.items[3]', previousValueJson: '{"quantity":1}', currentValueJson: null })).toBe(true);
   });
 
+  it('does not count a line whose only differences are the machine\'s own copies', () => {
+    expect(isRealChange({
+      changeType: 'Modified', scope: 'Line', path: '$.items["1"]',
+      previousValueJson: '{"quantity":3,"uom":null,"aiConfidence":1}',
+      currentValueJson: '{"quantity":3,"uom":"au","aiConfidence":1.0000}',
+    })).toBe(false);
+  });
+
   it('reads a whole changed line as the fields inside it that differ', () => {
     expect(objectChanges(
       { line: '1', quantity: 3, uom: null, unitOfMeasure: null, currency: null, aiConfidence: 1, receivedDate: '2026-09-10T00:00:00Z' },
@@ -124,6 +132,8 @@ describe('what counts as a change', () => {
 
   it('names fields the way a person would', () => {
     expect(fieldLabel('$.items["00020"]')).toBe('Line 00020');
+    expect(fieldLabel('$.items["6205.2RS"]')).toBe('Line 6205.2RS');
+    expect(fieldLabel('$.items["M8.5x20"].quantity')).toBe('Line M8.5x20 · Quantity');
     expect(fieldLabel('$.requiredDeliveryDate')).toBe('Required delivery');
     expect(fieldLabel('$.items[2].manufacturerPartNumber')).toBe('Line 3 · Part number');
     expect(fieldLabel('$.recDate')).toBe('Received');

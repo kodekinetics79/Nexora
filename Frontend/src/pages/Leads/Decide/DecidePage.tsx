@@ -53,6 +53,7 @@ import {
 } from '../Workbench/workbenchRules';
 import LinesTable from './LinesTable';
 import CheckDocumentDialog, { type ConfirmedLine } from './CheckDocumentDialog';
+import { decisionLabel } from '../decisionRead';
 import {
   buildFitRequest,
   buildParticipationRequest,
@@ -65,9 +66,9 @@ import {
   lineLabel,
   newId,
   nextThing,
-  QUALIFIED,
-  qualificationStep,
-  recommendationLabel,
+  normalizeConcern,
+  normalizeDecisions,
+  qualificationTransition,
   TERMINAL_BLOCKERS,
   type ConcernState,
 } from './decideRules';
@@ -125,9 +126,14 @@ const DecidePage: React.FC = () => {
   const [historyOpen, setHistoryOpen] = React.useState(() => ['evidence', 'validate'].includes(searchParams.get('stage') ?? ''));
   const [checkOpen, setCheckOpen] = React.useState(false);
   const [checkFocus, setCheckFocus] = React.useState<number | null>(null);
-  const seed = React.useRef<string | null>(null);
+  /** Which server participation state the choices on screen were seeded from. */
+  const decisionSeed = React.useRef<string | null>(null);
+  /** Which saved fit assessment the concern controls were seeded from. */
+  const concernSeed = React.useRef<string | null>(null);
   /** The lines and choices of the revision last shown, so a new revision can inherit the choices. */
-  const previous = React.useRef<{ revisionId: number; byLabel: Map<string, EditableLineDecision> } | null>(null);
+  const previous = React.useRef<{ revisionId: number; byLabel: Map<string, EditableLineDecision>; concern: ConcernState } | null>(null);
+  /** The lines currently on screen, for callbacks that must not close over a stale workbench. */
+  const linesRef = React.useRef<LeadDecisionWorkbenchDTO['lines']>([]);
   const fitOperation = React.useRef<RetryOperation | null>(null);
   const participationOperation = React.useRef<RetryOperation | null>(null);
   const promotionKey = React.useRef<string | null>(null);
@@ -157,12 +163,17 @@ const DecidePage: React.FC = () => {
 
   React.useEffect(() => {
     if (!workbench) return;
-    const nextSeed = [workbench.leadRevisionId, workbench.participationVersion ?? 'none', workbench.participationStatus, workbench.fitAssessment?.version ?? 0].join(':');
-    if (seed.current !== nextSeed) {
+    linesRef.current = workbench.lines;
+    const revisionChanged = previous.current != null && previous.current.revisionId !== workbench.leadRevisionId;
+    // Choices are re-read from the server only when the server's participation record moved
+    // (a save, a commit, a new revision), never because the fit assessment alone was re-saved:
+    // the fit save is the first step of the button, and the choices must survive it.
+    const nextDecisionSeed = [workbench.leadRevisionId, workbench.participationVersion ?? 'none', workbench.participationStatus].join(':');
+    if (decisionSeed.current !== nextDecisionSeed) {
       const initial = initializeDecisionMap(workbench);
       // A document check mints a new immutable revision with new line ids. The rep's Quote/Skip
       // choices and reasons carry across by line number; the corrected commercial values win.
-      if (previous.current && previous.current.revisionId !== workbench.leadRevisionId) {
+      if (revisionChanged && previous.current) {
         for (const line of workbench.lines) {
           const carried = previous.current.byLabel.get(lineLabel(line));
           if (!carried || initial[line.revisionLineId]?.decision !== 'Pending') continue;
@@ -175,8 +186,16 @@ const DecidePage: React.FC = () => {
         }
       }
       setDecisions(initial);
-      setConcern(concernFromSaved(workbench.fitAssessment));
-      seed.current = nextSeed;
+      decisionSeed.current = nextDecisionSeed;
+    }
+    const nextConcernSeed = [workbench.leadRevisionId, workbench.fitAssessment?.version ?? 0].join(':');
+    if (concernSeed.current !== nextConcernSeed) {
+      const saved = concernFromSaved(workbench.fitAssessment);
+      // A new revision has no assessment of its own yet; an unsaved concern typed on the old
+      // one is still the rep's concern.
+      const unsavedSurvives = revisionChanged && previous.current?.concern.raised && !(workbench.fitAssessment && workbench.fitAssessment.version > 0);
+      setConcern(unsavedSurvives && previous.current ? previous.current.concern : saved);
+      concernSeed.current = nextConcernSeed;
     }
     if (promotionRevision.current !== workbench.leadRevisionId) {
       promotionKey.current = `lead-promotion:${leadId}:${workbench.leadRevisionId}:${newId()}`;
@@ -185,18 +204,25 @@ const DecidePage: React.FC = () => {
     }
   }, [leadId, workbench]);
 
-  const formValue = React.useMemo<FormValue>(() => ({ decisions, concern }), [decisions, concern]);
+  // The guard compares JSON strings, so what it sees is canonical: the same choices serialise
+  // the same way whether the rep built them by clicking or the server sent them back.
+  const formValue = React.useMemo<FormValue>(
+    () => ({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) }),
+    [decisions, concern],
+  );
   const guard = useUnsavedWorkGuard<FormValue>({
     storageKey: workbench ? `nexora.lead-decision.${leadId}.revision.${workbench.leadRevisionId}` : '',
     value: formValue,
-    enabled: Boolean(workbench && seed.current),
+    enabled: Boolean(workbench && decisionSeed.current),
     leaveMessage: 'You have unsaved choices on this request. Leave without saving them?',
   });
 
-  const refresh = React.useCallback(async () => {
-    await queryClient.invalidateQueries({ queryKey: ['lead-decision-workbench', leadId] });
-    await queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] });
-    await queryClient.invalidateQueries({ queryKey: ['lifecycle', 'leads', leadId] });
+  const refresh = React.useCallback(async (options: { workbench?: boolean } = {}) => {
+    await Promise.all([
+      options.workbench === false ? Promise.resolve() : queryClient.invalidateQueries({ queryKey: ['lead-decision-workbench', leadId] }),
+      queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] }),
+      queryClient.invalidateQueries({ queryKey: ['lifecycle', 'leads', leadId] }),
+    ]);
   }, [leadId, queryClient]);
 
   const freshWorkbench = React.useCallback(
@@ -220,24 +246,30 @@ const DecidePage: React.FC = () => {
     previous.current = {
       revisionId: workbench.leadRevisionId,
       byLabel: new Map(workbench.lines.map((line) => [lineLabel(line), decisions[line.revisionLineId]]).filter((entry): entry is [string, EditableLineDecision] => Boolean(entry[1]))),
+      concern,
     };
-  }, [workbench, decisions]);
+  }, [workbench, decisions, concern]);
 
   const openDocument = React.useCallback((line?: { revisionLineId: number }) => {
     setCheckFocus(line?.revisionLineId ?? null);
     setCheckOpen(true);
   }, []);
 
+  /**
+   * Applies the values a rep confirmed against the document to the lines now on screen. Keyed
+   * by line number against the current lines, and only onto entries that already exist, because
+   * the check mints a new revision and the ids this callback was created with may be gone.
+   */
   const applyConfirmed = React.useCallback((confirmed: ConfirmedLine[]) => {
-    if (!workbench) return;
     const byLabel = new Map(confirmed.map((entry) => [entry.lineItemNo, entry]));
     setDecisions((current) => {
       const next = { ...current };
-      for (const line of workbench.lines) {
+      for (const line of linesRef.current) {
         const values = byLabel.get(lineLabel(line));
-        if (!values) continue;
+        const existing = current[line.revisionLineId];
+        if (!values || !existing) continue;
         next[line.revisionLineId] = {
-          ...(current[line.revisionLineId] ?? { decision: 'Pending' }),
+          ...existing,
           ...(values.quantity != null ? { quantity: values.quantity } : {}),
           ...(values.unitOfMeasure ? { unitOfMeasure: values.unitOfMeasure } : {}),
           ...(values.currency ? { currency: values.currency } : {}),
@@ -245,7 +277,7 @@ const DecidePage: React.FC = () => {
       }
       return next;
     });
-  }, [workbench]);
+  }, []);
 
   /**
    * One click, four governed writes. Each write is idempotent and each refetch re-reads the
@@ -269,6 +301,18 @@ const DecidePage: React.FC = () => {
         current = await freshWorkbench();
       }
 
+      // The server refuses to commit a Bid line on a lead that is not yet QUALIFIED, so the
+      // lead is qualified before the decision is committed, not after.
+      if (mode === 'rfq') {
+        const lifecycle = lifecycleQuery.data;
+        const option = qualificationTransition(lifecycle);
+        if (lifecycle && option) {
+          setBusy('Qualifying the lead…');
+          await lifecycleService.transition('leads', leadId, lifecycle, option);
+          await queryClient.invalidateQueries({ queryKey: ['lifecycle', 'leads', leadId] });
+        }
+      }
+
       const commit = mode !== 'draft';
       const alreadyCommitted = current.participationStatus === 'COMMITTED' && !guard.isDirty && !fitSaved && !header;
       if (!(commit && alreadyCommitted)) {
@@ -279,26 +323,19 @@ const DecidePage: React.FC = () => {
         participationOperation.current = operation;
         await leadDecisionService.saveParticipation(leadId, request, operation.key);
         participationOperation.current = null;
-        guard.markSaved({ decisions, concern });
+        guard.markSaved({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) });
         current = await freshWorkbench();
       }
 
       if (mode === 'draft') {
         enqueueSnackbar('Saved. A manager can create the RFQ from here.', { variant: 'success' });
-        await refresh();
+        await refresh({ workbench: false });
         return;
       }
       if (mode === 'decline') {
         enqueueSnackbar('Request declined and recorded.', { variant: 'success' });
-        await refresh();
+        await refresh({ workbench: false });
         return;
-      }
-
-      const lifecycle = lifecycleQuery.data;
-      if (lifecycle && qualificationStep(lifecycle) === 'transition') {
-        setBusy('Qualifying the lead…');
-        const option = lifecycle.allowedTransitions.find((candidate) => candidate.statusCode === QUALIFIED)!;
-        await lifecycleService.transition('leads', leadId, lifecycle, option);
       }
 
       if (!current.participationVersion || !promotionKey.current) {
@@ -311,7 +348,7 @@ const DecidePage: React.FC = () => {
         expectedParticipationVersion: current.participationVersion,
         idempotencyKey: promotionKey.current,
       });
-      guard.markSaved({ decisions, concern });
+      guard.markSaved({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) });
       enqueueSnackbar(
         `RFQ ${receipt.rfqNumber || `#${receipt.rfqId}`} created with ${receipt.promotedLineCount} line${receipt.promotedLineCount === 1 ? '' : 's'}.`,
         { variant: 'success' },
@@ -324,7 +361,7 @@ const DecidePage: React.FC = () => {
     } finally {
       setBusy(null);
     }
-  }, [commercialAccess.canViewPromotedRfq, concern, decisions, enqueueSnackbar, freshWorkbench, guard, leadId, lifecycleQuery.data, navigate, refresh, workbench]);
+  }, [commercialAccess.canViewPromotedRfq, concern, decisions, enqueueSnackbar, freshWorkbench, guard, leadId, lifecycleQuery.data, navigate, queryClient, refresh, workbench]);
 
   const resolveRfqImpact = React.useCallback(async (reason: string) => {
     if (!workbench?.promotion || !rfqImpactKey.current) return;
@@ -391,8 +428,10 @@ const DecidePage: React.FC = () => {
   const primary = (() => {
     if (busy) return { label: busy, disabled: true, onClick: () => undefined };
     if (!canEdit) return { label: 'Create RFQ', disabled: true, onClick: () => undefined };
-    if (next.kind === 'decline') return { label: 'Decline request', disabled: false, onClick: () => setDeclineOpen(true) };
-    if (next.kind === 'concern') return { label: 'Save for review', disabled: false, onClick: () => run('draft') };
+    // Declining is a committed decision, which the server allows only to commercial authority;
+    // a rep's skip-everything is saved as a draft for a manager to decline.
+    if (next.kind === 'decline' && canPromote) return { label: 'Decline request', disabled: false, onClick: () => setDeclineOpen(true) };
+    if (next.kind === 'concern' || next.kind === 'decline') return { label: next.kind === 'concern' ? 'Save for review' : 'Save for a manager', disabled: false, onClick: () => run('draft') };
     if (!canPromote) return { label: 'Save for a manager', disabled: next.kind !== 'ready', onClick: () => run('draft') };
     return { label: 'Create RFQ', disabled: next.kind !== 'ready', onClick: () => run('rfq') };
   })();
@@ -401,6 +440,7 @@ const DecidePage: React.FC = () => {
     if (busy) return 'Please wait.';
     if (!canEdit) return 'Your role can view this request but not decide it.';
     if (next.kind === 'blocked' || next.kind === 'closed') return next.sentence;
+    if (next.kind === 'decline' && !canPromote) return 'Every line is skipped. Saving records your reasons; a manager declines the request.';
     if (next.kind === 'decline') return 'Every line is skipped. Declining records the reason and closes the request without an RFQ.';
     if (next.kind === 'concern') return 'A concern stops the RFQ. Saving records it for a manager to review, or skip every line to decline.';
     if (!canPromote) return 'Records the assessment and your choices. A manager creates the RFQ.';
@@ -493,9 +533,11 @@ const DecidePage: React.FC = () => {
             <Typography id="decide-customer" component="h1" variant="h5" sx={{ fontWeight: 700, letterSpacing: '-0.01em' }}>
               {workbench.customerName || 'Customer not matched yet'}
             </Typography>
-            {!locked && commercialAccess.canLinkLeadClient ? (
+            {/* A resolved customer is immutable on the server (a database rule refuses any change),
+                so the picker is offered only while the request has none. */}
+            {!locked && commercialAccess.canLinkLeadClient && !workbench.customerId ? (
               <Link component="button" type="button" onClick={() => setCustomerDialogOpen(true)} sx={{ fontWeight: 700 }}>
-                {workbench.customerId ? 'Not them? Change' : 'Choose the customer'}
+                Choose the customer
               </Link>
             ) : null}
           </Stack>
@@ -548,7 +590,7 @@ const DecidePage: React.FC = () => {
               <Paper variant="outlined" sx={{ p: 2, mb: 2, borderLeft: 3, borderLeftColor: 'primary.main', borderRadius: 2 }}>
                 <Stack direction="row" spacing={1.5} sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
                   <Typography sx={{ fontWeight: 600 }}>
-                    Nexora&apos;s read: <Box component="b" sx={{ color: 'primary.main' }}>{recommendationLabel(brief.recommendation)}</Box>
+                    Nexora&apos;s read: <Box component="b" sx={{ color: 'primary.main' }}>{decisionLabel(brief.recommendation)}</Box>
                   </Typography>
                   <Typography variant="caption" color="text.secondary">from the decision brief for this lead</Typography>
                 </Stack>

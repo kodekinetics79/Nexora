@@ -49,19 +49,22 @@ const FIELD_NAMES: Record<string, string> = {
 
 /** "$.items[2].quantity" reads as "Line 3 · Quantity"; "$.requiredDeliveryDate" as "Required delivery". */
 export const fieldLabel = (path: string): string => {
-  const segments = path.replace(/^\$\.?/, '').split('.').filter(Boolean);
+  // Walk the path token by token rather than splitting on dots: a line key is the customer's
+  // own line number or part number, and part numbers like 6205.2RS contain dots.
+  const tokens = /([A-Za-z0-9_]+)(?:\[(?:(\d+)|"((?:[^"\\]|\\.)*)")\])?/g;
   const parts: string[] = [];
-  for (const segment of segments) {
-    // items[2] is a position (third line); items["00020"] is the line number the customer used.
-    const indexed = /^(\w+)\[(?:(\d+)|"([^"]+)")\]$/.exec(segment);
-    if (indexed) {
-      const [, name, position, key] = indexed;
-      const line = key ?? String(Number(position) + 1);
+  let match: RegExpExecArray | null;
+  const body = path.replace(/^\$\.?/, '');
+  while ((match = tokens.exec(body)) !== null) {
+    const [, name, position, quoted] = match;
+    if (position !== undefined || quoted !== undefined) {
+      // items[2] is a position (third line); items["00020"] is the line number the customer used.
+      const line = quoted !== undefined ? quoted.replaceAll('\\"', '"') : String(Number(position) + 1);
       parts.push(/^(items|lines|lineItems)$/i.test(name) ? `Line ${line}` : `${readable(name)} ${line}`);
-    } else if (FIELD_NAMES[segment.toLowerCase()]) {
-      parts.push(FIELD_NAMES[segment.toLowerCase()]);
+    } else if (FIELD_NAMES[name.toLowerCase()]) {
+      parts.push(FIELD_NAMES[name.toLowerCase()]);
     } else {
-      const words = readable(segment);
+      const words = readable(name);
       parts.push(words.charAt(0) + words.slice(1).toLowerCase());
     }
   }
@@ -95,22 +98,32 @@ const canonicalInstant = (value: string): string => value
 /** The marker the server prefixes to remarks while a document awaits review, and strips on approval. */
 const REVIEW_MARKER = /^\s*\[NEEDS REVIEW\]\s*/i;
 
+/** True when two values are the same instant, however each happens to be written. */
+const sameInstant = (before: unknown, after: unknown): boolean => {
+  if (typeof before !== 'string' || typeof after !== 'string') return false;
+  const a = before.trim();
+  const b = after.trim();
+  if (!ISO_INSTANT.test(a) || !ISO_INSTANT.test(b)) return false;
+  if (canonicalInstant(a) === canonicalInstant(b)) return true;
+  const beforeDate = dayjs(a);
+  const afterDate = dayjs(b);
+  return beforeDate.isValid() && afterDate.isValid() && beforeDate.valueOf() === afterDate.valueOf();
+};
+
 export const isRealChange = (difference: LeadRevisionDifferenceDTO): boolean => {
   const type = difference.changeType.toLowerCase();
   if (type === 'unchanged') return false;
   if (type !== 'modified') return true;
+  if (difference.previousValueJson === difference.currentValueJson) return false;
   const before = parsed(difference.previousValueJson);
   const after = parsed(difference.currentValueJson);
+  if (sameInstant(before, after)) return false;
   if (typeof before === 'string' && typeof after === 'string') {
-    if (ISO_INSTANT.test(before.trim()) && ISO_INSTANT.test(after.trim())) {
-      if (canonicalInstant(before.trim()) === canonicalInstant(after.trim())) return false;
-      const beforeDate = dayjs(before);
-      const afterDate = dayjs(after);
-      if (beforeDate.isValid() && afterDate.isValid()) return beforeDate.valueOf() !== afterDate.valueOf();
-    }
     // The review marker is the system's bookkeeping, not something the customer wrote.
     if (before.replace(REVIEW_MARKER, '').trim() === after.replace(REVIEW_MARKER, '').trim()) return false;
   }
+  // A whole line counts as changed only if a field a person cares about changed inside it.
+  if (isRecord(before) && isRecord(after)) return objectChanges(before, after).length > 0;
   return JSON.stringify(before) !== JSON.stringify(after);
 };
 
@@ -140,10 +153,7 @@ export const objectChanges = (before: unknown, after: unknown): Array<{ key: str
     if (MACHINE_LINE_KEYS.has(key.toLowerCase())) continue;
     const previous = before[key];
     const current = after[key];
-    const same = JSON.stringify(previous ?? null) === JSON.stringify(current ?? null)
-      || (typeof previous === 'string' && typeof current === 'string'
-        && ISO_INSTANT.test(previous.trim()) && ISO_INSTANT.test(current.trim())
-        && canonicalInstant(previous.trim()) === canonicalInstant(current.trim()));
+    const same = JSON.stringify(previous ?? null) === JSON.stringify(current ?? null) || sameInstant(previous, current);
     if (!same) changes.push({ key, before: display(previous), after: display(current) });
   }
   return changes;

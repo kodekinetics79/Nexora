@@ -91,5 +91,5 @@ test('revision UI preserves immutable differences and the Nexora Serial', async 
   await expect(page.getByText(`Nexora Serial: ${fixture.nexoraSerial}`)).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
   await expect(page.getByText(/Revision \d+/).first()).toBeVisible();
-  await expect(page.getByText(/Added|Removed|Modified|Unchanged/).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Revision \d+, (\d+ changes?|First version|No changes to the request)/ }).first()).toBeVisible();
 });

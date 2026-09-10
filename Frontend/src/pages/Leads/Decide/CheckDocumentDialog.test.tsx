@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LeadDecisionLineDTO, LeadDecisionWorkbenchDTO } from '../../../api/services/leadDecisionService';
@@ -76,7 +77,9 @@ const renderDialog = (props: Partial<React.ComponentProps<typeof CheckDocumentDi
   const onClose = vi.fn();
   render(
     <QueryClientProvider client={client}>
-      <CheckDocumentDialog open leadId={5} workbench={workbench()} onClose={onClose} onConfirmed={onConfirmed} {...props} />
+      <MemoryRouter>
+        <CheckDocumentDialog open leadId={5} workbench={workbench()} onClose={onClose} onConfirmed={onConfirmed} {...props} />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
   return { onConfirmed, onClose };
@@ -147,19 +150,33 @@ describe('CheckDocumentDialog', () => {
     expect(screen.getAllByText('inquiry.csv')).toHaveLength(1);
   });
 
-  it('offers to open or download a spreadsheet the browser cannot draw, instead of a blank pane', async () => {
-    api.fetchObjectUrl.mockResolvedValue({
-      url: 'blob:xlsx',
-      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      blob: new Blob(['PK']),
-    });
+  it('offers to open or download a spreadsheet the browser cannot draw, without downloading it first', async () => {
     const evidence = { ...workbench().evidence[0], name: 'bid-list.xlsx', mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
     renderDialog({ workbench: workbench({ evidence: [evidence] }) });
     expect(await screen.findByRole('button', { name: 'Open in a new tab' })).toBeInTheDocument();
     expect(screen.getByText(/is a file the browser cannot show here/)).toBeInTheDocument();
     expect(screen.queryByLabelText('bid-list.xlsx')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
-    expect(screen.queryByTitle('bid-list.xlsx')).not.toBeInTheDocument();
+    expect(api.fetchObjectUrl).not.toHaveBeenCalled();
+  });
+
+  it('frames an HTML document rather than printing its tags', async () => {
+    api.fetchObjectUrl.mockResolvedValue({ url: 'blob:html', contentType: 'text/html', blob: new Blob(['<table><tr><td>x</td></tr></table>']) });
+    const evidence = { ...workbench().evidence[0], name: 'inquiry.html', mediaType: 'text/html' };
+    renderDialog({ workbench: workbench({ evidence: [evidence] }) });
+    expect(await screen.findByTitle('inquiry.html')).toHaveAttribute('src', 'blob:html');
+    expect(screen.queryByText(/<table>/)).not.toBeInTheDocument();
+  });
+
+  it('keeps a refused check on the form with the way out, and reveals the lines it had hidden', async () => {
+    api.submitReview.mockRejectedValue(new Error('This lead is no longer awaiting extraction review.'));
+    renderDialog();
+    await screen.findByText('1 of 2 lines to check');
+    await pickOption('Unit, line 00001', 'EA');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm what the document says' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer awaiting extraction review|could not be recorded/);
+    expect(screen.getByRole('button', { name: 'Open the full review' })).toBeInTheDocument();
+    // Every line is now visible, in case the fault is on one the dialog had hidden.
+    expect(screen.getByRole('textbox', { name: 'What they asked for, line 00002' })).toBeInTheDocument();
   });
 
   it('sends a changed quote-due date with the check, and nothing else from the header', async () => {
@@ -172,13 +189,9 @@ describe('CheckDocumentDialog', () => {
     expect(api.submitReview.mock.calls[0][1].header).toEqual({ bidClosingDate: '2026-10-15' });
   });
 
-  it('says so when no document is on file, and surfaces a refused check without pretending', async () => {
-    api.submitReview.mockRejectedValue(new Error('Review version 3 is stale'));
+  it('says so when no document is on file', async () => {
     renderDialog({ workbench: workbench({ evidence: [] }) });
     expect(await screen.findByText(/No document is on file for this request/)).toBeInTheDocument();
-    await screen.findByText('1 of 2 lines to check');
-    await pickOption('Unit, line 00001', 'EA');
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm what the document says' }));
-    await waitFor(() => expect(snack).toHaveBeenCalledWith(expect.stringMatching(/stale|could not be recorded/), { variant: 'error' }));
+    expect(await screen.findByText('1 of 2 lines to check')).toBeInTheDocument();
   });
 });

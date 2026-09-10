@@ -118,7 +118,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await expect(page.getByRole('button', { name: /1 Revisions/i })).toBeVisible();
     await page.goto('/procurement/leads/view/1');
     await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Open decision workbench|View decision record/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Decide: quote or skip|View decision/i })).toBeVisible();
   });
 
   test('07 Possible Match decision offers Treat as Revision', async ({ page }) => {
@@ -152,7 +152,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await expect(openLead).toBeVisible();
     await openLead.click();
     await expect(page).toHaveURL(/\/procurement\/leads\/view\/\d+$/);
-    await expect(page.getByRole('button', { name: /Open decision workbench|View decision record/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Decide: quote or skip|View decision/i })).toBeVisible();
   });
 
   test('09 Dashboard retains reconciled drill-downs after the journey', async ({ page }) => {

@@ -187,7 +187,11 @@ describe('DecidePage', () => {
   it('shows who is asking, what Nexora thinks, and names one next thing at a time', async () => {
     renderPage();
     expect(await screen.findByRole('heading', { level: 1, name: 'Saudi Electricity Company' })).toBeInTheDocument();
+    // A matched customer cannot be changed here: the server refuses it once resolved.
+    expect(screen.queryByRole('button', { name: /Not them|Choose the customer/ })).not.toBeInTheDocument();
     expect(await screen.findByText(/Nexora's read:/)).toBeInTheDocument();
+    // The same name the list gives the same read.
+    expect(screen.getByText('Worth bidding')).toBeInTheDocument();
     expect(screen.getByText('3 of 3 lines match your catalogue.')).toBeInTheDocument();
 
     expect(status()).toHaveTextContent('Choose Quote or Skip for line 00001.');
@@ -225,6 +229,8 @@ describe('DecidePage', () => {
       .toEqual([['Bid', 'SAR'], ['Bid', 'SAR'], ['Bid', 'SAR']]);
 
     expect(api.transition).toHaveBeenCalledWith('leads', 407, expect.objectContaining({ currentStatusCode: 'RECEIVED' }), expect.objectContaining({ statusCode: 'QUALIFIED' }));
+    // The server refuses to commit a Bid line on an unqualified lead, so qualify comes first.
+    expect(api.transition.mock.invocationCallOrder[0]).toBeLessThan(api.saveParticipation.mock.invocationCallOrder[0]);
     expect(api.promoteToRfq).toHaveBeenCalledWith(407, expect.objectContaining({
       expectedLeadRevisionId: 9001,
       expectedDecisionVersion: 4,
@@ -277,6 +283,21 @@ describe('DecidePage', () => {
     expect(request.reasonCode).toBe('NO_STOCK');
     expect(request.lines.every((l: { decision: string; reasonCode: string }) => l.decision === 'NoBid' && l.reasonCode === 'NO_STOCK')).toBe(true);
     expect(api.promoteToRfq).not.toHaveBeenCalled();
+  });
+
+  it('does not offer a rep the decline the server would refuse; their skip-everything is saved for a manager', async () => {
+    auth.user = { id: 9, isManager: false, isSuperAdmin: false, businessUnitId: 1 };
+    renderPage();
+    for (const label of ['00001', '00002', '00003']) {
+      const group = await screen.findByRole('group', { name: `Quote or skip line ${label}` });
+      fireEvent.click(within(group).getByRole('button', { name: 'Skip' }));
+      await pickOption(`Why skip line ${label}`, 'Item unavailable');
+    }
+    expect(screen.queryByRole('button', { name: 'Decline request' })).not.toBeInTheDocument();
+    expect(status()).toHaveTextContent('a manager declines the request');
+    fireEvent.click(screen.getByRole('button', { name: 'Save for a manager' }));
+    await waitFor(() => expect(api.saveParticipation).toHaveBeenCalled());
+    expect(api.saveParticipation.mock.calls[0][1].commit).toBe(false);
   });
 
   it('records a concern for review instead of creating an RFQ', async () => {

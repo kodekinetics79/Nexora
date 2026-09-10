@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
@@ -116,31 +117,44 @@ export const buildReviewItems = (
   };
 });
 
-/** Browsers download rather than display these inside a frame, so they are shown as text. */
-const isTextLike = (contentType: string, name: string): boolean =>
-  /^text\//.test(contentType)
-  // Office types also end in "xml" (spreadsheetml, wordprocessingml); only bare data types count.
-  || /^application\/(json|xml|csv)$/.test(contentType)
-  || /\.(csv|txt|json|xml|md)$/i.test(name);
+/**
+ * How a document can be shown, decided from what the workbench already knows about the file so
+ * nothing is downloaded only to be discarded. Browsers frame PDFs, images and HTML; they will
+ * not frame CSV or plain text (shown as text here) and cannot draw Office files at all.
+ */
+export type DocumentKind = 'frame' | 'image' | 'text' | 'file';
 
-type ViewerState = { url: string; contentType: string; text?: string } | { error: string } | null;
+export const documentKind = (contentType: string, name: string): DocumentKind => {
+  const type = contentType.toLowerCase();
+  const file = name.toLowerCase();
+  if (type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|tiff?)$/.test(file)) return 'image';
+  if (/pdf|html/.test(type) || /\.(pdf|html?)$/.test(file)) return 'frame';
+  // Office types also end in "xml" (spreadsheetml, wordprocessingml); only bare data types count.
+  if (/^text\//.test(type) || /^application\/(json|xml|csv)$/.test(type) || /\.(csv|txt|json|xml|md)$/.test(file)) return 'text';
+  return 'file';
+};
+
+type ViewerState = { url: string; kind: DocumentKind; text?: string } | { error: string } | null;
 
 const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = ({ evidence }) => {
   const [state, setState] = React.useState<ViewerState>(null);
   const path = evidence ? inspectableEvidenceUrl(evidence) : null;
   const name = evidence?.name ?? '';
+  const knownKind = documentKind(evidence?.mediaType ?? '', name);
 
   React.useEffect(() => {
     let url: string | null = null;
     let cancelled = false;
     setState(null);
-    if (!path) return undefined;
+    if (!path || knownKind === 'file') return undefined;
     fetchAuthenticatedObjectUrl(path)
       .then(async (result) => {
-        const text = isTextLike(result.contentType, name) ? await result.blob.text() : undefined;
+        // The server's content type wins over the file name once the bytes are here.
+        const kind = result.contentType ? documentKind(result.contentType, name) : knownKind;
+        const text = kind === 'text' ? await result.blob.text() : undefined;
         if (cancelled) { URL.revokeObjectURL(result.url); return; }
         url = result.url;
-        setState({ url: result.url, contentType: result.contentType, text });
+        setState({ url: result.url, kind, text });
       })
       .catch((error: unknown) => {
         if (!cancelled) setState({ error: presentableErrorMessage(error, 'The document could not be opened.') });
@@ -149,13 +163,27 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = (
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [path, name]);
+  }, [path, name, knownKind]);
 
   if (!evidence || !path) {
     return (
       <Alert severity="warning">No document is on file for this request, so there is nothing to check against.</Alert>
     );
   }
+  const fileOffer = (
+    <Alert
+      severity="info"
+      action={(
+        <Stack direction="row" spacing={1}>
+          <Button color="inherit" size="small" onClick={() => void openAuthenticatedFile(path)}>Open in a new tab</Button>
+          <Button color="inherit" size="small" onClick={() => void downloadAuthenticatedFile(path, evidence.name)}>Download</Button>
+        </Stack>
+      )}
+    >
+      <strong>{evidence.name}</strong> is a file the browser cannot show here. Open it beside this window to cross-check.
+    </Alert>
+  );
+  if (knownKind === 'file') return fileOffer;
   if (!state) {
     return (
       <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
@@ -179,26 +207,8 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = (
       </Box>
     );
   }
-  const isImage = state.contentType.startsWith('image/');
-  const framable = isImage || /pdf|html/.test(state.contentType);
-  if (!framable) {
-    // Word, Excel and the like: a browser will not draw them inside a page. Offer the original
-    // itself rather than a blank pane that looks like a missing document.
-    return (
-      <Alert
-        severity="info"
-        action={(
-          <Stack direction="row" spacing={1}>
-            <Button color="inherit" size="small" onClick={() => void openAuthenticatedFile(path)}>Open in a new tab</Button>
-            <Button color="inherit" size="small" onClick={() => void downloadAuthenticatedFile(path, evidence.name)}>Download</Button>
-          </Stack>
-        )}
-      >
-        <strong>{evidence.name}</strong> is a file the browser cannot show here. Open it beside this window to cross-check.
-      </Alert>
-    );
-  }
-  return isImage ? (
+  if (state.kind === 'file') return fileOffer;
+  return state.kind === 'image' ? (
     <Box component="img" src={state.url} alt={evidence.name} sx={{ maxWidth: '100%', display: 'block' }} />
   ) : (
     <Box
@@ -222,12 +232,14 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
   const theme = useTheme();
   const fullScreen = useMediaQuery(theme.breakpoints.down('md'));
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
   const [showAll, setShowAll] = React.useState(false);
   const [edits, setEdits] = React.useState<Map<number, LineEdit>>(new Map());
   const [dueDate, setDueDate] = React.useState('');
   const [note, setNote] = React.useState('');
   const [evidenceIndex, setEvidenceIndex] = React.useState(0);
+  const [refusal, setRefusal] = React.useState<string | null>(null);
   const seeded = React.useRef<number | null>(null);
 
   const leadQuery = useQuery({
@@ -248,24 +260,27 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
       return true;
     });
   }, [workbench.evidence]);
-  const unverified = workbench.lines.filter((line) => line.verificationStatus !== 'VERIFIED');
-  const visibleLines = showAll || unverified.length === 0 ? workbench.lines : unverified;
+  /** Each decision line paired with the lead item behind it, computed once per record. */
+  const rows = React.useMemo(
+    () => workbench.lines.map((line, index) => ({ line, item: matchLeadItem(line, index, items) })),
+    [workbench.lines, items],
+  );
+  const unverified = React.useMemo(() => rows.filter(({ line }) => line.verificationStatus !== 'VERIFIED'), [rows]);
+  const visibleRows = showAll || unverified.length === 0 ? rows : unverified;
 
   React.useEffect(() => {
     if (!open) { seeded.current = null; return; }
     if (!lead || seeded.current === lead.reviewVersion) return;
     const next = new Map<number, LineEdit>();
-    workbench.lines.forEach((line, index) => {
-      const item = matchLeadItem(line, index, items);
-      if (item) next.set(item.id, editFrom(line, item));
-    });
+    for (const { line, item } of rows) if (item) next.set(item.id, editFrom(line, item));
     setEdits(next);
     setDueDate(toDateInput(lead.bidClosingDate));
     setNote('');
     setShowAll(false);
     setEvidenceIndex(0);
+    setRefusal(null);
     seeded.current = lead.reviewVersion;
-  }, [open, lead, items, workbench.lines]);
+  }, [open, lead, rows]);
 
   React.useEffect(() => {
     if (!open || focusLineId == null) return;
@@ -286,8 +301,7 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
       });
     },
     onSuccess: async () => {
-      const confirmed: ConfirmedLine[] = workbench.lines.flatMap((line, index) => {
-        const item = matchLeadItem(line, index, items);
+      const confirmed: ConfirmedLine[] = rows.flatMap(({ line, item }) => {
         const edit = item ? edits.get(item.id) : undefined;
         if (!item || !edit) return [];
         const quantity = Number(edit.quantity);
@@ -299,16 +313,22 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
         }];
       });
       enqueueSnackbar('Confirmed against the document.', { variant: 'success' });
-      await queryClient.invalidateQueries({ queryKey: ['lead-decision-workbench', leadId] });
-      await queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] });
-      await queryClient.invalidateQueries({ queryKey: ['needs-review'] });
+      // Hand the values back and close before the refetches, so the rep is not held on a closed
+      // form; the page re-reads the workbench and carries the choices across the new revision.
       onConfirmed(confirmed);
       onClose();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['lead-decision-workbench', leadId] }),
+        queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] }),
+        queryClient.invalidateQueries({ queryKey: ['needs-review'] }),
+      ]);
     },
-    onError: (error: unknown) => enqueueSnackbar(
-      presentableErrorMessage(error, 'The check could not be recorded. Nothing was changed.'),
-      { variant: 'error' },
-    ),
+    onError: (error: unknown) => {
+      // The refusal stays on the form, in the server's words, with the way out: a line the
+      // dialog hid may be the one at fault, or the lead may no longer be open to this check.
+      setRefusal(presentableErrorMessage(error, 'The check could not be recorded. Nothing was changed.'));
+      setShowAll(true);
+    },
   });
 
   const patch = (itemId: number, change: Partial<LineEdit>) =>
@@ -320,10 +340,9 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
 
   const unitOptions = workbench.unitOptions ?? [];
   const currencyOptions = workbench.currencyOptions ?? [];
-  const incomplete = visibleLines.some((line, index) => {
-    const item = matchLeadItem(line, workbench.lines.indexOf(line), items);
+  const incomplete = visibleRows.some(({ item }) => {
     const edit = item ? edits.get(item.id) : undefined;
-    if (!edit) return index >= 0;
+    if (!edit) return true;
     const quantity = Number(edit.quantity);
     // The review refuses a line with no product name or material code; a part number alone
     // does not satisfy it, so the name stays required here rather than failing on confirm.
@@ -374,6 +393,19 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
               </Alert>
             ) : (
               <Stack spacing={1.5}>
+                {refusal ? (
+                  <Alert
+                    severity="error"
+                    onClose={() => setRefusal(null)}
+                    action={(
+                      <Button color="inherit" size="small" onClick={() => { onClose(); navigate(`/procurement/extraction/review/${leadId}`); }}>
+                        Open the full review
+                      </Button>
+                    )}
+                  >
+                    {refusal}
+                  </Alert>
+                ) : null}
                 <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
                   <Typography sx={{ fontWeight: 700 }}>
                     {unverified.length > 0
@@ -398,9 +430,7 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                   sx={{ maxWidth: 220 }}
                 />
 
-                {visibleLines.map((line) => {
-                  const index = workbench.lines.indexOf(line);
-                  const item = matchLeadItem(line, index, items);
+                {visibleRows.map(({ line, item }) => {
                   const label = lineLabel(line);
                   const edit = item ? edits.get(item.id) : undefined;
                   if (!item || !edit) {

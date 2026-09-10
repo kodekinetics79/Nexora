@@ -12,7 +12,10 @@ import {
   nextThing,
   NO_CONCERN,
   NO_CONCERN_RATIONALE,
+  normalizeConcern,
+  normalizeDecisions,
   qualificationStep,
+  qualificationTransition,
 } from './decideRules';
 
 const line = (overrides: Partial<LeadDecisionLineDTO> & { id: number }): LeadDecisionLineDTO => ({
@@ -145,6 +148,22 @@ describe('the single next thing', () => {
       .toEqual({ kind: 'closed', sentence: 'This request is disqualified. Reopen it from the lead page before deciding.' });
   });
 
+  it('clears "not qualified" itself but says a duplicate flag in the server\'s words with the way out', () => {
+    const wb = workbench();
+    const decisions = quoteAll(wb);
+    decisions[20] = { ...decisions[20], currency: 'SAR' };
+    // The fixture's LEAD_NOT_ELIGIBLE is the not-yet-qualified refusal; the button qualifies.
+    expect(nextThing({ workbench: wb, decisions, concern: NO_CONCERN, lifecycle: lifecycle(), leadId: 407 })).toEqual({ kind: 'ready' });
+    const duplicate = workbench({ blockers: [
+      { code: 'LEAD_NOT_ELIGIBLE', message: 'This lead is flagged as a possible duplicate of lead #9; resolve the duplicate flag first.', actionLabel: 'Open Lead lifecycle', actionPath: '/procurement/leads/view/407' },
+    ] });
+    expect(nextThing({ workbench: duplicate, decisions, concern: NO_CONCERN, lifecycle: lifecycle(), leadId: 407 })).toEqual({
+      kind: 'blocked',
+      sentence: 'This lead is flagged as a possible duplicate of lead #9; resolve the duplicate flag first.',
+      action: { label: 'Open the lead', path: '/procurement/leads/view/407' },
+    });
+  });
+
   it('shows a server blocker it cannot resolve itself, in the server\'s words', () => {
     const wb = workbench({ blockers: [{ code: 'SOMETHING_NEW', message: 'A new rule applies.', actionLabel: 'Read it', actionPath: '/rules' }] });
     const decisions = quoteAll(wb);
@@ -160,9 +179,12 @@ describe('what one line needs', () => {
     expect(needs.map((need) => need.kind)).toEqual(['quantity', 'unit', 'currency', 'attention']);
   });
 
-  it('accepts any unit or currency when the tenant configured none', () => {
+  it('says so when the tenant has no units or currencies to choose from, instead of letting the commit fail', () => {
     const needs = lineNeeds(line({ id: 1 }), { decision: 'Bid', quantity: 1, unitOfMeasure: 'PCS', currency: 'AED' }, new Set(), new Set());
-    expect(needs).toEqual([]);
+    expect(needs.map((need) => need.kind)).toEqual(['unit-unconfigured', 'currency-unconfigured']);
+    const wb = workbench({ unitOptions: [], lines: [line({ id: 1 })] });
+    expect(nextThing({ workbench: wb, decisions: quoteAll(wb), concern: NO_CONCERN, leadId: 407 }))
+      .toMatchObject({ kind: 'blocked', sentence: expect.stringMatching(/no units of measure set up/) });
   });
 });
 
@@ -197,6 +219,17 @@ describe('the fit assessment behind one click', () => {
     expect(fitMatchesSaved(saved, NO_CONCERN, ['ELIGIBILITY', 'CAPABILITY'])).toBe(true);
     expect(fitMatchesSaved(saved, { raised: true, codes: ['DELIVERY'], note: 'x' }, ['ELIGIBILITY', 'CAPABILITY'])).toBe(false);
     expect(fitMatchesSaved({ ...saved, version: 0 }, NO_CONCERN, ['ELIGIBILITY', 'CAPABILITY'])).toBe(false);
+    // A NOT_FIT verdict is non-actionable however its criteria read; "no concerns" must re-save it.
+    expect(fitMatchesSaved({ ...saved, overallDecision: 'NOT_FIT' }, NO_CONCERN, ['ELIGIBILITY', 'CAPABILITY'])).toBe(false);
+  });
+
+  it('serialises the same choices the same way however they were built', () => {
+    const clicked: DecisionMap = { 20: { decision: 'NoBid', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR', reasonCode: 'NO_STOCK', note: 'x ' }, 10: { decision: 'Bid', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR' } };
+    const served: DecisionMap = { 10: { decision: 'Bid', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR' }, 20: { decision: 'NoBid', reasonCode: 'NO_STOCK', note: 'x', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR' } };
+    expect(JSON.stringify(normalizeDecisions(clicked))).toBe(JSON.stringify(normalizeDecisions(served)));
+    expect(JSON.stringify(normalizeConcern({ raised: true, codes: ['DELIVERY', 'COMMERCIAL'], note: 'tight ' })))
+      .toBe(JSON.stringify(normalizeConcern({ raised: true, codes: ['COMMERCIAL', 'DELIVERY'], note: 'tight' })));
+    expect(normalizeConcern({ raised: false, codes: ['DELIVERY'], note: 'stale' })).toEqual(NO_CONCERN);
   });
 
   it('rebuilds the concern controls from a saved assessment', () => {
@@ -218,6 +251,8 @@ describe('qualification and dates', () => {
     expect(qualificationStep(lifecycle({ currentStatusCode: 'QUALIFIED' }))).toBe('none');
     expect(qualificationStep(lifecycle({ currentStatusCode: 'LOST', allowedTransitions: [] }))).toBe('impossible');
     expect(qualificationStep(null)).toBe('none');
+    expect(qualificationTransition(lifecycle())).toMatchObject({ statusCode: 'QUALIFIED' });
+    expect(qualificationTransition(lifecycle({ currentStatusCode: 'QUALIFIED' }))).toBeNull();
   });
 
   it('says how long is left in words a rep would use', () => {
