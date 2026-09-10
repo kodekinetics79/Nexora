@@ -29,7 +29,25 @@ const readable = (value: string): string => value
   .replaceAll('_', ' ')
   .replace(/\b\w/g, (character) => character.toUpperCase());
 
-/** "$.items[2].quantity" reads as "Line 3 · Quantity"; "$.requiredDeliveryDate" as "Required delivery date". */
+/** Names a person uses for the fields whose stored names would not read as words. */
+const FIELD_NAMES: Record<string, string> = {
+  recdate: 'Received',
+  receivedatutc: 'Received',
+  rfqno: 'Customer RFQ number',
+  customerrfqreference: 'Customer RFQ number',
+  buyersname: 'Buyer',
+  bidclosingdate: 'Quote due',
+  bidclosingdatehijri: 'Quote due (Hijri)',
+  requireddeliverydate: 'Required delivery',
+  headerremarks: 'Remarks',
+  itemtext: 'Item text',
+  unitofmeasure: 'Unit',
+  manufacturerpartnumber: 'Part number',
+  productshortname: 'Item',
+  productshortdescription: 'Description',
+};
+
+/** "$.items[2].quantity" reads as "Line 3 · Quantity"; "$.requiredDeliveryDate" as "Required delivery". */
 export const fieldLabel = (path: string): string => {
   const segments = path.replace(/^\$\.?/, '').split('.').filter(Boolean);
   const parts: string[] = [];
@@ -38,6 +56,8 @@ export const fieldLabel = (path: string): string => {
     if (indexed) {
       const [, name, index] = indexed;
       parts.push(/^(items|lines|lineItems)$/i.test(name) ? `Line ${Number(index) + 1}` : `${readable(name)} ${Number(index) + 1}`);
+    } else if (FIELD_NAMES[segment.toLowerCase()]) {
+      parts.push(FIELD_NAMES[segment.toLowerCase()]);
     } else {
       const words = readable(segment);
       parts.push(words.charAt(0) + words.slice(1).toLowerCase());
@@ -62,6 +82,17 @@ const display = (value: unknown): string => {
  * strings, so a timestamp re-serialised to a different precision shows as "Modified" with the
  * same instant on both sides; that is not a change to what the customer asked for.
  */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?(Z|[+-]\d{2}:?\d{2})?$/;
+
+/** One canonical spelling for an ISO instant, so precision and a trailing Z do not count. */
+const canonicalInstant = (value: string): string => value
+  .replace(/(\.\d*?)0+(?=(Z|[+-]\d{2}:?\d{2})?$)/, '$1')
+  .replace(/\.(?=(Z|[+-]\d{2}:?\d{2})?$)/, '')
+  .replace(/Z$/, '');
+
+/** The marker the server prefixes to remarks while a document awaits review, and strips on approval. */
+const REVIEW_MARKER = /^\s*\[NEEDS REVIEW\]\s*/i;
+
 export const isRealChange = (difference: LeadRevisionDifferenceDTO): boolean => {
   const type = difference.changeType.toLowerCase();
   if (type === 'unchanged') return false;
@@ -69,11 +100,14 @@ export const isRealChange = (difference: LeadRevisionDifferenceDTO): boolean => 
   const before = parsed(difference.previousValueJson);
   const after = parsed(difference.currentValueJson);
   if (typeof before === 'string' && typeof after === 'string') {
-    const beforeDate = dayjs(before);
-    const afterDate = dayjs(after);
-    if (beforeDate.isValid() && afterDate.isValid() && /\d{4}-\d{2}-\d{2}/.test(before) && /\d{4}-\d{2}-\d{2}/.test(after)) {
-      return beforeDate.valueOf() !== afterDate.valueOf();
+    if (ISO_INSTANT.test(before.trim()) && ISO_INSTANT.test(after.trim())) {
+      if (canonicalInstant(before.trim()) === canonicalInstant(after.trim())) return false;
+      const beforeDate = dayjs(before);
+      const afterDate = dayjs(after);
+      if (beforeDate.isValid() && afterDate.isValid()) return beforeDate.valueOf() !== afterDate.valueOf();
     }
+    // The review marker is the system's bookkeeping, not something the customer wrote.
+    if (before.replace(REVIEW_MARKER, '').trim() === after.replace(REVIEW_MARKER, '').trim()) return false;
   }
   return JSON.stringify(before) !== JSON.stringify(after);
 };
@@ -95,7 +129,7 @@ const Change = ({ difference }: { difference: LeadRevisionDifferenceDTO }) => {
     <Box component="li" sx={{ py: 1, listStyle: 'none', borderTop: 1, borderColor: 'divider' }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
         <Typography variant="body2" sx={{ fontWeight: 700 }}>{fieldLabel(difference.path)}</Typography>
-        {difference.scope && !/^(header|lead)$/i.test(difference.scope) ? (
+        {difference.scope && !/^(header|lead|field)$/i.test(difference.scope) ? (
           <Typography variant="caption" color="text.secondary">{readable(difference.scope)}</Typography>
         ) : null}
       </Stack>

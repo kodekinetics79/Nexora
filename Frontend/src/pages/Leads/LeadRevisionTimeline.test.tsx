@@ -61,7 +61,7 @@ describe('LeadRevisionTimeline', () => {
     const current = await screen.findByRole('button', { name: 'Revision 2, 2 changes' });
     fireEvent.click(current);
     expect(screen.getByText('Line 2 · Quantity')).toBeInTheDocument();
-    expect(screen.getByText('Bid closing date')).toBeInTheDocument();
+    expect(screen.getByText('Quote due')).toBeInTheDocument();
     expect(screen.getByText('Added: 2026-10-15')).toBeInTheDocument();
     expect(screen.queryByText(/Unchanged/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Received at utc/)).not.toBeInTheDocument();
@@ -98,16 +98,24 @@ describe('LeadRevisionTimeline', () => {
 });
 
 describe('what counts as a change', () => {
-  it('treats the same instant written at two precisions as unchanged', () => {
+  it('treats the same instant written at two precisions, or with and without a Z, as unchanged', () => {
     expect(isRealChange({ changeType: 'Modified', scope: 'Header', path: '$.receivedAtUtc', previousValueJson: '"2026-09-10T00:51:00Z"', currentValueJson: '"2026-09-10T00:51:00.0000000Z"' })).toBe(false);
+    expect(isRealChange({ changeType: 'Modified', scope: 'Field', path: '$.recDate', previousValueJson: '"2026-09-10T04:11:28.236147Z"', currentValueJson: '"2026-09-10T04:11:28.236147"' })).toBe(false);
+  });
+
+  it('ignores the review marker the server strips from remarks on approval', () => {
+    expect(isRealChange({ changeType: 'Modified', scope: 'Field', path: '$.headerRemarks', previousValueJson: '"[NEEDS REVIEW] Received date is missing"', currentValueJson: '"Received date is missing"' })).toBe(false);
+    expect(isRealChange({ changeType: 'Modified', scope: 'Field', path: '$.headerRemarks', previousValueJson: '"Deliver to Dammam"', currentValueJson: '"Deliver to Jubail"' })).toBe(true);
     expect(isRealChange({ changeType: 'Modified', scope: 'Header', path: '$.bidClosingDate', previousValueJson: '"2026-09-10"', currentValueJson: '"2026-09-18"' })).toBe(true);
     expect(isRealChange({ changeType: 'Modified', scope: 'Line', path: '$.items[0].quantity', previousValueJson: '4', currentValueJson: '4' })).toBe(false);
     expect(isRealChange({ changeType: 'Removed', scope: 'Line', path: '$.items[3]', previousValueJson: '{"quantity":1}', currentValueJson: null })).toBe(true);
   });
 
   it('names fields the way a person would', () => {
-    expect(fieldLabel('$.requiredDeliveryDate')).toBe('Required delivery date');
-    expect(fieldLabel('$.items[2].manufacturerPartNumber')).toBe('Line 3 · Manufacturer part number');
+    expect(fieldLabel('$.requiredDeliveryDate')).toBe('Required delivery');
+    expect(fieldLabel('$.items[2].manufacturerPartNumber')).toBe('Line 3 · Part number');
+    expect(fieldLabel('$.recDate')).toBe('Received');
     expect(fieldLabel('$.buyer')).toBe('Buyer');
+    expect(fieldLabel('$.opportunityNo')).toBe('Opportunity no');
   });
 });
