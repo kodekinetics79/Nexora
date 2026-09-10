@@ -94,6 +94,12 @@ public sealed class CanonicalRfqLineItem
     /// <summary>The buyer's note against the line. Never validated — a note cannot be "wrong".</summary>
     public CanonicalValue<string> ItemText { get; set; } = new();
     public ValidationStatus ValidationStatus { get; set; } = ValidationStatus.Unvalidated;
+
+    /// <summary>
+    /// The buyer's own columns that named no field, verbatim heading and cell. Carried to the
+    /// lead line's ExtraFields so nothing the document said about a line is lost.
+    /// </summary>
+    public Dictionary<string, string>? ExtraFields { get; set; }
 }
 
 public sealed class CanonicalRfqDocument
@@ -116,6 +122,12 @@ public sealed class CanonicalRfqDocument
     public List<CanonicalRfqLineItem> LineItems { get; set; } = new();
     public List<CanonicalValidationIssue> Issues { get; set; } = new();
     public ValidationStatus ValidationStatus { get; set; } = ValidationStatus.Unvalidated;
+
+    /// <summary>
+    /// Document-level "Label: value" pairs no spelling recognised. Persisted with the inquiry
+    /// so a reviewer's correction can teach the tenant the label's meaning.
+    /// </summary>
+    public Dictionary<string, string> UnmappedHeaders { get; set; } = new(StringComparer.Ordinal);
 }
 
 public sealed class CanonicalValidationIssue

@@ -109,6 +109,8 @@ public sealed class StructuredEvidenceLedgerPersister
                 job.BusinessUnitId, source.CorpusId, firstInquiryNumber + documentIndex);
             inquiry.PopulateHeader(document.RfqNo.Value, document.BuyerName.Value,
                 ToOffset(document.ReceivedDate.Value), ToOffset(document.BidClosingDate.Value));
+            if (document.UnmappedHeaders.Count > 0)
+                inquiry.RecordUnmappedHeaders(document.UnmappedHeaders);
             inquiry.BindLead(lead.Id);
             if (document.ValidationStatus == CanonicalDtos.ValidationStatus.Valid)
                 inquiry.Validate();

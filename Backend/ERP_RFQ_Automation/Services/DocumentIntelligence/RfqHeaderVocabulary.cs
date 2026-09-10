@@ -93,6 +93,8 @@ public sealed class RfqHeaderVocabulary
             "inquirynumber", "tenderno", "tendernumber", "bidno", "bidnumber", "rfpno", "rfpnumber",
             "eventno", "eventnumber", "eventid", "docno", "documentno", "documentnumber", "prno", "prnumber",
             "purchaserequisition", "purchaserequisitionno", "quotationrequestno", "requestno", "requestnumber",
+            "customerrfqno", "customerrfqnumber", "customerrfqreference", "customerrfqref", "customerreference",
+            "buyerrfqno", "buyerrfqnumber", "buyerreference", "rfqreferenceno", "rfqrefno", "enquiryref", "enquiryreference",
         },
         [RfqSpreadsheetFields.BuyerName] = new[]
         {

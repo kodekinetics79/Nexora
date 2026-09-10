@@ -67,7 +67,7 @@ public sealed class DocxTableParser
         if (body is null)
             return Array.Empty<RfqSpreadsheetRow>();
 
-        var headerBlock = ReadHeaderBlock(body);
+        var (headerBlock, unmatchedLabels) = ReadHeaderBlock(body);
         if (!headerBlock.ContainsKey(RfqSpreadsheetFields.RfqNo))
         {
             var fromName = RfqNumberFromFileName(sourceDocumentName);
@@ -113,6 +113,7 @@ public sealed class DocxTableParser
             foreach (var row in rows)
             {
                 ApplyHeaderBlock(row, headerBlock);
+                row.UnmappedHeaderLabels = unmatchedLabels;
                 results.Add(row);
             }
         }
@@ -225,9 +226,10 @@ public sealed class DocxTableParser
     /// <summary>A label-and-value table this small is document metadata, not a line grid.</summary>
     private const int HeaderTableRowLimit = 12;
 
-    private Dictionary<string, string> ReadHeaderBlock(Body body)
+    private (Dictionary<string, string> Matched, Dictionary<string, string> Unmatched) ReadHeaderBlock(Body body)
     {
         var found = new Dictionary<string, string>(StringComparer.Ordinal);
+        var unmatched = new Dictionary<string, string>(StringComparer.Ordinal);
         var scanned = 0;
 
         foreach (var paragraph in body.Descendants<Paragraph>())
@@ -241,8 +243,14 @@ public sealed class DocxTableParser
             if (string.IsNullOrWhiteSpace(text) || !text.Contains(':', StringComparison.Ordinal))
                 continue;
 
+            var any = false;
             foreach (var (field, value) in ExtractPairs(text))
+            {
+                any = true;
                 found.TryAdd(field, value);
+            }
+            if (!any)
+                RecordUnmatchedLabel(unmatched, text);
         }
 
         // A sourcing-portal export ("print version of the event") states the same metadata as
@@ -259,13 +267,52 @@ public sealed class DocxTableParser
                 var cells = row.Elements<TableCell>().Select(cell => cell.InnerText.Trim()).ToList();
                 if (cells.Count != 2 || cells[0].Length == 0 || cells[1].Length == 0)
                     continue;
+                var any = false;
                 foreach (var (field, value) in ExtractPairs($"{cells[0]}: {cells[1]}"))
+                {
+                    any = true;
                     found.TryAdd(field, value);
+                }
+                if (!any && IsLabelShaped(cells[0]) && unmatched.Count < NativeSpreadsheetParser.MaxUnmappedColumns)
+                    unmatched.TryAdd(cells[0], cells[1]);
             }
         }
 
-        return found;
+        return (found, unmatched);
     }
+
+    /// <summary>
+    /// A paragraph of the form "Label: value" whose label no spelling recognised. Only a line
+    /// with ONE colon and a short, word-like label is kept: a sentence that happens to contain
+    /// a colon is prose, not a field, and recording it would teach nothing and clutter the
+    /// reviewer's view. The pairs are kept so a reviewer's correction can be matched back to the
+    /// label that stated the value, and so the anchored header completion has labelled text to read.
+    /// </summary>
+    private static void RecordUnmatchedLabel(Dictionary<string, string> unmatched, string text)
+    {
+        if (unmatched.Count >= NativeSpreadsheetParser.MaxUnmappedColumns)
+            return;
+        // The FIRST colon separates label from value; the value may carry its own ("3:00 PM").
+        var colon = text.IndexOf(':', StringComparison.Ordinal);
+        if (colon <= 0)
+            return;
+        var label = text[..colon].Trim();
+        var value = text[(colon + 1)..].Trim().Trim('-', '–', ' ').Trim();
+        if (!IsLabelShaped(label) || value.Length == 0 || value.Length > 200)
+            return;
+        // "Please quote: as per the attached specification and terms." is a sentence with a
+        // colon in it. A field's value is short and does not end like a sentence.
+        if (value.EndsWith('.') || value.Count(char.IsWhiteSpace) > 8)
+            return;
+        unmatched.TryAdd(label, value);
+    }
+
+    /// <summary>Short, starts with a letter, no sentence punctuation — the shape of a field label.</summary>
+    private static bool IsLabelShaped(string label)
+        => label.Length is >= 2 and <= 60
+           && char.IsLetter(label[0])
+           && !label.Contains('.', StringComparison.Ordinal)
+           && label.Count(char.IsWhiteSpace) <= 6;
 
     /// <summary>
     /// The RFQ number in a file name such as "RFP - 60000010028 - Switchgear Package.docx", used

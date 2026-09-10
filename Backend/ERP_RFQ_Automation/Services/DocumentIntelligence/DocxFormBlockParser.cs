@@ -200,11 +200,15 @@ public sealed class DocxFormBlockParser
         var fieldRows = new Dictionary<string, int>(StringComparer.Ordinal);
 
         var ordinal = 0;
+        var unmapped = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (label, value, rowNumber) in block.Entries)
         {
             ordinal++;
             headers[ordinal] = label;
             var field = _vocabulary.FieldForColumn(label);
+            if (field is null && !string.IsNullOrWhiteSpace(value) && !string.IsNullOrWhiteSpace(label)
+                && unmapped.Count < NativeSpreadsheetParser.MaxUnmappedColumns)
+                unmapped.TryAdd(label.Trim(), value.Trim());
             // A blank Price is the norm, not a defect: the buyer leaves it for us to quote. Only
             // populated labels become values, so an empty one never overwrites a real reading.
             if (field is null || string.IsNullOrWhiteSpace(value) || values.ContainsKey(field)) continue;
@@ -267,6 +271,7 @@ public sealed class DocxFormBlockParser
             HeadersByColumn = headers,
             FieldColumnNumbers = fieldRows.ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal),
             FieldSourceAddresses = addresses,
+            UnmappedColumns = unmapped,
             RfqNo = Get(values, RfqSpreadsheetFields.RfqNo),
             BuyerName = Get(values, RfqSpreadsheetFields.BuyerName),
             ReceivedDate = Get(values, RfqSpreadsheetFields.ReceivedDate),

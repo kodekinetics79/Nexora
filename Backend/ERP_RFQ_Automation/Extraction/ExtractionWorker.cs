@@ -364,6 +364,25 @@ public sealed class ExtractionWorker : BackgroundService
             }
             var input = await reader.ReadAsync(job, workToken);
             var structured = input.IsStructured && input.StructuredRows is { Count: > 0 };
+
+            // A structured document whose lines were read without a model may still state its
+            // closing date or RFQ number in a label the vocabulary does not know. The header
+            // text alone — never a line — is read under the same process-wide LLM gate, and
+            // only values quoted verbatim from that text are kept (HeaderCompletionService).
+            if (structured
+                && scope.ServiceProvider.GetService<HeaderCompletion.IHeaderCompletionService>() is { } headerCompletion
+                && headerCompletion.HasGap(input))
+            {
+                await _llmGate.WaitAsync(workToken);
+                try
+                {
+                    await headerCompletion.CompleteAsync(input, workToken);
+                }
+                finally
+                {
+                    _llmGate.Release();
+                }
+            }
             // Only the non-structured path can be a conversational body, so the provenance
             // lookup is paid only where it can change the routing.
             var jobMetadata = structured ? null : await ReadJobMetadataAsync(job, workToken);

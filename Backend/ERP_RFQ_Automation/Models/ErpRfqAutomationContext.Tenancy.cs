@@ -1,6 +1,8 @@
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.Services.DocumentIntelligence.Learning;
 using ERP_RFQ_Automation.CustomerResolution;
+using ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
@@ -316,6 +318,9 @@ public partial class ErpRfqAutomationContext
         // Client-organisation identity: the ranked machine proposals behind every
         // "Nexora thinks this is ..." on a lead.
         modelBuilder.ApplyCustomerResolutionModel();
+        // Maker knowledge: the (part-number prefix, manufacturer) pairs a tenant's reviewed
+        // leads have stated, read back by extraction to fill a manufacturer the buyer left out.
+        modelBuilder.ApplyManufacturerKnowledgeModel();
         modelBuilder.ApplyCommercialSalesModel();
         modelBuilder.ApplyCommercialExceptionModel();
         modelBuilder.ApplyOpportunityPriorityModel(Database.IsNpgsql());
@@ -365,6 +370,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.ManufacturerPartPattern>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<ERP_RFQ_Automation.CustomerResolution.LeadCustomerMatchCandidate>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerOwnership>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -409,6 +416,12 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<CustomFieldValue>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         // CustomFieldValueHistory was removed (FR-MDM-05 / E44) — it was mapped, filtered and
         // trigger-protected but never written to. See CustomFields/CustomFieldValues.cs.
+
+        // What a tenant's reviewers taught the document parser. Mapped on every provider so the
+        // learning loop is testable without PostgreSQL, unlike the evidence ledger below.
+        modelBuilder.AddHeaderSpellings();
+        modelBuilder.Entity<ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.HeaderSpelling>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // PostgreSQL-backed enterprise foundations.
         if (Database.IsNpgsql())

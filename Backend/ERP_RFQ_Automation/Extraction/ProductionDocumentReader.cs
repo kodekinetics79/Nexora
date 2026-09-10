@@ -12,6 +12,7 @@ using Docnet.Core;
 using Docnet.Core.Converters;
 using Docnet.Core.Models;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
+using ERP_RFQ_Automation.Services.DocumentIntelligence.Learning;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Platform.Entitlements;
@@ -57,7 +58,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly IEntitlementService? _entitlements;
     private readonly IExtractionHeavyWorkAdmission _heavyWorkAdmission;
     private readonly bool _requireOcrEntitlement;
-    private readonly NativeSpreadsheetParser _spreadsheetParser = new();
+    private NativeSpreadsheetParser _spreadsheetParser = new();
+    private readonly ITenantHeaderVocabulary? _vocabulary;
 
     /// <summary>Config key for <see cref="_requireOcrEntitlement"/>.</summary>
     internal const string RequireOcrEntitlementConfigKey = "Extraction:Ocr:RequirePlanEntitlement";
@@ -65,7 +67,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     // A Word RFQ usually states its lines in a table, which is structured data and should not be
     // flattened to prose and sent to a model. Shares the spreadsheet column-alias and
     // header-location rules, so one set of buyer spellings serves both formats.
-    private readonly DocxTableParser _docxTableParser;
+    private DocxTableParser _docxTableParser;
 
     /// <summary>
     /// Absolute floor: text below this many non-whitespace characters is nothing at all,
@@ -213,6 +215,19 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     {
     }
 
+    public ProductionDocumentReader(
+        ILogger<ProductionDocumentReader> log,
+        IWebHostEnvironment env,
+        IEvidenceObjectStorage evidenceStorage,
+        IFileInspectionService inspection,
+        IEntitlementService entitlements,
+        IExtractionHeavyWorkAdmission heavyWorkAdmission,
+        ITenantHeaderVocabulary vocabulary)
+        : this(log, env, evidenceStorage, null, inspection, entitlements,
+            configuration: null, heavyWorkAdmission: heavyWorkAdmission, vocabulary: vocabulary)
+    {
+    }
+
     internal ProductionDocumentReader(
         ILogger<ProductionDocumentReader> log,
         IWebHostEnvironment env,
@@ -221,9 +236,11 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         IFileInspectionService? inspection = null,
         IEntitlementService? entitlements = null,
         IConfiguration? configuration = null,
-        IExtractionHeavyWorkAdmission? heavyWorkAdmission = null)
+        IExtractionHeavyWorkAdmission? heavyWorkAdmission = null,
+        ITenantHeaderVocabulary? vocabulary = null)
     {
         _log = log;
+        _vocabulary = vocabulary;
         _evidenceStorage = evidenceStorage;
         _tiffFrameOcr = tiffFrameOcr;
         _inspection = inspection;
@@ -250,6 +267,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     public async Task<DocumentExtractionInput> ReadAsync(ExtractionJob job, CancellationToken ct = default)
     {
         await using var heavyWork = await _heavyWorkAdmission.EnterAsync(ct);
+        await UseTenantVocabularyAsync(job.BusinessUnitId, ct);
         var name = job.FileName ?? Path.GetFileName(job.StoragePath);
         var ext = (job.FileType ?? Path.GetExtension(job.StoragePath) ?? string.Empty)
             .TrimStart('.').ToLowerInvariant();
@@ -406,6 +424,32 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         };
 
         return Unstructured(job, name, read);
+    }
+
+    /// <summary>
+    /// Reads this job's document with the vocabulary its tenant has taught. The parsers are
+    /// rebuilt only when the tenant has learned spellings; the reader is scoped per job, so the
+    /// swap cannot leak one tenant's spellings into another's document.
+    /// </summary>
+    private async Task UseTenantVocabularyAsync(long businessUnitId, CancellationToken ct)
+    {
+        if (_vocabulary is null) return;
+        RfqHeaderVocabulary vocabulary;
+        try
+        {
+            vocabulary = await _vocabulary.ForBusinessUnitAsync(businessUnitId, ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            // Learned spellings are an improvement, never a dependency: a failed read leaves the
+            // document on the built-in vocabulary it would have had anyway.
+            _log.LogWarning(ex, "Could not load learned header spellings for tenant {Tenant}; using the built-in vocabulary.", businessUnitId);
+            return;
+        }
+        if (vocabulary.Learned.Count == 0 || ReferenceEquals(vocabulary, _spreadsheetParser.Vocabulary)) return;
+        _spreadsheetParser = new NativeSpreadsheetParser(vocabulary);
+        _docxTableParser = new DocxTableParser(_spreadsheetParser);
     }
 
     private static bool MayRequireOcr(string ext) => ext is

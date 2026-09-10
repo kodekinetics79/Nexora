@@ -56,8 +56,21 @@ public static class AiPromptVersions
     /// agreement reference (plus their header confidences). The common extraction result and
     /// Lead/revision model already carried these fields, but the structured/unstructured prompt
     /// never requested them, so model-read documents silently stored nulls.
+    ///
+    /// v6 -> v7 (2026-09-10): added the maker rule. The prompt said nothing about
+    /// "ManufacturerName", so a brand written inside a description ("Siemens 3RT2015
+    /// contactor") or a part-number family that belongs to one maker came back null whenever
+    /// the document had no manufacturer heading — which is most bid lists. The model may now
+    /// fill it from the line itself, at lowered item confidence, and never between two makers.
     /// </summary>
-    public const string StructuredRfqExtraction = "rfq-extraction-v6";
+    public const string StructuredRfqExtraction = "rfq-extraction-v7";
+
+    /// <summary>
+    /// The header-only prompt (<c>OllamaLlmService.BuildHeaderCompletionInstructions</c>) sent
+    /// for a structured document whose lines were read deterministically but whose inquiry-level
+    /// facts the vocabulary could not find. It never sees a line item.
+    /// </summary>
+    public const string HeaderCompletion = "rfq-header-completion-v1";
 }
 
 public sealed record AiCallContext(

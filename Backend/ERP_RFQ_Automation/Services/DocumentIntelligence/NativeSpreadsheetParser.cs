@@ -46,7 +46,8 @@ public sealed class NativeSpreadsheetParser
                     rowNumber,
                     headers,
                     fieldColumns,
-                    field => Cell(field));
+                    field => Cell(field),
+                    column => worksheet.Cells[rowNumber, column].Text);
 
                 if (IsMaterial(row))
                     rows.Add(row);
@@ -83,7 +84,8 @@ public sealed class NativeSpreadsheetParser
                 record.StartLine,
                 headers,
                 fieldColumns,
-                field => Cell(field));
+                field => Cell(field),
+                column => column <= record.Values.Count ? record.Values[column - 1] : null);
 
             if (IsMaterial(row))
                 rows.Add(row);
@@ -227,7 +229,7 @@ public sealed class NativeSpreadsheetParser
             {
                 string? Cell(string field) => ReadCell(fieldColumns, field, valueAt);
                 var row = CreateRow(sourceDocumentName, worksheetName, headerRow, rowNumber,
-                    headers, fieldColumns, Cell);
+                    headers, fieldColumns, Cell, valueAt);
                 if (IsMaterial(row))
                     rows.Add(row);
             }
@@ -264,7 +266,8 @@ public sealed class NativeSpreadsheetParser
         int rowNumber,
         Dictionary<int, string> headers,
         Dictionary<string, int> fieldColumns,
-        Func<string, string?> cell)
+        Func<string, string?> cell,
+        Func<int, string?> valueAt)
     {
         var addresses = fieldColumns.ToDictionary(
             pair => pair.Key,
@@ -280,6 +283,7 @@ public sealed class NativeSpreadsheetParser
             HeadersByColumn = new Dictionary<int, string>(headers),
             FieldColumnNumbers = new Dictionary<string, int>(fieldColumns, StringComparer.Ordinal),
             FieldSourceAddresses = addresses,
+            UnmappedColumns = UnmappedColumns(headers, fieldColumns, valueAt),
             RfqNo = cell(RfqSpreadsheetFields.RfqNo),
             BuyerName = cell(RfqSpreadsheetFields.BuyerName),
             ReceivedDate = cell(RfqSpreadsheetFields.ReceivedDate),
@@ -327,7 +331,8 @@ public sealed class NativeSpreadsheetParser
                 column => column <= cells.Count ? cells[column - 1] : null);
 
             var row = CreateRow(sourceDocumentName, worksheetName, located.Row, rowNumber,
-                located.Headers, located.FieldColumns, Cell);
+                located.Headers, located.FieldColumns, Cell,
+                column => column <= cells.Count ? cells[column - 1] : null);
             if (IsMaterial(row))
                 rows.Add(row);
         }
@@ -365,7 +370,8 @@ public sealed class NativeSpreadsheetParser
                 column => column <= cells.Count ? cells[column - 1] : null);
 
             var row = CreateRow(sourceDocumentName, worksheetName, headerRowNumber, rowNumber,
-                headerMap, columns, Cell);
+                headerMap, columns, Cell,
+                column => column <= cells.Count ? cells[column - 1] : null);
             if (IsMaterial(row))
                 rows.Add(row);
         }
@@ -423,6 +429,35 @@ public sealed class NativeSpreadsheetParser
 
         var fallback = readHeadersAt(firstRow);
         return (firstRow, fallback, BuildFieldColumnMap(fallback));
+    }
+
+    /// <summary>At most this many unrecognised columns travel with a line — the same ceiling the model path applies to ExtraFields.</summary>
+    internal const int MaxUnmappedColumns = 20;
+
+    /// <summary>
+    /// The buyer's own headings that named no field, with this row's text under each. Blank
+    /// headings and blank cells are skipped: a value with no heading teaches nothing, and a
+    /// heading with no value on this row says nothing about this line.
+    /// </summary>
+    private static Dictionary<string, string> UnmappedColumns(
+        IReadOnlyDictionary<int, string> headers,
+        IReadOnlyDictionary<string, int> fieldColumns,
+        Func<int, string?> valueAt)
+    {
+        var mapped = new HashSet<int>(fieldColumns.Values);
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (column, heading) in headers.OrderBy(pair => pair.Key))
+        {
+            if (mapped.Contains(column) || string.IsNullOrWhiteSpace(heading))
+                continue;
+            var value = valueAt(column)?.Trim();
+            if (string.IsNullOrEmpty(value) || result.ContainsKey(heading.Trim()))
+                continue;
+            result[heading.Trim()] = value;
+            if (result.Count >= MaxUnmappedColumns)
+                break;
+        }
+        return result;
     }
 
     private static Dictionary<int, string> ReadHeaders(int firstColumn, int lastColumn, Func<int, string?> value)

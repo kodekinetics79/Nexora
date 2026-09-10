@@ -39,7 +39,8 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 BidClosingDate = DateValue(first.BidClosingDate, first, RfqSpreadsheetFields.BidClosingDate, true, "BID_CLOSING_DATE"),
                 DeliveryLocation = TextValue(first.DeliveryLocation, first, RfqSpreadsheetFields.DeliveryLocation),
                 RequiredDeliveryDate = DateValue(first.RequiredDeliveryDate, first, RfqSpreadsheetFields.RequiredDeliveryDate, true, "REQUIRED_DELIVERY_DATE"),
-                AgreementReference = TextValue(first.AgreementReference, first, RfqSpreadsheetFields.AgreementReference)
+                AgreementReference = TextValue(first.AgreementReference, first, RfqSpreadsheetFields.AgreementReference),
+                UnmappedHeaders = new Dictionary<string, string>(first.UnmappedHeaderLabels, StringComparer.Ordinal)
             };
 
             // What THIS document states, decided from the document's own rows before any
@@ -66,7 +67,10 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                     ManufacturerName = TextValue(row.ManufacturerName, row, RfqSpreadsheetFields.ManufacturerName),
                     ManufacturerPartNumber = TextValue(row.ManufacturerPartNumber, row, RfqSpreadsheetFields.ManufacturerPartNumber),
                     LeadTimeDays = IntValue(row.LeadTimeDays, row, RfqSpreadsheetFields.LeadTimeDays, true, "LEAD_TIME_DAYS"),
-                    ItemText = TextValue(row.ItemText, row, RfqSpreadsheetFields.ItemText)
+                    ItemText = TextValue(row.ItemText, row, RfqSpreadsheetFields.ItemText),
+                    ExtraFields = row.UnmappedColumns.Count == 0
+                        ? null
+                        : new Dictionary<string, string>(row.UnmappedColumns, StringComparer.Ordinal)
                 };
 
                 var lineKey = BuildLineKey(row);
@@ -206,7 +210,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     private static CanonicalValue<string> TextValue(string? raw, RfqSpreadsheetRow row, string column, CanonicalValueKind kind = CanonicalValueKind.Extracted, decimal confidence = 1.0m)
     {
         var trimmed = raw?.Trim();
-        return new CanonicalValue<string>
+        var value = new CanonicalValue<string>
         {
             OriginalValue = raw,
             Value = string.IsNullOrWhiteSpace(trimmed) ? null : trimmed,
@@ -216,6 +220,21 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             Evidence = new List<SourceEvidence> { Evidence(row, column, raw) },
             Transformations = string.IsNullOrWhiteSpace(trimmed) ? new List<string>() : new List<string> { "trim" }
         };
+        ApplyProvenance(value, row, column);
+        return value;
+    }
+
+    /// <summary>
+    /// A value that was filled in after the labelled read (see <see cref="RfqSpreadsheetRow.FieldProvenance"/>)
+    /// keeps every check above but is never certified at the confidence of a deterministic read:
+    /// its confidence is capped at the filler's figure and the filler's note is recorded with it.
+    /// </summary>
+    private static void ApplyProvenance<T>(CanonicalValue<T> value, RfqSpreadsheetRow row, string column)
+    {
+        if (value.Value is null || !row.FieldProvenance.TryGetValue(column, out var provenance))
+            return;
+        value.Confidence = Math.Min(value.Confidence, provenance.Confidence);
+        value.Transformations.Add(provenance.Note);
     }
 
     private static CanonicalValue<DateTime> DateValue(string? raw, RfqSpreadsheetRow row, string column, bool optional, string fieldName)
@@ -276,6 +295,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 value.ValidationStatus = ValidationStatus.Valid;
             }
 
+            ApplyProvenance(value, row, column);
             return value;
         }
 
