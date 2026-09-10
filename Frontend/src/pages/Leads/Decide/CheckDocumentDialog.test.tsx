@@ -20,6 +20,8 @@ vi.mock('../../../api/services/extractionReviewService', () => ({
 }));
 vi.mock('../../../utils/authenticatedFile', () => ({
   fetchAuthenticatedObjectUrl: (...args: unknown[]) => api.fetchObjectUrl(...args),
+  openAuthenticatedFile: vi.fn(),
+  downloadAuthenticatedFile: vi.fn(),
 }));
 
 import CheckDocumentDialog, { DEFAULT_CHECK_REASON } from './CheckDocumentDialog';
@@ -143,6 +145,20 @@ describe('CheckDocumentDialog', () => {
     expect(await screen.findByLabelText('inquiry.csv')).toHaveTextContent('SEC-1,Control module');
     expect(screen.queryByTitle('inquiry.csv')).not.toBeInTheDocument();
     expect(screen.getAllByText('inquiry.csv')).toHaveLength(1);
+  });
+
+  it('offers to open or download a spreadsheet the browser cannot draw, instead of a blank pane', async () => {
+    api.fetchObjectUrl.mockResolvedValue({
+      url: 'blob:xlsx',
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      blob: new Blob(['PK']),
+    });
+    const evidence = { ...workbench().evidence[0], name: 'bid-list.xlsx', mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+    renderDialog({ workbench: workbench({ evidence: [evidence] }) });
+    expect(await screen.findByRole('alert')).toHaveTextContent('bid-list.xlsx is a file the browser cannot show here');
+    expect(screen.getByRole('button', { name: 'Open in a new tab' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
+    expect(screen.queryByTitle('bid-list.xlsx')).not.toBeInTheDocument();
   });
 
   it('sends a changed quote-due date with the check, and nothing else from the header', async () => {

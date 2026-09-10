@@ -27,7 +27,7 @@ import { useSnackbar } from 'notistack';
 import leadService, { type LeadItemResponseDTO } from '../../../api/services/leadService';
 import extractionReviewService, { type ReviewItemPayload } from '../../../api/services/extractionReviewService';
 import type { LeadDecisionEvidenceDTO, LeadDecisionLineDTO, LeadDecisionWorkbenchDTO } from '../../../api/services/leadDecisionService';
-import { fetchAuthenticatedObjectUrl } from '../../../utils/authenticatedFile';
+import { downloadAuthenticatedFile, fetchAuthenticatedObjectUrl, openAuthenticatedFile } from '../../../utils/authenticatedFile';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { inspectableEvidenceUrl } from '../Workbench/evidenceRules';
 import { lineLabel } from './decideRules';
@@ -177,6 +177,24 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = (
     );
   }
   const isImage = state.contentType.startsWith('image/');
+  const framable = isImage || /pdf|html/.test(state.contentType);
+  if (!framable) {
+    // Word, Excel and the like: a browser will not draw them inside a page. Offer the original
+    // itself rather than a blank pane that looks like a missing document.
+    return (
+      <Alert
+        severity="info"
+        action={(
+          <Stack direction="row" spacing={1}>
+            <Button color="inherit" size="small" onClick={() => void openAuthenticatedFile(path)}>Open in a new tab</Button>
+            <Button color="inherit" size="small" onClick={() => void downloadAuthenticatedFile(path, evidence.name)}>Download</Button>
+          </Stack>
+        )}
+      >
+        <strong>{evidence.name}</strong> is a file the browser cannot show here. Open it beside this window to cross-check.
+      </Alert>
+    );
+  }
   return isImage ? (
     <Box component="img" src={state.url} alt={evidence.name} sx={{ maxWidth: '100%', display: 'block' }} />
   ) : (
