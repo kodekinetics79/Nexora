@@ -2283,6 +2283,37 @@ public sealed class LeadPersister : ILeadPersister
         return persisted.LeadId;
     }
 
+    /// <summary>
+    /// Lines the persist transaction will write for this outcome: the extracted items, or the
+    /// canonical import's line items when the structured ledger is also being written.
+    /// </summary>
+    internal static int PersistedLineCount(ChunkedExtractionOutcome outcome)
+    {
+        var canonicalLines = outcome.CanonicalImport?.Documents.Sum(d => d.LineItems.Count) ?? 0;
+        return Math.Max(outcome.ExtractedItemCount, canonicalLines);
+    }
+
+    /// <summary>Lines one base lease is trusted to persist. Observed: ~250 lines a minute on a
+    /// developer machine against a local database, so 300 lines per five-minute lease leaves a
+    /// four-fold margin for a remote database's round trips.</summary>
+    internal const int LinesPerBaseLease = 300;
+
+    /// <summary>The longest persist lease a single job may hold, however large the document.</summary>
+    internal static readonly TimeSpan MaxPersistLease = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// The lease to hold while persisting <paramref name="lineCount"/> lines: the base lease,
+    /// multiplied for every <see cref="LinesPerBaseLease"/> lines and capped at
+    /// <see cref="MaxPersistLease"/>. Never shorter than the base lease.
+    /// </summary>
+    internal static TimeSpan PersistLeaseFor(TimeSpan baseLease, int lineCount)
+    {
+        if (baseLease <= TimeSpan.Zero) return baseLease;
+        var multiplier = Math.Max(1, (int)Math.Ceiling(Math.Max(lineCount, 0) / (double)LinesPerBaseLease));
+        var scaled = TimeSpan.FromTicks(baseLease.Ticks * multiplier);
+        return scaled > MaxPersistLease && MaxPersistLease > baseLease ? MaxPersistLease : scaled;
+    }
+
     private async Task<PersistedExtraction?> PersistAndCompleteCoreAsync(
         ExtractionJob job,
         ChunkedExtractionOutcome outcome,
@@ -2296,7 +2327,15 @@ public sealed class LeadPersister : ILeadPersister
 
         // This conditional UPDATE both validates the fencing generation and holds the
         // queue row lock until commit, preventing reclaim during the persistence write.
-        if (!await queue.RenewLeaseAsync(job.Id, workerId, leaseAttempt, leaseDuration, ct))
+        //
+        // The lease it grants is sized to the document. The base lease covers one ordinary
+        // read-and-persist cycle; a 1,500-line bid list writes some 35 evidence rows per line
+        // inside this transaction and took six minutes on a developer machine, so a five-minute
+        // lease fenced its own completion on every attempt and the job dead-lettered after
+        // repeating the full write five times. The row lock held here already prevents any
+        // reclaim while the write runs, so a longer lease only delays recovery after a crash.
+        var persistLease = PersistLeaseFor(leaseDuration, PersistedLineCount(outcome));
+        if (!await queue.RenewLeaseAsync(job.Id, workerId, leaseAttempt, persistLease, ct))
         {
             await transaction.RollbackAsync(ct);
             return null;

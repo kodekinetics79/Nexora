@@ -509,12 +509,18 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         };
     }
 
+    /// <summary>The document key for rows that name no RFQ number and no buyer.</summary>
+    internal const string UnidentifiedRfqKey = "document";
+
     private static string BuildRfqKey(RfqSpreadsheetRow row)
     {
         var rfqNo = (row.RfqNo ?? "").Trim().ToLowerInvariant();
         var buyer = (row.BuyerName ?? "").Trim().ToLowerInvariant();
+        // Rows that carry no RFQ identity of their own belong to the one document they came
+        // from. Keying them by row number made a 1,500-line Word bid list into 1,500 canonical
+        // inquiries, one per line, each with its own header evidence, and multiplied the write.
         return string.IsNullOrWhiteSpace(rfqNo) && string.IsNullOrWhiteSpace(buyer)
-            ? $"row:{row.RowNumber}"
+            ? UnidentifiedRfqKey
             : $"{rfqNo}|{buyer}";
     }
 

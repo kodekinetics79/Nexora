@@ -83,6 +83,12 @@ public sealed class DocxTableParser
             return Array.Empty<RfqSpreadsheetRow>();
 
         var headerBlock = ReadHeaderBlock(body);
+        if (!headerBlock.ContainsKey(RfqSpreadsheetFields.RfqNo))
+        {
+            var fromName = RfqNumberFromFileName(sourceDocumentName);
+            if (fromName is not null)
+                headerBlock[RfqSpreadsheetFields.RfqNo] = fromName;
+        }
 
         var results = new List<RfqSpreadsheetRow>();
         var tableOrdinal = 0;
@@ -231,6 +237,9 @@ public sealed class DocxTableParser
     /// splits one visual line across several runs and several paragraphs, so each paragraph is
     /// scanned for every known label rather than assuming one pair per line.
     /// </summary>
+    /// <summary>A label-and-value table this small is document metadata, not a line grid.</summary>
+    private const int HeaderTableRowLimit = 12;
+
     private static Dictionary<string, string> ReadHeaderBlock(Body body)
     {
         var found = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -251,7 +260,38 @@ public sealed class DocxTableParser
                 found.TryAdd(field, value);
         }
 
+        // A sourcing-portal export ("print version of the event") states the same metadata as
+        // small two-column tables — "Due date | 10/8/2026 3:00 PM", "Currency | US Dollar" —
+        // with no paragraph above the first table at all. Each such row is one "Label: value"
+        // pair; a row that is not a recognised label is simply skipped.
+        foreach (var table in body.Elements<Table>())
+        {
+            var rows = table.Elements<TableRow>().ToList();
+            if (rows.Count == 0 || rows.Count > HeaderTableRowLimit)
+                continue;
+            foreach (var row in rows)
+            {
+                var cells = row.Elements<TableCell>().Select(cell => cell.InnerText.Trim()).ToList();
+                if (cells.Count != 2 || cells[0].Length == 0 || cells[1].Length == 0)
+                    continue;
+                foreach (var (field, value) in ExtractPairs($"{cells[0]}: {cells[1]}"))
+                    found.TryAdd(field, value);
+            }
+        }
+
         return found;
+    }
+
+    /// <summary>
+    /// The RFQ number in a file name such as "RFP - 60000010028 - Switchgear Package.docx", used
+    /// only when the document itself states none. Nine digits or more, so a date or a year in a
+    /// name is never mistaken for one.
+    /// </summary>
+    internal static string? RfqNumberFromFileName(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(fileName, @"(?<!\d)\d{9,}(?!\d)");
+        return match.Success ? match.Value : null;
     }
 
     /// <summary>
