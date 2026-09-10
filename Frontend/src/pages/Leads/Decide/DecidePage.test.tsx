@@ -58,6 +58,11 @@ vi.mock('../ResolveClientDialog', () => ({
   default: ({ open }: { open: boolean }) => (open ? <div role="dialog" aria-label="Choose customer">customer picker</div> : null),
 }));
 vi.mock('../Workbench/SourceEvidencePanel', () => ({ default: () => <h2>Source evidence</h2> }));
+// The document check is its own tested dialog; here it only needs to open on the right line.
+vi.mock('./CheckDocumentDialog', () => ({
+  default: ({ open, focusLineId }: { open: boolean; focusLineId?: number | null }) =>
+    (open ? <div role="dialog" aria-label="Check against the document">focus:{String(focusLineId)}</div> : null),
+}));
 
 import DecidePage from './DecidePage';
 
@@ -116,7 +121,7 @@ let record: LeadDecisionWorkbenchDTO;
 
 const renderPage = () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/procurement/leads/407/workbench']}>
         <Routes>
@@ -125,6 +130,7 @@ const renderPage = () => {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, client };
 };
 
 const pickOption = async (comboboxName: string | RegExp, optionName: string | RegExp) => {
@@ -330,6 +336,42 @@ describe('DecidePage', () => {
     expect(await screen.findByText('This request could not be loaded', undefined, { timeout: 5000 })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create RFQ' })).not.toBeInTheDocument();
+  });
+
+  it('opens the document check in place for a line Nexora is unsure about', async () => {
+    record = { ...baseWorkbench(), lines: [line({ id: 1, verificationStatus: 'NEEDS_CHECK' }), line({ id: 2 })] };
+    renderPage();
+    const group = await screen.findByRole('group', { name: 'Quote or skip line 00001' });
+    fireEvent.click(within(group).getByRole('button', { name: 'Quote' }));
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Quote or skip line 00002' })).getByRole('button', { name: 'Quote' }));
+    expect(status()).toHaveTextContent('Check what Nexora read for line 00001 against the document.');
+    expect(screen.getByRole('button', { name: 'Create RFQ' })).toBeDisabled();
+
+    // From the sentence, from the line, and from the section header: all the same dialog.
+    fireEvent.click(within(status()).getByRole('button', { name: 'Check the document' }));
+    expect(await screen.findByRole('dialog', { name: 'Check against the document' })).toHaveTextContent('focus:null');
+    expect(navigate).not.toHaveBeenCalledWith(expect.stringContaining('/procurement/extraction/review/'));
+  });
+
+  it('carries Quote and Skip choices across the new revision a document check creates', async () => {
+    record = { ...baseWorkbench(), lines: [line({ id: 1, verificationStatus: 'NEEDS_CHECK' }), line({ id: 2 })] };
+    const { client } = renderPage();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Quote or skip line 00001' })).getByRole('button', { name: 'Quote' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Quote or skip line 00002' })).getByRole('button', { name: 'Skip' }));
+    await pickOption('Why skip line 00002', 'Item unavailable');
+
+    // The server minted revision 2 with new line ids, both lines now verified; the page re-reads it.
+    record = {
+      ...record,
+      leadRevisionId: 9002,
+      leadRevisionNumber: 2,
+      lines: [line({ id: 7, lineItemNo: '00001' }), line({ id: 8, lineItemNo: '00002' })],
+    };
+    await client.invalidateQueries({ queryKey: ['lead-decision-workbench', 407] });
+    await screen.findByText('Revision 2');
+    const first = await screen.findByRole('group', { name: 'Quote or skip line 00001' });
+    await waitFor(() => expect(within(first).getByRole('button', { name: 'Quote' })).toHaveAttribute('aria-pressed', 'true'));
+    expect(within(screen.getByRole('group', { name: 'Quote or skip line 00002' })).getByRole('button', { name: 'Skip' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('opens the history drawer when an RFQ links straight to the evidence', async () => {

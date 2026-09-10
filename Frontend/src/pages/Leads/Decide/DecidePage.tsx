@@ -52,6 +52,7 @@ import {
   type EditableLineDecision,
 } from '../Workbench/workbenchRules';
 import LinesTable from './LinesTable';
+import CheckDocumentDialog, { type ConfirmedLine } from './CheckDocumentDialog';
 import {
   buildFitRequest,
   buildParticipationRequest,
@@ -61,6 +62,7 @@ import {
   daysUntil,
   dueSentence,
   fitMatchesSaved,
+  lineLabel,
   newId,
   nextThing,
   QUALIFIED,
@@ -121,7 +123,11 @@ const DecidePage: React.FC = () => {
   const [declineOpen, setDeclineOpen] = React.useState(false);
   const [rfqImpactOpen, setRfqImpactOpen] = React.useState(false);
   const [historyOpen, setHistoryOpen] = React.useState(() => ['evidence', 'validate'].includes(searchParams.get('stage') ?? ''));
+  const [checkOpen, setCheckOpen] = React.useState(false);
+  const [checkFocus, setCheckFocus] = React.useState<number | null>(null);
   const seed = React.useRef<string | null>(null);
+  /** The lines and choices of the revision last shown, so a new revision can inherit the choices. */
+  const previous = React.useRef<{ revisionId: number; byLabel: Map<string, EditableLineDecision> } | null>(null);
   const fitOperation = React.useRef<RetryOperation | null>(null);
   const participationOperation = React.useRef<RetryOperation | null>(null);
   const promotionKey = React.useRef<string | null>(null);
@@ -153,7 +159,22 @@ const DecidePage: React.FC = () => {
     if (!workbench) return;
     const nextSeed = [workbench.leadRevisionId, workbench.participationVersion ?? 'none', workbench.participationStatus, workbench.fitAssessment?.version ?? 0].join(':');
     if (seed.current !== nextSeed) {
-      setDecisions(initializeDecisionMap(workbench));
+      const initial = initializeDecisionMap(workbench);
+      // A document check mints a new immutable revision with new line ids. The rep's Quote/Skip
+      // choices and reasons carry across by line number; the corrected commercial values win.
+      if (previous.current && previous.current.revisionId !== workbench.leadRevisionId) {
+        for (const line of workbench.lines) {
+          const carried = previous.current.byLabel.get(lineLabel(line));
+          if (!carried || initial[line.revisionLineId]?.decision !== 'Pending') continue;
+          initial[line.revisionLineId] = {
+            ...initial[line.revisionLineId],
+            decision: carried.decision,
+            ...(carried.reasonCode ? { reasonCode: carried.reasonCode } : {}),
+            ...(carried.note ? { note: carried.note } : {}),
+          };
+        }
+      }
+      setDecisions(initial);
       setConcern(concernFromSaved(workbench.fitAssessment));
       seed.current = nextSeed;
     }
@@ -194,7 +215,37 @@ const DecidePage: React.FC = () => {
     }));
   }, []);
 
-  const openDocument = React.useCallback(() => navigate(`/procurement/extraction/review/${leadId}`), [leadId, navigate]);
+  React.useEffect(() => {
+    if (!workbench) return;
+    previous.current = {
+      revisionId: workbench.leadRevisionId,
+      byLabel: new Map(workbench.lines.map((line) => [lineLabel(line), decisions[line.revisionLineId]]).filter((entry): entry is [string, EditableLineDecision] => Boolean(entry[1]))),
+    };
+  }, [workbench, decisions]);
+
+  const openDocument = React.useCallback((line?: { revisionLineId: number }) => {
+    setCheckFocus(line?.revisionLineId ?? null);
+    setCheckOpen(true);
+  }, []);
+
+  const applyConfirmed = React.useCallback((confirmed: ConfirmedLine[]) => {
+    if (!workbench) return;
+    const byLabel = new Map(confirmed.map((entry) => [entry.lineItemNo, entry]));
+    setDecisions((current) => {
+      const next = { ...current };
+      for (const line of workbench.lines) {
+        const values = byLabel.get(lineLabel(line));
+        if (!values) continue;
+        next[line.revisionLineId] = {
+          ...(current[line.revisionLineId] ?? { decision: 'Pending' }),
+          ...(values.quantity != null ? { quantity: values.quantity } : {}),
+          ...(values.unitOfMeasure ? { unitOfMeasure: values.unitOfMeasure } : {}),
+          ...(values.currency ? { currency: values.currency } : {}),
+        };
+      }
+      return next;
+    });
+  }, [workbench]);
 
   /**
    * One click, four governed writes. Each write is idempotent and each refetch re-reads the
@@ -466,9 +517,16 @@ const DecidePage: React.FC = () => {
         <Box component="section" aria-labelledby="decide-lines" sx={{ pt: 2 }}>
           <Stack direction="row" spacing={2} sx={{ alignItems: 'baseline', justifyContent: 'space-between', px: { xs: 2, sm: 3 }, pb: 1 }}>
             <Typography id="decide-lines" component="h2" variant="subtitle1" sx={{ fontWeight: 700 }}>What they want</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-              <Box component="b" sx={{ color: 'text.primary' }}>{quoted}</Box> of {workbench.lines.length} lines to quote
-            </Typography>
+            <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
+              {!locked && canEdit && workbench.lines.some((line) => line.verificationStatus === 'NEEDS_CHECK') ? (
+                <Button size="small" variant="outlined" onClick={() => openDocument()} sx={{ fontWeight: 700 }}>
+                  Check against the document
+                </Button>
+              ) : null}
+              <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                <Box component="b" sx={{ color: 'text.primary' }}>{quoted}</Box> of {workbench.lines.length} lines to quote
+              </Typography>
+            </Stack>
           </Stack>
           <LinesTable
             leadId={leadId}
@@ -581,7 +639,12 @@ const DecidePage: React.FC = () => {
                 {next.kind === 'blocked' && next.action ? (
                   <>
                     {' '}
-                    <Link component="button" type="button" onClick={() => navigate(next.action!.path)} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
+                    <Link
+                      component="button"
+                      type="button"
+                      onClick={() => (next.action!.intent === 'check-document' ? openDocument() : navigate(next.action!.path))}
+                      sx={{ fontWeight: 700, verticalAlign: 'baseline' }}
+                    >
                       {next.action.label}
                     </Link>
                   </>
@@ -635,6 +698,15 @@ const DecidePage: React.FC = () => {
           {historyOpen ? <SourceEvidencePanel workbench={workbench} compact /> : null}
         </AccordionDetails>
       </Accordion>
+
+      <CheckDocumentDialog
+        open={checkOpen}
+        leadId={leadId}
+        workbench={workbench}
+        focusLineId={checkFocus}
+        onClose={() => setCheckOpen(false)}
+        onConfirmed={applyConfirmed}
+      />
 
       <ResolveClientDialog
         open={customerDialogOpen}

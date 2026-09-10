@@ -38,7 +38,8 @@ export interface LinesTableProps {
   reasonCodes: DecisionReasonCodeDTO[];
   readOnly: boolean;
   onChange: (revisionLineId: number, patch: Partial<EditableLineDecision>) => void;
-  onOpenDocument: () => void;
+  /** Opens the document check beside the lines, focused on the given line when there is one. */
+  onOpenDocument: (line?: LeadDecisionLineDTO) => void;
 }
 
 const numberOrEmpty = (value: number | undefined): string =>
@@ -245,7 +246,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
                               : (
                                 <>
                                   Nexora is not sure it read this line correctly.{' '}
-                                  <Link component="button" type="button" onClick={onOpenDocument} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
+                                  <Link component="button" type="button" onClick={() => onOpenDocument(line)} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
                                     Check the document
                                   </Link>
                                 </>
@@ -265,7 +266,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
                 <Typography color="text.secondary">
                   Nexora read no lines from this request. Check the document, or ask the customer for a list.
                 </Typography>
-                <Link component="button" type="button" onClick={onOpenDocument} sx={{ fontWeight: 700 }}>
+                <Link component="button" type="button" onClick={() => onOpenDocument()} sx={{ fontWeight: 700 }}>
                   Check the document for lead {leadId}
                 </Link>
               </TableCell>

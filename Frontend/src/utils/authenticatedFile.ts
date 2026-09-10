@@ -5,6 +5,17 @@ const fetchObjectUrl = async (path: string): Promise<string> => {
   return URL.createObjectURL(response.data);
 };
 
+/**
+ * An object URL for an authenticated file, with the content type the server sent, for callers
+ * that render the document inline (an iframe or image) rather than in a new tab. The caller owns
+ * the URL and must revoke it.
+ */
+export const fetchAuthenticatedObjectUrl = async (path: string): Promise<{ url: string; contentType: string; blob: Blob }> => {
+  const response = await axiosInstance.get(path, { responseType: 'blob' });
+  const blob = response.data as Blob;
+  return { url: URL.createObjectURL(blob), contentType: blob.type || String(response.headers?.['content-type'] ?? ''), blob };
+};
+
 export const downloadAuthenticatedFile = async (path: string, fileName: string): Promise<void> => {
   const url = await fetchObjectUrl(path);
   try {

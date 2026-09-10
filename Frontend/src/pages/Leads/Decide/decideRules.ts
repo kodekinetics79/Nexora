@@ -164,7 +164,14 @@ export const lineNeeds = (
   return needs;
 };
 
-export const needSentence = (need: LineNeed, leadId: number): { sentence: string; action?: { label: string; path: string } } => {
+export interface NextAction {
+  label: string;
+  path: string;
+  /** Set when the page can satisfy the action in place instead of navigating. */
+  intent?: 'check-document';
+}
+
+export const needSentence = (need: LineNeed, leadId: number): { sentence: string; action?: NextAction } => {
   const label = lineLabel(need.line);
   switch (need.kind) {
     case 'choice': return { sentence: `Choose Quote or Skip for line ${label}.` };
@@ -174,7 +181,7 @@ export const needSentence = (need: LineNeed, leadId: number): { sentence: string
     case 'currency': return { sentence: `Choose the currency for line ${label}.` };
     case 'source': return {
       sentence: `Check what Nexora read for line ${label} against the document.`,
-      action: { label: 'Check the document', path: `/procurement/extraction/review/${leadId}` },
+      action: { label: 'Check the document', path: `/procurement/extraction/review/${leadId}`, intent: 'check-document' },
     };
     case 'missing-source': return { sentence: `Line ${label} has no source document on file, so it cannot be quoted. Skip it, or upload the document again.` };
     case 'attention': return { sentence: `Say how you handled the catalogue warning on line ${label}.` };
@@ -204,7 +211,7 @@ export type NextThing =
   | { kind: 'ready' }
   | { kind: 'decline' }
   | { kind: 'concern' }
-  | { kind: 'blocked'; sentence: string; action?: { label: string; path: string } }
+  | { kind: 'blocked'; sentence: string; action?: NextAction }
   | { kind: 'closed'; sentence: string };
 
 export interface NextThingInput {
