@@ -155,8 +155,9 @@ describe('CheckDocumentDialog', () => {
     });
     const evidence = { ...workbench().evidence[0], name: 'bid-list.xlsx', mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
     renderDialog({ workbench: workbench({ evidence: [evidence] }) });
-    expect(await screen.findByRole('alert')).toHaveTextContent('bid-list.xlsx is a file the browser cannot show here');
-    expect(screen.getByRole('button', { name: 'Open in a new tab' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Open in a new tab' })).toBeInTheDocument();
+    expect(screen.getByText(/is a file the browser cannot show here/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('bid-list.xlsx')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
     expect(screen.queryByTitle('bid-list.xlsx')).not.toBeInTheDocument();
   });

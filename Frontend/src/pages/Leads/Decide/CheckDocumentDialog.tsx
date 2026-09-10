@@ -118,7 +118,10 @@ export const buildReviewItems = (
 
 /** Browsers download rather than display these inside a frame, so they are shown as text. */
 const isTextLike = (contentType: string, name: string): boolean =>
-  /^text\//.test(contentType) || /json|csv|xml/.test(contentType) || /\.(csv|txt|json|xml|md)$/i.test(name);
+  /^text\//.test(contentType)
+  // Office types also end in "xml" (spreadsheetml, wordprocessingml); only bare data types count.
+  || /^application\/(json|xml|csv)$/.test(contentType)
+  || /\.(csv|txt|json|xml|md)$/i.test(name);
 
 type ViewerState = { url: string; contentType: string; text?: string } | { error: string } | null;
 
