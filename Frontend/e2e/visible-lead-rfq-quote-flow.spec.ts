@@ -68,14 +68,12 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await expect(serialChip).toBeVisible();
     nexoraSerial = (await serialChip.textContent())!.replace(/^Nexora Serial:\s*/, '');
     await page.screenshot({ path: path.join(evidenceDir, '04-canonical-lead.png'), fullPage: true });
-    const workbench = page.getByRole('button', { name: /Open decision workbench|View decision record/i });
+    const workbench = page.getByRole('button', { name: /Decide: quote or skip|View decision/i });
     await expect(workbench).toBeVisible();
     await workbench.click();
     await expect(page).toHaveURL(/\/procurement\/leads\/1\/workbench$/);
-    await expect(page.getByRole('tab', { name: /^1\. Evidence:/ })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /^3\. Fit & Participation:/ })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /^4\. Promote:/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Create RFQ', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible();
+    await expect(page.getByRole('status')).toBeVisible();
     await expect(page.getByRole('button', { name: /Review & Create RFQ/i })).toHaveCount(0);
     await page.screenshot({ path: path.join(evidenceDir, '05-governed-decision-workbench.png'), fullPage: true });
   });
@@ -168,8 +166,8 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await page.setViewportSize({ width: 375, height: 812 });
     await login(page);
     await page.goto('/procurement/leads/1/workbench');
-    await expect(page.getByText('Decision workbench', { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole('tab', { name: /^1\. Evidence:/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible();
+    await expect(page.getByRole('status')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
     await page.screenshot({ path: path.join(evidenceDir, '13-mobile-workbench.png'), fullPage: true });
   });

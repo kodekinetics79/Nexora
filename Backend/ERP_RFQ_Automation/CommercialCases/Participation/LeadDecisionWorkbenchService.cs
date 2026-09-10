@@ -329,10 +329,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             ? lines
             : lines.Where(x => string.Equals(x.Participation?.Decision, "Bid",
                 StringComparison.OrdinalIgnoreCase)).ToArray();
+        // One condition, one blocker. This used to emit a second code from the identical
+        // predicate, so a rep with one missing-source line always read two bullets for one problem.
         if (sourceRequiredLines.Any(x => x.VerificationStatus == "MISSING_SOURCE"))
             blockers.Add(new("SOURCE_UNAVAILABLE", "A Bid line has no retained source evidence or governed human approval for the current revision."));
-        if (sourceRequiredLines.Any(x => x.VerificationStatus == "MISSING_SOURCE"))
-            blockers.Add(new("SOURCE_LINEAGE_INCOMPLETE", "Every Bid line must have exact source lineage before RFQ promotion."));
         if (lines.Any(x => x.VerificationStatus == "NEEDS_CHECK"
                 && string.Equals(x.Participation?.Decision, "Bid", StringComparison.OrdinalIgnoreCase)))
             blockers.Add(new("SOURCE_CRITICAL_FIELDS_UNVERIFIED",

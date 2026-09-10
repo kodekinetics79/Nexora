@@ -342,7 +342,7 @@ const AssignedLeadsPage: React.FC = () => {
           <Button
             size="small"
             variant="contained"
-            aria-label={`Open decision workbench for ${p.row.rfqno || `Lead ${p.row.id}`}`}
+            aria-label={`Decide ${p.row.rfqno || `Lead ${p.row.id}`}`}
             onClick={() => navigate(`/procurement/leads/${p.row.id}/workbench`)}
             sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}
           >

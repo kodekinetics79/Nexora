@@ -524,7 +524,7 @@ test('03 RFQ line evidence opens without inventing unavailable provenance', asyn
   await expect(page).toHaveURL(new RegExp(
     `/procurement/leads/${requiredNumber('E2E_CORE_LEAD_ID')}/workbench\\?stage=evidence$`,
   ));
-  await expect(page.getByRole('tab', { name: '1. Evidence' })).toHaveAttribute('aria-selected', 'true');
+  // The evidence address opens the decision screen with its history drawer already expanded.
   await expect(page.getByRole('heading', { name: 'Source evidence' })).toBeVisible();
 });
 

@@ -17,7 +17,6 @@ import {
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
   Email as EmailIcon,
-  AutoAwesome as SparkleIcon,
   MoreVert as MoreIcon,
   FilterAltOff as ClearFiltersIcon,
   MarkEmailRead as InboxIcon,
@@ -975,8 +974,8 @@ const LeadsPage: React.FC = () => {
     },
     {
       field: 'decision',
-      headerName: 'Decision',
-      width: 140,
+      headerName: "Nexora's read",
+      width: 230,
       sortable: false,
       filterable: false,
       renderCell: (p) => {
@@ -988,30 +987,23 @@ const LeadsPage: React.FC = () => {
         if (!summary) return null;
         const meta = DECISION_META[summary.recommendation];
         if (!meta) return null;
+        // The read and its reasons sit in the open. A tooltip hid the one line that tells a rep
+        // why the word says what it says, which is the line that makes the word believable.
         const facts = decisionFacts(summary);
-        const chip = (
-          <Chip
-            label={meta.label}
-            color={meta.color}
-            size="small"
-            sx={{ fontWeight: 600, fontSize: '0.7rem' }}
-          />
-        );
-        if (facts.length === 0) return chip;
         return (
-          <Tooltip
-            title={
-              <Box>
-                {facts.map((fact) => (
-                  <Typography key={fact} variant="caption" sx={{ display: 'block' }}>
-                    {fact}
-                  </Typography>
-                ))}
-              </Box>
-            }
-          >
-            {chip}
-          </Tooltip>
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', minWidth: 0 }}>
+            <Chip
+              label={meta.label}
+              color={meta.color}
+              size="small"
+              sx={{ fontWeight: 700, fontSize: '0.7rem', flexShrink: 0 }}
+            />
+            {facts.length > 0 && (
+              <Typography variant="caption" color="text.secondary" noWrap title={facts.join(' · ')}>
+                {facts.join(' · ')}
+              </Typography>
+            )}
+          </Stack>
         );
       },
     },
@@ -1061,16 +1053,17 @@ const LeadsPage: React.FC = () => {
                 <ViewIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-            {commercialAccess.canOpenLeadWorkbench && <Tooltip title="Open decision workbench">
-              <IconButton
+            {commercialAccess.canOpenLeadWorkbench && (
+              <Button
                 size="small"
-                aria-label="Open decision workbench"
-                sx={{ color: 'secondary.main' }}
+                variant={decided ? 'text' : 'outlined'}
+                aria-label={`Decide ${p.row.rfqno || `lead ${p.row.id}`}`}
                 onClick={() => navigate(`/procurement/leads/${p.row.id}/workbench`)}
+                sx={{ fontWeight: 700, minWidth: 0, px: 1.25, whiteSpace: 'nowrap' }}
               >
-                <SparkleIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>}
+                {decided ? 'View' : 'Decide'}
+              </Button>
+            )}
             {!decided && (
               <Tooltip title="More actions">
                 <IconButton

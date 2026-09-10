@@ -152,7 +152,10 @@ test.describe.serial('Production smoke — live customer journey', () => {
     await expect(page.getByRole('heading', { name: 'Leads', exact: true })).toBeVisible();
     const grid = page.getByRole('grid');
     await expect(grid).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole('columnheader', { name: 'Nexora Serial' })).toBeVisible();
+    // Client and Nexora's read are the default columns now; the serial is one click away in
+    // the column picker rather than on every row.
+    await expect(page.getByRole('columnheader', { name: 'Client' })).toBeVisible();
+    await expect(page.getByRole('columnheader', { name: "Nexora's read" })).toBeVisible();
 
     // Feature detection — the SINGLE allowed conditional in this suite. The
     // "Ingested" column (with its "Loaded after deadline" badge) may not be in
@@ -250,14 +253,13 @@ test.describe.serial('Production smoke — live customer journey', () => {
 
     await page.goto(`/procurement/leads/${targetLeadId}/convert`);
     await expect(page).toHaveURL(new RegExp(`/procurement/leads/${targetLeadId}/workbench$`), { timeout: 30_000 });
-    await expect(page.getByText('Decision workbench', { exact: true }).first()).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByRole('tab', { name: /^1\. Evidence:/ })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /^2\. Review transformation:/ })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /^3\. Fit & Participation:/ })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /^4\. Promote:/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Create RFQ', exact: true })).toHaveCount(0);
+    // The one decision screen: lines to quote or skip, and a sentence naming the next thing.
+    // The only creation control is the governed one, and it stays disabled until that
+    // sentence has nothing left to say.
+    await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('status')).toBeVisible();
     await expect(page.getByRole('button', { name: /Qualify & Create RFQ/i })).toHaveCount(0);
-    console.log(`[production-smoke] legacy bookmark resolved to governed workbench for lead ${targetLeadId}; no direct RFQ action was exposed.`);
+    console.log(`[production-smoke] legacy bookmark resolved to the lead decision screen for lead ${targetLeadId}; no ungoverned RFQ action was exposed.`);
   });
 
   test('05 governance and health APIs answer for the browser session', async ({ page }) => {

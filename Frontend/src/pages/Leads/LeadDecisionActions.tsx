@@ -250,7 +250,7 @@ const LeadDecisionActions: React.FC<Props> = ({ leadId, reviewVersion, canEdit, 
         <DialogTitle sx={{ fontWeight: 800 }}>Qualify this Lead?</DialogTitle>
         <DialogContent dividers>
           <DialogContentText>
-            This records a governed lifecycle transition to Qualified. It does not create an RFQ; participation must still be committed and promoted from the decision workbench.
+            This records a governed lifecycle transition to Qualified. It does not create an RFQ; the lines are still quoted or skipped, and the RFQ created, on the Decide screen.
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>

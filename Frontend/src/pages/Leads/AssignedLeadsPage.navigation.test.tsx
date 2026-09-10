@@ -94,7 +94,7 @@ describe('Assigned Lead next action', () => {
     );
 
     const workbenchButton = await screen.findByRole('button', {
-      name: 'Open decision workbench for P34086',
+      name: 'Decide P34086',
     });
     expect(workbenchButton).toHaveTextContent('Decision workbench');
 

@@ -62,12 +62,12 @@ public static class ListViewCatalog
             // on the lead LINE live on the `lead.items` view, which attaches to LeadItem.
             ["leads.list"] = new("leads.list", null,
             [
-                new("nexoraSerial", "Nexora Serial"),
+                new("nexoraSerial", "Nexora Serial", DefaultVisible: false),
                 new("rfqno", "RFQ #"),
                 new("client", "Client"),
-                new("buyer", "Buyer contact"),
-                new("recDate", "Received"),
-                new("ingestedAtUtc", "Nexora ingestion date"),
+                new("buyer", "Buyer contact", DefaultVisible: false),
+                new("recDate", "Received", DefaultVisible: false),
+                new("ingestedAtUtc", "Nexora ingestion date", DefaultVisible: false),
                 new("bidClosingDate", "Deadline"),
                 // FR-RFQ-04. Two DIFFERENT dates and they are never interchangeable:
                 // "Deadline" is when the bid must be back, "Required delivery" is when the
@@ -85,8 +85,8 @@ public static class ListViewCatalog
                 // not the inquiry's own reference, which is the "RFQ #" column above.
                 new("agreementReference", "Agreement reference", DefaultVisible: false),
                 new("itemCount", "Items"),
-                new("leadSource", "Source"),
-                new("status", "Status"),
+                new("leadSource", "Source", DefaultVisible: false),
+                new("status", "Status", DefaultVisible: false),
                 // WHO OWNS IT, and the control that changes that. Assigning a lead used to cost
                 // four clicks and two page loads because the only owner control in the product
                 // lived on the lead DETAIL screen; this column is both the answer and the
@@ -94,7 +94,7 @@ public static class ListViewCatalog
                 // the reason two reps quote the same tender. Listed here so the reader who does
                 // not want it can switch it off like any other column.
                 new("assignee", "Owner"),
-                new("decision", "Decision"),
+                new("decision", "Nexora's read"),
                 new("estimatedValue", "Estimated value", DefaultVisible: false),
                 new("actions", "Actions", Locked: true)
             ]),
