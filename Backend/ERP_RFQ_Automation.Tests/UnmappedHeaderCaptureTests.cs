@@ -43,7 +43,7 @@ public sealed class UnmappedHeaderCaptureTests
     {
         var bytes = WordDocument(
             paragraphs: new[] { "Cut-off: 10/8/2026 3:00 PM", "Please quote: as per the attached specification and terms.", "RFQ Number: RFQ-9" },
-            metadata: new[] { ("Currency", "US Dollar"), ("Region", "Eastern") },
+            metadata: new[] { ("Currency", "US Dollar"), ("Region", "Eastern"), ("Portal", "Ariba") },
             table: (new[] { "Part No", "Description", "Qty" }, new[] { "P-1", "Valve", "5" }));
 
         var rows = new DocxTableParser(new NativeSpreadsheetParser()).Parse(bytes, "event.docx");
@@ -51,8 +51,11 @@ public sealed class UnmappedHeaderCaptureTests
 
         Assert.Equal("RFQ-9", row.RfqNo);
         Assert.Equal("10/8/2026 3:00 PM", row.UnmappedHeaderLabels["Cut-off"]);
-        Assert.Equal("US Dollar", row.UnmappedHeaderLabels["Currency"]);
+        // A currency the document states once applies to every line; it is a field, not an unknown.
+        Assert.Equal("US Dollar", row.Currency);
+        Assert.DoesNotContain("Currency", row.UnmappedHeaderLabels.Keys);
         Assert.Equal("Eastern", row.UnmappedHeaderLabels["Region"]);
+        Assert.Equal("Ariba", row.UnmappedHeaderLabels["Portal"]);
         // A sentence with a colon is prose, not a label.
         Assert.DoesNotContain("Please quote", row.UnmappedHeaderLabels.Keys);
 

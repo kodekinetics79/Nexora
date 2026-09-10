@@ -83,6 +83,7 @@ public sealed class DocxFormBlockParser
         if (valueColumn <= 0) return Array.Empty<RfqSpreadsheetRow>();
 
         var labels = RecurringLeftHandValues(grid);
+        labels.ExceptWith(TitlesUnderNumberedHeadings(grid));
         if (labels.Count < 2) return Array.Empty<RfqSpreadsheetRow>();
 
         var blocks = SplitIntoBlocks(grid, valueColumn, labels);
@@ -95,6 +96,31 @@ public sealed class DocxFormBlockParser
             if (row is not null) rows.Add(row);
         }
         return rows;
+    }
+
+    /// <summary>"8 MODULE ADAPT ESD" — a numbered section heading, whose number is the buyer's own line number.</summary>
+    private static readonly Regex NumberedHeading = new(@"^(\d{1,6})\s+(\S.*)$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Names that appear as the row directly under a numbered heading that repeats them
+    /// ("40 OUTLET, SOCKET…" then "OUTLET, SOCKET…"). Such a name is an item's TITLE, whatever
+    /// its frequency: an export that asks for the same socket three times repeats the title
+    /// three times, and by repetition alone it looked like a label. Every one of those items
+    /// then lost its title and was named by its heading number instead.
+    /// </summary>
+    private static HashSet<string> TitlesUnderNumberedHeadings(IReadOnlyList<IReadOnlyList<string?>> grid)
+    {
+        var titles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index + 1 < grid.Count; index++)
+        {
+            var heading = grid[index].Count > 0 ? (grid[index][0] ?? string.Empty).Trim() : string.Empty;
+            var next = grid[index + 1].Count > 0 ? (grid[index + 1][0] ?? string.Empty).Trim() : string.Empty;
+            var match = NumberedHeading.Match(heading);
+            if (match.Success && next.Length > 0
+                && string.Equals(match.Groups[2].Value.Trim(), next, StringComparison.OrdinalIgnoreCase))
+                titles.Add(next);
+        }
+        return titles;
     }
 
     private sealed class Block
@@ -241,11 +267,29 @@ public sealed class DocxFormBlockParser
         // the one before it carries the section number. Picking the longest instead reached back
         // past both into the preamble and named the first item after a paragraph of bidding
         // instructions.
+        string? customerLineNumber = null;
         if (!values.ContainsKey(RfqSpreadsheetFields.ProductName))
         {
             var title = block.Titles.LastOrDefault();
             if (!string.IsNullOrWhiteSpace(title))
             {
+                // "8 MODULE ADAPT ESD" directly above "MODULE ADAPT ESD": the number is the
+                // buyer's own line number, and the title is the line without it.
+                var heading = block.Titles.Count >= 2 ? block.Titles[^2] : null;
+                var numbered = heading is null ? Match.Empty : NumberedHeading.Match(heading);
+                if (numbered.Success && string.Equals(numbered.Groups[2].Value.Trim(), title.Trim(), StringComparison.OrdinalIgnoreCase))
+                    customerLineNumber = numbered.Groups[1].Value;
+                else
+                {
+                    // Only a numbered heading was left ("40 OUTLET, SOCKET…"): the number is still
+                    // the buyer's, and the title is what follows it.
+                    var own = NumberedHeading.Match(title.Trim());
+                    if (own.Success && block.Titles.Count == 1)
+                    {
+                        customerLineNumber = own.Groups[1].Value;
+                        title = own.Groups[2].Value;
+                    }
+                }
                 values[RfqSpreadsheetFields.ProductName] = title.Trim();
                 addresses[RfqSpreadsheetFields.ProductName] =
                     $"'{worksheetName.Replace("'", "''", StringComparison.Ordinal)}'!R{block.StartRow}";
@@ -272,6 +316,7 @@ public sealed class DocxFormBlockParser
             FieldColumnNumbers = fieldRows.ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal),
             FieldSourceAddresses = addresses,
             UnmappedColumns = unmapped,
+            CustomerLineNumber = customerLineNumber,
             RfqNo = Get(values, RfqSpreadsheetFields.RfqNo),
             BuyerName = Get(values, RfqSpreadsheetFields.BuyerName),
             ReceivedDate = Get(values, RfqSpreadsheetFields.ReceivedDate),

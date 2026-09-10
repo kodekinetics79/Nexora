@@ -9,6 +9,14 @@ public sealed class RfqSpreadsheetRow
     public Dictionary<int, string> HeadersByColumn { get; set; } = new();
     public Dictionary<string, int> FieldColumnNumbers { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, string> FieldSourceAddresses { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>
+    /// The buyer's OWN number for this line, when the document states one ("8 MODULE ADAPT ESD"
+    /// heads the eighth section of an event print). A rep replying "item 8" must mean what the
+    /// buyer's portal calls item 8; numbering the lines 1..n from our side broke that
+    /// cross-reference on every line of a 1,500-line RFP.
+    /// </summary>
+    public string? CustomerLineNumber { get; set; }
+
     public string? RfqNo { get; set; }
     public string? BuyerName { get; set; }
     public string? ReceivedDate { get; set; }

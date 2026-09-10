@@ -4,20 +4,27 @@ using System.Globalization;
 using System.Linq;
 using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Extraction.Templates;
 using ERP_RFQ_Automation.Extraction.Quantities;
 
 namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 
 public interface ICanonicalRfqNormalizer
 {
-    CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId);
+    /// <param name="receivedOn">
+    /// When the document arrived. The one thing it decides: an ambiguous closing date whose
+    /// day-first reading was already past at arrival, while its month-first reading was still to
+    /// come, is read month-first (a live tender does not close before it is received).
+    /// </param>
+    CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId, DateTime? receivedOn = null);
 }
 
 public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
 {
-    public CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId)
+    public CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId, DateTime? receivedOn = null)
     {
         var result = new CanonicalRfqImportResult();
+        var arrived = (receivedOn ?? DateTime.UtcNow).Date;
         var materialRows = rows
             .Where(r => HasAnyValue(r.RfqNo, r.BuyerName, r.ProductName, r.Quantity, r.UnitPrice, r.Currency))
             .ToList();
@@ -43,11 +50,15 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 UnmappedHeaders = new Dictionary<string, string>(first.UnmappedHeaderLabels, StringComparer.Ordinal)
             };
 
+            ResolveDateOrder(document, arrived);
+
             // What THIS document states, decided from the document's own rows before any
             // line is judged. See CanonicalValue.StatedInDocument for why the review signal
             // is worthless without it.
             var stated = StatedFields(group);
             MarkHeaderExpectations(document, stated);
+
+            var customerNumbered = CustomerLineNumbersUsable(group);
 
             var lineOrdinal = 0;
             foreach (var row in group)
@@ -58,7 +69,11 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 lineOrdinal++;
                 var line = new CanonicalRfqLineItem
                 {
-                    LineItemNo = TextValue(lineOrdinal.ToString(CultureInfo.InvariantCulture), row, "row", CanonicalValueKind.Derived, 1.0m),
+                    // The buyer's own line number when the document states one for every line,
+                    // otherwise ours. See RfqSpreadsheetRow.CustomerLineNumber.
+                    LineItemNo = customerNumbered
+                        ? TextValue(row.CustomerLineNumber, row, "row")
+                        : TextValue(lineOrdinal.ToString(CultureInfo.InvariantCulture), row, "row", CanonicalValueKind.Derived, 1.0m),
                     ProductName = RequiredText(row.ProductName, row, RfqSpreadsheetFields.ProductName, "PRODUCT_NAME", "Product name is required."),
                     Quantity = QuantityValue(row.Quantity, row, RfqSpreadsheetFields.Quantity, "QUANTITY"),
                     UnitOfMeasure = TextValue(row.UnitOfMeasure, row, RfqSpreadsheetFields.UnitOfMeasure),
@@ -72,6 +87,9 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                         ? null
                         : new Dictionary<string, string>(row.UnmappedColumns, StringComparer.Ordinal)
                 };
+
+                CanonicaliseCurrency(line.Currency);
+                ReadManufacturingPartText(line, row);
 
                 var lineKey = BuildLineKey(row);
                 if (duplicateKeys.TryGetValue(lineKey, out var duplicateRows))
@@ -306,6 +324,105 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         return value;
     }
 
+    /// <summary>Marker left on an ambiguous date read month-first on the document's own evidence.</summary>
+    private const string MonthFirstTransformation = "read_month_first";
+
+    /// <summary>
+    /// One document, one date order. "10/8/2026" is read day-first by convention, and that is
+    /// wrong for a sourcing portal that prints month-first. The document itself can say which:
+    /// a live tender does not close before it arrives, so when the day-first reading of the
+    /// closing date was already past on the day the document was received and the month-first
+    /// reading was still to come, the document is month-first — and every other ambiguous date
+    /// on it is read the same way. The date stays flagged for the reviewer, with the reason.
+    /// </summary>
+    private static void ResolveDateOrder(CanonicalRfqDocument document, DateTime arrived)
+    {
+        var closing = document.BidClosingDate;
+        if (!IsAmbiguous(closing) || closing.Kind != CanonicalValueKind.Normalized)
+            return;
+        var dayFirst = closing.Value;
+        var monthFirst = RfqDateParser.SwapDayAndMonth(dayFirst);
+        if (monthFirst is not { } swapped || dayFirst.Date >= arrived || swapped.Date < arrived)
+            return;
+
+        var reason = $"{MonthFirstTransformation}: the day-first reading ({dayFirst:d MMMM yyyy}) was already past when the document arrived ({arrived:d MMMM yyyy}); the month-first reading ({swapped:d MMMM yyyy}) is the one that can still close";
+        ReadMonthFirst(closing, reason);
+        foreach (var other in new[] { document.ReceivedDate, document.RequiredDeliveryDate })
+            if (IsAmbiguous(other) && other.Kind == CanonicalValueKind.Normalized)
+                ReadMonthFirst(other, $"{MonthFirstTransformation}: same order as this document's closing date");
+    }
+
+    private static void ReadMonthFirst(CanonicalValue<DateTime> value, string reason)
+    {
+        if (RfqDateParser.SwapDayAndMonth(value.Value) is not { } swapped) return;
+        value.Value = DateTime.SpecifyKind(swapped, value.Value.Kind);
+        value.Transformations.Add(reason);
+    }
+
+    private static bool WasReadMonthFirst(CanonicalValue<DateTime> value)
+        => value.Transformations.Any(t => t.StartsWith(MonthFirstTransformation, StringComparison.Ordinal));
+
+    /// <summary>The buyer's own numbering is used only when every line of the document carries a distinct one.</summary>
+    private static bool CustomerLineNumbersUsable(IEnumerable<RfqSpreadsheetRow> rows)
+    {
+        var numbers = rows.Select(r => r.CustomerLineNumber?.Trim()).ToList();
+        return numbers.Count > 0
+               && numbers.All(n => !string.IsNullOrEmpty(n))
+               && numbers.Distinct(StringComparer.Ordinal).Count() == numbers.Count;
+    }
+
+    /// <summary>"US Dollar" → "USD", recorded as a transformation; an unknown word is kept as written.</summary>
+    private static void CanonicaliseCurrency(CanonicalValue<string> currency)
+    {
+        if (currency.Value is null) return;
+        var code = CurrencyNames.ToIsoCode(currency.Value);
+        if (code is null || string.Equals(code, currency.Value, StringComparison.Ordinal)) return;
+        currency.Transformations.Add($"currency_name_to_iso: \"{currency.Value}\" read as {code}");
+        currency.Value = code;
+    }
+
+    /// <summary>
+    /// An SAP sourcing export packs the buyer's APPROVED makers and their part numbers into one
+    /// "Manufacturing Part Text" cell (see <see cref="ManufacturingPartText"/>). A line that names
+    /// exactly one maker there has its manufacturer stated, and it is read as stated; a line that
+    /// names several is a choice the buyer allows, so the list travels with the line for the
+    /// reviewer and the manufacturer field stays empty rather than guessing between them. The
+    /// makers' own part numbers travel with the line too; the buyer's material number keeps the
+    /// part-number field it has always had.
+    /// </summary>
+    private static void ReadManufacturingPartText(CanonicalRfqLineItem line, RfqSpreadsheetRow row)
+    {
+        if (line.ExtraFields is null) return;
+        var source = line.ExtraFields.FirstOrDefault(pair =>
+            RfqHeaderVocabulary.Normalize(pair.Key) is "manufacturingparttext" or "manufacturerparttext" or "mfrparttext");
+        if (source.Key is null || !ManufacturingPartText.Recognises(source.Value)) return;
+
+        var reading = ManufacturingPartText.Read(source.Value);
+        if (reading.IsEmpty) return;
+
+        if (reading.Manufacturers.Count == 1 && line.ManufacturerName.Kind == CanonicalValueKind.Missing)
+        {
+            var maker = reading.Manufacturers[0];
+            line.ManufacturerName.Value = maker;
+            line.ManufacturerName.OriginalValue = source.Value;
+            line.ManufacturerName.Kind = CanonicalValueKind.Extracted;
+            line.ManufacturerName.Confidence = 1.0m;
+            line.ManufacturerName.ValidationStatus = ValidationStatus.Valid;
+            line.ManufacturerName.Transformations.Add($"read_from_manufacturing_part_text: \"{source.Key}\" names one approved maker");
+            line.ManufacturerName.Evidence.Clear();
+            line.ManufacturerName.Evidence.Add(Evidence(row, "row", maker));
+        }
+        else if (reading.Manufacturers.Count > 1)
+        {
+            line.ExtraFields["Approved manufacturers"] = string.Join("; ", reading.Manufacturers);
+        }
+
+        if (reading.PartNumbers.Count > 0)
+            line.ExtraFields["Manufacturer part numbers"] = string.Join("; ", reading.PartNumbers);
+        if (reading.SupersededNumbers.Count > 0)
+            line.ExtraFields["Superseded part numbers"] = string.Join("; ", reading.SupersededNumbers);
+    }
+
     /// <summary>Marker left on a date the parser could read but not disambiguate.</summary>
     private const string AmbiguousDateTransformation = "ambiguous_day_month";
 
@@ -318,7 +435,10 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     /// <summary>The reviewer-facing wording, identical to the customer-purchase-order path.</summary>
     private static string AmbiguityMessage(CanonicalValue<DateTime> value, string field)
         => $"\"{value.OriginalValue}\" is ambiguous — both parts of the {field} are 12 or lower, so it could be "
-           + "either day/month or month/day. It has been read day-first; confirm it.";
+           + "either day/month or month/day. "
+           + (WasReadMonthFirst(value)
+               ? $"It has been read month-first ({value.Value:d MMMM yyyy}), because the day-first reading was already past when the document arrived; confirm it."
+               : "It has been read day-first; confirm it.");
 
     /// <summary>
     /// Reads a line's demand quantity through the shared <see cref="QuantityParser"/>.

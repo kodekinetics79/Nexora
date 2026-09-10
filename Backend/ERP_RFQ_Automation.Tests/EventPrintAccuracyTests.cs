@@ -1,0 +1,191 @@
+using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
+using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Services.DocumentIntelligence;
+
+namespace ERP_RFQ_Automation.Tests;
+
+/// <summary>
+/// What two real 1,500-line sourcing-portal event prints revealed when their extraction was
+/// checked line by line against the documents: the closing date read in the wrong order, the
+/// delivery date lost to a weekday, the currency stated once and applied nowhere, the buyer's
+/// own line numbers replaced by ours, repeated titles mistaken for labels, and the approved
+/// makers ignored. Each case here is one of those, kept small.
+/// </summary>
+public sealed class EventPrintAccuracyTests
+{
+    private static readonly DateTime Arrived = new(2026, 9, 10);
+
+    private static RfqSpreadsheetRow Row(int number, string product, string? closing = null, string? currency = null,
+        string? customerNo = null, Dictionary<string, string>? extra = null) => new()
+    {
+        RowNumber = number,
+        ProductName = product,
+        Quantity = "1",
+        UnitOfMeasure = "each",
+        BidClosingDate = closing,
+        Currency = currency,
+        CustomerLineNumber = customerNo,
+        UnmappedColumns = extra ?? new Dictionary<string, string>(StringComparer.Ordinal),
+    };
+
+    private static CanonicalRfqDocument Normalise(DateTime arrived, params RfqSpreadsheetRow[] rows)
+        => Assert.Single(new CanonicalRfqNormalizer().NormalizeSpreadsheetRows(rows, 1, arrived).Documents);
+
+    // ------------------------------------------------------------------- date order
+
+    [Fact]
+    public void An_ambiguous_closing_date_already_past_at_arrival_is_read_month_first_and_still_flagged()
+    {
+        var document = Normalise(Arrived, Row(2, "Relay", closing: "10/8/2026 3:00 PM"));
+
+        Assert.Equal(new DateTime(2026, 10, 8), document.BidClosingDate.Value.Date);
+        Assert.Equal(ValidationStatus.NeedsReview, document.BidClosingDate.ValidationStatus);
+        Assert.Contains(document.BidClosingDate.Transformations, t => t.StartsWith("read_month_first", StringComparison.Ordinal));
+        var issue = Assert.Single(document.Issues, i => i.Code == "BID_CLOSING_DATE");
+        Assert.Contains("read month-first (8 October 2026)", issue.Message);
+    }
+
+    [Fact]
+    public void An_ambiguous_closing_date_still_ahead_is_read_day_first_as_before()
+    {
+        var document = Normalise(new DateTime(2026, 7, 1), Row(2, "Relay", closing: "10/8/2026"));
+
+        Assert.Equal(new DateTime(2026, 8, 10), document.BidClosingDate.Value.Date);
+        Assert.DoesNotContain(document.BidClosingDate.Transformations, t => t.StartsWith("read_month_first", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_closing_date_past_in_both_orders_is_left_day_first()
+    {
+        // Neither reading can still close: there is no evidence for either order.
+        var document = Normalise(new DateTime(2027, 1, 1), Row(2, "Relay", closing: "10/8/2026"));
+        Assert.Equal(new DateTime(2026, 8, 10), document.BidClosingDate.Value.Date);
+    }
+
+    [Fact]
+    public void The_documents_other_ambiguous_dates_follow_the_closing_dates_order()
+    {
+        var row = Row(2, "Relay", closing: "10/8/2026");
+        row.RequiredDeliveryDate = "2/1/2027";
+        var document = Normalise(Arrived, row);
+
+        Assert.Equal(new DateTime(2027, 2, 1), document.RequiredDeliveryDate.Value.Date);
+    }
+
+    // --------------------------------------------------------------- delivery date format
+
+    [Theory]
+    [InlineData("Sat, 2 Jan, 2027")]
+    [InlineData("2 Jan, 2027")]
+    [InlineData("Saturday, 2 January 2027")]
+    public void A_delivery_date_with_a_weekday_or_a_comma_is_read(string raw)
+        => Assert.Equal(new DateTime(2027, 1, 2), RfqDateParser.Read(raw).Value);
+
+    // ------------------------------------------------------------------------ currency
+
+    [Theory]
+    [InlineData("US Dollar", "USD")]
+    [InlineData("Saudi Riyal", "SAR")]
+    [InlineData("European Union Euro", "EUR")]
+    [InlineData("USD", "USD")]
+    public void A_currency_stated_as_a_word_reaches_the_line_as_its_iso_code(string word, string code)
+    {
+        var document = Normalise(Arrived, Row(2, "Relay", currency: word));
+        var line = Assert.Single(document.LineItems);
+
+        Assert.Equal(code, line.Currency.Value);
+        if (word != code)
+            Assert.Contains(line.Currency.Transformations, t => t.StartsWith("currency_name_to_iso", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_currency_word_nobody_knows_is_kept_as_written()
+        => Assert.Equal("Galleons", Assert.Single(Normalise(Arrived, Row(2, "Relay", currency: "Galleons")).LineItems).Currency.Value);
+
+    // ------------------------------------------------------------------ line numbering
+
+    [Fact]
+    public void The_buyers_own_line_numbers_are_kept_when_every_line_has_one()
+    {
+        var document = Normalise(Arrived, Row(2, "Relay", customerNo: "8"), Row(3, "Module", customerNo: "9"));
+
+        Assert.Equal(new[] { "8", "9" }, document.LineItems.Select(l => l.LineItemNo.Value));
+        Assert.All(document.LineItems, l => Assert.Equal(CanonicalValueKind.Extracted, l.LineItemNo.Kind));
+    }
+
+    [Fact]
+    public void Our_numbering_is_used_when_the_buyers_is_missing_or_repeats()
+    {
+        var partial = Normalise(Arrived, Row(2, "Relay", customerNo: "8"), Row(3, "Module"));
+        Assert.Equal(new[] { "1", "2" }, partial.LineItems.Select(l => l.LineItemNo.Value));
+
+        var repeated = Normalise(Arrived, Row(2, "Relay", customerNo: "8"), Row(3, "Module", customerNo: "8"));
+        Assert.Equal(new[] { "1", "2" }, repeated.LineItems.Select(l => l.LineItemNo.Value));
+    }
+
+    // ------------------------------------------------------------ manufacturing part text
+
+    private const string OneMaker =
+        "4000020966 - 0060000235 - BENTLY-NEVADA LLC - US 000000005002923306 - 10030469 - BENTLY-NEVADA LLC - US " +
+        "ED_PART_NUMBER - AA32307301 PART_NUMBER - AA 323073-01 CUSTOMER_MATERIAL_DESCRIPTION1 - MODULE";
+
+    private const string TwoMakers =
+        "4000062813 - 0060001092 - SCHNEIDER ELECTRIC THE NETHERLANDS - NL 000000005002831975 - 10001675 - SCHNEIDER ELECTRIC THE NETHERLANDS - NL " +
+        "PART_NUMBER - LV429827 4000062814 - 0060001761 - PEPPERL+FUCHS (AUST) PTY LTD - AU 000000005002831976 - 10001676 - PEPPERL+FUCHS (AUST) PTY LTD - AU PART_NUMBER - NJ2-12GM40-E2";
+
+    [Fact]
+    public void One_approved_maker_becomes_the_lines_manufacturer_with_its_part_numbers_beside_it()
+    {
+        var document = Normalise(Arrived, Row(2, "Module", extra: new() { ["Manufacturing Part Text"] = OneMaker }));
+        var line = Assert.Single(document.LineItems);
+
+        Assert.Equal("BENTLY-NEVADA LLC", line.ManufacturerName.Value);
+        Assert.Equal(CanonicalValueKind.Extracted, line.ManufacturerName.Kind);
+        Assert.Equal(1.0m, line.ManufacturerName.Confidence);
+        Assert.Contains(line.ManufacturerName.Transformations, t => t.StartsWith("read_from_manufacturing_part_text", StringComparison.Ordinal));
+        Assert.Equal("AA 323073-01", line.ExtraFields!["Manufacturer part numbers"]);
+    }
+
+    [Fact]
+    public void Several_approved_makers_are_listed_for_the_reviewer_and_none_is_guessed()
+    {
+        var document = Normalise(Arrived, Row(2, "Breaker", extra: new() { ["Manufacturing Part Text"] = TwoMakers }));
+        var line = Assert.Single(document.LineItems);
+
+        Assert.Null(line.ManufacturerName.Value);
+        Assert.Equal("SCHNEIDER ELECTRIC THE NETHERLANDS; PEPPERL+FUCHS (AUST) PTY LTD", line.ExtraFields!["Approved manufacturers"]);
+        Assert.Equal("LV429827; NJ2-12GM40-E2", line.ExtraFields["Manufacturer part numbers"]);
+    }
+
+    [Fact]
+    public void A_manufacturer_the_line_states_is_never_overridden()
+    {
+        var row = Row(2, "Module", extra: new() { ["Manufacturing Part Text"] = OneMaker });
+        row.ManufacturerName = "Bently Nevada (stated)";
+        var line = Assert.Single(Normalise(Arrived, row).LineItems);
+        Assert.Equal("Bently Nevada (stated)", line.ManufacturerName.Value);
+    }
+
+    // ------------------------------------------------------------ repeated titles in a form
+
+    [Fact]
+    public void Three_items_with_the_same_title_keep_their_title_and_their_own_numbers()
+    {
+        var grid = new List<IReadOnlyList<string?>> { new[] { "Name", "Alternative", "Value" } };
+        foreach (var number in new[] { 40, 41, 42 })
+        {
+            grid.Add(new[] { $"{number} OUTLET, SOCKET, FOR PANELBOARD", "", "" });
+            grid.Add(new[] { "OUTLET, SOCKET, FOR PANELBOARD", "", "" });
+            grid.Add(new[] { "Price", "", "" });
+            grid.Add(new[] { "Quantity", "", "1 each" });
+            grid.Add(new[] { "Material Number", "", $"00000000200000{number}" });
+            grid.Add(new[] { "Remarks", "", "" });
+        }
+
+        var rows = new DocxFormBlockParser().Parse(grid, "event.docx", "Table 7");
+
+        Assert.Equal(3, rows.Count);
+        Assert.All(rows, row => Assert.Equal("OUTLET, SOCKET, FOR PANELBOARD", row.ProductName));
+        Assert.Equal(new[] { "40", "41", "42" }, rows.Select(r => r.CustomerLineNumber));
+    }
+}

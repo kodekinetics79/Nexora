@@ -136,6 +136,7 @@ public sealed class RfqHeaderVocabulary
         [RfqSpreadsheetFields.LeadTimeDays] = new[]
         {
             "leadtimedays", "leadtime", "deliverytime", "deliveryperiod", "deliveryleadtime", "leadtimeweeks",
+            "leadtimeindays", "leadtimeinweeks", "deliveryleadtimedays",
         },
         [RfqSpreadsheetFields.ItemText] = new[]
         {
@@ -171,6 +172,16 @@ public sealed class RfqHeaderVocabulary
         [RfqSpreadsheetFields.RfqNo] = new[] { "reference", "refno", "ref", "ourref", "yourref", "referenceno", "referencenumber" },
         [RfqSpreadsheetFields.BuyerName] = new[] { "company", "companyname", "organisation", "organization", "buyerorganisation" },
         [RfqSpreadsheetFields.ReceivedDate] = new[] { "date" },
+        [RfqSpreadsheetFields.Currency] = new[] { "bidcurrency", "eventcurrency", "quotationcurrency", "quotecurrency", "currencyofquotation", "biddingcurrency" },
+    };
+
+    /// <summary>
+    /// Line fields a document may state ONCE for every line ("Currency: US Dollar" in an event's
+    /// overview). Read from the header block and applied to each line that does not state its own.
+    /// </summary>
+    public static readonly IReadOnlySet<string> DocumentLevelLineDefaults = new HashSet<string>(StringComparer.Ordinal)
+    {
+        RfqSpreadsheetFields.Currency,
     };
 
     private static readonly Dictionary<string, string[]> BuiltinLabelAliases = BuildLabelAliases();
@@ -178,7 +189,7 @@ public sealed class RfqHeaderVocabulary
     private static Dictionary<string, string[]> BuildLabelAliases()
     {
         var labels = new Dictionary<string, string[]>(StringComparer.Ordinal);
-        foreach (var field in InquiryLevelFields)
+        foreach (var field in InquiryLevelFields.Concat(DocumentLevelLineDefaults))
         {
             var spellings = BuiltinColumnAliases[field].ToList();
             if (LabelOnlySpellings.TryGetValue(field, out var extra))

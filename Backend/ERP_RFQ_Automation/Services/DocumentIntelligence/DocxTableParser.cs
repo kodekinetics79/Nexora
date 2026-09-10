@@ -213,6 +213,8 @@ public sealed class DocxTableParser
         row.RequiredDeliveryDate ??= Value(block, RfqSpreadsheetFields.RequiredDeliveryDate);
         row.DeliveryLocation ??= Value(block, RfqSpreadsheetFields.DeliveryLocation);
         row.AgreementReference ??= Value(block, RfqSpreadsheetFields.AgreementReference);
+        // A currency the document states once, for every line ("Currency | US Dollar").
+        row.Currency ??= Value(block, RfqSpreadsheetFields.Currency);
     }
 
     private static string? Value(IReadOnlyDictionary<string, string> block, string field)
