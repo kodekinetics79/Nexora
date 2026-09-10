@@ -290,7 +290,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // The grid MUST read the same fields as the brief (MatchCatalogAsync): a buyer's material
         // number arrives in whichever field the door that read the document happens to have, and
         // the spreadsheet door routes every material-code heading into ManufacturerPartNumber by
-        // design (NativeSpreadsheetParser.FieldAliases). Reading ItemMaterialCode alone scored
+        // design (RfqHeaderVocabulary). Reading ItemMaterialCode alone scored
         // every spreadsheet-ingested lead 0% here — "We stock ~0%" and a Skip chip — while that
         // lead's own brief reported full coverage.
         var lines = leads.SelectMany(l => l.Items).ToList();

@@ -26,28 +26,6 @@ public sealed class DocxTableParser
     /// <summary>Paragraphs scanned above the first table for header-block labels.</summary>
     private const int HeaderBlockParagraphLimit = 40;
 
-    /// <summary>Labels that identify the inquiry itself rather than one of its lines.</summary>
-    private static readonly Dictionary<string, string[]> HeaderBlockAliases = new(StringComparer.Ordinal)
-    {
-        [RfqSpreadsheetFields.RfqNo] = new[] { "rfqnumber", "rfqno", "rfq", "enquiryno", "enquirynumber", "inquiryno", "tenderno", "bidno", "reference", "refno" },
-        [RfqSpreadsheetFields.BuyerName] = new[] { "customer", "customername", "buyer", "buyername", "client", "clientname", "company" },
-        [RfqSpreadsheetFields.ReceivedDate] = new[] { "rfqdate", "date", "datereceived", "receiveddate", "enquirydate" },
-        [RfqSpreadsheetFields.BidClosingDate] = new[] { "bidclosingdate", "closingdate", "bidduedate", "duedate", "deadline", "submissiondate", "submissiondeadline", "quotationdue", "quotedue", "responseby", "offerdue", "tenderclosingdate" },
-        // "Requested Delivery" now has a correct home. It is what the BUYER is asking for, so it
-        // maps to RequiredDeliveryDate and never to a supplier lead time — that conflation put a
-        // lead time of zero, meaning "deliver immediately", on every line of every document.
-        // It is frequently prose ("9 weeks") rather than a date; an optional date that cannot be
-        // parsed now yields NeedsReview and a null value, so an unreadable one costs nothing.
-        //
-        // The "…deliverydate" spellings are the SAME ones the column mapper already recognises
-        // (NativeSpreadsheetParser.FieldAliases). They were missing here, so a paragraph reading
-        // "Required Delivery Date: 2026-10-01" matched no delivery label at all and the bare
-        // "date" alias took the value onto ReceivedDate instead.
-        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requireddeliverydate", "requesteddeliverydate", "deliverydate", "requesteddelivery", "deliveryrequired", "requireddelivery", "deliveryby", "requiredby", "neededby" },
-        [RfqSpreadsheetFields.DeliveryLocation] = new[] { "deliverylocation", "deliveryto", "shipto", "destination", "deliveryaddress", "site" },
-        [RfqSpreadsheetFields.AgreementReference] = new[] { "agreementreference", "agreementno", "contractno", "contractreference", "framecontract" },
-    };
-
     /// <summary>
     /// Aliases short and generic enough to be the TAIL of a longer label, which may therefore only
     /// match as the first word of their label.
@@ -64,9 +42,16 @@ public sealed class DocxTableParser
     private static readonly HashSet<string> FirstWordOnlyAliases = new(StringComparer.Ordinal) { "date" };
 
     private readonly NativeSpreadsheetParser _grid;
-    private readonly DocxFormBlockParser _form = new();
+    private readonly DocxFormBlockParser _form;
 
-    public DocxTableParser(NativeSpreadsheetParser grid) => _grid = grid;
+    /// <summary>Header-block labels and column headings resolve through ONE vocabulary — the grid parser's.</summary>
+    private RfqHeaderVocabulary Vocabulary => _grid.Vocabulary;
+
+    public DocxTableParser(NativeSpreadsheetParser grid)
+    {
+        _grid = grid;
+        _form = new DocxFormBlockParser(grid.Vocabulary);
+    }
 
     /// <summary>
     /// Returns one row per table line, or an empty list when the document states no table this
@@ -240,7 +225,7 @@ public sealed class DocxTableParser
     /// <summary>A label-and-value table this small is document metadata, not a line grid.</summary>
     private const int HeaderTableRowLimit = 12;
 
-    private static Dictionary<string, string> ReadHeaderBlock(Body body)
+    private Dictionary<string, string> ReadHeaderBlock(Body body)
     {
         var found = new Dictionary<string, string>(StringComparer.Ordinal);
         var scanned = 0;
@@ -300,7 +285,7 @@ public sealed class DocxTableParser
     /// several pairs into a single paragraph with no separator
     /// ("RFQ Number: RFQ-260011Customer: Omega OilRFQ Date: 2026-05-26").
     /// </summary>
-    private static IEnumerable<(string Field, string Value)> ExtractPairs(string line)
+    private IEnumerable<(string Field, string Value)> ExtractPairs(string line)
     {
         var marks = FindMarks(line);
 
@@ -336,7 +321,7 @@ public sealed class DocxTableParser
     ///
     /// <para>Marks come back in position order, which is the order they are found.</para>
     /// </summary>
-    private static List<(int Index, int LabelLength, string Field)> FindMarks(string line)
+    private List<(int Index, int LabelLength, string Field)> FindMarks(string line)
     {
         var marks = new List<(int Index, int LabelLength, string Field)>();
         var position = 0;
@@ -362,11 +347,11 @@ public sealed class DocxTableParser
     /// on length is broken on the field's name, so the reading of a document never depends on
     /// dictionary enumeration order.
     /// </summary>
-    private static (int Length, string Field)? LongestLabelAt(string line, int index)
+    private (int Length, string Field)? LongestLabelAt(string line, int index)
     {
         (int Length, string Field)? best = null;
 
-        foreach (var (field, aliases) in HeaderBlockAliases)
+        foreach (var (field, aliases) in Vocabulary.LabelAliases)
         {
             foreach (var alias in aliases)
             {

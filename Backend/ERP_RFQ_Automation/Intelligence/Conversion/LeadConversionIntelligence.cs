@@ -394,7 +394,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     /// straight into <c>ItemMaterialCode</c> at <c>Certain</c> confidence, and the model door
     /// populates it too. The 1.00 rung below is LIVE. Do not "fix" the hardcoded null, do not
     /// touch <c>CanonicalRfqLineItem</c>, <c>MapCanonicalItem</c>, the extraction prompt, or
-    /// <c>NativeSpreadsheetParser.FieldAliases</c> (that routing is deliberate and
+    /// <c>RfqHeaderVocabulary</c> (that routing is deliberate and
     /// test-pinned by <c>ProductionDocumentReaderSpreadsheetFallbackTests</c>). Any consumer that
     /// reads a lead line's catalogue number must read BOTH fields, exactly as the ladder below
     /// and <c>LeadDecisionService</c> now do on both its brief and its grid paths.</para>

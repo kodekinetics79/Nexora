@@ -1354,21 +1354,24 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
         };
     }
 
-    private static List<RfqSpreadsheetRow> ParseCsv(List<string> lines, string name)
+    internal static List<RfqSpreadsheetRow> ParseCsv(List<string> lines, string name)
     {
-        var headers = SplitCsv(lines[0]).Select(h => h.Trim().ToLowerInvariant()).ToArray();
-        int Idx(params string[] keys) => Array.FindIndex(headers, h => keys.Contains(h));
-        var iRfq = Idx("rfqno", "rfq no", "rfq");
-        var iBuyer = Idx("buyername", "buyer name", "buyer");
-        var iRecv = Idx("receiveddate", "received date");
-        var iBid = Idx("bidclosingdate", "bid closing date");
-        var iProduct = Idx("productname", "product name", "product");
-        var iQty = Idx("quantity", "qty");
-        var iPrice = Idx("unitprice", "unit price", "price");
-        var iCurr = Idx("currency");
-        var iMfr = Idx("manufacturername", "manufacturer");
-        var iMpn = Idx("manufacturerpartnumber", "mpn", "part number");
-        var iLead = Idx("leadtimedays", "lead time", "leadtime");
+        // The same vocabulary the native spreadsheet parser uses, so a heading this legacy path
+        // reads is never one the production path would have dropped, or the reverse.
+        var vocabulary = RfqHeaderVocabulary.Builtin;
+        var headers = SplitCsv(lines[0]).Select(h => vocabulary.FieldForColumn(h)).ToArray();
+        int Idx(string field) => Array.IndexOf(headers, field);
+        var iRfq = Idx(RfqSpreadsheetFields.RfqNo);
+        var iBuyer = Idx(RfqSpreadsheetFields.BuyerName);
+        var iRecv = Idx(RfqSpreadsheetFields.ReceivedDate);
+        var iBid = Idx(RfqSpreadsheetFields.BidClosingDate);
+        var iProduct = Idx(RfqSpreadsheetFields.ProductName);
+        var iQty = Idx(RfqSpreadsheetFields.Quantity);
+        var iPrice = Idx(RfqSpreadsheetFields.UnitPrice);
+        var iCurr = Idx(RfqSpreadsheetFields.Currency);
+        var iMfr = Idx(RfqSpreadsheetFields.ManufacturerName);
+        var iMpn = Idx(RfqSpreadsheetFields.ManufacturerPartNumber);
+        var iLead = Idx(RfqSpreadsheetFields.LeadTimeDays);
 
         string? Cell(string[] cells, int i) => i >= 0 && i < cells.Length ? cells[i].Trim() : null;
 

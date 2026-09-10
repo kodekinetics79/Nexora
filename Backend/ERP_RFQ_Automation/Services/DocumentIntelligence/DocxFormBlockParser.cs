@@ -33,7 +33,7 @@ namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 /// again. That works whatever the labels are called, in any language, and needs no list of
 /// spellings to be maintained. The labels are only consulted afterwards, to decide which field
 /// each one means, and that uses the SAME vocabulary a column header does
-/// (<see cref="NativeSpreadsheetParser.FieldForHeader"/>).</para>
+/// (<see cref="RfqHeaderVocabulary.FieldForColumn"/>).</para>
 ///
 /// <para><b>Deliberately narrow.</b> Refuses anything that does not look like a repeated form:
 /// too few blocks, too few labels, or a table whose left column is mostly unique. A refusal
@@ -61,6 +61,13 @@ public sealed class DocxFormBlockParser
     /// </summary>
     private static readonly Regex QuantityWithUnit =
         new(@"^\s*([0-9][0-9.,]*)\s+([^\d\s][^\r\n]*?)\s*$", RegexOptions.Compiled);
+
+    private readonly RfqHeaderVocabulary _vocabulary;
+
+    public DocxFormBlockParser() : this(null) { }
+
+    public DocxFormBlockParser(RfqHeaderVocabulary? vocabulary)
+        => _vocabulary = vocabulary ?? RfqHeaderVocabulary.Builtin;
 
     public IReadOnlyList<RfqSpreadsheetRow> Parse(
         IReadOnlyList<IReadOnlyList<string?>> grid, string sourceDocumentName, string worksheetName)
@@ -185,7 +192,7 @@ public sealed class DocxFormBlockParser
         return blocks;
     }
 
-    private static RfqSpreadsheetRow? BuildRow(Block block, string sourceDocumentName, string worksheetName)
+    private RfqSpreadsheetRow? BuildRow(Block block, string sourceDocumentName, string worksheetName)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var addresses = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -197,7 +204,7 @@ public sealed class DocxFormBlockParser
         {
             ordinal++;
             headers[ordinal] = label;
-            var field = NativeSpreadsheetParser.FieldForHeader(label);
+            var field = _vocabulary.FieldForColumn(label);
             // A blank Price is the norm, not a defect: the buyer leaves it for us to quote. Only
             // populated labels become values, so an empty one never overwrites a real reading.
             if (field is null || string.IsNullOrWhiteSpace(value) || values.ContainsKey(field)) continue;
