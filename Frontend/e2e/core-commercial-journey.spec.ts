@@ -40,7 +40,7 @@ test('29 Decision Workbench preserves customer, owners and inventory results', a
   await expect(page.getByRole('heading', { level: 1, name: required('E2E_CORE_CUSTOMER_NAME') })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible();
   await expect(page.getByRole('group', { name: /Quote or skip line/ })).toHaveCount(6);
-  await expect(page.getByRole('status')).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Next step' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Qualify & Create RFQ/i })).toHaveCount(0);
   await fs.mkdir(evidenceDir, { recursive: true });
   await page.screenshot({ path: path.join(evidenceDir, '29-governed-decision-workbench.png'), fullPage: true });

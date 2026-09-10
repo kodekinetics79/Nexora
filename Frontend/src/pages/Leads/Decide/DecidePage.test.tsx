@@ -140,7 +140,7 @@ const quoteEveryLine = async () => {
   }
 };
 
-const status = () => screen.getByRole('status');
+const status = () => screen.getByRole('status', { name: 'Next step' });
 
 beforeEach(() => {
   vi.clearAllMocks();

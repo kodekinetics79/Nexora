@@ -77,7 +77,7 @@ async function openFreshWorkbench(page: Page, leadId: number, expectedParticipat
   // The one decision screen: the lines, one choice each, one sentence naming the next thing.
   await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible();
   await expect(page.getByRole('group', { name: /Quote or skip line/ })).toHaveCount(6);
-  await expect(page.getByRole('status')).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Next step' })).toBeVisible();
 }
 
 async function saveFitThroughControls(page: Page) {

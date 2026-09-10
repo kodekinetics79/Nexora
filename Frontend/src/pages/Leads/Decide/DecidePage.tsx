@@ -573,6 +573,7 @@ const DecidePage: React.FC = () => {
               </Button>
               <Typography
                 role="status"
+                aria-label="Next step"
                 variant="body2"
                 sx={{ color: next.kind === 'ready' || next.kind === 'decline' || busy ? 'text.secondary' : 'warning.dark', fontWeight: next.kind === 'blocked' ? 600 : 400 }}
               >

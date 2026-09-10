@@ -73,7 +73,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await workbench.click();
     await expect(page).toHaveURL(/\/procurement\/leads\/1\/workbench$/);
     await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible();
-    await expect(page.getByRole('status')).toBeVisible();
+    await expect(page.getByRole('status', { name: 'Next step' })).toBeVisible();
     await expect(page.getByRole('button', { name: /Review & Create RFQ/i })).toHaveCount(0);
     await page.screenshot({ path: path.join(evidenceDir, '05-governed-decision-workbench.png'), fullPage: true });
   });
@@ -167,7 +167,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await login(page);
     await page.goto('/procurement/leads/1/workbench');
     await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible();
-    await expect(page.getByRole('status')).toBeVisible();
+    await expect(page.getByRole('status', { name: 'Next step' })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
     await page.screenshot({ path: path.join(evidenceDir, '13-mobile-workbench.png'), fullPage: true });
   });

@@ -257,7 +257,7 @@ test.describe.serial('Production smoke — live customer journey', () => {
     // The only creation control is the governed one, and it stays disabled until that
     // sentence has nothing left to say.
     await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByRole('status')).toBeVisible();
+    await expect(page.getByRole('status', { name: 'Next step' })).toBeVisible();
     await expect(page.getByRole('button', { name: /Qualify & Create RFQ/i })).toHaveCount(0);
     console.log(`[production-smoke] legacy bookmark resolved to the lead decision screen for lead ${targetLeadId}; no ungoverned RFQ action was exposed.`);
   });
