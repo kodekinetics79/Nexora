@@ -14,7 +14,7 @@ vi.mock('../../api/services/leadService', () => ({
   default: { getRevisions: (...args: unknown[]) => getRevisions(...args) },
 }));
 
-import LeadRevisionTimeline, { fieldLabel, isRealChange } from './LeadRevisionTimeline';
+import LeadRevisionTimeline, { fieldLabel, isRealChange, objectChanges } from './LeadRevisionTimeline';
 
 const revision = (overrides: Partial<LeadRevisionDTO>): LeadRevisionDTO => ({
   id: 1,
@@ -111,7 +111,19 @@ describe('what counts as a change', () => {
     expect(isRealChange({ changeType: 'Removed', scope: 'Line', path: '$.items[3]', previousValueJson: '{"quantity":1}', currentValueJson: null })).toBe(true);
   });
 
+  it('reads a whole changed line as the fields inside it that differ', () => {
+    expect(objectChanges(
+      { line: '1', quantity: 3, uom: null, unitOfMeasure: null, currency: null, aiConfidence: 1, receivedDate: '2026-09-10T00:00:00Z' },
+      { line: '1', quantity: 3, uom: 'au', unitOfMeasure: 'AU', currency: 'SAR', aiConfidence: 1.0, receivedDate: '2026-09-10T00:00:00' },
+    )).toEqual([
+      { key: 'unitOfMeasure', before: 'Not stated', after: 'AU' },
+      { key: 'currency', before: 'Not stated', after: 'SAR' },
+    ]);
+    expect(objectChanges('a', 'b')).toEqual([]);
+  });
+
   it('names fields the way a person would', () => {
+    expect(fieldLabel('$.items["00020"]')).toBe('Line 00020');
     expect(fieldLabel('$.requiredDeliveryDate')).toBe('Required delivery');
     expect(fieldLabel('$.items[2].manufacturerPartNumber')).toBe('Line 3 · Part number');
     expect(fieldLabel('$.recDate')).toBe('Received');

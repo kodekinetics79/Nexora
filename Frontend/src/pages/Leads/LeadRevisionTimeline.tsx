@@ -52,10 +52,12 @@ export const fieldLabel = (path: string): string => {
   const segments = path.replace(/^\$\.?/, '').split('.').filter(Boolean);
   const parts: string[] = [];
   for (const segment of segments) {
-    const indexed = /^(\w+)\[(\d+)\]$/.exec(segment);
+    // items[2] is a position (third line); items["00020"] is the line number the customer used.
+    const indexed = /^(\w+)\[(?:(\d+)|"([^"]+)")\]$/.exec(segment);
     if (indexed) {
-      const [, name, index] = indexed;
-      parts.push(/^(items|lines|lineItems)$/i.test(name) ? `Line ${Number(index) + 1}` : `${readable(name)} ${Number(index) + 1}`);
+      const [, name, position, key] = indexed;
+      const line = key ?? String(Number(position) + 1);
+      parts.push(/^(items|lines|lineItems)$/i.test(name) ? `Line ${line}` : `${readable(name)} ${line}`);
     } else if (FIELD_NAMES[segment.toLowerCase()]) {
       parts.push(FIELD_NAMES[segment.toLowerCase()]);
     } else {
@@ -120,20 +122,60 @@ const sourceLabel = (processingPath: string): string => {
   return readable(processingPath);
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Keys inside a stored line that are the machine's own working copies of a value it also stores
+ * properly (uom beside unitOfMeasure, part beside manufacturerPartNumber) or its bookkeeping.
+ */
+const MACHINE_LINE_KEYS = new Set(['uom', 'part', 'date', 'line', 'schemaversion', 'aiconfidence', 'extrafields', 'receiveddate']);
+
+/** For a whole line that changed, the fields inside it that differ, so the rep reads "Quantity 4 → 6" not two JSON blobs. */
+export const objectChanges = (before: unknown, after: unknown): Array<{ key: string; before: string; after: string }> => {
+  if (!isRecord(before) || !isRecord(after)) return [];
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const changes: Array<{ key: string; before: string; after: string }> = [];
+  for (const key of keys) {
+    if (MACHINE_LINE_KEYS.has(key.toLowerCase())) continue;
+    const previous = before[key];
+    const current = after[key];
+    const same = JSON.stringify(previous ?? null) === JSON.stringify(current ?? null)
+      || (typeof previous === 'string' && typeof current === 'string'
+        && ISO_INSTANT.test(previous.trim()) && ISO_INSTANT.test(current.trim())
+        && canonicalInstant(previous.trim()) === canonicalInstant(current.trim()));
+    if (!same) changes.push({ key, before: display(previous), after: display(current) });
+  }
+  return changes;
+};
+
 const Change = ({ difference }: { difference: LeadRevisionDifferenceDTO }) => {
   const type = difference.changeType.toLowerCase();
-  const before = display(parsed(difference.previousValueJson));
-  const after = display(parsed(difference.currentValueJson));
+  const beforeValue = parsed(difference.previousValueJson);
+  const afterValue = parsed(difference.currentValueJson);
+  const before = display(beforeValue);
+  const after = display(afterValue);
   const multiline = before.includes('\n') || after.includes('\n');
+  const inner = type === 'modified' ? objectChanges(beforeValue, afterValue) : [];
   return (
     <Box component="li" sx={{ py: 1, listStyle: 'none', borderTop: 1, borderColor: 'divider' }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
         <Typography variant="body2" sx={{ fontWeight: 700 }}>{fieldLabel(difference.path)}</Typography>
-        {difference.scope && !/^(header|lead|field)$/i.test(difference.scope) ? (
+        {difference.scope && !/^(header|lead|field|line)$/i.test(difference.scope) ? (
           <Typography variant="caption" color="text.secondary">{readable(difference.scope)}</Typography>
         ) : null}
       </Stack>
-      {type === 'added' ? (
+      {inner.length > 0 ? (
+        <Box component="ul" sx={{ m: 0, pl: 2 }}>
+          {inner.map((change) => (
+            <Typography key={change.key} component="li" variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+              {fieldLabel(change.key)}: <Box component="span" sx={{ color: 'text.secondary', textDecoration: 'line-through' }}>{change.before}</Box>
+              {' → '}
+              <Box component="span" sx={{ fontWeight: 600 }}>{change.after}</Box>
+            </Typography>
+          ))}
+        </Box>
+      ) : type === 'added' ? (
         <Typography variant="body2" sx={{ whiteSpace: multiline ? 'pre-wrap' : 'normal', overflowWrap: 'anywhere' }}>
           Added: {after}
         </Typography>
