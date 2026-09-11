@@ -15,6 +15,13 @@ namespace ERP_RFQ_Automation.Extraction.Templates;
 /// and every line marked "no source document on file" — unquotable, on a document that was
 /// read perfectly.</para>
 /// </summary>
+/// <param name="Rows">One row per bid line, in document order.</param>
+/// <param name="Narrative">The buyer's instructions to bidders, verbatim; null when none were printed.</param>
+/// <param name="SupplierName">OUR name in the Vendname column — captured to be excluded from customer matching, never matched.</param>
+/// <param name="SupplierAccountRef">OUR vendor code at the customer (e.g. 2004414).</param>
+public sealed record AramcoBidListReading(
+    IReadOnlyList<RfqSpreadsheetRow> Rows, string? Narrative, string? SupplierName, string? SupplierAccountRef);
+
 public static class AramcoBidListExtraction
 {
     /// <summary>The page name the ledger files this document's cells under.</summary>
@@ -38,11 +45,15 @@ public static class AramcoBidListExtraction
         [RfqSpreadsheetFields.ItemText] = 6
     };
 
+    /// <summary>The portal these prints come from; pairs with the vendor code into the account key.</summary>
+    public const string PortalName = "MATERIALS E-BIDDING SYSTEM";
+
     /// <summary>
-    /// Reads the document into rows, or returns null when it is not an Aramco bid list or the
-    /// parser refused it. Null means "fall through to the model", never "no items".
+    /// Reads the document into rows plus the header facts that are not rows, or returns null
+    /// when it is not an Aramco bid list or the parser refused it. Null means "fall through
+    /// to the model", never "no items".
     /// </summary>
-    public static IReadOnlyList<RfqSpreadsheetRow>? TryReadRows(
+    public static AramcoBidListReading? TryRead(
         string? documentText, string sourceDocumentName, out string? rejection)
     {
         rejection = null;
@@ -57,7 +68,9 @@ public static class AramcoBidListExtraction
             return null;
         }
 
-        return bid.Lines.Select(line => Map(bid, line, sourceDocumentName)).ToList();
+        return new AramcoBidListReading(
+            bid.Lines.Select(line => Map(bid, line, sourceDocumentName)).ToList(),
+            bid.Note, bid.VendorName, bid.VendorCode);
     }
 
     private static RfqSpreadsheetRow Map(AramcoBidList bid, AramcoBidLine line, string sourceDocumentName)

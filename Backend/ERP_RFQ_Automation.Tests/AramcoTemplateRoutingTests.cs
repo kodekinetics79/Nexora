@@ -82,6 +82,14 @@ public sealed class AramcoTemplateRoutingTests
         Assert.Equal("C001046933", outcome.Result.Rfqno);
         Assert.Equal("1G5-Fawzi Alomari", outcome.Result.BuyersName);
         Assert.Equal("2021-02-28", outcome.Result.BidClosingDate);
+
+        // The header block that is not a row: the portal, and OUR account there. Captured to
+        // be excluded from customer matching, exactly as the model path records them.
+        Assert.Equal("MATERIALS E-BIDDING SYSTEM", outcome.Result.CustomerPortalName);
+        Assert.Equal("ALI ZAID AL-QURAISHI&PARTNERS EL", outcome.Result.SupplierNameOnDocument);
+        Assert.Equal("2004414", outcome.Result.SupplierAccountRefOnDocument);
+        // The buyer's instruction to bidders is kept verbatim, as evidence, not as a line.
+        Assert.Equal("For Foreign Suppliers, If the delivery type is CIF or DDP, Supplier must attach.", outcome.DocumentNarrative);
     }
 
     [Fact]
@@ -143,7 +151,7 @@ public sealed class AramcoTemplateRoutingTests
     [Fact]
     public void A_document_that_is_not_an_Aramco_bid_list_routes_to_the_model_silently()
     {
-        var rows = AramcoBidListExtraction.TryReadRows(
+        var rows = AramcoBidListExtraction.TryRead(
             "Please quote 5 EA of ABC-123.", "email_body.txt", out var rejection);
 
         Assert.Null(rows);
@@ -159,7 +167,7 @@ public sealed class AramcoTemplateRoutingTests
         var text = Preamble + "\n" + string.Join("\n",
             "10", "902017274", "3801", "176", "EA", "KEY:SHAFT");   // unit and quantity swapped
 
-        var rows = AramcoBidListExtraction.TryReadRows(text, "bid.doc", out var rejection);
+        var rows = AramcoBidListExtraction.TryRead(text, "bid.doc", out var rejection);
 
         Assert.Null(rows);
         Assert.NotNull(rejection);

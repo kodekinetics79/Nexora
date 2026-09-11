@@ -144,6 +144,15 @@ public sealed class DocumentExtractionInput
 
 public sealed class ChunkedExtractionOutcome
 {
+    /// <summary>The same outcome carrying a different result. Every other member is copied, so a member added to this class must be added here too.</summary>
+    internal ChunkedExtractionOutcome WithResult(LeadExtractionResult? result) => new()
+    {
+        Status = Status, Result = result, ExpectedItemCount = ExpectedItemCount, ExtractedItemCount = ExtractedItemCount,
+        ReviewReason = ReviewReason, Diagnostics = Diagnostics, AiProviderClass = AiProviderClass, ProcessingPath = ProcessingPath,
+        OcrStatus = OcrStatus, OcrPageCount = OcrPageCount, PageCount = PageCount, PageCountAuthoritative = PageCountAuthoritative,
+        OcrTruncated = OcrTruncated, SplitResults = SplitResults, CanonicalImport = CanonicalImport, DocumentNarrative = DocumentNarrative
+    };
+
     public ExtractionOutcomeStatus Status { get; init; }
     public LeadExtractionResult? Result { get; init; }
 
@@ -561,16 +570,29 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         //
         // A refusal is a routing decision, not a failure — the document falls through and is
         // read by the model exactly as before. Nothing is lost by trying.
-        if (Templates.AramcoBidListExtraction.TryReadRows(
-                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templateRows)
+        if (Templates.AramcoBidListExtraction.TryRead(
+                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } reading)
         {
             // The rows take the structured path from here — normaliser, canonical import,
             // evidence ledger — so a line read by the template can cite its source exactly
             // like a spreadsheet cell can. Nothing below this point is consulted.
-            var templated = await ExtractStructuredAsync(
-                templateRows, input.BusinessUnitId, input.SourceDocumentName, ct, receivedOn: input.ReceivedOn);
+            var structured = await ExtractStructuredAsync(
+                reading.Rows, input.BusinessUnitId, input.SourceDocumentName, ct,
+                documentNarrative: reading.Narrative, receivedOn: input.ReceivedOn);
+            // The header block that is not a row: which portal printed this and under which
+            // vendor account of OURS. The model path records these; the template read them
+            // and dropped them. Deterministic, so certain.
+            var templated = structured.Result is null ? structured : structured.WithResult(structured.Result with
+            {
+                CustomerPortalName = Templates.AramcoBidListExtraction.PortalName,
+                CustomerPortalNameConfidence = 1.0d,
+                SupplierNameOnDocument = reading.SupplierName,
+                SupplierNameOnDocumentConfidence = reading.SupplierName is null ? null : 1.0d,
+                SupplierAccountRefOnDocument = reading.SupplierAccountRef,
+                SupplierAccountRefOnDocumentConfidence = reading.SupplierAccountRef is null ? null : 1.0d
+            });
             templated.Diagnostics.Insert(0,
-                $"Aramco bid list template: {templateRows.Count} line item(s) read without a model call.");
+                $"Aramco bid list template: {reading.Rows.Count} line item(s) read without a model call.");
             _log.LogInformation(
                 "{Document} was read from the Aramco bid list template: {Items} line item(s), no model call.",
                 input.SourceDocumentName, templated.ExtractedItemCount);

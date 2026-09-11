@@ -30,10 +30,12 @@ public sealed record AramcoBidLineRows(int BidLine, int ItemNo, int ShipTo, int 
 /// <param name="Bidno">The customer's own bid number — becomes the Lead's RFQ reference.</param>
 /// <param name="Rejection">Null when the parse is trustworthy; otherwise why it must not be used.</param>
 /// <param name="Rows">Where the header values sit, 1-based; 0 when a value was not found.</param>
+/// <param name="VendorName">OUR name as the customer's portal prints it (the Vendname column). Identifies us, never the buyer.</param>
+/// <param name="Note">The buyer's instructions printed between the column labels and the first record ("For Foreign Suppliers…"), verbatim. Null when there are none.</param>
 public sealed record AramcoBidList(
     IReadOnlyList<AramcoBidLine> Lines, string? Bidno, string? VendorCode,
     string? Buyer, DateOnly? BidDate, DateOnly? BidClose, string? Rejection,
-    AramcoBidListRows? Rows = null)
+    AramcoBidListRows? Rows = null, string? VendorName = null, string? Note = null)
 {
     public bool IsTrustworthy => Rejection is null && Lines.Count > 0;
 }
@@ -130,13 +132,21 @@ public static partial class AramcoBidListParser
         if (headerEnd < 0)
             return Empty("The six-column header block was not found in the expected order.");
 
-        var (bidno, vendor, buyer, bidDate, bidClose, headerRows) = ReadHeader(lines, headerEnd);
+        var (bidno, vendor, vendorName, buyer, bidDate, bidClose, headerRows) = ReadHeader(lines, headerEnd);
         // headerEnd is the index just past the six labels; the first label's 1-based row is
         // therefore headerEnd - ColumnHeaders.Length + 1.
         headerRows = headerRows with { ColumnHeader = headerEnd - ColumnHeaders.Length + 1 };
 
         var parsed = new List<AramcoBidLine>();
         var index = headerEnd;
+
+        // Anything printed between the column labels and the first record is the buyer's
+        // instruction to bidders — CIF/DDP alternatives, packing lists. It is kept verbatim
+        // and travels with the lead as evidence; it is not a line and never becomes one.
+        var firstRecord = NextRecordStart(lines, headerEnd);
+        var note = firstRecord > headerEnd
+            ? string.Join("\n", lines.Skip(headerEnd).Take(firstRecord - headerEnd))
+            : null;
 
         while (index < lines.Count)
         {
@@ -227,7 +237,7 @@ public static partial class AramcoBidListParser
                 $"The document contains {codes} material number(s) but {parsed.Count} record(s) "
                 + "were read; the layout is not the one this template expects.");
 
-        return new AramcoBidList(parsed, bidno, vendor, buyer, bidDate, bidClose, null, headerRows);
+        return new AramcoBidList(parsed, bidno, vendor, buyer, bidDate, bidClose, null, headerRows, vendorName, note);
     }
 
     /// <summary>
@@ -270,10 +280,10 @@ public static partial class AramcoBidListParser
     /// offset past the label row. Every field is optional: a missing buyer name is not a reason
     /// to refuse a document whose line items are perfectly readable.
     /// </summary>
-    private static (string? Bidno, string? Vendor, string? Buyer, DateOnly? Date, DateOnly? Close, AramcoBidListRows Rows)
+    private static (string? Bidno, string? Vendor, string? VendorName, string? Buyer, DateOnly? Date, DateOnly? Close, AramcoBidListRows Rows)
         ReadHeader(List<string> lines, int limit)
     {
-        string? bidno = null, vendor = null, buyer = null;
+        string? bidno = null, vendor = null, vendorName = null, buyer = null;
         DateOnly? date = null, close = null;
         int bidnoRow = 0, dateRow = 0, closeRow = 0, buyerRow = 0;
 
@@ -283,6 +293,7 @@ public static partial class AramcoBidListParser
         {
             // Vendor Code | Vendname | Bidno | Bid Date | Bid Close  →  five values follow.
             vendor = Value(labels, anchor + 5);
+            vendorName = Value(labels, anchor + 6);
             bidno  = Value(labels, anchor + 7);
             date   = Date(Value(labels, anchor + 8));
             close  = Date(Value(labels, anchor + 9));
@@ -308,7 +319,7 @@ public static partial class AramcoBidListParser
             if (buyer is not null) buyerRow = valueIndex + 1;
         }
 
-        return (bidno, vendor, buyer, date, close, new AramcoBidListRows(bidnoRow, buyerRow, dateRow, closeRow, 0));
+        return (bidno, vendor, vendorName, buyer, date, close, new AramcoBidListRows(bidnoRow, buyerRow, dateRow, closeRow, 0));
     }
 
     private static bool IsBuyerBlockLabel(string line) =>
