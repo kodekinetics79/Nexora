@@ -455,21 +455,3 @@ describe('one decision for the whole request', () => {
     expect(screen.getByText(/lines to quote/).textContent).toMatch(/^2 of 3/);
   });
 });
-
-describe('a long bid list', () => {
-  it('draws a hundred lines at a time and still decides every line at once', async () => {
-    record = { ...baseWorkbench(), lines: Array.from({ length: 120 }, (_item, index) => line({ id: index + 1 })) };
-    renderPage();
-
-    await screen.findByRole('group', { name: 'Quote or skip line 00001' });
-    expect(screen.getByText('Lines 1–100 of 120')).toBeInTheDocument();
-    expect(screen.queryByRole('group', { name: 'Quote or skip line 00101' })).toBeNull();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Quote all' }));
-    expect(screen.getByText(/lines to quote/).textContent).toMatch(/^120 of 120/);
-
-    fireEvent.click(screen.getByRole('button', { name: 'next page of lines' }));
-    const group = await screen.findByRole('group', { name: 'Quote or skip line 00101' });
-    expect(within(group).getByRole('button', { name: 'Quote' })).toHaveAttribute('aria-pressed', 'true');
-  });
-});

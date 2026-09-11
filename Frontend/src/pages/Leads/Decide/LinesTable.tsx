@@ -41,6 +41,8 @@ export interface LinesTableProps {
   onChange: (revisionLineId: number, patch: Partial<EditableLineDecision>) => void;
   /** Opens the document check beside the lines, focused on the given line when there is one. */
   onOpenDocument: (line?: LeadDecisionLineDTO) => void;
+  /** Lines drawn per page; the default suits a real bid list, tests use fewer. */
+  linesPerPage?: number;
 }
 
 /** Lines drawn at once. Enough to work through, few enough to draw instantly. */
@@ -250,6 +252,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
   readOnly,
   onChange,
   onOpenDocument,
+  linesPerPage = LINES_PER_PAGE,
 }) => {
   const skipReasons = React.useMemo(() => reasonCodes.filter((reason) => reason.appliesTo.includes('NoBid')), [reasonCodes]);
   const unitCodes = React.useMemo(() => new Set(unitOptions.map((option) => option.code.toUpperCase())), [unitOptions]);
@@ -260,7 +263,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
   // minutes after "Quote all". A hundred at a time draws in well under a second, and the page
   // control says where you are. Decisions are kept for every line, on every page.
   const [page, setPage] = React.useState(0);
-  const [pageSize, setPageSize] = React.useState(LINES_PER_PAGE);
+  const [pageSize, setPageSize] = React.useState(linesPerPage);
   React.useEffect(() => {
     if (page * pageSize >= lines.length) setPage(0);
   }, [lines.length, page, pageSize]);
@@ -268,7 +271,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
 
   return (
     <TableContainer sx={{ overflowX: 'auto' }}>
-      {lines.length > LINES_PER_PAGE ? (
+      {lines.length > linesPerPage ? (
         <TablePagination
           component="div"
           count={lines.length}
@@ -276,7 +279,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
           onPageChange={(_event, next) => setPage(next)}
           rowsPerPage={pageSize}
           onRowsPerPageChange={(event) => { setPageSize(Number(event.target.value)); setPage(0); }}
-          rowsPerPageOptions={[100, 250, 500]}
+          rowsPerPageOptions={[linesPerPage, linesPerPage * 2, linesPerPage * 5]}
           labelRowsPerPage="Lines per page"
           labelDisplayedRows={({ from, to, count }) => `Lines ${from}–${to} of ${count}`}
           getItemAriaLabel={(type) => `${type} page of lines`}
