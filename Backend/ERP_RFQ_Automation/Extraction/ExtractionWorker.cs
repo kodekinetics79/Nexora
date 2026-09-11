@@ -1835,11 +1835,7 @@ public sealed class LeadPersister : ILeadPersister
             var attributedExternalCost = ProcessingCostAttribution.Summarize(externalRequests).Amount;
             for (var i = 0; i < leads.Count; i++)
             {
-                var path = outcome.CanonicalImport is not null
-                    ? ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic
-                    : outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.Local
-                        ? ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.LocalModel
-                        : ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel;
+                var path = LeadPathFor(outcome);
                 reconciliation.Add(await _leadIdentity.ReconcileAsync(leads[i],
                     new ERP_RFQ_Automation.LeadIdentity.LeadIntakeDescriptor(
                         job.BatchId, job.SourceType.ToString(),
@@ -2309,6 +2305,30 @@ public sealed class LeadPersister : ILeadPersister
     /// Lines the persist transaction will write for this outcome: the extracted items, or the
     /// canonical import's line items when the structured ledger is also being written.
     /// </summary>
+    /// <summary>
+    /// How this document was read, as the intake ledger records it. Decided from the outcome's
+    /// own processing path first: a bid list read by the Aramco template made no model call and
+    /// yet was stamped "External provider used", because the mapping only knew two things —
+    /// "had a canonical import" or "asked the provider" — and a template read is neither.
+    /// </summary>
+    internal static ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath LeadPathFor(ChunkedExtractionOutcome outcome)
+    {
+        if (outcome.CanonicalImport is not null)
+            return ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic;
+        return outcome.ProcessingPath switch
+        {
+            ExtractionProcessingPath.DeterministicRules or ExtractionProcessingPath.NativeParser
+                => ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic,
+            ExtractionProcessingPath.LocalModel or ExtractionProcessingPath.LocalOcr
+                => ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.LocalModel,
+            ExtractionProcessingPath.ExternalFallback
+                => ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel,
+            _ => outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.Local
+                ? ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.LocalModel
+                : ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel,
+        };
+    }
+
     internal static int PersistedLineCount(ChunkedExtractionOutcome outcome)
     {
         var canonicalLines = outcome.CanonicalImport?.Documents.Sum(d => d.LineItems.Count) ?? 0;

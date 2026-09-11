@@ -131,3 +131,21 @@ public sealed class ExtractionPersistLeaseTests : IDisposable
             => throw new NotSupportedException();
     }
 }
+
+/// <summary>What the intake ledger records about how a document was read.</summary>
+public sealed class LeadProcessingPathMappingTests
+{
+    [Theory]
+    [InlineData(ExtractionProcessingPath.DeterministicRules, null, ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic)]
+    [InlineData(ExtractionProcessingPath.NativeParser, null, ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic)]
+    [InlineData(ExtractionProcessingPath.LocalModel, null, ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.LocalModel)]
+    [InlineData(ExtractionProcessingPath.ExternalFallback, null, ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel)]
+    [InlineData(ExtractionProcessingPath.LegacyUnknown, ERP_RFQ_Automation.AI.AiProviderClass.Local, ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.LocalModel)]
+    [InlineData(ExtractionProcessingPath.LegacyUnknown, ERP_RFQ_Automation.AI.AiProviderClass.External, ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel)]
+    public void A_template_read_is_deterministic_and_never_an_external_provider(
+        ExtractionProcessingPath path, ERP_RFQ_Automation.AI.AiProviderClass? provider, ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath expected)
+    {
+        var outcome = new ChunkedExtractionOutcome { Status = ExtractionOutcomeStatus.Ok, ProcessingPath = path, AiProviderClass = provider };
+        Assert.Equal(expected, LeadPersister.LeadPathFor(outcome));
+    }
+}

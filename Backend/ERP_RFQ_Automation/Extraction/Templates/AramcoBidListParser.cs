@@ -73,7 +73,11 @@ public static partial class AramcoBidListParser
     /// inside specification text, so the completeness cross-check counted phantom items and
     /// refused every document in the corpus.
     /// </summary>
-    [GeneratedRegex(@"^\d{9}$", RegexOptions.CultureInvariant)]
+    /// <para>A Saudi Electricity list writes the dummy material code "DM10" (and its siblings
+    /// DM1..DM9999) for free-text items that have no catalogue number. Twenty-one such lines
+    /// were refused as "not a material number", the document fell to the model, and the model
+    /// path refused it as too large. The dummy code is the item number the buyer wrote.</para>
+    [GeneratedRegex(@"^(?:\d{9}|DM\d{1,4})$", RegexOptions.CultureInvariant)]
     private static partial Regex MaterialNumber();
 
     [GeneratedRegex(@"^\d{1,6}$", RegexOptions.CultureInvariant)]
