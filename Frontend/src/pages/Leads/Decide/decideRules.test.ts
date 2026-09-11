@@ -9,6 +9,7 @@ import {
   dueSentence,
   fitMatchesSaved,
   lineNeeds,
+  MANY_LINES_TO_CHECK,
   nextThing,
   NO_CONCERN,
   NO_CONCERN_RATIONALE,
@@ -107,6 +108,22 @@ describe('the single next thing', () => {
       kind: 'blocked',
       sentence: 'Check what Nexora read for line 00001 against the document.',
       action: { path: '/procurement/extraction/review/407' },
+    });
+  });
+
+  it('sends many unverified quoted lines to one approval instead of a check per line', () => {
+    expect(MANY_LINES_TO_CHECK).toBeLessThanOrEqual(8);
+    const many = workbench({
+      lines: Array.from({ length: 8 }, (_item, index) => line({ id: index + 1, currency: 'SAR', verificationStatus: 'NEEDS_CHECK' })),
+    });
+    const decisions: DecisionMap = Object.fromEntries(many.lines.map((item) => [item.revisionLineId, { decision: 'Bid' }]));
+
+    const next = nextThing({ workbench: many, decisions, concern: NO_CONCERN, lifecycle: undefined, leadId: 407 });
+
+    expect(next).toMatchObject({
+      kind: 'blocked',
+      sentence: 'Nexora could not certify 8 of the quoted lines against the document. Approve the extraction once in Documents to check, then come back here.',
+      action: { label: 'Approve the extraction', path: '/procurement/extraction/review/407' },
     });
   });
 

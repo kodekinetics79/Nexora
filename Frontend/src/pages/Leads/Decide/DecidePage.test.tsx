@@ -435,6 +435,16 @@ describe('one decision for the whole request', () => {
       expect(box).toHaveTextContent('Item unavailable');
   });
 
+  it('Quote all writes the acknowledgement a warned line needs, where it can be changed', async () => {
+    record = { ...baseWorkbench(), lines: [line({ id: 1 }), line({ id: 2, needsAttention: true, attentionReason: 'No catalog match found' })] };
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+
+    const note = screen.getByRole('textbox', { name: 'How you handled it (line 00002)' });
+    expect(note).toHaveValue('Quoted as read; no catalogue match yet, sourcing will resolve it.');
+    expect(screen.queryByRole('textbox', { name: 'How you handled it (line 00001)' })).toBeNull();
+  });
+
   it('a line skipped after Quote all keeps its own decision', async () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));

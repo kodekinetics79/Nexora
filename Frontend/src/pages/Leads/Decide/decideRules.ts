@@ -287,6 +287,21 @@ export const qualificationStep = (lifecycle?: LifecycleState | null): 'none' | '
  * The single next thing, in the order the server would refuse them. Never a list: a rep who
  * reads five bullets fixes none, a rep who reads one sentence fixes that one and gets the next.
  */
+/**
+ * From this many unverified quoted lines on, the next step is one approval of the extraction,
+ * not a document check per line. A 1,500-line bid list read from a table is certified by
+ * approving it once in Documents to check; asking for line 8, then line 9, then line 10 is how
+ * the rep gives up.
+ */
+export const MANY_LINES_TO_CHECK = 6;
+
+/**
+ * The acknowledgement "Quote all" writes on a line that carries a catalogue warning. The
+ * commit refuses a warned line without a meaningful note, and a rep who quotes the whole
+ * request has decided exactly this; the words are on the line, and can be changed there.
+ */
+export const QUOTED_AS_READ_NOTE = 'Quoted as read; no catalogue match yet, sourcing will resolve it.';
+
 export const nextThing = ({ workbench, decisions, concern, lifecycle, leadId }: NextThingInput): NextThing => {
   if (!workbench.customerId) {
     return { kind: 'blocked', sentence: 'Choose the customer this request came from.' };
@@ -309,6 +324,17 @@ export const nextThing = ({ workbench, decisions, concern, lifecycle, leadId }: 
 
   const choices = workbench.lines.map((line) => decisions[line.revisionLineId]?.decision);
   const allSkipped = workbench.lines.length > 0 && choices.every((choice) => choice === 'NoBid');
+
+  const unverifiedQuoted = workbench.lines.filter((line) =>
+    decisions[line.revisionLineId]?.decision === 'Bid'
+    && lineNeeds(line, decisions[line.revisionLineId], unitCodes, currencyCodes).some((need) => need.kind === 'source'));
+  if (unverifiedQuoted.length >= MANY_LINES_TO_CHECK) {
+    return {
+      kind: 'blocked',
+      sentence: `Nexora could not certify ${unverifiedQuoted.length} of the quoted lines against the document. Approve the extraction once in Documents to check, then come back here.`,
+      action: { label: 'Approve the extraction', path: `/procurement/extraction/review/${leadId}` },
+    };
+  }
 
   for (const line of workbench.lines) {
     const [need] = lineNeeds(line, decisions[line.revisionLineId], unitCodes, currencyCodes);

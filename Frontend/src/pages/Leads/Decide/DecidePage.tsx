@@ -73,6 +73,7 @@ import {
   qualificationTransition,
   TERMINAL_BLOCKERS,
   type ConcernState,
+  QUOTED_AS_READ_NOTE,
 } from './decideRules';
 
 type Mode = 'rfq' | 'draft' | 'decline';
@@ -251,8 +252,15 @@ const DecidePage: React.FC = () => {
     if (!workbench) return;
     setDecisions((current) => {
       const next: DecisionMap = { ...current };
-      for (const line of workbench.lines)
-        next[line.revisionLineId] = { ...(current[line.revisionLineId] ?? { decision: 'Pending' }), ...patch };
+      for (const line of workbench.lines) {
+        const existing = current[line.revisionLineId] ?? { decision: 'Pending' };
+        const merged = { ...existing, ...patch };
+        // Quoting a warned line needs an acknowledgement; "Quote all" is that acknowledgement,
+        // written on the line where it can be read and changed.
+        if (patch.decision === 'Bid' && line.needsAttention && (merged.note?.trim().length ?? 0) < 5)
+          merged.note = QUOTED_AS_READ_NOTE;
+        next[line.revisionLineId] = merged;
+      }
       return next;
     });
   }, [workbench]);
