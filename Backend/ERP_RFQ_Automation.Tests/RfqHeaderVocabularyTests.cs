@@ -158,6 +158,9 @@ public sealed class RfqHeaderVocabularyTests
         Assert.Null(Assert.Single(rows).RfqNo);
 
         Assert.Equal(RfqSpreadsheetFields.RfqNo, RfqHeaderVocabulary.Builtin.FieldForLabel("Reference"));
+        // A sourcing event's "Owner" label names the buyer's person; an "Owner" column does not.
+        Assert.Equal(RfqSpreadsheetFields.BuyerName, RfqHeaderVocabulary.Builtin.FieldForLabel("Owner"));
+        Assert.Null(RfqHeaderVocabulary.Builtin.FieldForColumn("Owner"));
         Assert.Null(RfqHeaderVocabulary.Builtin.FieldForColumn("Reference"));
     }
 

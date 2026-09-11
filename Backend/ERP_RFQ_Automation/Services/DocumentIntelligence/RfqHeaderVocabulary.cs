@@ -176,7 +176,9 @@ public sealed class RfqHeaderVocabulary
     private static readonly Dictionary<string, string[]> LabelOnlySpellings = new(StringComparer.Ordinal)
     {
         [RfqSpreadsheetFields.RfqNo] = new[] { "reference", "refno", "ref", "ourref", "yourref", "referenceno", "referencenumber" },
-        [RfqSpreadsheetFields.BuyerName] = new[] { "company", "companyname", "organisation", "organization", "buyerorganisation" },
+        // A sourcing event's "Owner" is the buyer's person running it (Ariba: "Owner | TURKI
+        // ALAHMARI"). Only as a document label: an "Owner" column on a line grid is an asset owner.
+        [RfqSpreadsheetFields.BuyerName] = new[] { "company", "companyname", "organisation", "organization", "buyerorganisation", "owner", "eventowner" },
         [RfqSpreadsheetFields.ReceivedDate] = new[] { "date" },
         [RfqSpreadsheetFields.Currency] = new[] { "bidcurrency", "eventcurrency", "quotationcurrency", "quotecurrency", "currencyofquotation", "biddingcurrency" },
     };
