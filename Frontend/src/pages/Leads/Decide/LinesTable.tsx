@@ -13,6 +13,7 @@ import {
   TableCell,
   TableContainer,
   TableHead,
+  TablePagination,
   TableRow,
   TextField,
   ToggleButton,
@@ -41,6 +42,9 @@ export interface LinesTableProps {
   /** Opens the document check beside the lines, focused on the given line when there is one. */
   onOpenDocument: (line?: LeadDecisionLineDTO) => void;
 }
+
+/** Lines drawn at once. Enough to work through, few enough to draw instantly. */
+export const LINES_PER_PAGE = 100;
 
 const numberOrEmpty = (value: number | undefined): string =>
   value == null || !Number.isFinite(value) ? '' : String(value);
@@ -251,8 +255,33 @@ const LinesTable: React.FC<LinesTableProps> = ({
   const unitCodes = React.useMemo(() => new Set(unitOptions.map((option) => option.code.toUpperCase())), [unitOptions]);
   const currencyCodes = React.useMemo(() => new Set(currencyOptions.map((option) => option.code.toUpperCase())), [currencyOptions]);
 
+  // A page of lines at a time. Every row is a live form (quantity, unit, currency, a reason),
+  // and a real bid list runs to 1,500 lines: drawing them all at once froze the browser for
+  // minutes after "Quote all". A hundred at a time draws in well under a second, and the page
+  // control says where you are. Decisions are kept for every line, on every page.
+  const [page, setPage] = React.useState(0);
+  const [pageSize, setPageSize] = React.useState(LINES_PER_PAGE);
+  React.useEffect(() => {
+    if (page * pageSize >= lines.length) setPage(0);
+  }, [lines.length, page, pageSize]);
+  const visible = lines.length > pageSize ? lines.slice(page * pageSize, (page + 1) * pageSize) : lines;
+
   return (
     <TableContainer sx={{ overflowX: 'auto' }}>
+      {lines.length > LINES_PER_PAGE ? (
+        <TablePagination
+          component="div"
+          count={lines.length}
+          page={page}
+          onPageChange={(_event, next) => setPage(next)}
+          rowsPerPage={pageSize}
+          onRowsPerPageChange={(event) => { setPageSize(Number(event.target.value)); setPage(0); }}
+          rowsPerPageOptions={[100, 250, 500]}
+          labelRowsPerPage="Lines per page"
+          labelDisplayedRows={({ from, to, count }) => `Lines ${from}–${to} of ${count}`}
+          getItemAriaLabel={(type) => `${type} page of lines`}
+        />
+      ) : null}
       <Table size="small" aria-label="Lines the customer asked for" sx={{ minWidth: 720 }}>
         <TableHead>
           <TableRow>
@@ -263,7 +292,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
           </TableRow>
         </TableHead>
         <TableBody>
-          {lines.map((line) => (
+          {visible.map((line) => (
             <LineRow
               key={line.revisionLineId}
               line={line}
