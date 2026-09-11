@@ -407,3 +407,41 @@ describe('DecidePage', () => {
     expect(await screen.findByRole('heading', { name: 'Source evidence' })).toBeInTheDocument();
   });
 });
+
+
+describe('one decision for the whole request', () => {
+  it('Quote all quotes every line in one click', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+
+    for (const label of ['00001', '00002', '00003']) {
+      const group = screen.getByRole('group', { name: `Quote or skip line ${label}` });
+      expect(within(group).getByRole('button', { name: 'Quote' })).toHaveAttribute('aria-pressed', 'true');
+    }
+    expect(screen.getByText(/3 lines to quote/).textContent).toMatch(/^3 of 3/);
+  });
+
+  it('Skip all asks for one reason and puts it on every line', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Skip all…' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Item unavailable' }));
+
+    for (const label of ['00001', '00002', '00003']) {
+      const group = screen.getByRole('group', { name: `Quote or skip line ${label}` });
+      expect(within(group).getByRole('button', { name: 'Skip' })).toHaveAttribute('aria-pressed', 'true');
+    }
+    expect(screen.getAllByRole('combobox', { name: /Why skip line/ })).toHaveLength(3);
+    for (const box of screen.getAllByRole('combobox', { name: /Why skip line/ }))
+      expect(box).toHaveTextContent('Item unavailable');
+  });
+
+  it('a line skipped after Quote all keeps its own decision', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    const group = screen.getByRole('group', { name: 'Quote or skip line 00002' });
+    fireEvent.click(within(group).getByRole('button', { name: 'Skip' }));
+
+    expect(within(group).getByRole('button', { name: 'Skip' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/lines to quote/).textContent).toMatch(/^2 of 3/);
+  });
+});

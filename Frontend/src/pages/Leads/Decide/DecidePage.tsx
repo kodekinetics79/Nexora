@@ -16,6 +16,8 @@ import {
   FormControlLabel,
   FormGroup,
   Link,
+  Menu,
+  MenuItem,
   Paper,
   Stack,
   TextField,
@@ -240,6 +242,20 @@ const DecidePage: React.FC = () => {
       [revisionLineId]: { ...(current[revisionLineId] ?? { decision: 'Pending' }), ...patch },
     }));
   }, []);
+
+  // One decision for the whole request. A real bid list runs to 1,500 lines; nobody presses
+  // 1,500 buttons. "Quote all" says yes to everything and the rep then skips the exceptions;
+  // "Skip all" needs one reason, which every skipped line carries.
+  const [skipAllAnchor, setSkipAllAnchor] = React.useState<HTMLElement | null>(null);
+  const updateEveryLine = React.useCallback((patch: Partial<EditableLineDecision>) => {
+    if (!workbench) return;
+    setDecisions((current) => {
+      const next: DecisionMap = { ...current };
+      for (const line of workbench.lines)
+        next[line.revisionLineId] = { ...(current[line.revisionLineId] ?? { decision: 'Pending' }), ...patch };
+      return next;
+    });
+  }, [workbench]);
 
   React.useEffect(() => {
     if (!workbench) return;
@@ -560,6 +576,30 @@ const DecidePage: React.FC = () => {
           <Stack direction="row" spacing={2} sx={{ alignItems: 'baseline', justifyContent: 'space-between', px: { xs: 2, sm: 3 }, pb: 1 }}>
             <Typography id="decide-lines" component="h2" variant="subtitle1" sx={{ fontWeight: 700 }}>What they want</Typography>
             <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
+              {!readOnly && workbench.lines.length > 1 ? (
+                <Stack direction="row" spacing={1}>
+                  <Button size="small" variant="outlined" onClick={() => updateEveryLine({ decision: 'Bid', reasonCode: undefined })} sx={{ fontWeight: 700 }}>
+                    Quote all
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    aria-haspopup="menu"
+                    aria-expanded={skipAllAnchor ? 'true' : undefined}
+                    onClick={(event) => setSkipAllAnchor(event.currentTarget)}
+                    sx={{ fontWeight: 700 }}
+                  >
+                    Skip all…
+                  </Button>
+                  <Menu anchorEl={skipAllAnchor} open={Boolean(skipAllAnchor)} onClose={() => setSkipAllAnchor(null)} aria-label="Why skip every line">
+                    {workbench.reasonCodes.filter((reason) => reason.appliesTo.includes('NoBid')).map((reason) => (
+                      <MenuItem key={reason.code} onClick={() => { updateEveryLine({ decision: 'NoBid', reasonCode: reason.code }); setSkipAllAnchor(null); }}>
+                        {reason.label}
+                      </MenuItem>
+                    ))}
+                  </Menu>
+                </Stack>
+              ) : null}
               {!locked && canEdit && workbench.lines.some((line) => line.verificationStatus === 'NEEDS_CHECK') ? (
                 <Button size="small" variant="outlined" onClick={() => openDocument()} sx={{ fontWeight: 700 }}>
                   Check against the document
