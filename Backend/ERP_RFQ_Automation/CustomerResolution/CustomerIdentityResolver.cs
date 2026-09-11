@@ -119,7 +119,54 @@ public static class CustomerIdentityResolver
         // ── S4..S6 READ-ONLY SUGGESTION SCANS ─────────────────────────────────
         // Never link. Two distinct Gulf legal entities routinely share a trade name; a
         // first-time collision is not evidence, a human-confirmed one (S3) is.
+        // THE NAME THE BUYER WROTE. "Deliver to: Saudi Electricity Company-Jizan Area" names
+        // the customer whatever system printed the page. A known customer's full name, or an
+        // alias a reviewer taught, found as whole words inside a passage about the buyer
+        // (address, site) links the lead; inside item text it is a suggestion, because a
+        // name there may be incidental ("SEC-specified barcode"). A one-word customer name
+        // never matches on its own: "Test" or "Alpha" is anybody's word.
+        var namedInAddress = new List<Hit>();
+        var namedInText = new List<Hit>();
+        if (guarded.Passages.Count > 0)
+        {
+            var namesToFind = new List<(long CustomerId, string Key, string Display, bool Taught)>();
+            foreach (var customer in corpus.Customers)
+            {
+                var key = CustomerNameNormalizer.LooseKey(customer.Name);
+                if (key.Length < 8 || key.Split(' ').Length < 2 || guarded.IsSelfName(key)) continue;
+                namesToFind.Add((customer.CustomerId, key, customer.Name, false));
+            }
+            foreach (var identifier in corpus.Identifiers)
+            {
+                if (!identifier.IsVerified) continue;
+                if (identifier.IdentifierType is not (CustomerIdentifierType.Alias or CustomerIdentifierType.CustomerName)) continue;
+                if (!CustomerIdentifierSources.TrustedForAutoLink.Contains(identifier.Source, StringComparer.Ordinal)) continue;
+                var key = identifier.NormalizedValue;
+                var taught = string.Equals(identifier.Source, CustomerIdentifierSources.LeadReviewLearned, StringComparison.Ordinal);
+                // A taught alias may be one word ("SEC"); a profile name still needs two.
+                if (key.Length < 3 || (!taught && (key.Length < 8 || key.Split(' ').Length < 2)) || guarded.IsSelfName(key)) continue;
+                namesToFind.Add((identifier.CustomerId, key, identifier.NormalizedValue, taught));
+            }
+
+            foreach (var passage in guarded.Passages)
+            {
+                foreach (var (customerId, key, display, _) in namesToFind)
+                {
+                    if (!ContainsWholeWords(passage.Key, key)) continue;
+                    var excerpt = passage.Text.Length <= 80 ? passage.Text : passage.Text[..80] + "…";
+                    var hit = new Hit(customerId,
+                        passage.NamesTheBuyer ? policy.NameInAddressConfidence : policy.NameInItemTextConfidence,
+                        CustomerMatchReasonCodes.NameInDocument,
+                        $"\"{display}\" appears in the {passage.Where}: \"{excerpt}\".");
+                    (passage.NamesTheBuyer ? namedInAddress : namedInText).Add(hit);
+                }
+            }
+        }
+        if (Decide(namedInAddress, names, policy, out var namedOutcome))
+            return WithContact(namedOutcome!, guarded, corpus);
+
         var suggestions = new List<Hit>();
+        suggestions.AddRange(namedInText.GroupBy(h => h.CustomerId).Select(g => g.First()));
 
         if (guarded.NameKey.Length > 0)
         {
@@ -251,6 +298,13 @@ public static class CustomerIdentityResolver
         var nameKey = CustomerNameNormalizer.LooseKey(evidence.CustomerCompanyName);
         if (IsSelfName(nameKey)) nameKey = string.Empty;
 
+        var passages = evidence.Passages
+            .Where(p => !string.IsNullOrWhiteSpace(p.Text))
+            .Select(p => new GuardedPassage(p.Where, p.Text.Trim(), CustomerNameNormalizer.LooseKey(p.Text), p.NamesTheBuyer))
+            .Where(p => p.Key.Length > 0)
+            .Take(200)
+            .ToList();
+
         string? portalAccountKey = null;
         var portalKey = CustomerNameNormalizer.LooseKey(evidence.CustomerPortalName);
         if (portalKey.Length > 0 && supplierAccountKey is { Length: > 0 })
@@ -260,7 +314,9 @@ public static class CustomerIdentityResolver
             addresses, domains, accounts, taxRegistrations, nameKey,
             CustomerNameNormalizer.TightKey(nameKey),
             portalAccountKey,
-            CustomerNameNormalizer.LooseKey(evidence.BuyerPersonName));
+            CustomerNameNormalizer.LooseKey(evidence.BuyerPersonName),
+            passages,
+            selfNames);
 
         bool IsSelfName(string key) => SelfIdentityGuard.IsSelfName(key, selfNames);
 
@@ -383,15 +439,18 @@ public static class CustomerIdentityResolver
         CustomerMatchReasonCodes.SenderDomain => 3,
         CustomerMatchReasonCodes.LearnedPortalAccount => 4,
         CustomerMatchReasonCodes.LearnedAlias => 5,
-        CustomerMatchReasonCodes.NameExactUnverified => 6,
-        CustomerMatchReasonCodes.PriorSender => 7,
-        CustomerMatchReasonCodes.ContactPerson => 8,
-        CustomerMatchReasonCodes.NameFuzzy => 9,
-        CustomerMatchReasonCodes.RfqPattern => 10,
+        CustomerMatchReasonCodes.NameInDocument => 6,
+        CustomerMatchReasonCodes.NameExactUnverified => 7,
+        CustomerMatchReasonCodes.PriorSender => 8,
+        CustomerMatchReasonCodes.ContactPerson => 9,
+        CustomerMatchReasonCodes.NameFuzzy => 10,
+        CustomerMatchReasonCodes.RfqPattern => 11,
         _ => 99
     };
 
     private sealed record Hit(long CustomerId, decimal Confidence, string ReasonCode, string Explanation);
+
+    private sealed record GuardedPassage(string Where, string Text, string Key, bool NamesTheBuyer);
 
     private sealed record GuardedEvidence(
         HashSet<string> Addresses,
@@ -401,11 +460,23 @@ public static class CustomerIdentityResolver
         string NameKey,
         string TightNameKey,
         string? PortalAccountKey,
-        string BuyerPersonKey)
+        string BuyerPersonKey,
+        IReadOnlyList<GuardedPassage> Passages,
+        HashSet<string> SelfNameKeys)
     {
         public bool IsEmpty =>
             Addresses.Count == 0 && Domains.Count == 0 && AccountReferences.Count == 0 &&
             TaxRegistrations.Count == 0 && NameKey.Length == 0 &&
-            string.IsNullOrEmpty(PortalAccountKey) && BuyerPersonKey.Length == 0;
+            string.IsNullOrEmpty(PortalAccountKey) && BuyerPersonKey.Length == 0 && Passages.Count == 0;
+
+        public bool IsSelfName(string key) => SelfIdentityGuard.IsSelfName(key, SelfNameKeys);
+    }
+
+    /// <summary>"SAUDI ELECTRICITY COMPANY" inside "SAUDI ELECTRICITY COMPANY JIZAN AREA", as whole words — never inside another word.</summary>
+    internal static bool ContainsWholeWords(string passageKey, string nameKey)
+    {
+        if (nameKey.Length == 0 || passageKey.Length < nameKey.Length) return false;
+        var padded = " " + passageKey + " ";
+        return padded.Contains(" " + nameKey + " ", StringComparison.Ordinal);
     }
 }
