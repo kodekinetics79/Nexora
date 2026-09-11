@@ -44,6 +44,8 @@ namespace ERP_RFQ_Automation.Migrations
     [Migration("20260910120000_ManufacturerPartPatterns")]
     public partial class ManufacturerPartPatterns : Migration
     {
+        // Spelled out in every SQL statement below, not interpolated: the tenant-isolation test
+        // reads the migration TEXT for the table's row-level-security statements.
         private const string Table = "manufacturer_part_patterns";
 
         /// <inheritdoc />
@@ -85,21 +87,21 @@ namespace ERP_RFQ_Automation.Migrations
             // added by a later migration inherits none of this, and a maker-knowledge table
             // readable across tenants would let one customer's numbering habits name the
             // manufacturer on another customer's quote.
-            migrationBuilder.Sql($"""
-                ALTER TABLE public.{Table} ENABLE ROW LEVEL SECURITY;
-                ALTER TABLE public.{Table} FORCE ROW LEVEL SECURITY;
-                CREATE POLICY nexora_tenant_isolation ON public.{Table} TO nexora_tenant_app
+            migrationBuilder.Sql("""
+                ALTER TABLE public."manufacturer_part_patterns" ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE public."manufacturer_part_patterns" FORCE ROW LEVEL SECURITY;
+                CREATE POLICY nexora_tenant_isolation ON public."manufacturer_part_patterns" TO nexora_tenant_app
                     USING ("BusinessUnitId" = NULLIF(current_setting('nexora.business_unit_id', true), '')::bigint)
                     WITH CHECK ("BusinessUnitId" = NULLIF(current_setting('nexora.business_unit_id', true), '')::bigint);
                 """);
 
-            migrationBuilder.Sql($$"""
+            migrationBuilder.Sql("""
                 DO $$
                 BEGIN
                     IF NOT (SELECT relforcerowsecurity FROM pg_class
-                            WHERE oid = 'public.{{Table}}'::regclass) THEN
+                            WHERE oid = 'public."manufacturer_part_patterns"'::regclass) THEN
                         RAISE EXCEPTION
-                            '{{Table}} lost FORCE ROW LEVEL SECURITY during migration '
+                            'manufacturer_part_patterns lost FORCE ROW LEVEL SECURITY during migration '
                             '20260910120000. Refusing to complete: the table owner would be '
                             'unbounded by tenant.';
                     END IF;
@@ -109,26 +111,26 @@ namespace ERP_RFQ_Automation.Migrations
 
             // A policy without a grant is not a narrower boundary — it is a table nobody can
             // read. `public` is deny-by-default since CompleteTenantRlsCoverage.
-            migrationBuilder.Sql($"""
-                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.{Table} TO nexora_tenant_app;
+            migrationBuilder.Sql("""
+                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."manufacturer_part_patterns" TO nexora_tenant_app;
                 """);
 
             // USAGE only on the sequence — never SELECT (currval leaks another tenant's row
             // volume) and never UPDATE (setval collides with a neighbour's future keys).
-            migrationBuilder.Sql($"""
-                GRANT USAGE ON SEQUENCE public."{Table}_Id_seq" TO nexora_tenant_app;
+            migrationBuilder.Sql("""
+                GRANT USAGE ON SEQUENCE public."manufacturer_part_patterns_Id_seq" TO nexora_tenant_app;
                 """);
 
             // The extraction worker reads this table while draining a shared queue, outside a
             // pushed tenant scope, so it executes as nexora_pipeline_app. Same DML the pipeline
             // already holds on customer_identifiers.
-            migrationBuilder.Sql($$"""
+            migrationBuilder.Sql("""
                 DO $$
                 BEGIN
                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_pipeline_app') THEN
-                        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.{{Table}} TO nexora_pipeline_app;
-                        GRANT USAGE ON SEQUENCE public."{{Table}}_Id_seq" TO nexora_pipeline_app;
-                        REVOKE TRUNCATE ON TABLE public.{{Table}} FROM nexora_pipeline_app;
+                        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."manufacturer_part_patterns" TO nexora_pipeline_app;
+                        GRANT USAGE ON SEQUENCE public."manufacturer_part_patterns_Id_seq" TO nexora_pipeline_app;
+                        REVOKE TRUNCATE ON TABLE public."manufacturer_part_patterns" FROM nexora_pipeline_app;
                     END IF;
                 END
                 $$;
@@ -138,17 +140,17 @@ namespace ERP_RFQ_Automation.Migrations
             // it can reach, so a table missing this grant and policy blocks EVERY tenant purge
             // rather than silently leaving data behind. Learned patterns are derived from the
             // tenant's documents and are precisely what a deletion request covers.
-            migrationBuilder.Sql($$"""
+            migrationBuilder.Sql("""
                 DO $$
                 BEGIN
                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_purge_app') THEN
-                        GRANT SELECT, DELETE ON public.{{Table}} TO nexora_purge_app;
+                        GRANT SELECT, DELETE ON public."manufacturer_part_patterns" TO nexora_purge_app;
 
                         IF NOT EXISTS (
                             SELECT 1 FROM pg_policy p
-                            WHERE p.polrelid = 'public.{{Table}}'::regclass
+                            WHERE p.polrelid = 'public."manufacturer_part_patterns"'::regclass
                               AND p.polname = 'nexora_tenant_purge') THEN
-                            CREATE POLICY nexora_tenant_purge ON public.{{Table}}
+                            CREATE POLICY nexora_tenant_purge ON public."manufacturer_part_patterns"
                                 AS PERMISSIVE FOR ALL TO nexora_purge_app
                                 USING ("BusinessUnitId" = NULLIF(current_setting('nexora.purge_business_unit_id', true), '')::bigint);
                         END IF;
@@ -165,9 +167,9 @@ namespace ERP_RFQ_Automation.Migrations
             {
                 // Grants fall with the table; policies are dropped explicitly so a partial Down
                 // never leaves a policy pointing at a relation that is about to disappear.
-                migrationBuilder.Sql($"""
-                    DROP POLICY IF EXISTS nexora_tenant_purge ON public.{Table};
-                    DROP POLICY IF EXISTS nexora_tenant_isolation ON public.{Table};
+                migrationBuilder.Sql("""
+                    DROP POLICY IF EXISTS nexora_tenant_purge ON public."manufacturer_part_patterns";
+                    DROP POLICY IF EXISTS nexora_tenant_isolation ON public."manufacturer_part_patterns";
                     """);
             }
 
