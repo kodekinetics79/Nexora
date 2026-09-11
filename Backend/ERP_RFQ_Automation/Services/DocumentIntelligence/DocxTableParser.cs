@@ -39,7 +39,15 @@ public sealed class DocxTableParser
     /// "Validity Date", "Effective Date" — where reading nothing is a visible gap and reading the
     /// wrong thing is a silent error.</para>
     /// </summary>
-    private static readonly HashSet<string> FirstWordOnlyAliases = new(StringComparer.Ordinal) { "date" };
+    private static readonly HashSet<string> FirstWordOnlyAliases = new(StringComparer.Ordinal)
+    {
+        "date",
+        // Promoted from the column vocabulary to document labels, and every one of them is the
+        // tail of a longer phrase a terms sheet writes: "Partial Delivery: Not allowed",
+        // "Subcontract: Not permitted", "Delivery Plant: 1234". Matched mid-phrase they wrote
+        // "Not allowed" into the delivery date and the real label, further down, was ignored.
+        "delivery", "contract", "agreement", "plant", "site", "ref", "reference", "company", "destination",
+    };
 
     private readonly NativeSpreadsheetParser _grid;
     private readonly DocxFormBlockParser _form;
@@ -67,13 +75,7 @@ public sealed class DocxTableParser
         if (body is null)
             return Array.Empty<RfqSpreadsheetRow>();
 
-        var (headerBlock, unmatchedLabels) = ReadHeaderBlock(body);
-        if (!headerBlock.ContainsKey(RfqSpreadsheetFields.RfqNo))
-        {
-            var fromName = RfqNumberFromFileName(sourceDocumentName);
-            if (fromName is not null)
-                headerBlock[RfqSpreadsheetFields.RfqNo] = fromName;
-        }
+        var parsedTables = new List<IReadOnlyList<RfqSpreadsheetRow>>();
 
         var results = new List<RfqSpreadsheetRow>();
         var tableOrdinal = 0;
@@ -107,9 +109,24 @@ public sealed class DocxTableParser
             if (rows.Count == 0)
                 rows = _form.Parse(grid, sourceDocumentName, $"Table {tableOrdinal}");
 
-            if (rows.Count == 0)
-                continue;
+            parsedTables.Add(rows);
+        }
 
+        // Metadata tables are the small ones ABOVE the first line-item table. A two-column
+        // table below it is a line grid or a terms table, and reading "Ball valve 2in | 10" or
+        // "Delivery | 8 weeks" as document labels put line items into the header and a lead
+        // time into the delivery date.
+        var firstLineTable = parsedTables.FindIndex(rows => rows.Count > 0);
+        var (headerBlock, unmatchedLabels) = ReadHeaderBlock(body, metadataTableLimit: firstLineTable < 0 ? 0 : firstLineTable);
+        if (!headerBlock.ContainsKey(RfqSpreadsheetFields.RfqNo))
+        {
+            var fromName = RfqNumberFromFileName(sourceDocumentName);
+            if (fromName is not null)
+                headerBlock[RfqSpreadsheetFields.RfqNo] = fromName;
+        }
+
+        foreach (var rows in parsedTables)
+        {
             foreach (var row in rows)
             {
                 ApplyHeaderBlock(row, headerBlock);
@@ -228,7 +245,7 @@ public sealed class DocxTableParser
     /// <summary>A label-and-value table this small is document metadata, not a line grid.</summary>
     private const int HeaderTableRowLimit = 12;
 
-    private (Dictionary<string, string> Matched, Dictionary<string, string> Unmatched) ReadHeaderBlock(Body body)
+    private (Dictionary<string, string> Matched, Dictionary<string, string> Unmatched) ReadHeaderBlock(Body body, int metadataTableLimit)
     {
         var found = new Dictionary<string, string>(StringComparer.Ordinal);
         var unmatched = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -259,7 +276,7 @@ public sealed class DocxTableParser
         // small two-column tables — "Due date | 10/8/2026 3:00 PM", "Currency | US Dollar" —
         // with no paragraph above the first table at all. Each such row is one "Label: value"
         // pair; a row that is not a recognised label is simply skipped.
-        foreach (var table in body.Elements<Table>())
+        foreach (var table in body.Elements<Table>().Take(metadataTableLimit))
         {
             var rows = table.Elements<TableRow>().ToList();
             if (rows.Count == 0 || rows.Count > HeaderTableRowLimit)
@@ -324,8 +341,17 @@ public sealed class DocxTableParser
     internal static string? RfqNumberFromFileName(string? fileName)
     {
         if (string.IsNullOrWhiteSpace(fileName)) return null;
-        var match = System.Text.RegularExpressions.Regex.Match(fileName, @"(?<!\d)\d{9,}(?!\d)");
-        return match.Success ? match.Value : null;
+        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(fileName, @"(?<!\d)\d{9,}(?!\d)"))
+        {
+            // "Quotation Request 20260910120000.docx" carries an export timestamp, not a
+            // number: a 12- or 14-digit run opening with a plausible year is skipped.
+            var digits = match.Value;
+            var timestampShaped = digits.Length is 12 or 14
+                && (digits.StartsWith("19", StringComparison.Ordinal) || digits.StartsWith("20", StringComparison.Ordinal));
+            if (timestampShaped) continue;
+            return digits;
+        }
+        return null;
     }
 
     /// <summary>
@@ -451,7 +477,9 @@ public sealed class DocxTableParser
             var c = line[j];
             if (char.IsLetterOrDigit(c))
             {
-                if (char.ToLowerInvariant(c) != normalizedAlias[compact])
+                // Accents fold the same way the vocabulary folds them, so "Fecha límite:" in a
+                // Word document matches the spelling a spreadsheet column taught.
+                if (BaseLetter(c) != normalizedAlias[compact])
                     return -1;
                 compact++;
             }
@@ -476,6 +504,17 @@ public sealed class DocxTableParser
         // costs far more than it saves. The one alias generic enough to be another label's
         // TAIL is guarded individually, by FirstWordOnlyAliases.
         return k < line.Length && line[k] == ':' ? k - index + 1 : -1;
+    }
+
+    /// <summary>The lower-case base letter of a character, its accent stripped ("í" → "i").</summary>
+    private static char BaseLetter(char c)
+    {
+        if (c < 128) return char.ToLowerInvariant(c);
+        var folded = c.ToString().Normalize(System.Text.NormalizationForm.FormD);
+        foreach (var part in folded)
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(part) != System.Globalization.UnicodeCategory.NonSpacingMark)
+                return char.ToLowerInvariant(part);
+        return char.ToLowerInvariant(c);
     }
 
     /// <summary>

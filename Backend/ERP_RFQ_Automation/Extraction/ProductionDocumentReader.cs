@@ -447,7 +447,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             _log.LogWarning(ex, "Could not load learned header spellings for tenant {Tenant}; using the built-in vocabulary.", businessUnitId);
             return;
         }
-        if (vocabulary.Learned.Count == 0 || ReferenceEquals(vocabulary, _spreadsheetParser.Vocabulary)) return;
+        if (ReferenceEquals(vocabulary, _spreadsheetParser.Vocabulary)) return;
+        // Always the tenant's own vocabulary, including the built-in one when it has taught
+        // nothing: a reader that ever served two jobs must not carry the first tenant's
+        // spellings into the second.
         _spreadsheetParser = new NativeSpreadsheetParser(vocabulary);
         _docxTableParser = new DocxTableParser(_spreadsheetParser);
     }

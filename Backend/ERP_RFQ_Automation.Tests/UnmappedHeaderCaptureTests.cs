@@ -63,7 +63,37 @@ public sealed class UnmappedHeaderCaptureTests
         Assert.Equal("10/8/2026 3:00 PM", document.UnmappedHeaders["Cut-off"]);
     }
 
-    private static byte[] WordDocument(string[] paragraphs, (string[] Header, string[] Row) table, (string Label, string Value)[]? metadata = null)
+    [Fact]
+    public void A_terms_line_that_merely_contains_a_label_word_does_not_become_the_field()
+    {
+        // "Partial Delivery: Not allowed" contains "delivery"; the real label comes later.
+        var bytes = WordDocument(
+            paragraphs: new[] { "Partial Delivery: Not allowed", "Subcontract: Not permitted", "Required Delivery Date: 2026-10-01", "Contract No: FA-2026-1" },
+            table: (new[] { "Part No", "Description", "Qty" }, new[] { "P-1", "Valve", "5" }));
+
+        var row = Assert.Single(new DocxTableParser(new NativeSpreadsheetParser()).Parse(bytes, "terms.docx"));
+
+        Assert.Equal("2026-10-01", row.RequiredDeliveryDate);
+        Assert.Equal("FA-2026-1", row.AgreementReference);
+    }
+
+    [Fact]
+    public void A_two_column_table_below_the_line_items_is_not_document_metadata()
+    {
+        // A terms table after the grid: "Delivery | 8 weeks" is a term, not the delivery date,
+        // and its rows are not unrecognised document labels either.
+        var bytes = WordDocument(
+            paragraphs: Array.Empty<string>(),
+            table: (new[] { "Part No", "Description", "Qty" }, new[] { "P-1", "Valve", "5" }),
+            trailing: new[] { ("Delivery", "8 weeks"), ("Warranty", "18 months") });
+
+        var row = Assert.Single(new DocxTableParser(new NativeSpreadsheetParser()).Parse(bytes, "grid.docx"));
+
+        Assert.Null(row.RequiredDeliveryDate);
+        Assert.DoesNotContain("Warranty", row.UnmappedHeaderLabels.Keys);
+    }
+
+    private static byte[] WordDocument(string[] paragraphs, (string[] Header, string[] Row) table, (string Label, string Value)[]? metadata = null, (string Label, string Value)[]? trailing = null)
     {
         using var stream = new MemoryStream();
         using (var document = WordprocessingDocument.Create(stream, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
@@ -82,6 +112,12 @@ public sealed class UnmappedHeaderCaptureTests
             grid.AppendChild(Row(table.Header));
             grid.AppendChild(Row(table.Row));
             body.AppendChild(grid);
+            if (trailing is not null)
+            {
+                var terms = new Table();
+                foreach (var (label, value) in trailing) terms.AppendChild(Row(new[] { label, value }));
+                body.AppendChild(terms);
+            }
             main.Document.Save();
         }
         return stream.ToArray();

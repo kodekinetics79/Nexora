@@ -217,7 +217,11 @@ public interface IChunkedExtractionService
     /// null by default: the deterministic parse does not depend on it, and a caller that has
     /// none simply passes nothing.
     /// </param>
-    Task<ChunkedExtractionOutcome> ExtractStructuredAsync(IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default, string? documentNarrative = null);
+    /// <param name="receivedOn">
+    /// When the document arrived, from the job. The normaliser reads an ambiguous closing date
+    /// against it; defaulting to "now" made a re-run months later read a different date.
+    /// </param>
+    Task<ChunkedExtractionOutcome> ExtractStructuredAsync(IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default, string? documentNarrative = null, DateTime? receivedOn = null);
 }
 
 /// <summary>
@@ -968,10 +972,10 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
     public async Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
         IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default,
-        string? documentNarrative = null)
+        string? documentNarrative = null, DateTime? receivedOn = null)
     {
         // Deterministic parse — runs in milliseconds for 10k rows, no LLM call.
-        var import = _normalizer.NormalizeSpreadsheetRows(rows, businessUnitId);
+        var import = _normalizer.NormalizeSpreadsheetRows(rows, businessUnitId, receivedOn);
         var diagnostics = new List<string>
         {
             $"Structured parse produced {import.Documents.Count} RFQ group(s) from {rows.Count} row(s)."

@@ -101,7 +101,6 @@ public sealed class RfqHeaderVocabularyTests
     [InlineData("Catalogue No.")]
     [InlineData("Article Number")]
     [InlineData("SKU")]
-    [InlineData("Model")]
     public void A_part_number_column_is_read_under_every_customer_spelling(string header)
     {
         var rows = Grid.ParseCsv(Csv($"Description,Qty,{header}", "Contactor,4,3RT2015-1BB41"), "bid.csv");

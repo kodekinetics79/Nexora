@@ -83,7 +83,7 @@ public sealed class DocxFormBlockParser
         if (valueColumn <= 0) return Array.Empty<RfqSpreadsheetRow>();
 
         var labels = RecurringLeftHandValues(grid);
-        labels.ExceptWith(TitlesUnderNumberedHeadings(grid));
+        labels.ExceptWith(TitlesUnderNumberedHeadings(grid, valueColumn));
         if (labels.Count < 2) return Array.Empty<RfqSpreadsheetRow>();
 
         var blocks = SplitIntoBlocks(grid, valueColumn, labels);
@@ -108,8 +108,18 @@ public sealed class DocxFormBlockParser
     /// three times, and by repetition alone it looked like a label. Every one of those items
     /// then lost its title and was named by its heading number instead.
     /// </summary>
-    private static HashSet<string> TitlesUnderNumberedHeadings(IReadOnlyList<IReadOnlyList<string?>> grid)
+    private static HashSet<string> TitlesUnderNumberedHeadings(IReadOnlyList<IReadOnlyList<string?>> grid, int valueColumn)
     {
+        // A name that ever carries a value is a label, however it also appears under a heading
+        // ("3 Delivery" then "Delivery" as a section, and "Delivery | 8 weeks" on every item).
+        var carriesValue = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in grid)
+        {
+            if (row.Count == 0) continue;
+            var name = (row[0] ?? string.Empty).Trim();
+            var value = valueColumn < row.Count ? (row[valueColumn] ?? string.Empty).Trim() : string.Empty;
+            if (name.Length > 0 && value.Length > 0) carriesValue.Add(name);
+        }
         var titles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var index = 0; index + 1 < grid.Count; index++)
         {
@@ -117,7 +127,8 @@ public sealed class DocxFormBlockParser
             var next = grid[index + 1].Count > 0 ? (grid[index + 1][0] ?? string.Empty).Trim() : string.Empty;
             var match = NumberedHeading.Match(heading);
             if (match.Success && next.Length > 0
-                && string.Equals(match.Groups[2].Value.Trim(), next, StringComparison.OrdinalIgnoreCase))
+                && string.Equals(match.Groups[2].Value.Trim(), next, StringComparison.OrdinalIgnoreCase)
+                && !carriesValue.Contains(next))
                 titles.Add(next);
         }
         return titles;

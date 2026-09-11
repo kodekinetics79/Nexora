@@ -28,13 +28,37 @@ public static class CurrencyNames
         ["chf"] = "CHF", ["swissfranc"] = "CHF",
     };
 
-    /// <summary>The ISO code for a currency word, or null when the word is not one we know.</summary>
+    /// <summary>
+    /// Every ISO 4217 code the runtime knows, plus the ones named above. A three-letter WORD is
+    /// not a code: "Lot", "Per", "Set", "Nil" and "TBD" sit in currency columns all the time and
+    /// passing them through as codes made "LOT" the inquiry's currency.
+    /// </summary>
+    private static readonly HashSet<string> IsoCodes = BuildIsoCodes();
+
+    private static HashSet<string> BuildIsoCodes()
+    {
+        var codes = new HashSet<string>(Codes.Values, StringComparer.OrdinalIgnoreCase);
+        foreach (var culture in System.Globalization.CultureInfo.GetCultures(System.Globalization.CultureTypes.SpecificCultures))
+        {
+            try
+            {
+                var symbol = new System.Globalization.RegionInfo(culture.Name).ISOCurrencySymbol;
+                if (symbol.Length == 3) codes.Add(symbol);
+            }
+            catch (ArgumentException)
+            {
+                // A culture the runtime lists but cannot describe; nothing to add.
+            }
+        }
+        return codes;
+    }
+
+    /// <summary>The ISO code for a currency word or code, or null when the word is not one we know.</summary>
     public static string? ToIsoCode(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
         var key = new string(raw.Trim().Where(c => !char.IsWhiteSpace(c) && c != '.' && c != ',' && c != '-').Select(char.ToLowerInvariant).ToArray());
-        if (key.Length == 3 && key.All(char.IsLetter) && !Codes.ContainsKey(key))
-            return key.ToUpperInvariant(); // already a code we simply have no name for
-        return Codes.TryGetValue(key, out var code) ? code : null;
+        if (Codes.TryGetValue(key, out var code)) return code;
+        return key.Length == 3 && IsoCodes.Contains(key) ? key.ToUpperInvariant() : null;
     }
 }

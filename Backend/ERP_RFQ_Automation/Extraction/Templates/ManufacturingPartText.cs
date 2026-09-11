@@ -36,8 +36,10 @@ public static class ManufacturingPartText
         public bool IsEmpty => Manufacturers.Count == 0 && PartNumbers.Count == 0 && SupersededNumbers.Count == 0 && CustomerMaterialCode is null;
     }
 
+    // Names are bounded: a record that omits its trailing country code must not let the lazy
+    // group run on into the next record and hand a hundred-character "maker" to the line.
     private static readonly Regex VendorRecord = new(
-        @"(?<!\d)\d{10} - \d{10} - (?<vendor>.+?) - [A-Z]{2} \d{18} - \d{8} - (?<maker>.+?) - [A-Z]{2}(?= |$)",
+        @"(?<!\d)\d{10} - \d{10} - (?<vendor>[^\r\n]{1,80}?) - [A-Z]{2} \d{18} - \d{8} - (?<maker>[^\r\n]{1,80}?) - [A-Z]{2}(?=\s|\z)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -48,8 +50,8 @@ public static class ManufacturingPartText
     private const string KeyToken = @"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+";
 
     private static readonly Regex KeyedValue = new(
-        @"\b(?<key>" + KeyToken + @") - (?<value>.*?)(?=(?: \b" + KeyToken + @" - )|(?: \d{10} - \d{10} - )|$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"\b(?<key>" + KeyToken + @") - (?<value>.*?)(?=(?:\s\b" + KeyToken + @" - )|(?:\s\d{10} - \d{10} - )|\z)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
     /// <summary>The keys whose value is a maker's own number for the goods.</summary>
     private static readonly HashSet<string> PartNumberKeys = new(StringComparer.Ordinal)

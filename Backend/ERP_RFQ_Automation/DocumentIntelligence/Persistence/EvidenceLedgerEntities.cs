@@ -1088,7 +1088,13 @@ public sealed class CanonicalInquiry
             if (kept.Count >= MaxUnmappedHeaders) break;
         }
         if (kept.Count == 0) return;
+        // Over the size cap, the LAST labels are dropped, never the lot.
         var json = System.Text.Json.JsonSerializer.Serialize(kept);
+        while (json.Length > MaxUnmappedHeadersChars && kept.Count > 1)
+        {
+            kept.Remove(kept.Keys.Last());
+            json = System.Text.Json.JsonSerializer.Serialize(kept);
+        }
         UnmappedHeadersJson = json.Length <= MaxUnmappedHeadersChars ? json : null;
         UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
     }

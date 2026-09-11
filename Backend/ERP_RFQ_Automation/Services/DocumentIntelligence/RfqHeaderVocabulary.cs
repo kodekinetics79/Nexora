@@ -75,8 +75,11 @@ public sealed class RfqHeaderVocabulary
         "skucode", "productcode", "catalogno", "catalognumber", "catalogueno", "cataloguenumber", "catno",
         "articleno", "articlenumber", "sku", "pn", "mfrpn", "mfgpn", "manufacturerpn", "mfrpartno", "mfgpartno",
         "mfrpartnumber", "mfgpartnumber", "oempartno", "oempartnumber", "oemno", "oemnumber", "oemcode",
-        "manufacturerpartno", "manufacturercode", "manufacturerref", "partref", "partreference",
-        "materialid", "itemid", "productid", "model", "typenumber", "typeno", "refnumber", "vendorpartno",
+        "manufacturerpartno", "manufacturercode", "manufacturerref", "partref", "partreference", "vendorpartno",
+        // Deliberately absent: "model", "type", "item id", "product id", "material id", "ref number".
+        // A spares list carries "Model | Part No" side by side, and the column mapper takes the
+        // lowest column for a field — "GRUNDFOS CR64" became the part number and the real one was
+        // dropped. A model column is kept with the line as the buyer's own column instead.
         // The buyer's OWN catalogue number travels on the same field, by design (see
         // LeadConversionIntelligence): an SAP export writes it far more often than a maker's number.
         "sapmaterial", "sapmaterialno", "sapmaterialnumber", "sapcode", "sapno", "customerpartno", "customerpartnumber",

@@ -814,7 +814,7 @@ public class PlatformObservabilityMetricsTests
 
         public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
             IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
-            CancellationToken ct = default, string? documentNarrative = null) => throw new NotSupportedException();
+            CancellationToken ct = default, string? documentNarrative = null, DateTime? receivedOn = null) => throw new NotSupportedException();
     }
 
     private sealed class FixedPersister : ILeadPersister

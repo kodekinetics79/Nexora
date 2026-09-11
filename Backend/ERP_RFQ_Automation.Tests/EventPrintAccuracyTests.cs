@@ -187,6 +187,30 @@ public sealed class EventPrintAccuracyTests
     }
 
     [Fact]
+    public void What_was_read_from_the_part_text_survives_the_stored_size_cap()
+    {
+        // Four approved makers: the raw cell alone runs past the 2 KB the line's extra fields
+        // may occupy, and the store drops entries from the end. The reading must come first
+        // and the raw text must be shortened, or the makers are computed and then lost.
+        var fourMakers = string.Join(" ", Enumerable.Range(1, 4).Select(n =>
+            $"40000000{n:00} - 00600000{n:00} - MAKER NUMBER {n} INDUSTRIAL COMPANY LIMITED - US 0000000050000000{n:00} - 100000{n:00} - MAKER NUMBER {n} INDUSTRIAL COMPANY LIMITED - US " +
+            $"ED_PART_NUMBER - P{n}00X CUSTOMER_MATERIAL_CODE - 0000000050000000{n:00} PART_NUMBER - P{n}-00X CUSTOMER_MATERIAL_DESCRIPTION1 - SOME LONG DESCRIPTION OF THE PART THAT GOES ON AND ON CUSTOMER_MATERIAL_DESCRIPTION2 - MORE"));
+        var extra = new Dictionary<string, string>
+        {
+            ["Material Type"] = "9CAT", ["Manufacturing Part Text"] = fourMakers,
+            ["Material PO Text"] = new string('x', 300), ["Hazardous Indicator"] = "No", ["SASO Indicator"] = "No",
+        };
+        var line = Assert.Single(Normalise(Arrived, Row(2, "Breaker", extra: extra)).LineItems);
+
+        var stored = ERP_RFQ_Automation.Models.ExtraFieldsJson.Serialize(line.ExtraFields!);
+        Assert.NotNull(stored);
+        Assert.Contains("Approved manufacturers", stored);
+        Assert.Contains("Manufacturer part numbers", stored);
+        Assert.Equal(new[] { "Approved manufacturers", "Manufacturer part numbers" }, line.ExtraFields!.Keys.Take(2));
+        Assert.True(line.ExtraFields["Manufacturing Part Text"].Length <= 604);
+    }
+
+    [Fact]
     public void A_manufacturer_the_line_states_is_never_overridden()
     {
         var row = Row(2, "Module", extra: new() { ["Manufacturing Part Text"] = OneMaker });
@@ -225,5 +249,78 @@ public sealed class EventPrintAccuracyTests
     {
         Assert.Equal(RfqSpreadsheetFields.ReceivedDate, RfqHeaderVocabulary.Builtin.FieldForLabel("Publish time"));
         Assert.Equal(RfqSpreadsheetFields.ReceivedDate, RfqHeaderVocabulary.Builtin.FieldForColumn("Published on"));
+    }
+}
+
+/// <summary>What an adversarial review of the accuracy fixes found, each pinned before it was fixed.</summary>
+public sealed class EventPrintAccuracyReviewTests
+{
+    private static readonly System.Text.Encoding Utf8 = System.Text.Encoding.UTF8;
+    private static byte[] Csv(params string[] lines) => Utf8.GetBytes(string.Join("\r\n", lines));
+
+    [Fact]
+    public void A_model_column_beside_a_part_number_column_never_becomes_the_part_number()
+    {
+        var rows = new NativeSpreadsheetParser().ParseCsv(Csv(
+            "Item,Equipment,Model,Part No,Qty",
+            "1,Pump CR64,GRUNDFOS CR64,96123456-01,4"), "spares.csv");
+        var row = Assert.Single(rows);
+
+        Assert.Equal("96123456-01", row.ManufacturerPartNumber);
+        Assert.Equal("GRUNDFOS CR64", row.UnmappedColumns["Model"]);
+    }
+
+    [Theory]
+    [InlineData("Lot")]
+    [InlineData("Per")]
+    [InlineData("Nil")]
+    [InlineData("TBD")]
+    public void A_three_letter_word_in_a_currency_cell_is_not_a_currency_code(string word)
+        => Assert.Null(CurrencyNames.ToIsoCode(word));
+
+    [Theory]
+    [InlineData("USD", "USD")]
+    [InlineData("kwd", "KWD")]
+    [InlineData("AED", "AED")]
+    public void A_real_iso_code_passes_as_itself(string word, string code)
+        => Assert.Equal(code, CurrencyNames.ToIsoCode(word));
+
+    [Fact]
+    public void A_column_whose_value_differs_per_line_is_never_sent_as_header_text()
+    {
+        var rows = new[]
+        {
+            new RfqSpreadsheetRow { RowNumber = 2, ProductName = "Valve", Quantity = "4", UnmappedColumns = new() { ["Cust Ref"] = "PO-77821", ["Cut-off"] = "12/12/2026" } },
+            new RfqSpreadsheetRow { RowNumber = 3, ProductName = "Gasket", Quantity = "9", UnmappedColumns = new() { ["Cust Ref"] = "PO-77822", ["Cut-off"] = "12/12/2026" } },
+        };
+
+        var text = ERP_RFQ_Automation.Extraction.HeaderCompletion.HeaderCompletionService.ComposeHeaderText(rows, null);
+
+        Assert.Contains("Cut-off: 12/12/2026", text);
+        Assert.DoesNotContain("Cust Ref", text);
+        Assert.DoesNotContain("PO-77821", text);
+    }
+
+    [Theory]
+    [InlineData("Quotation Request 20260910120000.docx", null)]
+    [InlineData("Export 202609101200.xlsx", null)]
+    [InlineData("RFP 6000000031 - Switchgear Package.docx", "6000000031")]
+    [InlineData("RFP - 60000010028 - 1 of 3.docx", "60000010028")]
+    public void A_timestamp_in_a_file_name_is_not_an_rfq_number(string fileName, string? expected)
+        => Assert.Equal(expected, DocxTableParser.RfqNumberFromFileName(fileName));
+
+    [Fact]
+    public void The_arrival_date_travels_from_the_job_to_the_date_order_rule()
+    {
+        // Received 20 February, closing "11/03/2026": day-first (11 March) is still ahead of
+        // arrival, so it stands — whatever day the extraction happens to run on.
+        var rows = new[] { new RfqSpreadsheetRow { RowNumber = 2, ProductName = "Valve", Quantity = "4", BidClosingDate = "11/03/2026" } };
+        var extractor = new ERP_RFQ_Automation.Extraction.ChunkedExtractionService(
+            new ERP_RFQ_Automation.Tests.Support.StubLlm(), new CanonicalRfqNormalizer(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ERP_RFQ_Automation.Extraction.ChunkedExtractionService>.Instance);
+
+        var outcome = extractor.ExtractStructuredAsync(rows, 1, "bid.csv", receivedOn: new DateTime(2026, 2, 20)).GetAwaiter().GetResult();
+
+        Assert.Equal(new DateTime(2026, 3, 11), outcome.CanonicalImport!.Documents[0].BidClosingDate.Value.Date);
     }
 }

@@ -621,7 +621,7 @@ public sealed class MarketingMailDoesNotBecomeLeadPostgreSqlTests(PostgreSqlTest
 
         public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
             IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
-            CancellationToken ct = default, string? documentNarrative = null)
+            CancellationToken ct = default, string? documentNarrative = null, DateTime? receivedOn = null)
             => Task.FromResult(PartialOcr());
     }
 
@@ -658,7 +658,7 @@ public sealed class MarketingMailDoesNotBecomeLeadPostgreSqlTests(PostgreSqlTest
 
         public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
             IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
-            CancellationToken ct = default, string? documentNarrative = null)
+            CancellationToken ct = default, string? documentNarrative = null, DateTime? receivedOn = null)
             => Task.FromResult(WholeDocumentPartialOcr());
     }
 

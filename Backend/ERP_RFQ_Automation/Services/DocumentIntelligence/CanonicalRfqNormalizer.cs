@@ -26,7 +26,9 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         var result = new CanonicalRfqImportResult();
         var arrived = (receivedOn ?? DateTime.UtcNow).Date;
         var materialRows = rows
-            .Where(r => HasAnyValue(r.RfqNo, r.BuyerName, r.ProductName, r.Quantity, r.UnitPrice, r.Currency))
+            // Currency is deliberately not a sign of a line: a document-level "Currency: USD" is
+            // stamped onto every row, junk rows included, before this filter runs.
+            .Where(r => HasAnyValue(r.RfqNo, r.BuyerName, r.ProductName, r.Quantity, r.UnitPrice))
             .ToList();
 
         var duplicateKeys = materialRows
@@ -427,6 +429,24 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         var reading = ManufacturingPartText.Read(source.Value);
         if (reading.IsEmpty) return;
 
+        // What was read from the text goes FIRST, and the raw text is shortened. The line's
+        // extra fields are stored under a 2 KB cap that drops entries from the end, and a cell
+        // naming four approved makers runs past it on its own: on two real bid lists the
+        // approved-maker list and the part numbers were computed and then silently dropped
+        // from 45 and 50 lines. The full text stays in the retained document.
+        var ordered = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (reading.Manufacturers.Count > 1)
+            ordered["Approved manufacturers"] = string.Join("; ", reading.Manufacturers);
+        if (reading.PartNumbers.Count > 0)
+            ordered["Manufacturer part numbers"] = string.Join("; ", reading.PartNumbers);
+        if (reading.SupersededNumbers.Count > 0)
+            ordered["Superseded part numbers"] = string.Join("; ", reading.SupersededNumbers);
+        foreach (var (key, value) in line.ExtraFields)
+            ordered[key] = key == source.Key && value.Length > MaxRetainedPartTextChars
+                ? value[..MaxRetainedPartTextChars] + " …"
+                : value;
+        line.ExtraFields = ordered;
+
         if (reading.Manufacturers.Count == 1 && line.ManufacturerName.Kind == CanonicalValueKind.Missing)
         {
             var maker = reading.Manufacturers[0];
@@ -439,16 +459,10 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             line.ManufacturerName.Evidence.Clear();
             line.ManufacturerName.Evidence.Add(Evidence(row, "row", maker));
         }
-        else if (reading.Manufacturers.Count > 1)
-        {
-            line.ExtraFields["Approved manufacturers"] = string.Join("; ", reading.Manufacturers);
-        }
-
-        if (reading.PartNumbers.Count > 0)
-            line.ExtraFields["Manufacturer part numbers"] = string.Join("; ", reading.PartNumbers);
-        if (reading.SupersededNumbers.Count > 0)
-            line.ExtraFields["Superseded part numbers"] = string.Join("; ", reading.SupersededNumbers);
     }
+
+    /// <summary>The raw manufacturing part text kept on the line; the reading above carries what matters.</summary>
+    private const int MaxRetainedPartTextChars = 600;
 
     /// <summary>Marker left on a date the parser could read but not disambiguate.</summary>
     private const string AmbiguousDateTransformation = "ambiguous_day_month";

@@ -393,7 +393,7 @@ public sealed class ExtractionWorker : BackgroundService
                 // Deterministic path bypasses the LLM entirely — no gate needed.
                 outcome = await extractor.ExtractStructuredAsync(
                     input.StructuredRows!, job.BusinessUnitId, input.SourceDocumentName, workToken,
-                    input.DocumentNarrative);
+                    input.DocumentNarrative, receivedOn: DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc));
             }
             else if (IsProseBody(jobMetadata)
                 && scope.ServiceProvider.GetService<Conversational.IConversationalExtractionService>()
