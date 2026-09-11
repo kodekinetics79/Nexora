@@ -43,8 +43,18 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         if (!lead.CurrentRevisionId.HasValue)
             throw new InvalidOperationException("The lead has no immutable current revision. Reconcile its source evidence first.");
 
-        var revision = await _db.Set<LeadRevision>().AsNoTracking().Include(x => x.Items)
+        // Two queries, not one join. A revision carries the whole document's snapshot JSON
+        // (300 KB for a 1,500-line bid list), and a single joined Include repeated that column
+        // once per item: the database answered in milliseconds while 450 MB crossed the wire and
+        // the screen said "Loading the request…" for eighteen seconds. (AsSplitQuery is not an
+        // option here: the tenant scope holds the request's transaction, and EF would try to
+        // open another.)
+        var revision = await _db.Set<LeadRevision>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == lead.CurrentRevisionId.Value, ct);
+        foreach (var revisionItem in await _db.Set<LeadItemRevision>().AsNoTracking()
+                     .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
+                     .OrderBy(x => x.LineNumber).ThenBy(x => x.Id).ToListAsync(ct))
+            revision.Items.Add(revisionItem);
         var occurrence = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == revision.EstablishedByOccurrenceId, ct);
         var links = await _db.Set<LeadOccurrenceDocument>().AsNoTracking()

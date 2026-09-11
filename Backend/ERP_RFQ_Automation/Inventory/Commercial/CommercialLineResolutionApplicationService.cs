@@ -69,8 +69,14 @@ public sealed class CommercialLineResolutionApplicationService(
         if (!lead.CurrentRevisionId.HasValue)
             throw new InvalidOperationException("The lead has no immutable current revision.");
 
-        var revision = await db.Set<LeadRevision>().AsNoTracking().Include(x => x.Items)
+        // Two queries, not one join: the revision's snapshot JSON must not be repeated once per
+        // item (see LeadDecisionWorkbenchService for the measurement).
+        var revision = await db.Set<LeadRevision>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == lead.CurrentRevisionId.Value, ct);
+        foreach (var revisionItem in await db.Set<LeadItemRevision>().AsNoTracking()
+                     .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
+                     .OrderBy(x => x.LineNumber).ThenBy(x => x.Id).ToListAsync(ct))
+            revision.Items.Add(revisionItem);
         var existing = await db.Set<LeadLineCommercialResolution>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
             .OrderBy(x => x.LeadLineId).ToListAsync(ct);
