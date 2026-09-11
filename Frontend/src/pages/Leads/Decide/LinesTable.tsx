@@ -78,7 +78,14 @@ const LineRow = React.memo(function LineRow({
   const skipping = choice === 'NoBid';
   const needs = new Set<LineNeedKind>(lineNeeds(line, decision, unitCodes, currencyCodes).map((need) => need.kind));
   const unverified = needs.has('source') || needs.has('missing-source');
-  const detail = [line.manufacturerPartNumber, line.manufacturerName].filter(Boolean).join(' · ');
+  // Two numbers can sit on a line and they are not the same thing: the buyer's own material
+  // code, and the maker's part number. Each is named so a rep never quotes the wrong one.
+  const detail = [
+    line.itemMaterialCode ? `Material ${line.itemMaterialCode}` : null,
+    line.manufacturerPartNumber
+      ? `${line.manufacturerName ? `${line.manufacturerName} ` : ''}P/N ${line.manufacturerPartNumber}`
+      : line.manufacturerName,
+  ].filter(Boolean).join(' · ');
   const showDetailRow = !readOnly && (skipping || unverified || (quoting && Boolean(line.needsAttention)));
 
   return (

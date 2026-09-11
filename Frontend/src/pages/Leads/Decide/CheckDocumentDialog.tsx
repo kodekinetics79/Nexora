@@ -53,6 +53,7 @@ export interface CheckDocumentDialogProps {
 
 interface LineEdit {
   productShortName: string;
+  itemMaterialCode: string;
   manufacturerPartNumber: string;
   quantity: string;
   unitOfMeasure: string;
@@ -84,6 +85,7 @@ export const matchLeadItem = (
 
 const editFrom = (line: LeadDecisionLineDTO, item: LeadItemResponseDTO | undefined): LineEdit => ({
   productShortName: item?.productShortName ?? line.productName ?? line.description ?? '',
+  itemMaterialCode: item?.itemMaterialCode ?? line.itemMaterialCode ?? '',
   manufacturerPartNumber: item?.manufacturerPartNumber ?? line.manufacturerPartNumber ?? '',
   quantity: item?.quantity != null ? String(item.quantity) : line.quantity != null ? String(line.quantity) : '',
   unitOfMeasure: item?.unitOfMeasure ?? line.unitOfMeasure ?? '',
@@ -103,7 +105,7 @@ export const buildReviewItems = (
     productShortName: (edit?.productShortName ?? item.productShortName) || undefined,
     productShortDescription: item.productShortDescription || undefined,
     commodityProduct: item.commodityProduct || undefined,
-    itemMaterialCode: item.itemMaterialCode || undefined,
+    itemMaterialCode: (edit?.itemMaterialCode ?? item.itemMaterialCode) || undefined,
     currency: (edit?.currency ?? item.currency) || undefined,
     unitOfMeasure: (edit?.unitOfMeasure ?? item.unitOfMeasure) || undefined,
     unitPrice: item.unitPrice ?? undefined,
@@ -334,7 +336,7 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
   const patch = (itemId: number, change: Partial<LineEdit>) =>
     setEdits((current) => {
       const next = new Map(current);
-      next.set(itemId, { ...(current.get(itemId) ?? { productShortName: '', manufacturerPartNumber: '', quantity: '', unitOfMeasure: '', currency: '' }), ...change });
+      next.set(itemId, { ...(current.get(itemId) ?? { productShortName: '', itemMaterialCode: '', manufacturerPartNumber: '', quantity: '', unitOfMeasure: '', currency: '' }), ...change });
       return next;
     });
 
@@ -467,13 +469,31 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                           onChange={(event) => patch(item.id, { productShortName: event.target.value })}
                           slotProps={{ htmlInput: { 'aria-label': `What they asked for, line ${label}` } }}
                         />
-                        <TextField
-                          size="small"
-                          label="Part number"
-                          value={edit.manufacturerPartNumber}
-                          onChange={(event) => patch(item.id, { manufacturerPartNumber: event.target.value })}
-                          slotProps={{ htmlInput: { 'aria-label': `Part number, line ${label}` } }}
-                        />
+                        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                          <TextField
+                            size="small"
+                            fullWidth
+                            label="Their material code"
+                            value={edit.itemMaterialCode}
+                            onChange={(event) => patch(item.id, { itemMaterialCode: event.target.value })}
+                            slotProps={{ htmlInput: { 'aria-label': `Their material code, line ${label}` } }}
+                            helperText="The buyer's own number for this line."
+                          />
+                          <TextField
+                            size="small"
+                            fullWidth
+                            label={line.manufacturerName ? `Part number (${line.manufacturerName})` : 'Maker part number'}
+                            value={edit.manufacturerPartNumber}
+                            onChange={(event) => patch(item.id, { manufacturerPartNumber: event.target.value })}
+                            slotProps={{ htmlInput: { 'aria-label': `Maker part number, line ${label}` } }}
+                            helperText="The maker's number, if the document names one."
+                          />
+                        </Stack>
+                        {line.specification ? (
+                          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary', maxHeight: 160, overflowY: 'auto', px: 1, py: 0.5, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+                            {line.specification}
+                          </Typography>
+                        ) : null}
                         <Stack direction="row" spacing={1}>
                           <TextField
                             size="small"

@@ -104,7 +104,7 @@ describe('CheckDocumentDialog', () => {
     expect(api.fetchObjectUrl).toHaveBeenCalledWith('/api/evidence/9');
     expect(await screen.findByText('1 of 2 lines to check')).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'What they asked for, line 00001' })).toHaveValue('Control module');
-    expect(screen.getByRole('textbox', { name: 'Part number, line 00001' })).toHaveValue('CM-900');
+    expect(screen.getByRole('textbox', { name: 'Maker part number, line 00001' })).toHaveValue('CM-900');
     expect(screen.getByRole('spinbutton', { name: 'Quantity, line 00001' })).toHaveValue(3);
     expect(screen.queryByRole('textbox', { name: 'What they asked for, line 00002' })).not.toBeInTheDocument();
     // Nothing can be confirmed while the unit is still missing.

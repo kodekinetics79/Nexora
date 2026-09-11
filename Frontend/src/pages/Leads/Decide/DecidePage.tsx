@@ -238,11 +238,17 @@ const DecidePage: React.FC = () => {
   );
 
   const updateLine = React.useCallback((revisionLineId: number, patch: Partial<EditableLineDecision>) => {
-    setDecisions((current) => ({
-      ...current,
-      [revisionLineId]: { ...(current[revisionLineId] ?? { decision: 'Pending' }), ...patch },
-    }));
-  }, []);
+    setDecisions((current) => {
+      const merged = { ...(current[revisionLineId] ?? { decision: 'Pending' }), ...patch };
+      // Quoting a warned line needs an acknowledgement. "Quote all" writes one; quoting the line
+      // on its own used to leave the note empty and red, so a one-line request could not be
+      // quoted without typing. Same note, editable on the line.
+      const line = workbench?.lines.find((candidate) => candidate.revisionLineId === revisionLineId);
+      if (patch.decision === 'Bid' && line?.needsAttention && (merged.note?.trim().length ?? 0) < 5)
+        merged.note = QUOTED_AS_READ_NOTE;
+      return { ...current, [revisionLineId]: merged };
+    });
+  }, [workbench]);
 
   // One decision for the whole request. A real bid list runs to 1,500 lines; nobody presses
   // 1,500 buttons. "Quote all" says yes to everything and the rep then skips the exceptions;
