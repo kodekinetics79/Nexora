@@ -347,13 +347,35 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // to let them through — but a job created before that check existed, or bytes that reach
         // this reader by any other route, must still be READ as what they are rather than thrown
         // at a binary workbook parser that can only fail.
-        if (bytes.Length > 0 && ext is "xls" or "xlsx" or "xlsm"
+        // An HTML page named as an Office file. Sourcing portals export the same event print as
+        // Word or as web, and a buyer's "Save as .doc" of the web one is an HTML page with a Word
+        // name. Its tables are read exactly as a Word document's tables are — one reader — and
+        // only a page with no readable table falls back to its text.
+        if (bytes.Length > 0 && ext is "doc" or "docx" or "xls" or "xlsx" or "xlsm"
             && HtmlDocumentTextExtractor.HasHtmlSignature(bytes))
         {
+            var reading = HtmlTableGrids.Read(bytes);
+            IReadOnlyList<RfqSpreadsheetRow> htmlRows;
+            try
+            {
+                htmlRows = _docxTableParser.ParseGrids(reading.Grids, reading.Paragraphs, name);
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "HTML table pre-parse failed for {Name}; using the text path.", name);
+                htmlRows = Array.Empty<RfqSpreadsheetRow>();
+            }
+            if (htmlRows.Count > 0)
+            {
+                _log.LogInformation(
+                    "{Name} is an HTML page named .{Ext}; read deterministically from its tables: {Rows} line(s), no model involved.",
+                    name, ext, htmlRows.Count);
+                return Structured(job, name, htmlRows.ToList(), RetainedProse(reading.Paragraphs));
+            }
             _log.LogInformation(
-                "Spreadsheet-named document {Name} carries HTML content; reading it as HTML.", name);
+                "{Name} is an HTML page named .{Ext} with no readable line table; reading it as HTML text.", name, ext);
             return Unstructured(job, name, Native(ExtractTextFromHtml(bytes)),
-                "This file is named as a spreadsheet but its contents are a web page (HTML). "
+                $"This file is named .{ext} but its contents are a web page (HTML). "
                 + "Nexora read it as HTML so its table rows were preserved.");
         }
 
@@ -475,6 +497,17 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     /// throws and never fails a document: prose is context, and a document that reads
     /// perfectly must not be lost because its narrative could not be re-read.
     /// </summary>
+    private static string? RetainedProse(IReadOnlyList<string> paragraphs)
+    {
+        if (paragraphs.Count == 0) return null;
+        var prose = string.Join('\n', paragraphs);
+        return prose.Length <= MaxRetainedProseChars
+            ? prose
+            : prose[..MaxRetainedProseChars]
+              + "\n[Truncated: the document states more text than the reviewer panel retains. "
+              + "Open the source attachment for the rest.]";
+    }
+
     private string? ProseOutsideTables(byte[] bytes, string name)
     {
         try

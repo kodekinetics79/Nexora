@@ -348,8 +348,25 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     private static void ResolveDateOrder(CanonicalRfqDocument document, DateTime arrived)
     {
         var closing = document.BidClosingDate;
-        if (!IsAmbiguous(closing) || closing.Kind != CanonicalValueKind.Normalized)
+        if (closing.Kind != CanonicalValueKind.Normalized)
             return;
+        if (!IsAmbiguous(closing))
+        {
+            // The closing date could only be read one way ("9/16/2026" has no 16th month), so
+            // it is certain — but the issue date beside it may still be ambiguous, and a document
+            // is not issued after it closes. "Publish time 9/10/2026, Due date 9/16/2026" read as
+            // issued 9 October and closing 16 September, and the ledger refused the lead for a
+            // closing date before its issue date. Read the issue date in the only order that
+            // keeps it before the close.
+            var issued = document.ReceivedDate;
+            if (IsAmbiguous(issued) && issued.Kind == CanonicalValueKind.Normalized
+                && issued.Value.Date > closing.Value.Date
+                && RfqDateParser.SwapDayAndMonth(issued.Value) is { } issuedMonthFirst
+                && issuedMonthFirst.Date <= closing.Value.Date)
+                ReadMonthFirst(issued,
+                    $"{MonthFirstTransformation}: read day-first, the issue date ({issued.Value:d MMMM yyyy}) would fall after the closing date ({closing.Value:d MMMM yyyy}), which is certain; read month-first it was issued on {issuedMonthFirst:d MMMM yyyy}");
+            return;
+        }
         var dayFirst = closing.Value;
         if (RfqDateParser.SwapDayAndMonth(dayFirst) is not { } monthFirst)
             return;

@@ -75,19 +75,40 @@ public sealed class DocxTableParser
         if (body is null)
             return Array.Empty<RfqSpreadsheetRow>();
 
+        // TOP-LEVEL tables only. Descendants<Table>() also returns every table NESTED inside a
+        // cell of another table, so a layout table wrapping the line grid was read twice and every
+        // line was counted twice — while Lead.NoOfLineItems reported the inflated number as if it
+        // were a conservation guarantee.
+        var grids = body.Elements<Table>().Select(BuildGrid).ToList<IReadOnlyList<IReadOnlyList<string?>>>();
+        var paragraphs = body.Descendants<Paragraph>()
+            .Where(paragraph => !paragraph.Ancestors<Table>().Any())
+            .Take(HeaderBlockParagraphLimit)
+            .Select(paragraph => paragraph.InnerText)
+            .ToList();
+        return ParseGrids(grids, paragraphs, sourceDocumentName);
+    }
+
+    /// <summary>
+    /// The reading itself, over positional grids. Word tables arrive here through
+    /// <see cref="Parse(byte[], string)"/>; an HTML page named as an Office file arrives through
+    /// <see cref="HtmlTableGrids"/>. One reader, so the two prints of the same portal event are
+    /// read the same way.
+    /// </summary>
+    /// <param name="grids">One grid per top-level table, document order.</param>
+    /// <param name="paragraphs">Body text outside the tables, document order, for "Label: value" lines.</param>
+    public IReadOnlyList<RfqSpreadsheetRow> ParseGrids(
+        IReadOnlyList<IReadOnlyList<IReadOnlyList<string?>>> grids,
+        IReadOnlyList<string> paragraphs,
+        string sourceDocumentName)
+    {
         var parsedTables = new List<IReadOnlyList<RfqSpreadsheetRow>>();
 
         var results = new List<RfqSpreadsheetRow>();
         var tableOrdinal = 0;
 
-        // TOP-LEVEL tables only. Descendants<Table>() also returns every table NESTED inside a
-        // cell of another table, so a layout table wrapping the line grid was read twice and every
-        // line was counted twice — while Lead.NoOfLineItems reported the inflated number as if it
-        // were a conservation guarantee.
-        foreach (var table in body.Elements<Table>())
+        foreach (var grid in grids)
         {
             tableOrdinal++;
-            var grid = BuildGrid(table);
 
             var rows = _grid.ParseGrid(grid, sourceDocumentName, $"Table {tableOrdinal}");
 
@@ -117,7 +138,7 @@ public sealed class DocxTableParser
         // "Delivery | 8 weeks" as document labels put line items into the header and a lead
         // time into the delivery date.
         var firstLineTable = parsedTables.FindIndex(rows => rows.Count > 0);
-        var (headerBlock, unmatchedLabels) = ReadHeaderBlock(body, metadataTableLimit: firstLineTable < 0 ? 0 : firstLineTable);
+        var (headerBlock, unmatchedLabels) = ReadHeaderBlock(paragraphs, grids, metadataTableLimit: firstLineTable < 0 ? 0 : firstLineTable);
         if (!headerBlock.ContainsKey(RfqSpreadsheetFields.RfqNo))
         {
             var fromName = RfqNumberFromFileName(sourceDocumentName);
@@ -245,20 +266,16 @@ public sealed class DocxTableParser
     /// <summary>A label-and-value table this small is document metadata, not a line grid.</summary>
     private const int HeaderTableRowLimit = 12;
 
-    private (Dictionary<string, string> Matched, Dictionary<string, string> Unmatched) ReadHeaderBlock(Body body, int metadataTableLimit)
+    private (Dictionary<string, string> Matched, Dictionary<string, string> Unmatched) ReadHeaderBlock(
+        IReadOnlyList<string> paragraphs,
+        IReadOnlyList<IReadOnlyList<IReadOnlyList<string?>>> grids,
+        int metadataTableLimit)
     {
         var found = new Dictionary<string, string>(StringComparer.Ordinal);
         var unmatched = new Dictionary<string, string>(StringComparer.Ordinal);
-        var scanned = 0;
 
-        foreach (var paragraph in body.Descendants<Paragraph>())
+        foreach (var text in paragraphs.Take(HeaderBlockParagraphLimit))
         {
-            if (paragraph.Ancestors<Table>().Any())
-                continue;
-            if (++scanned > HeaderBlockParagraphLimit)
-                break;
-
-            var text = paragraph.InnerText;
             if (string.IsNullOrWhiteSpace(text) || !text.Contains(':', StringComparison.Ordinal))
                 continue;
 
@@ -276,14 +293,13 @@ public sealed class DocxTableParser
         // small two-column tables — "Due date | 10/8/2026 3:00 PM", "Currency | US Dollar" —
         // with no paragraph above the first table at all. Each such row is one "Label: value"
         // pair; a row that is not a recognised label is simply skipped.
-        foreach (var table in body.Elements<Table>().Take(metadataTableLimit))
+        foreach (var rows in grids.Take(metadataTableLimit))
         {
-            var rows = table.Elements<TableRow>().ToList();
             if (rows.Count == 0 || rows.Count > HeaderTableRowLimit)
                 continue;
             foreach (var row in rows)
             {
-                var cells = row.Elements<TableCell>().Select(cell => cell.InnerText.Trim()).ToList();
+                var cells = row.Where(cell => cell is not null).Select(cell => cell!.Trim()).ToList();
                 if (cells.Count != 2 || cells[0].Length == 0 || cells[1].Length == 0)
                     continue;
                 var any = false;
@@ -341,15 +357,19 @@ public sealed class DocxTableParser
     internal static string? RfqNumberFromFileName(string? fileName)
     {
         if (string.IsNullOrWhiteSpace(fileName)) return null;
-        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(fileName, @"(?<!\d)\d{9,}(?!\d)"))
+        // A single letter glued to the digits is part of the number: SEC bids are "C001835789",
+        // and "SE RFP-C001835789.doc" read as 001835789 lost the letter the buyer quotes back.
+        // A longer letter run ("RFP6000000003") is a word, not a prefix.
+        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                     fileName, @"(?<![A-Za-z\d])(?<prefix>[A-Z])?(?<digits>\d{9,})(?!\d)"))
         {
             // "Quotation Request 20260910120000.docx" carries an export timestamp, not a
             // number: a 12- or 14-digit run opening with a plausible year is skipped.
-            var digits = match.Value;
+            var digits = match.Groups["digits"].Value;
             var timestampShaped = digits.Length is 12 or 14
                 && (digits.StartsWith("19", StringComparison.Ordinal) || digits.StartsWith("20", StringComparison.Ordinal));
             if (timestampShaped) continue;
-            return digits;
+            return match.Groups["prefix"].Value + digits;
         }
         return null;
     }

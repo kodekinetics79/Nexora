@@ -286,7 +286,10 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         if (HtmlDocumentTextExtractor.HasHtmlSignature(bytes))
         {
             ValidateText(bytes, allowNonUtf8: true);
-            return new("text/html", [".html", ".htm"]);
+            // A web page named .doc/.xls is how sourcing portals hand out an event print, and
+            // the document reader reads its tables as it reads a Word document's. Refusing it
+            // asked a rep to rename a customer's file — and the rep, rightly, did not know why.
+            return new("text/html", [".html", ".htm", ".doc", ".docx", ".xls", ".xlsx", ".xlsm"]);
         }
 
         // An .eml has no magic number — RFC 5322 defines a header block, so that IS the
@@ -852,7 +855,14 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             ["image/bmp"] = new(StringComparer.OrdinalIgnoreCase) { "image/bmp", "image/x-ms-bmp" },
             ["image/tiff"] = new(StringComparer.OrdinalIgnoreCase) { "image/tiff" },
             ["image/webp"] = new(StringComparer.OrdinalIgnoreCase) { "image/webp" },
-            ["text/html"] = new(StringComparer.OrdinalIgnoreCase) { "text/html", "application/xhtml+xml", "text/plain" },
+            ["text/html"] = new(StringComparer.OrdinalIgnoreCase)
+            {
+                "text/html", "application/xhtml+xml", "text/plain",
+                // What a browser declares for the Office name the page was given.
+                "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel.sheet.macroenabled.12", "application/octet-stream"
+            },
             ["message/rfc822"] = new(StringComparer.OrdinalIgnoreCase) { "message/rfc822", "text/plain" },
             ["application/vnd.ms-outlook"] = new(StringComparer.OrdinalIgnoreCase)
                 { "application/vnd.ms-outlook", "application/vnd.ms-office", "application/x-msg", "application/msoutlook" }

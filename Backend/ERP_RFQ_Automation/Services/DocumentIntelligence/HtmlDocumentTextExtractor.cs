@@ -241,7 +241,7 @@ public static class HtmlDocumentTextExtractor
     /// windows-1252 portal exports that never declare a charset — a decode failure must not lose
     /// the document.
     /// </summary>
-    private static string Decode(byte[] bytes)
+    internal static string Decode(byte[] bytes)
     {
         try
         {

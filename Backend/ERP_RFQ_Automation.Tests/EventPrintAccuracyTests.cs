@@ -63,6 +63,22 @@ public sealed class EventPrintAccuracyTests
     }
 
     [Fact]
+    public void An_ambiguous_issue_date_follows_a_closing_date_that_could_only_be_read_one_way()
+    {
+        // SEC event print: "Publish time 9/10/2026", "Due date 9/16/2026". The closing date has
+        // no 16th month, so it is certainly 16 September. Read day-first the issue date is
+        // 9 October — after the close — and the ledger refused the lead as closing before it was
+        // issued. The only order in which the print makes sense is month-first for both.
+        var row = Row(2, "Battery", closing: "9/16/2026 1:30 AM");
+        row.ReceivedDate = "9/10/2026 3:43 PM";
+        var document = Normalise(new DateTime(2026, 9, 11), row);
+
+        Assert.Equal(new DateTime(2026, 9, 16), document.BidClosingDate.Value.Date);
+        Assert.Equal(new DateTime(2026, 9, 10), document.ReceivedDate.Value.Date);
+        Assert.Contains(document.ReceivedDate.Transformations, t => t.Contains("certain", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_closing_date_consistent_with_the_issue_date_only_day_first_stays_day_first()
     {
         // Issued 1 March, closing "10/3/2026": day-first (10 March) follows the issue date and

@@ -45,7 +45,7 @@ public sealed class DocxFormBlockParser
     private const int MinimumLabelOccurrences = 3;
 
     /// <summary>Fewer repeated blocks than this and it is a form, not a line-item list.</summary>
-    private const int MinimumBlocks = 2;
+    private const int MinimumBlocks = 1;
 
     /// <summary>A block must resolve at least this many real fields to be emitted.</summary>
     private const int MinimumResolvedFields = 1;
@@ -83,11 +83,20 @@ public sealed class DocxFormBlockParser
         if (valueColumn <= 0) return Array.Empty<RfqSpreadsheetRow>();
 
         var labels = RecurringLeftHandValues(grid);
+        // A label is also anything the vocabulary already knows as a field ("Quantity",
+        // "Manufacturer Part Number", "Item Text"). Recurrence alone needs three items before
+        // it believes a document, so a one-item event print — the SEC portal sends those —
+        // read as nothing at all and went to the model for a table we could read ourselves.
+        labels.UnionWith(RecognisedLeftHandValues(grid));
         labels.ExceptWith(TitlesUnderNumberedHeadings(grid, valueColumn));
         if (labels.Count < 2) return Array.Empty<RfqSpreadsheetRow>();
 
         var blocks = SplitIntoBlocks(grid, valueColumn, labels);
         if (blocks.Count < MinimumBlocks) return Array.Empty<RfqSpreadsheetRow>();
+        // One block is a line only when the document introduced it as one — a numbered item
+        // heading above it. A lone "Quantity | 5" under no heading is a terms table, not an item.
+        if (blocks.Count == 1 && !blocks[0].Titles.Any(title => NumberedHeading.IsMatch(title.Trim())))
+            return Array.Empty<RfqSpreadsheetRow>();
 
         var rows = new List<RfqSpreadsheetRow>();
         foreach (var block in blocks)
@@ -163,6 +172,18 @@ public sealed class DocxFormBlockParser
     /// this from repetition rather than from a list of known words is what lets the reader handle
     /// a layout, or a language, nobody anticipated.
     /// </summary>
+    private HashSet<string> RecognisedLeftHandValues(IReadOnlyList<IReadOnlyList<string?>> grid)
+    {
+        var recognised = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in grid)
+        {
+            if (row.Count == 0) continue;
+            var name = (row[0] ?? string.Empty).Trim();
+            if (name.Length > 0 && _vocabulary.FieldForColumn(name) is not null) recognised.Add(name);
+        }
+        return recognised;
+    }
+
     private static HashSet<string> RecurringLeftHandValues(IReadOnlyList<IReadOnlyList<string?>> grid)
     {
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -193,7 +214,16 @@ public sealed class DocxFormBlockParser
             if (name.Length == 0) continue;
             var value = valueColumn < row.Count ? (row[valueColumn] ?? string.Empty).Trim() : string.Empty;
 
-            if (labels.Contains(name))
+            // Inside an item, a short label-shaped row the vocabulary does not know ("Extended
+            // Price", "Copper Factor (%)") is one of the item's own fields, not the next item's
+            // title. Only a NUMBERED heading opens the next item. Without this, every unknown
+            // label ended the block, and a two-item print read each item as Price and Quantity
+            // alone — the material number two rows further down belonged to a block nobody kept.
+            var isLabel = labels.Contains(name)
+                || (current is not null && current.Entries.Count > 0
+                    && !NumberedHeading.IsMatch(name) && LooksLikeLabel(name));
+
+            if (isLabel)
             {
                 // The boundary. A label coming round again means the previous item ended, even
                 // when no title separated them.
@@ -229,6 +259,42 @@ public sealed class DocxFormBlockParser
         return blocks;
     }
 
+    /// <summary>
+    /// "8 MODULE ADAPT ESD" introduces "MODULE ADAPT ESD"; so does "8 10 909101154 BATTERY,STORAGE,MAX VOLT ..."
+    /// introduce "10 909101154 BATTERY,STORAGE,MAX VOLT 1.5 V,830AH" — the portal cuts a long heading
+    /// short with an ellipsis, and what remains is the start of the title.
+    /// </summary>
+    private static bool HeadingIntroduces(string headingText, string title)
+    {
+        var heading = headingText.Trim();
+        var name = title.Trim();
+        if (string.Equals(heading, name, StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (var ellipsis in new[] { "...", "…" })
+        {
+            if (!heading.EndsWith(ellipsis, StringComparison.Ordinal)) continue;
+            var stem = heading[..^ellipsis.Length].TrimEnd();
+            if (stem.Length >= 8 && name.StartsWith(stem, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>A title without the number a heading opens with, for comparing against repeated text.</summary>
+    private static string TitleText(string title)
+    {
+        var trimmed = title.Trim();
+        var numbered = NumberedHeading.Match(trimmed);
+        var text = numbered.Success ? numbered.Groups[2].Value.Trim() : trimmed;
+        foreach (var ellipsis in new[] { "...", "…" })
+            if (text.EndsWith(ellipsis, StringComparison.Ordinal)) text = text[..^ellipsis.Length].TrimEnd();
+        return text.Length >= 8 ? text : string.Empty;
+    }
+
+    /// <summary>A field name, not a sentence: short, few words, no closing full stop.</summary>
+    private static bool LooksLikeLabel(string name)
+        => name.Length <= 80
+           && !name.EndsWith('.')
+           && name.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length <= 8;
+
     private RfqSpreadsheetRow? BuildRow(Block block, string sourceDocumentName, string worksheetName)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -256,6 +322,20 @@ public sealed class DocxFormBlockParser
 
         // "1 each" is a count and a unit in one cell. Split only when the unit slot is otherwise
         // empty, so a document that states its own unit column always wins.
+        // The SEC portal prints the material cell as "909101154 10 909101154 BATTERY,STORAGE…":
+        // the code, then the item's own heading again. A code is one token; when what follows
+        // it is the item's title, the title is not part of the code.
+        foreach (var codeField in new[] { RfqSpreadsheetFields.CustomerMaterialCode, RfqSpreadsheetFields.ManufacturerPartNumber })
+        {
+            if (!values.TryGetValue(codeField, out var code)) continue;
+            var space = code.IndexOf(' ', StringComparison.Ordinal);
+            if (space <= 0) continue;
+            var rest = code[(space + 1)..].Trim();
+            if (block.Titles.Any(title => TitleText(title).Length > 0
+                    && rest.Contains(TitleText(title), StringComparison.OrdinalIgnoreCase)))
+                values[codeField] = code[..space];
+        }
+
         if (values.TryGetValue(RfqSpreadsheetFields.Quantity, out var quantity))
         {
             var match = QuantityWithUnit.Match(quantity);
@@ -288,8 +368,23 @@ public sealed class DocxFormBlockParser
                 // buyer's own line number, and the title is the line without it.
                 var heading = block.Titles.Count >= 2 ? block.Titles[^2] : null;
                 var numbered = heading is null ? Match.Empty : NumberedHeading.Match(heading);
-                if (numbered.Success && string.Equals(numbered.Groups[2].Value.Trim(), title.Trim(), StringComparison.OrdinalIgnoreCase))
+                if (numbered.Success && HeadingIntroduces(numbered.Groups[2].Value, title))
+                {
                     customerLineNumber = numbered.Groups[1].Value;
+                    // "8 10 909101154 BATTERY…" above "10 909101154 BATTERY…": the outer number
+                    // is the print's own section index; the buyer's line number and material are
+                    // the two tokens the title opens with. Read that way ONLY when the second
+                    // token is the material code the block states — "10 KV CABLE" stays a name.
+                    var inner = NumberedHeading.Match(title.Trim());
+                    var statedCode = values.GetValueOrDefault(RfqSpreadsheetFields.CustomerMaterialCode)
+                        ?? values.GetValueOrDefault(RfqSpreadsheetFields.ManufacturerPartNumber);
+                    if (inner.Success && !string.IsNullOrWhiteSpace(statedCode)
+                        && inner.Groups[2].Value.Trim().StartsWith(statedCode + " ", StringComparison.Ordinal))
+                    {
+                        customerLineNumber = inner.Groups[1].Value;
+                        title = inner.Groups[2].Value.Trim()[(statedCode.Length + 1)..];
+                    }
+                }
                 else
                 {
                     // Only a numbered heading was left ("40 OUTLET, SOCKET…"): the number is still
