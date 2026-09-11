@@ -329,11 +329,18 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
 
     /// <summary>
     /// One document, one date order. "10/8/2026" is read day-first by convention, and that is
-    /// wrong for a sourcing portal that prints month-first. The document itself can say which:
-    /// a live tender does not close before it arrives, so when the day-first reading of the
-    /// closing date was already past on the day the document was received and the month-first
-    /// reading was still to come, the document is month-first — and every other ambiguous date
-    /// on it is read the same way. The date stays flagged for the reviewer, with the reason.
+    /// wrong for a sourcing portal that prints month-first. The document itself can say which,
+    /// in two ways, tried in this order:
+    /// <list type="number">
+    /// <item>Its own issue date. A tender is published before it closes, so the order under which
+    /// the publish date precedes the closing date is the order the document is written in. When
+    /// only one order satisfies that, it is taken.</item>
+    /// <item>Its arrival. A live tender does not close before it is received, so when the
+    /// day-first closing date was already past on the day the document arrived and the
+    /// month-first one was still to come, the document is month-first.</item>
+    /// </list>
+    /// Every other ambiguous date on the document is then read the same way, and the closing
+    /// date stays flagged for the reviewer, with the reason.
     /// </summary>
     private static void ResolveDateOrder(CanonicalRfqDocument document, DateTime arrived)
     {
@@ -341,11 +348,31 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         if (!IsAmbiguous(closing) || closing.Kind != CanonicalValueKind.Normalized)
             return;
         var dayFirst = closing.Value;
-        var monthFirst = RfqDateParser.SwapDayAndMonth(dayFirst);
-        if (monthFirst is not { } swapped || dayFirst.Date >= arrived || swapped.Date < arrived)
+        if (RfqDateParser.SwapDayAndMonth(dayFirst) is not { } monthFirst)
             return;
 
-        var reason = $"{MonthFirstTransformation}: the day-first reading ({dayFirst:d MMMM yyyy}) was already past when the document arrived ({arrived:d MMMM yyyy}); the month-first reading ({swapped:d MMMM yyyy}) is the one that can still close";
+        string? reason = null;
+
+        var received = document.ReceivedDate;
+        if (received.Kind == CanonicalValueKind.Normalized)
+        {
+            var receivedDayFirst = received.Value;
+            var receivedMonthFirst = IsAmbiguous(received) ? RfqDateParser.SwapDayAndMonth(received.Value) ?? received.Value : received.Value;
+            var dayFirstConsistent = receivedDayFirst.Date <= dayFirst.Date;
+            var monthFirstConsistent = receivedMonthFirst.Date <= monthFirst.Date;
+            if (dayFirstConsistent && !monthFirstConsistent)
+                return;
+            if (monthFirstConsistent && !dayFirstConsistent)
+                reason = $"{MonthFirstTransformation}: read day-first, the closing date ({dayFirst:d MMMM yyyy}) would come before the document's own issue date ({receivedDayFirst:d MMMM yyyy}); read month-first it closes on {monthFirst:d MMMM yyyy}, after it was issued on {receivedMonthFirst:d MMMM yyyy}";
+        }
+
+        if (reason is null)
+        {
+            if (dayFirst.Date >= arrived || monthFirst.Date < arrived)
+                return;
+            reason = $"{MonthFirstTransformation}: the day-first reading ({dayFirst:d MMMM yyyy}) was already past when the document arrived ({arrived:d MMMM yyyy}); the month-first reading ({monthFirst:d MMMM yyyy}) is the one that can still close";
+        }
+
         ReadMonthFirst(closing, reason);
         foreach (var other in new[] { document.ReceivedDate, document.RequiredDeliveryDate })
             if (IsAmbiguous(other) && other.Kind == CanonicalValueKind.Normalized)
@@ -437,7 +464,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         => $"\"{value.OriginalValue}\" is ambiguous — both parts of the {field} are 12 or lower, so it could be "
            + "either day/month or month/day. "
            + (WasReadMonthFirst(value)
-               ? $"It has been read month-first ({value.Value:d MMMM yyyy}), because the day-first reading was already past when the document arrived; confirm it."
+               ? $"It has been read month-first ({value.Value:d MMMM yyyy}) on the document's own evidence; confirm it."
                : "It has been read day-first; confirm it.");
 
     /// <summary>

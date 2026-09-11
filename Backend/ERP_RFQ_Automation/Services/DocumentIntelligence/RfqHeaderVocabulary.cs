@@ -105,6 +105,9 @@ public sealed class RfqHeaderVocabulary
         {
             "receiveddate", "datereceived", "rfqdate", "enquirydate", "inquirydate", "issuedate", "dateissued",
             "issuedon", "rfpdate", "tenderdate", "documentdate", "datedon",
+            // A sourcing portal's "Publish time" is when the buyer issued the event: the RFQ date.
+            "publishtime", "publishdate", "publisheddate", "publishedon", "publishedat", "datepublished", "eventpublished",
+            "releasedate", "dateofissue", "issuedatetime",
         },
         [RfqSpreadsheetFields.BidClosingDate] = ClosingDateSpellings,
         // "item" is deliberately absent — it is ambiguous and resolved by the column mapper.

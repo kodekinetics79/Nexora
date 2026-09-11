@@ -43,6 +43,35 @@ public sealed class EventPrintAccuracyTests
         Assert.Contains(document.BidClosingDate.Transformations, t => t.StartsWith("read_month_first", StringComparison.Ordinal));
         var issue = Assert.Single(document.Issues, i => i.Code == "BID_CLOSING_DATE");
         Assert.Contains("read month-first (8 October 2026)", issue.Message);
+        Assert.Contains(document.BidClosingDate.Transformations, t => t.Contains("already past when the document arrived", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_closing_date_that_would_precede_the_documents_own_issue_date_is_read_month_first()
+    {
+        // Published "8/9/2026", due "9/6/2026", arrived 11 September: read day-first the tender
+        // would close on 9 June, three months before it was published on 8 September. Read
+        // month-first it was published on 9 August and closed on 6 September — the only order
+        // in which the document makes sense, even though both readings are already past.
+        var row = Row(2, "Bearing", closing: "9/6/2026 4:00 PM");
+        row.ReceivedDate = "8/9/2026 9:48 AM";
+        var document = Normalise(new DateTime(2026, 9, 11), row);
+
+        Assert.Equal(new DateTime(2026, 9, 6), document.BidClosingDate.Value.Date);
+        Assert.Equal(new DateTime(2026, 8, 9), document.ReceivedDate.Value.Date);
+        Assert.Contains(document.BidClosingDate.Transformations, t => t.Contains("issue date", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_closing_date_consistent_with_the_issue_date_only_day_first_stays_day_first()
+    {
+        // Issued 1 March, closing "10/3/2026": day-first (10 March) follows the issue date and
+        // month-first (3 October) does too, so the issue date decides nothing; the closing date is
+        // still ahead of arrival either way, so day-first stands.
+        var row = Row(2, "Bearing", closing: "10/3/2026");
+        row.ReceivedDate = "2026-03-01";
+        var document = Normalise(new DateTime(2026, 3, 2), row);
+        Assert.Equal(new DateTime(2026, 3, 10), document.BidClosingDate.Value.Date);
     }
 
     [Fact]
@@ -187,5 +216,14 @@ public sealed class EventPrintAccuracyTests
         Assert.Equal(3, rows.Count);
         Assert.All(rows, row => Assert.Equal("OUTLET, SOCKET, FOR PANELBOARD", row.ProductName));
         Assert.Equal(new[] { "40", "41", "42" }, rows.Select(r => r.CustomerLineNumber));
+    }
+
+    // ------------------------------------------------------------------ issue date label
+
+    [Fact]
+    public void A_portals_publish_time_is_the_documents_issue_date()
+    {
+        Assert.Equal(RfqSpreadsheetFields.ReceivedDate, RfqHeaderVocabulary.Builtin.FieldForLabel("Publish time"));
+        Assert.Equal(RfqSpreadsheetFields.ReceivedDate, RfqHeaderVocabulary.Builtin.FieldForColumn("Published on"));
     }
 }
