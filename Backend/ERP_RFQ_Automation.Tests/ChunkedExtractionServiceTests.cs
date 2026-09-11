@@ -308,6 +308,19 @@ public class ChunkedExtractionServiceTests
         Assert.False(llm.WasCalled, "the template was skipped and the document went to the model");
         Assert.Equal(1, outcome.ExtractedItemCount);
         Assert.Null(outcome.AiProviderClass);   // nothing external was involved
+        Assert.Equal(ExtractionProcessingPath.DeterministicRules, outcome.ProcessingPath);
+
+        // The template used to hand back lead items with NO canonical import, so the evidence
+        // ledger wrote nothing for this door and the Decide screen marked every line "no source
+        // document on file" — unquotable. The rows now take the structured path, so the ledger
+        // can cite the line each value was printed on.
+        Assert.NotNull(outcome.CanonicalImport);
+        var line = Assert.Single(Assert.Single(outcome.CanonicalImport!.Documents).LineItems);
+        Assert.Equal("902017274", line.CustomerMaterialCode.Value);
+        Assert.NotEmpty(line.ProductName.Evidence);
+        Assert.NotEmpty(line.Quantity.Evidence);
+        Assert.NotEmpty(line.UnitOfMeasure.Evidence);
+        Assert.NotEmpty(line.CustomerMaterialCode.Evidence);
     }
 
     /// <summary>A minimal but genuine bid list: masthead, the six column headers, one record.</summary>

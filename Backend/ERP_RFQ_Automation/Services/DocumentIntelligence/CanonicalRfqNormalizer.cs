@@ -83,6 +83,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                     Currency = TextValue(row.Currency, row, RfqSpreadsheetFields.Currency),
                     ManufacturerName = TextValue(row.ManufacturerName, row, RfqSpreadsheetFields.ManufacturerName),
                     ManufacturerPartNumber = TextValue(row.ManufacturerPartNumber, row, RfqSpreadsheetFields.ManufacturerPartNumber),
+                    CustomerMaterialCode = TextValue(row.CustomerMaterialCode, row, RfqSpreadsheetFields.CustomerMaterialCode),
                     LeadTimeDays = IntValue(row.LeadTimeDays, row, RfqSpreadsheetFields.LeadTimeDays, true, "LEAD_TIME_DAYS"),
                     ItemText = TextValue(row.ItemText, row, RfqSpreadsheetFields.ItemText),
                     ExtraFields = row.UnmappedColumns.Count == 0
@@ -676,6 +677,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         RfqSpreadsheetFields.DeliveryLocation => "M",
         RfqSpreadsheetFields.RequiredDeliveryDate => "N",
         RfqSpreadsheetFields.AgreementReference => "O",
+        RfqSpreadsheetFields.CustomerMaterialCode => "P",
         _ => "row"
     };
 
@@ -713,7 +715,8 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             row.BuyerName,
             row.ProductName,
             row.Quantity,
-            row.ManufacturerPartNumber
+            row.ManufacturerPartNumber,
+            row.CustomerMaterialCode
         }.Select(v => (v ?? "").Trim().ToLowerInvariant()));
     }
 
@@ -744,6 +747,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             Consider(RfqSpreadsheetFields.Currency, row.Currency);
             Consider(RfqSpreadsheetFields.ManufacturerName, row.ManufacturerName);
             Consider(RfqSpreadsheetFields.ManufacturerPartNumber, row.ManufacturerPartNumber);
+            Consider(RfqSpreadsheetFields.CustomerMaterialCode, row.CustomerMaterialCode);
             Consider(RfqSpreadsheetFields.LeadTimeDays, row.LeadTimeDays);
             Consider(RfqSpreadsheetFields.ItemText, row.ItemText);
             Consider(RfqSpreadsheetFields.DeliveryLocation, row.DeliveryLocation);
@@ -788,6 +792,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         MarkUnstated(line.Currency, RfqSpreadsheetFields.Currency, stated, resolveToValid: true);
         MarkUnstated(line.ManufacturerName, RfqSpreadsheetFields.ManufacturerName, stated, resolveToValid: true);
         MarkUnstated(line.ManufacturerPartNumber, RfqSpreadsheetFields.ManufacturerPartNumber, stated, resolveToValid: true);
+        MarkUnstated(line.CustomerMaterialCode, RfqSpreadsheetFields.CustomerMaterialCode, stated, resolveToValid: true);
         MarkUnstated(line.LeadTimeDays, RfqSpreadsheetFields.LeadTimeDays, stated, resolveToValid: true);
         MarkUnstated(line.ItemText, RfqSpreadsheetFields.ItemText, stated, resolveToValid: true);
     }

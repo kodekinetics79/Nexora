@@ -500,6 +500,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             DocumentNarrative = documentNarrative,
             BusinessUnitId = job.BusinessUnitId,
+            ReceivedOn = DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc),
             SourceId = $"job:{job.Id}",
             // The lease attempt scopes every AI idempotency key this pass issues, so a
             // retried job makes NEW governed requests (see AttemptNumber).
@@ -536,6 +537,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         return new DocumentExtractionInput
         {
             BusinessUnitId = job.BusinessUnitId,
+            ReceivedOn = DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc),
             SourceId = $"job:{job.Id}",
             // Same attempt scoping as the structured path — see AttemptNumber.
             AttemptNumber = Math.Max(1, job.Attempts),

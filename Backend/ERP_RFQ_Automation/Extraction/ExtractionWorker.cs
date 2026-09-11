@@ -1327,6 +1327,7 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
                 return new DocumentExtractionInput
                 {
                     BusinessUnitId = job.BusinessUnitId,
+                    ReceivedOn = DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc),
                     SourceId = $"job:{job.Id}",
                     // The lease attempt scopes every AI idempotency key this pass issues,
                     // so a retried job makes NEW governed requests (see AttemptNumber).
@@ -1359,6 +1360,7 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
         return new DocumentExtractionInput
         {
             BusinessUnitId = job.BusinessUnitId,
+            ReceivedOn = DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc),
             SourceId = $"job:{job.Id}",
             // The lease attempt scopes every AI idempotency key this pass issues, so a
             // retried job makes NEW governed requests (see AttemptNumber).

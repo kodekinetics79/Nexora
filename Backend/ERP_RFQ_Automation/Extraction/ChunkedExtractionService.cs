@@ -60,6 +60,14 @@ public sealed class DocumentExtractionInput
     public string SourceId { get; init; } = Guid.NewGuid().ToString("N");
 
     /// <summary>
+    /// When the document arrived (UTC), for the deterministic readers' date rules — a closing
+    /// date is read month-first when the day-first reading is already past on arrival. The
+    /// structured door receives it as an argument; this carries it to the template inside the
+    /// unstructured door. Null falls back to "now", which is right only on the day of arrival.
+    /// </summary>
+    public DateTime? ReceivedOn { get; init; }
+
+    /// <summary>
     /// The queue lease attempt (<see cref="ExtractionJob.Attempts"/>) this pass runs
     /// under. Monotonic for the life of the job — every claim increments it and
     /// dead-letter recovery extends MaxAttempts without ever resetting it — and it is
@@ -553,9 +561,16 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         //
         // A refusal is a routing decision, not a failure — the document falls through and is
         // read by the model exactly as before. Nothing is lost by trying.
-        if (Templates.AramcoBidListExtraction.TryExtract(
-                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templated)
+        if (Templates.AramcoBidListExtraction.TryReadRows(
+                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templateRows)
         {
+            // The rows take the structured path from here — normaliser, canonical import,
+            // evidence ledger — so a line read by the template can cite its source exactly
+            // like a spreadsheet cell can. Nothing below this point is consulted.
+            var templated = await ExtractStructuredAsync(
+                templateRows, input.BusinessUnitId, input.SourceDocumentName, ct, receivedOn: input.ReceivedOn);
+            templated.Diagnostics.Insert(0,
+                $"Aramco bid list template: {templateRows.Count} line item(s) read without a model call.");
             _log.LogInformation(
                 "{Document} was read from the Aramco bid list template: {Items} line item(s), no model call.",
                 input.SourceDocumentName, templated.ExtractedItemCount);
@@ -1267,7 +1282,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             CompanyRef: null, CompanyRefConfidence: 0,
             CustomerAccountPortalId: null, CustomerAccountPortalIdConfidence: 0,
             CustomerRfqno: null, CustomerRfqnoConfidence: 0,
-            ItemMaterialCode: null, ItemMaterialCodeConfidence: 0,
+            ItemMaterialCode: line.CustomerMaterialCode.Value,
+            ItemMaterialCodeConfidence: (double)line.CustomerMaterialCode.Confidence,
             CommodityProduct: null, CommodityProductConfidence: 0,
             BuyerName: null, BuyerNameConfidence: 0,
             LineItemNo: line.LineItemNo.Value, LineItemNoConfidence: (double)line.LineItemNo.Confidence,
@@ -1332,6 +1348,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             line.ManufacturerName.Value, line.ManufacturerName.Confidence);
         AddEvidence(result, "ManufacturerPartNumber", line.ManufacturerPartNumber.Evidence,
             line.ManufacturerPartNumber.Value, line.ManufacturerPartNumber.Confidence);
+        AddEvidence(result, "ItemMaterialCode", line.CustomerMaterialCode.Evidence,
+            line.CustomerMaterialCode.Value, line.CustomerMaterialCode.Confidence);
         AddEvidence(result, "LeadTime", line.LeadTimeDays.Evidence,
             line.LeadTimeDays.Kind == CanonicalValueKind.Normalized
                 ? line.LeadTimeDays.Value.ToString(CultureInfo.InvariantCulture) : null,

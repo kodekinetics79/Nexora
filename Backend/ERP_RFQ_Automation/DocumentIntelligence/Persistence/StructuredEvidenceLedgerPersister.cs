@@ -172,6 +172,7 @@ public sealed class StructuredEvidenceLedgerPersister
                 AddField(pendingFields, null, line, "Currency", canonical.Currency);
                 AddField(pendingFields, null, line, "ManufacturerName", canonical.ManufacturerName);
                 AddField(pendingFields, null, line, "ManufacturerPartNumber", canonical.ManufacturerPartNumber);
+                AddField(pendingFields, null, line, "ItemMaterialCode", canonical.CustomerMaterialCode);
                 AddField(pendingFields, null, line, "LeadTimeDays", canonical.LeadTimeDays);
                 AddField(pendingFields, null, line, "ItemText", canonical.ItemText);
             }
@@ -314,6 +315,7 @@ public sealed class StructuredEvidenceLedgerPersister
             .Concat(line.Currency.Evidence)
             .Concat(line.ManufacturerName.Evidence)
             .Concat(line.ManufacturerPartNumber.Evidence)
+            .Concat(line.CustomerMaterialCode.Evidence)
             .Concat(line.LeadTimeDays.Evidence);
 
     private static void AddField<T>(List<PendingField> fields, CanonicalInquiry? inquiry,
@@ -441,7 +443,8 @@ public sealed class StructuredEvidenceLedgerPersister
 
     private static bool HasUsableIdentity(CanonicalRfqLineItem sourceLine)
         => CanonicalTexts(sourceLine.ProductName).Any()
-            || CanonicalTexts(sourceLine.ManufacturerPartNumber).Any();
+            || CanonicalTexts(sourceLine.ManufacturerPartNumber).Any()
+            || CanonicalTexts(sourceLine.CustomerMaterialCode).Any();
 
     private static LeadItem? UniqueIdentityMatch(
         CanonicalRfqLineItem sourceLine,
@@ -454,7 +457,9 @@ public sealed class StructuredEvidenceLedgerPersister
                     || SameText(item.ProductShortDescription, value));
             var partMatches = CanonicalTexts(sourceLine.ManufacturerPartNumber)
                 .Any(value => SameText(item.ManufacturerPartNumber, value));
-            if (!productMatches && !partMatches) return false;
+            var materialMatches = CanonicalTexts(sourceLine.CustomerMaterialCode)
+                .Any(value => SameText(item.ItemMaterialCode, value));
+            if (!productMatches && !partMatches && !materialMatches) return false;
             if (sourceLine.Quantity.Value is { } quantity && item.Quantity != quantity) return false;
             return !CanonicalTexts(sourceLine.UnitOfMeasure).Any()
                 || CanonicalTexts(sourceLine.UnitOfMeasure).Any(value => SameText(item.UnitOfMeasure, value));
