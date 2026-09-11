@@ -175,6 +175,7 @@ public sealed class StructuredEvidenceLedgerPersister
                 AddField(pendingFields, null, line, "ItemMaterialCode", canonical.CustomerMaterialCode);
                 AddField(pendingFields, null, line, "LeadTimeDays", canonical.LeadTimeDays);
                 AddField(pendingFields, null, line, "ItemText", canonical.ItemText);
+                AddField(pendingFields, null, line, "MaterialPotext", canonical.MaterialPoText);
             }
         }
 
@@ -316,6 +317,7 @@ public sealed class StructuredEvidenceLedgerPersister
             .Concat(line.ManufacturerName.Evidence)
             .Concat(line.ManufacturerPartNumber.Evidence)
             .Concat(line.CustomerMaterialCode.Evidence)
+            .Concat(line.MaterialPoText.Evidence)
             .Concat(line.LeadTimeDays.Evidence);
 
     private static void AddField<T>(List<PendingField> fields, CanonicalInquiry? inquiry,

@@ -436,6 +436,8 @@ public sealed class DocxFormBlockParser
             ManufacturerPartNumber = Get(values, RfqSpreadsheetFields.ManufacturerPartNumber),
             LeadTimeDays = Get(values, RfqSpreadsheetFields.LeadTimeDays),
             ItemText = Get(values, RfqSpreadsheetFields.ItemText),
+            CustomerMaterialCode = Get(values, RfqSpreadsheetFields.CustomerMaterialCode),
+            MaterialPoText = Get(values, RfqSpreadsheetFields.MaterialPoText),
             DeliveryLocation = Get(values, RfqSpreadsheetFields.DeliveryLocation),
             RequiredDeliveryDate = Get(values, RfqSpreadsheetFields.RequiredDeliveryDate),
             AgreementReference = Get(values, RfqSpreadsheetFields.AgreementReference)

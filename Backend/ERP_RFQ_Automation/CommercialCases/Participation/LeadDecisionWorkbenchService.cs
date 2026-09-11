@@ -308,7 +308,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 lineDecision is null ? null : new LineParticipationDto(lineDecision.Choice.ToString(),
                     lineDecision.ReasonCode, lineDecision.ReasonNotes, lineDecision.ProductId,
                     lineDecision.Quantity, lineDecision.UnitOfMeasure, lineDecision.Currency,
-                    lineDecision.CatalogPolicyVersion, lineDecision.WarningSnapshotJson));
+                    lineDecision.CatalogPolicyVersion, lineDecision.WarningSnapshotJson),
+                // The buyer's own number and their long text: the maker's part number above is a
+                // different thing, and a rep needs both to know what is being asked for.
+                canonical?.ItemMaterialCode, canonical?.MaterialPotext);
         }).ToArray();
 
         var hasFrozenCommercialHeader = LeadRevisionCommercialSnapshot.TryParse(
@@ -618,7 +621,8 @@ public sealed record LeadDecisionLineDto(long Id, long RevisionLineId, string? L
     string? CatalogResolution, IReadOnlyList<CatalogMatchDto> CatalogMatches, long? BestMatchProductId,
     decimal CatalogConfidence, bool NeedsAttention, string? AttentionReason, string CatalogPolicyVersion,
     string WarningSnapshotJson, string VerificationStatus,
-    string? VerificationDetail, LineParticipationDto? Participation);
+    string? VerificationDetail, LineParticipationDto? Participation,
+    string? ItemMaterialCode = null, string? Specification = null);
 public sealed record FitCriterionDto(string Code, string Label, string? Description, string Decision, string? Note);
 public sealed record FitAssessmentDto(int Version, string OverallDecision, string Rationale,
     IReadOnlyList<FitCriterionDto> Criteria, string? AssessedBy, DateTimeOffset? AssessedAtUtc);

@@ -300,6 +300,8 @@ public sealed class NativeSpreadsheetParser
             ManufacturerPartNumber = cell(RfqSpreadsheetFields.ManufacturerPartNumber),
             LeadTimeDays = cell(RfqSpreadsheetFields.LeadTimeDays),
             ItemText = cell(RfqSpreadsheetFields.ItemText),
+            CustomerMaterialCode = cell(RfqSpreadsheetFields.CustomerMaterialCode),
+            MaterialPoText = cell(RfqSpreadsheetFields.MaterialPoText),
             DeliveryLocation = cell(RfqSpreadsheetFields.DeliveryLocation),
             RequiredDeliveryDate = cell(RfqSpreadsheetFields.RequiredDeliveryDate),
             AgreementReference = cell(RfqSpreadsheetFields.AgreementReference)

@@ -99,12 +99,27 @@ public sealed class RfqHeaderVocabularyTests
     [InlineData("Mfr P/N")]
     [InlineData("OEM Part No")]
     [InlineData("Catalogue No.")]
-    [InlineData("Article Number")]
-    [InlineData("SKU")]
     public void A_part_number_column_is_read_under_every_customer_spelling(string header)
     {
         var rows = Grid.ParseCsv(Csv($"Description,Qty,{header}", "Contactor,4,3RT2015-1BB41"), "bid.csv");
         Assert.Equal("3RT2015-1BB41", Assert.Single(rows).ManufacturerPartNumber);
+    }
+
+    [Theory]
+    [InlineData("Material Code")]
+    [InlineData("SAP Material")]
+    [InlineData("Stock Code")]
+    [InlineData("Article Number")]
+    [InlineData("SKU")]
+    [InlineData("Customer Part No")]
+    public void A_buyers_own_number_column_is_the_material_code_not_the_part_number(string header)
+    {
+        // A buyer's material number is not a maker's part number. Read onto the same field, an SEC
+        // material number was shown as a "part number" no supplier could look up.
+        var rows = Grid.ParseCsv(Csv($"Description,Qty,{header}", "Contactor,4,902507666"), "bid.csv");
+        var row = Assert.Single(rows);
+        Assert.Equal("902507666", row.CustomerMaterialCode);
+        Assert.Null(row.ManufacturerPartNumber);
     }
 
     // ------------------------------------------------------------------------ list hygiene

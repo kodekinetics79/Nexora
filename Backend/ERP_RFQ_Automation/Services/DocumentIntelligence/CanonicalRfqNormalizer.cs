@@ -86,6 +86,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                     CustomerMaterialCode = TextValue(row.CustomerMaterialCode, row, RfqSpreadsheetFields.CustomerMaterialCode),
                     LeadTimeDays = IntValue(row.LeadTimeDays, row, RfqSpreadsheetFields.LeadTimeDays, true, "LEAD_TIME_DAYS"),
                     ItemText = TextValue(row.ItemText, row, RfqSpreadsheetFields.ItemText),
+                    MaterialPoText = TextValue(row.MaterialPoText, row, RfqSpreadsheetFields.MaterialPoText),
                     ExtraFields = row.UnmappedColumns.Count == 0
                         ? null
                         : new Dictionary<string, string>(row.UnmappedColumns, StringComparer.Ordinal)
@@ -93,6 +94,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
 
                 CanonicaliseCurrency(line.Currency);
                 ReadManufacturingPartText(line, row);
+                ReadMaterialPoText(line, row);
 
                 var lineKey = BuildLineKey(row);
                 if (duplicateKeys.TryGetValue(lineKey, out var duplicateRows))
@@ -437,6 +439,83 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     /// makers' own part numbers travel with the line too; the buyer's material number keeps the
     /// part-number field it has always had.
     /// </summary>
+    /// <summary>Standing instructions kept beside the line, bounded: they repeat on every line of a print.</summary>
+    private const int MaxRetainedInstructionChars = 600;
+
+    /// <summary>
+    /// SAP's "Material PO text" carries three things in one cell — the specification, the
+    /// maker the buyer references with their part number, and the buyer's standing
+    /// instruction. A quote needs them apart: the specification stays as the line's long
+    /// text, the maker and part number land on the line (derived, and only when the line does
+    /// not state them itself), and the instruction is kept beside the line under its own
+    /// name rather than buried in the specification.
+    /// </summary>
+    private static void ReadMaterialPoText(CanonicalRfqLineItem line, RfqSpreadsheetRow row)
+    {
+        var raw = line.MaterialPoText.Value;
+        string? sourceKey = null;
+        if (string.IsNullOrWhiteSpace(raw) && line.ExtraFields is not null)
+        {
+            // The text may have arrived under a label the vocabulary did not map to the field.
+            var source = line.ExtraFields.FirstOrDefault(pair =>
+                RfqHeaderVocabulary.Normalize(pair.Key) is "materialpotext" or "potext" or "materialpurchaseordertext");
+            if (source.Key is not null) { raw = source.Value; sourceKey = source.Key; }
+        }
+        if (string.IsNullOrWhiteSpace(raw) || !Extraction.Templates.SapMaterialPoText.Recognises(raw)) return;
+
+        var reading = Extraction.Templates.SapMaterialPoText.Read(raw);
+        if (reading.IsEmpty) return;
+
+        if (reading.Specification.Length > 0)
+        {
+            if (line.MaterialPoText.Kind == CanonicalValueKind.Missing)
+            {
+                line.MaterialPoText.Kind = CanonicalValueKind.Extracted;
+                line.MaterialPoText.Confidence = 1.0m;
+                line.MaterialPoText.ValidationStatus = ValidationStatus.Valid;
+                line.MaterialPoText.StatedInDocument = true;
+                line.MaterialPoText.Evidence.Add(Evidence(row, "row", raw));
+            }
+            line.MaterialPoText.OriginalValue ??= raw;
+            line.MaterialPoText.Value = reading.Specification;
+            if (reading.Instructions is not null)
+                line.MaterialPoText.Transformations.Add("po_text_split: the buyer's standing instruction was separated from the specification");
+        }
+
+        var extras = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (reading.Makers.Count > 1)
+            extras["Other makers named"] = string.Join("; ", reading.Makers.Skip(1)
+                .Select(m => m.PartNumber is null ? m.Name : $"{m.Name} P/N {m.PartNumber}"));
+        if (reading.Instructions is not null)
+            extras["Buyer's standing instructions"] = reading.Instructions.Length <= MaxRetainedInstructionChars
+                ? reading.Instructions : reading.Instructions[..MaxRetainedInstructionChars] + " …";
+        if (line.ExtraFields is not null)
+            foreach (var (key, value) in line.ExtraFields)
+                if (key != sourceKey) extras.TryAdd(key, value);     // the raw cell now lives on the line itself
+        line.ExtraFields = extras.Count == 0 ? null : extras;
+
+        var first = reading.Makers.FirstOrDefault();
+        if (first is null) return;
+        if (line.ManufacturerName.Kind == CanonicalValueKind.Missing)
+            Derive(line.ManufacturerName, first.Name, raw, row, $"read_from_material_po_text: the buyer references {first.Name}");
+        var number = first.PartNumber ?? first.Model;
+        if (number is not null && line.ManufacturerPartNumber.Kind == CanonicalValueKind.Missing)
+            Derive(line.ManufacturerPartNumber, number, raw, row, $"read_from_material_po_text: {first.Name}'s number as the buyer wrote it");
+    }
+
+    private static void Derive(CanonicalValue<string> target, string value, string source, RfqSpreadsheetRow row, string note)
+    {
+        target.Value = value;
+        target.OriginalValue = source;
+        target.Kind = CanonicalValueKind.Derived;
+        target.Confidence = 0.85m;
+        target.ValidationStatus = ValidationStatus.Valid;
+        target.StatedInDocument = true;
+        target.Transformations.Add(note);
+        target.Evidence.Clear();
+        target.Evidence.Add(Evidence(row, RfqSpreadsheetFields.MaterialPoText, value));
+    }
+
     private static void ReadManufacturingPartText(CanonicalRfqLineItem line, RfqSpreadsheetRow row)
     {
         if (line.ExtraFields is null) return;
@@ -695,6 +774,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         RfqSpreadsheetFields.RequiredDeliveryDate => "N",
         RfqSpreadsheetFields.AgreementReference => "O",
         RfqSpreadsheetFields.CustomerMaterialCode => "P",
+        RfqSpreadsheetFields.MaterialPoText => "Q",
         _ => "row"
     };
 
@@ -765,6 +845,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             Consider(RfqSpreadsheetFields.ManufacturerName, row.ManufacturerName);
             Consider(RfqSpreadsheetFields.ManufacturerPartNumber, row.ManufacturerPartNumber);
             Consider(RfqSpreadsheetFields.CustomerMaterialCode, row.CustomerMaterialCode);
+            Consider(RfqSpreadsheetFields.MaterialPoText, row.MaterialPoText);
             Consider(RfqSpreadsheetFields.LeadTimeDays, row.LeadTimeDays);
             Consider(RfqSpreadsheetFields.ItemText, row.ItemText);
             Consider(RfqSpreadsheetFields.DeliveryLocation, row.DeliveryLocation);
@@ -810,6 +891,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         MarkUnstated(line.ManufacturerName, RfqSpreadsheetFields.ManufacturerName, stated, resolveToValid: true);
         MarkUnstated(line.ManufacturerPartNumber, RfqSpreadsheetFields.ManufacturerPartNumber, stated, resolveToValid: true);
         MarkUnstated(line.CustomerMaterialCode, RfqSpreadsheetFields.CustomerMaterialCode, stated, resolveToValid: true);
+        MarkUnstated(line.MaterialPoText, RfqSpreadsheetFields.MaterialPoText, stated, resolveToValid: true);
         MarkUnstated(line.LeadTimeDays, RfqSpreadsheetFields.LeadTimeDays, stated, resolveToValid: true);
         MarkUnstated(line.ItemText, RfqSpreadsheetFields.ItemText, stated, resolveToValid: true);
     }

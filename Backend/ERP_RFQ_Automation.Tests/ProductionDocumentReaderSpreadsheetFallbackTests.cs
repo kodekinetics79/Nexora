@@ -44,7 +44,7 @@ public sealed class ProductionDocumentReaderSpreadsheetFallbackTests
         Assert.Equal(ExtractionProcessingPath.DeterministicRules, result.ProcessingPath);
 
         var first = result.StructuredRows!.First();
-        Assert.Equal("MAT-88001", first.ManufacturerPartNumber);
+        Assert.Equal("MAT-88001", first.CustomerMaterialCode);      // "Material Code" is the buyer's number
         Assert.Equal("Ball valve DN50 PN16 stainless", first.ProductName);
         Assert.Equal("EA", first.UnitOfMeasure);
         Assert.Equal("12", first.Quantity);

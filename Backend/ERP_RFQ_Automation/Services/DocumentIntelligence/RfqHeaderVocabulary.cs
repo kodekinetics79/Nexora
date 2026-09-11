@@ -68,23 +68,44 @@ public sealed class RfqHeaderVocabulary
         "brandname", "manufacturermake", "makemanufacturer", "producer", "vendorbrand",
     };
 
+    /// <summary>SAP's long text for the line, printed under its own label. Read as the specification; see SapMaterialPoText.</summary>
+    private static readonly string[] MaterialPoTextSpellings =
+    {
+        "materialpotext", "potext", "materialpurchaseordertext", "purchaseordertext", "materiallongtext", "polongtext",
+    };
+
+    /// <summary>
+    /// The BUYER's own number for the line — SAP/ERP material number, stock code, item code,
+    /// the buyer's part number — as distinct from the maker's part number.
+    /// </summary>
+    private static readonly string[] CustomerMaterialCodeSpellings =
+    {
+        "materialcode", "materialno", "materialnumber", "sapmaterial", "sapmaterialno", "sapmaterialnumber",
+        "sapcode", "sapno", "sapnumber", "itemcode", "stockcode", "stockno", "stocknumber",
+        "skucode", "sku", "productcode", "articleno", "articlenumber", "customerpartno", "customerpartnumber",
+        "buyerpartno", "buyerpartnumber", "customermaterial", "customermaterialcode", "customeritemcode",
+        "customermaterialno", "customermaterialnumber", "buyermaterialno", "clientpartno", "clientpartnumber", "clientmaterialno",
+        "ourpartno", "ourpartnumber", "ourmaterial", "ourcode", "internalcode", "internalpartno",
+    };
+
+    /// <summary>
+    /// The MAKER's number: what is stamped on the part. A buyer's own catalogue number is a
+    /// different thing (<see cref="CustomerMaterialCodeSpellings"/>) — the two used to share one
+    /// field, and an SEC material number was shown as a "part number" nobody could look up.
+    /// </summary>
     private static readonly string[] PartNumberSpellings =
     {
         "manufacturerpartnumber", "mpn", "partnumber", "partno", "partcode", "modelno", "modelnumber",
-        "materialcode", "itemcode", "materialno", "materialnumber", "stockcode", "stockno", "stocknumber",
-        "skucode", "productcode", "catalogno", "catalognumber", "catalogueno", "cataloguenumber", "catno",
-        "articleno", "articlenumber", "sku", "pn", "mfrpn", "mfgpn", "manufacturerpn", "mfrpartno", "mfgpartno",
+        "catalogno", "catalognumber", "catalogueno", "cataloguenumber", "catno",
+        "pn", "mfrpn", "mfgpn", "manufacturerpn", "mfrpartno", "mfgpartno",
         "mfrpartnumber", "mfgpartnumber", "oempartno", "oempartnumber", "oemno", "oemnumber", "oemcode",
         "manufacturerpartno", "manufacturercode", "manufacturerref", "partref", "partreference", "vendorpartno",
         // Deliberately absent: "model", "type", "item id", "product id", "material id", "ref number".
         // A spares list carries "Model | Part No" side by side, and the column mapper takes the
         // lowest column for a field — "GRUNDFOS CR64" became the part number and the real one was
         // dropped. A model column is kept with the line as the buyer's own column instead.
-        // The buyer's OWN catalogue number travels on the same field, by design (see
-        // LeadConversionIntelligence): an SAP export writes it far more often than a maker's number.
-        "sapmaterial", "sapmaterialno", "sapmaterialnumber", "sapcode", "sapno", "customerpartno", "customerpartnumber",
-        "buyerpartno", "buyerpartnumber", "customermaterialno", "customermaterialnumber", "customeritemcode",
-        "buyermaterialno", "clientpartno", "clientpartnumber", "clientmaterialno",
+        // The buyer's OWN catalogue number used to travel on this field too; it now has its own
+        // (CustomerMaterialCodeSpellings) — a buyer's material number is not a maker's part number.
     };
 
     /// <summary>Spellings a column header or a form label may use, per field.</summary>
@@ -137,6 +158,8 @@ public sealed class RfqHeaderVocabulary
         // material of CONSTRUCTION ("SS316", "Carbon Steel"), not an identifier. Bare "itemno" is
         // absent too: it is the line ordinal (1, 2, 3) far more often than a code.
         [RfqSpreadsheetFields.ManufacturerPartNumber] = PartNumberSpellings,
+        [RfqSpreadsheetFields.CustomerMaterialCode] = CustomerMaterialCodeSpellings,
+        [RfqSpreadsheetFields.MaterialPoText] = MaterialPoTextSpellings,
         // "delivery" is deliberately NOT here. A column headed exactly "Delivery" holds a date far
         // more often than a number of days; it maps to the buyer's requirement below.
         [RfqSpreadsheetFields.LeadTimeDays] = new[]

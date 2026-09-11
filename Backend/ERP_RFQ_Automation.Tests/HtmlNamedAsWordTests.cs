@@ -64,7 +64,8 @@ public sealed class HtmlNamedAsWordTests
         Assert.Equal("92", row.Quantity);
         Assert.Equal("each", row.UnitOfMeasure);
         Assert.Equal("BATTERY,STORAGE,MAX VOLT 1.5 V,830AH", row.ProductName);   // line number and material stripped
-        Assert.Equal("909101154", row.ManufacturerPartNumber ?? row.CustomerMaterialCode);
+        Assert.Equal("909101154", row.CustomerMaterialCode);
+        Assert.Null(row.ManufacturerPartNumber);                       // the maker's number is a different thing, and the print left it blank
         Assert.Contains("Installation\nand Testing", row.ItemText);   // the <br> survived as a line
         Assert.Equal("C001835789", row.RfqNo);                       // from the file name, as for the Word print
         Assert.Equal("9/16/2026 1:30 AM", row.BidClosingDate);

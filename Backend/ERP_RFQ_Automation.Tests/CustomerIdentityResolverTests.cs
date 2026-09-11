@@ -436,6 +436,25 @@ public sealed class CustomerIdentityResolverTests
     }
 
     [Fact]
+    public void A_rule_an_administrator_entered_on_the_setup_screen_links_the_lead()
+    {
+        // Setup → Routing rules writes Source = MasterData. A portal vendor code entered there
+        // is a deliberate fact about the customer, not a guess.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")], identifiers:
+        [
+            new(1, Sec, CustomerIdentifierType.PortalAccount, "MATERIALS E BIDDING SYSTEM|2004414", true, 0.95m, CustomerIdentifierSources.MasterData),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            CustomerPortalName = "MATERIALS E-BIDDING SYSTEM", SupplierAccountRefOnDocument = "2004414",
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+    }
+
+    [Fact]
     public void A_taught_alias_in_the_item_text_is_a_suggestion_not_a_link()
     {
         // "SEC" in "AFFIX SEC SPECIFIED BARCODE" is a strong hint and a weak proof: item text

@@ -1332,7 +1332,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             AlternateProductName: null, AlternateProductNameConfidence: 0,
             AlternatePartNumber: null, AlternatePartNumberConfidence: 0,
             ItemText: line.ItemText.Value, ItemTextConfidence: (double)line.ItemText.Confidence,
-            MaterialPotext: null, MaterialPotextConfidence: 0,
+            MaterialPotext: line.MaterialPoText.Value, MaterialPotextConfidence: (double)line.MaterialPoText.Confidence,
             // Same rule as UnitPrice. A lead time of 0 means "deliver immediately"; emitting it
             // for a value we could not read is a false commercial fact, not a harmless default.
             LeadTime: line.LeadTimeDays.Kind == CanonicalValueKind.Normalized
@@ -1378,6 +1378,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             line.LeadTimeDays.Confidence);
         AddEvidence(result, "ItemText", line.ItemText.Evidence,
             line.ItemText.Value, line.ItemText.Confidence);
+        AddEvidence(result, "MaterialPotext", line.MaterialPoText.Evidence,
+            line.MaterialPoText.Value, line.MaterialPoText.Confidence);
         return result;
     }
 

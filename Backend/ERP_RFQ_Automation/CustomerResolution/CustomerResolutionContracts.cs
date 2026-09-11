@@ -39,9 +39,17 @@ public static class CustomerIdentifierSources
     /// </summary>
     public const string LeadReviewLearned = "LeadReviewLearned";
 
-    /// <summary>Sources trusted enough for the learned-alias auto-link tier (S3).</summary>
+    /// <summary>What the Setup → Routing rules screen writes: a rule an administrator entered on purpose.</summary>
+    public const string MasterData = "MasterData";
+
+    /// <summary>
+    /// Sources trusted enough for the learned-alias auto-link tier (S3). An administrator's own
+    /// entry on the setup screen belongs here: a portal vendor code or an "also known as" typed
+    /// in deliberately is at least as reliable as a reviewer's confirmation — and until it was
+    /// listed, a rule entered there could route a lead but never link its customer.
+    /// </summary>
     public static readonly string[] TrustedForAutoLink =
-        [LeadReviewLearned, "CustomerProfile", "CustomerImport"];
+        [LeadReviewLearned, "CustomerProfile", "CustomerImport", MasterData];
 }
 
 /// <summary>

@@ -42,7 +42,7 @@ public class DocxFormBlockParserTests
         Assert.Equal("BATTERY: LEAD ACID, 12 V, 6 CELLS", parsed[0].ProductName);
         Assert.Equal("1", parsed[0].Quantity);
         Assert.Equal("each", parsed[0].UnitOfMeasure);
-        Assert.Equal("000000002000008534", parsed[0].ManufacturerPartNumber);
+        Assert.Equal("000000002000008534", parsed[0].CustomerMaterialCode);
         Assert.Equal("Fri, 1 Jan, 2027", parsed[0].RequiredDeliveryDate);
         Assert.Equal("4", parsed[1].Quantity);
         Assert.Equal("2", parsed[2].Quantity);
@@ -134,7 +134,7 @@ public class DocxFormBlockParserTests
 
         Assert.Equal(2, parsed.Count);
         Assert.Equal("BATTERY, 12 V", parsed[0].ProductName);
-        Assert.Equal("M-2", parsed[1].ManufacturerPartNumber);
+        Assert.Equal("M-2", parsed[1].CustomerMaterialCode);
     }
 
     [Fact]
@@ -148,7 +148,7 @@ public class DocxFormBlockParserTests
         var row = Assert.Single(parsed);
         Assert.Equal("BATTERY, 12 V", row.ProductName);
         Assert.Equal("1", row.Quantity);
-        Assert.Equal("M-1", row.ManufacturerPartNumber);
+        Assert.Equal("M-1", row.CustomerMaterialCode);
         Assert.Equal("8", row.CustomerLineNumber);
     }
 
@@ -183,7 +183,7 @@ public class DocxFormBlockParserTests
         var row = Assert.Single(_parser.Parse(Grid(rows.ToArray()), "SE RFP-C001835789.doc", "Table 5"));
         Assert.Equal("10", row.CustomerLineNumber);
         Assert.Equal("BATTERY,STORAGE,MAX VOLT 1.5 V,830AH", row.ProductName);
-        Assert.Equal("909101154", row.ManufacturerPartNumber);
+        Assert.Equal("909101154", row.CustomerMaterialCode);
         Assert.Equal("92", row.Quantity);
         Assert.Equal("each", row.UnitOfMeasure);
         Assert.Equal("Saudi Electricity Company-Jizan Area", row.UnmappedColumns["Storage Location"]);

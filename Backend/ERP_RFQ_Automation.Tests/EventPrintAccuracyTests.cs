@@ -79,6 +79,26 @@ public sealed class EventPrintAccuracyTests
     }
 
     [Fact]
+    public void An_SAP_material_PO_text_yields_the_specification_the_maker_and_the_standing_instruction()
+    {
+        // SEC's print: one cell carries the spec, the maker the buyer references with their part
+        // number, and the barcode boilerplate. A quote needs the three apart, and the maker's
+        // number must not be confused with SEC's own material number.
+        var row = Row(2, "GUARD,COUPLING,FUEL PUMP,272 MM WD X 215");
+        row.CustomerMaterialCode = "902507666";
+        row.MaterialPoText = ";Material PO text:\nGUARD,BULK NOUN:\nSIZE:\n272 MM WD X 215 MM LG X 240 MM HT;\nMATERIAL:\nSTL;\nADDITIONAL DATA:\nGENERAL ELECTRIC (GE) (LM/FM):\nP/N#221B4034G005\n* FOR THIS ITEM YOU ARE REQUIRED TO\nAFFIX SEC SPECIFIED BARCODE/LABEL.";
+        var line = Assert.Single(Normalise(new DateTime(2026, 9, 11), row).LineItems);
+
+        Assert.Equal("902507666", line.CustomerMaterialCode.Value);
+        Assert.Equal("GENERAL ELECTRIC", line.ManufacturerName.Value);
+        Assert.Equal("221B4034G005", line.ManufacturerPartNumber.Value);
+        Assert.Equal(CanonicalValueKind.Derived, line.ManufacturerPartNumber.Kind);
+        Assert.Contains("272 MM WD X 215 MM LG X 240 MM HT", line.MaterialPoText.Value);
+        Assert.DoesNotContain("BARCODE", line.MaterialPoText.Value);
+        Assert.StartsWith("* FOR THIS ITEM", line.ExtraFields!["Buyer's standing instructions"]);
+    }
+
+    [Fact]
     public void A_closing_date_consistent_with_the_issue_date_only_day_first_stays_day_first()
     {
         // Issued 1 March, closing "10/3/2026": day-first (10 March) follows the issue date and

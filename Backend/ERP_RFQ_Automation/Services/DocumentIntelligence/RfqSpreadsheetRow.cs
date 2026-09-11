@@ -43,6 +43,13 @@ public sealed class RfqSpreadsheetRow
     /// <c>LeadItem.ItemMaterialCode</c> and reaches the evidence ledger as "ItemMaterialCode".
     /// </summary>
     public string? CustomerMaterialCode { get; set; }
+
+    /// <summary>
+    /// The buyer's long text for the line — SAP's "Material PO text": the noun and its
+    /// attributes, the maker and part number it references, and the buyer's standing
+    /// instructions. Read as the line's specification; see SapMaterialPoText.
+    /// </summary>
+    public string? MaterialPoText { get; set; }
     public string? LeadTimeDays { get; set; }
 
     /// <summary>FR-RFQ-04. Saudi region or city for delivery, in the buyer's own wording.</summary>
@@ -114,6 +121,7 @@ public static class RfqSpreadsheetFields
     public const string ManufacturerName = nameof(RfqSpreadsheetRow.ManufacturerName);
     public const string ManufacturerPartNumber = nameof(RfqSpreadsheetRow.ManufacturerPartNumber);
     public const string CustomerMaterialCode = nameof(RfqSpreadsheetRow.CustomerMaterialCode);
+    public const string MaterialPoText = nameof(RfqSpreadsheetRow.MaterialPoText);
     public const string LeadTimeDays = nameof(RfqSpreadsheetRow.LeadTimeDays);
     public const string ItemText = nameof(RfqSpreadsheetRow.ItemText);
     public const string DeliveryLocation = nameof(RfqSpreadsheetRow.DeliveryLocation);

@@ -327,7 +327,12 @@ public sealed class CustomerPurchaseOrderDocumentExtractor
     /// </summary>
     private static (string? ItemCode, string? PartNumber) SplitIdentityKeys(RfqSpreadsheetRow row)
     {
+        // The vocabulary now reads the buyer's own number onto its own field; a column it
+        // recognised as such needs no header inspection. The header check below remains for a
+        // code that arrived on the part-number field under a buyer-flavoured heading.
+        var buyerCode = Trimmed(row.CustomerMaterialCode);
         var value = Trimmed(row.ManufacturerPartNumber);
+        if (buyerCode is not null) return (buyerCode, value);
         if (value is null) return (null, null);
 
         if (!row.FieldColumnNumbers.TryGetValue(RfqSpreadsheetFields.ManufacturerPartNumber, out var column)
