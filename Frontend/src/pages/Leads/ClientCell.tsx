@@ -38,6 +38,11 @@ export interface ClientIdentityLike {
   customerMatchStatus?: string | null;
   customerMatchReasonCode?: string | null;
   customerMatchConfidence?: number | null;
+  /**
+   * The resolver's own sentence for the match, quoting the document it read. Optional for
+   * the same reason as everything else here: the older list projections do not send it.
+   */
+  customerMatchExplanation?: string | null;
   clientCandidates?: ClientCandidateDTO[] | null;
 }
 
@@ -122,6 +127,14 @@ export const clientStatusLabel = (status?: string | null): string => {
  * The evidence behind a match, phrased for a sales rep. Keep every sentence
  * fragment usable both after "Matched because " and standing alone in a
  * candidate row.
+ *
+ * EVERY reason code the resolver can write must appear here. A code that falls to
+ * `default` renders NOTHING — the panel then shows a client name, a percentage and
+ * silence, which is exactly the state a rep cannot act on. That is what happened to
+ * NAME_IN_DOCUMENT and HUMAN_RESOLVED (both in
+ * Backend/.../CustomerResolution/CustomerResolutionContracts.cs from the start, neither
+ * ever listed here): the richest match the engine makes, and "a person already decided",
+ * were the two that explained themselves least. Added 2026-09-12.
  */
 export const matchReasonText = (reasonCode?: string | null): string | null => {
   switch ((reasonCode ?? '').trim().toUpperCase()) {
@@ -132,10 +145,16 @@ export const matchReasonText = (reasonCode?: string | null): string | null => {
     case 'LEARNED_ALIAS': return 'someone previously confirmed this company name for this client';
     case 'LEARNED_PORTAL_ACCOUNT': return 'the portal and vendor code pair was confirmed for this client before';
     case 'NAME_EXACT_UNVERIFIED': return 'the company name on the document matches this client’s name';
+    // The strongest read the engine does: it found the customer's name PRINTED in the
+    // document's own text (a delivery address, a header block, a sentence naming the buyer).
+    case 'NAME_IN_DOCUMENT': return "this customer's name is printed on the document";
     case 'NAME_FUZZY': return 'the company name on the document is a close match';
     case 'RFQ_PATTERN': return 'the RFQ number follows this client’s numbering pattern';
     case 'PRIOR_SENDER': return 'earlier leads from this sender were linked to this client';
     case 'CONTACT_PERSON': return 'the buyer named on the document is a contact at this client';
+    // Not a machine match at all: a person decided, and the resolver deliberately left the
+    // lead alone. Worth saying out loud — it is the one reason a rep should not second-guess.
+    case 'HUMAN_RESOLVED': return 'a colleague already chose this customer';
     case 'AMBIGUOUS': return 'more than one client matches the evidence equally well';
     case 'NO_EVIDENCE': return 'the document carries nothing that identifies the buying company';
     case 'NO_MATCH': return 'nothing on file matches the evidence on this document';
@@ -143,8 +162,24 @@ export const matchReasonText = (reasonCode?: string | null): string | null => {
   }
 };
 
-/** "Matched because the sender's email domain belongs to this client." */
+/**
+ * The sentence to show for a match: the engine's OWN words when it wrote any, and the
+ * reason-code phrase only as a fallback.
+ *
+ * The resolver already writes a sentence that quotes the document it read — `"Saudi
+ * Electricity Company" appears in the delivery address: "Saudi Electricity
+ * Company-DAMMAM".`, `Shares the corporate sender domain se.com.sa.` — and stores it on the
+ * lead. Until 2026-09-12 every screen threw that away and printed the category phrase
+ * instead, so a rep was told THAT the machine decided but never WHAT it read, and could not
+ * check the match against the page in front of them. The quoted evidence is the point.
+ *
+ * Same shape `candidateExplanation` has always used for a candidate row. The sentence is
+ * passed through verbatim — the resolver punctuates it, and re-casing it would wreck the
+ * company names it quotes.
+ */
 export const matchExplanation = (lead: ClientIdentityLike): string | null => {
+  const authored = (lead.customerMatchExplanation ?? '').trim();
+  if (authored) return authored;
   const reason = matchReasonText(lead.customerMatchReasonCode);
   if (!reason) return null;
   return `Matched because ${reason}.`;
