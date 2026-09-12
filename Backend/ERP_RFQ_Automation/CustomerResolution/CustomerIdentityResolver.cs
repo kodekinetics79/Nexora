@@ -129,12 +129,18 @@ public static class CustomerIdentityResolver
         var namedInText = new List<Hit>();
         if (guarded.Passages.Count > 0)
         {
-            var namesToFind = new List<(long CustomerId, string Key, string Display, bool Taught)>();
+            var namesToFind = new List<(long CustomerId, string Key, string Display, bool Taught, bool Initials)>();
             foreach (var customer in corpus.Customers)
             {
                 var key = CustomerNameNormalizer.LooseKey(customer.Name);
-                if (key.Length < 8 || key.Split(' ').Length < 2 || guarded.IsSelfName(key)) continue;
-                namesToFind.Add((customer.CustomerId, key, customer.Name, false));
+                if (key.Length >= 8 && key.Split(' ').Length >= 2 && !guarded.IsSelfName(key))
+                    namesToFind.Add((customer.CustomerId, key, customer.Name, false, false));
+                // "SEC Materials West Plant" names Saudi Electricity Company by its initials, and
+                // nobody should have to teach the system that. Derived, never stored: it follows
+                // the customer's name wherever the name goes.
+                var initials = CustomerNameNormalizer.AcronymKey(customer.Name);
+                if (initials.Length > 0 && !guarded.IsSelfName(initials))
+                    namesToFind.Add((customer.CustomerId, initials, customer.Name, false, true));
             }
             foreach (var identifier in corpus.Identifiers)
             {
@@ -145,19 +151,23 @@ public static class CustomerIdentityResolver
                 var taught = string.Equals(identifier.Source, CustomerIdentifierSources.LeadReviewLearned, StringComparison.Ordinal);
                 // A taught alias may be one word ("SEC"); a profile name still needs two.
                 if (key.Length < 3 || (!taught && (key.Length < 8 || key.Split(' ').Length < 2)) || guarded.IsSelfName(key)) continue;
-                namesToFind.Add((identifier.CustomerId, key, identifier.NormalizedValue, taught));
+                namesToFind.Add((identifier.CustomerId, key, identifier.NormalizedValue, taught, false));
             }
 
             foreach (var passage in guarded.Passages)
             {
-                foreach (var (customerId, key, display, _) in namesToFind)
+                foreach (var (customerId, key, display, _, initials) in namesToFind)
                 {
                     if (!ContainsWholeWords(passage.Key, key)) continue;
                     var excerpt = passage.Text.Length <= 80 ? passage.Text : passage.Text[..80] + "…";
-                    var hit = new Hit(customerId,
-                        passage.NamesTheBuyer ? policy.NameInAddressConfidence : policy.NameInItemTextConfidence,
+                    var confidence = initials
+                        ? (passage.NamesTheBuyer ? policy.NameAcronymInAddressConfidence : policy.NameAcronymInItemTextConfidence)
+                        : (passage.NamesTheBuyer ? policy.NameInAddressConfidence : policy.NameInItemTextConfidence);
+                    var hit = new Hit(customerId, confidence,
                         CustomerMatchReasonCodes.NameInDocument,
-                        $"\"{display}\" appears in the {passage.Where}: \"{excerpt}\".");
+                        initials
+                            ? $"\"{key}\", the initials of \"{display}\", appears in the {passage.Where}: \"{excerpt}\"."
+                            : $"\"{display}\" appears in the {passage.Where}: \"{excerpt}\".");
                     (passage.NamesTheBuyer ? namedInAddress : namedInText).Add(hit);
                 }
             }
@@ -166,7 +176,7 @@ public static class CustomerIdentityResolver
             return WithContact(namedOutcome!, guarded, corpus);
 
         var suggestions = new List<Hit>();
-        suggestions.AddRange(namedInText.GroupBy(h => h.CustomerId).Select(g => g.First()));
+        suggestions.AddRange(namedInText.GroupBy(h => h.CustomerId).Select(g => g.OrderByDescending(h => h.Confidence).First()));
 
         if (guarded.NameKey.Length > 0)
         {

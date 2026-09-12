@@ -436,6 +436,66 @@ public sealed class CustomerIdentityResolverTests
     }
 
     [Fact]
+    public void The_customers_initials_in_the_delivery_address_link_the_lead_without_teaching()
+    {
+        // Production, 2026-09-12: "SEC Materials West Plant-West Operating Area" was on the page and
+        // the lead was offered to Saudi Aramco at 55% because a numbering pattern had been learned
+        // onto it. Nobody had taught "SEC". The initials of a customer's own name are not a lesson
+        // to be taught; they follow the name.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saudi Aramco")], identifiers:
+        [
+            new(1, OtherCustomer, CustomerIdentifierType.RfqNumberPattern, @"^C\d{9}$", false, 0.50m, CustomerIdentifierSources.LeadReviewLearned),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10, RfqNumber = "C001832162",
+            Passages = [new DocumentPassage("delivery location", "SEC Materials West Plant-West Operating Area", true)]
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(Policy.NameAcronymInAddressConfidence, outcome.Confidence);
+        Assert.Contains("initials", outcome.Explanation);
+    }
+
+    [Fact]
+    public void Two_letter_initials_never_match_and_initials_in_item_text_only_suggest()
+    {
+        // "Saudi Aramco" has no usable initials: "SA" is anybody's letters. And "SEC" inside
+        // item text is a hint about a third party as often as about the buyer.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saudi Aramco")]);
+        var none = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery location", "SA Plant 4, Receiving Bay B", true)]
+        }, corpus, Policy);
+        Assert.Null(none.CustomerId);
+        Assert.NotEqual(CustomerMatchReasonCodes.NameInDocument, none.ReasonCode);
+
+        var hint = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 11,
+            Passages = [new DocumentPassage("item text", "AFFIX SEC SPECIFIED BARCODE", false)]
+        }, corpus, Policy);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, hint.Status);
+        Assert.Equal(Sec, Assert.Single(hint.Candidates).CustomerId);
+        Assert.Equal(Policy.NameAcronymInItemTextConfidence, hint.Confidence);
+    }
+
+    [Fact]
+    public void Two_customers_initials_in_the_same_address_stay_ambiguous()
+    {
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saline Water Conversion Corporation")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery location", "SEC substation inside the SWCC Jubail plant", true)]
+        }, corpus, Policy);
+        Assert.Equal(LeadCustomerMatchStatuses.Ambiguous, outcome.Status);
+        Assert.Null(outcome.CustomerId);
+    }
+
+    [Fact]
     public void A_rule_an_administrator_entered_on_the_setup_screen_links_the_lead()
     {
         // Setup → Routing rules writes Source = MasterData. A portal vendor code entered there
