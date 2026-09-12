@@ -725,14 +725,14 @@ const QuoteViewPage: React.FC = () => {
           <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'action.hover' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
           <Box sx={{ overflowX: 'auto' }}>
             <Table size="small">
-              <TableHead><TableRow sx={{ bgcolor: 'action.hover' }}><TableCell sx={{ fontWeight: 800 }}>Ref</TableCell><TableCell sx={{ fontWeight: 800 }}>Description</TableCell><TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell><TableCell sx={{ fontWeight: 800 }}>UOM</TableCell><TableCell sx={{ fontWeight: 800 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell></TableRow></TableHead>
+              <TableHead><TableRow sx={{ bgcolor: 'action.hover' }}><TableCell sx={{ fontWeight: 700 }}>Ref</TableCell><TableCell sx={{ fontWeight: 700 }}>Description</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell><TableCell sx={{ fontWeight: 700 }}>UOM</TableCell><TableCell sx={{ fontWeight: 700 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Total</TableCell></TableRow></TableHead>
               <TableBody>
                 {quote.quoteItems.map((item, idx) => (
                   <TableRow key={item.id} hover>
                     {/* The buyer's own line reference (their RFQ line, e.g. SAP "00010"); synthetic index only for legacy lines */}
                     <TableCell>{item.customerLineRef || idx + 1}</TableCell>
                     <TableCell><Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography><Typography variant="caption" color="text.secondary">{item.itemDescription}</Typography></TableCell>
-                    <TableCell align="center">{item.quantity}</TableCell>
+                    <TableCell align="right">{item.quantity}</TableCell>
                     <TableCell>{item.unitOfMeasure || '—'}</TableCell>
                     <TableCell>
                       {(() => {
@@ -752,7 +752,7 @@ const QuoteViewPage: React.FC = () => {
                           <br />
                           ({item.discountTypeName})
                         </Typography>
-                      ) : '-'}
+                      ) : '—'}
                     </TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(item.totalAmount, quote.currencyCode)}</TableCell>
                   </TableRow>

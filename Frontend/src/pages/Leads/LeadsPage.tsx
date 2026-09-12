@@ -76,13 +76,27 @@ const userScopedKey = (base: string): string => {
   return `${base}:global`;
 };
 
-type DensityChoice = 'comfortable' | 'compact';
+type DensityChoice = 'comfortable' | 'standard' | 'compact';
 
 const loadDensity = (): DensityChoice => {
   try {
-    return localStorage.getItem(userScopedKey(DENSITY_KEY_BASE)) === 'compact' ? 'compact' : 'comfortable';
+    const stored = localStorage.getItem(userScopedKey(DENSITY_KEY_BASE));
+    return stored === 'compact' || stored === 'standard' ? stored : 'comfortable';
   } catch {
     return 'comfortable';
+  }
+};
+
+// Two ways to read the same rows. "Simple" is five plain columns a rep scans without
+// scrolling sideways; "Spreadsheet" is every field, in this user's saved order. Same rows,
+// same queries, same cells — only the column set differs. Local, like density.
+const VIEW_KEY_BASE = 'nexora.leadsPage.view';
+type ViewChoice = 'simple' | 'spreadsheet';
+const loadView = (): ViewChoice => {
+  try {
+    return localStorage.getItem(userScopedKey(VIEW_KEY_BASE)) === 'spreadsheet' ? 'spreadsheet' : 'simple';
+  } catch {
+    return 'simple';
   }
 };
 
@@ -244,6 +258,15 @@ const LeadsPage: React.FC = () => {
   // shared with every other grid that opts in.
   const columnPreferences = useColumnPreferences('leads.list');
   const [density, setDensity] = useState<DensityChoice>(loadDensity);
+  const [listView, setListView] = useState<ViewChoice>(loadView);
+  const applyView = (value: ViewChoice) => {
+    setListView(value);
+    try {
+      localStorage.setItem(userScopedKey(VIEW_KEY_BASE), value);
+    } catch {
+      // Storage unavailable — preference just won't persist.
+    }
+  };
 
   const applyDensity = (value: DensityChoice) => {
     setDensity(value);
@@ -1053,6 +1076,127 @@ const LeadsPage: React.FC = () => {
   // Reordered to this user's saved layout. Falls back to the declared order above when the
   // preference call has not resolved or failed.
   const orderedColumns = columnPreferences.arrangeColumns(columns);
+  // The simple view reuses the spreadsheet's own cell renderers, so both views show the same
+  // facts with the same controls; only the grouping differs.
+  const col = (field: string) => columns.find((c) => c.field === field)!;
+  const simpleColumns: GridColDef<LeadResponseDTO>[] = [
+    {
+      field: 'customerBid',
+      headerName: 'Customer & bid',
+      flex: 1,
+      minWidth: 240,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value, row) => row.customerName || '',
+      renderCell: (p) => {
+        const items = p.row.itemCount ?? 0;
+        const marker = (p.row.duplicateStatus ?? '').toLowerCase();
+        const status = leadStatus(p.row);
+        return (
+          <Box sx={{ lineHeight: 1.3, py: 0.25, minWidth: 0 }}>
+            {col('client').renderCell!(p)}
+            <Stack direction="row" spacing={0.75} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap', mt: 0.25 }}>
+              {col('rfqno').renderCell!(p)}
+              <Typography variant="caption" color="text.secondary">
+                {items > 0 ? `· ${items} ${items === 1 ? 'item' : 'items'}` : '· items not listed yet'}
+                {p.row.deliveryLocation ? ` · to ${p.row.deliveryLocation}` : ''}
+              </Typography>
+              {(marker === 'suspected' || marker === 'confirmed') && (
+                <Chip label="Possible duplicate" color="warning" variant="outlined" size="small" sx={{ fontWeight: 700, height: 20 }} />
+              )}
+              {status.label !== 'Open' && status.label !== 'New' && (
+                <Chip label={status.label} color={status.color} variant={status.variant} size="small" sx={{ fontWeight: 700, height: 20 }} />
+              )}
+            </Stack>
+          </Box>
+        );
+      },
+    },
+    {
+      field: 'when',
+      headerName: 'When',
+      width: 150,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value, row) => row.bidClosingDate || '',
+      renderCell: (p) => {
+        const due = formatDateSafe(p.row.bidClosingDate);
+        const wanted = formatDateSafe(p.row.requiredDeliveryDate);
+        const received = formatDateSafe(p.row.recDate);
+        return (
+          <Box sx={{ lineHeight: 1.3, py: 0.25 }}>
+            <Typography variant="body2" sx={{ fontSize: '0.85rem', ...deadlineSx(p.row.bidClosingDate) }}>
+              {due === '—' ? 'No deadline stated' : `Due ${due}`}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+              {wanted !== '—' ? `Wanted by ${wanted}` : received === '—' ? 'Received date unknown' : `Received ${received}`}
+            </Typography>
+          </Box>
+        );
+      },
+    },
+    { ...col('assignee'), headerName: "Who's on it", width: 150 },
+    {
+      field: 'worth',
+      headerName: 'Worth chasing?',
+      width: 210,
+      sortable: false,
+      filterable: false,
+      renderCell: (p) => {
+        if (decisionQuery.isError) {
+          return <Typography variant="caption" color="text.secondary">Read unavailable</Typography>;
+        }
+        if (decisionsLoading) {
+          return <Skeleton variant="rounded" width={96} height={22} sx={{ borderRadius: 3 }} />;
+        }
+        const summary = decisionSummaries?.[String(p.row.id)];
+        const meta = summary ? DECISION_META[summary.recommendation] : undefined;
+        if (!summary || !meta) {
+          return <Typography variant="caption" color="text.secondary">No read yet</Typography>;
+        }
+        const facts = decisionFacts(summary);
+        return (
+          <Box sx={{ lineHeight: 1.3, py: 0.25, minWidth: 0 }}>
+            <Chip label={meta.label} color={meta.color} size="small" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+            {facts.length > 0 && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', whiteSpace: 'normal' }} title={facts.join(' · ')}>
+                {facts.join(' · ')}
+              </Typography>
+            )}
+          </Box>
+        );
+      },
+    },
+    {
+      field: 'simpleAction',
+      headerName: t('actions'),
+      width: 120,
+      sortable: false,
+      filterable: false,
+      hideable: false,
+      renderCell: (p) => {
+        const decided = p.row.isAccepted || p.row.isRejected;
+        return commercialAccess.canOpenLeadWorkbench ? (
+          <Button
+            size="small"
+            variant={decided ? 'text' : 'outlined'}
+            aria-label={`Decide ${p.row.rfqno || `lead ${p.row.id}`}`}
+            onClick={() => navigate(`/procurement/leads/${p.row.id}/workbench`)}
+            sx={{ fontWeight: 700, minWidth: 0, px: 1.25, whiteSpace: 'nowrap' }}
+          >
+            {decided ? 'See decision' : 'Decide'}
+          </Button>
+        ) : (
+          <Tooltip title="Open the inquiry record">
+            <IconButton size="small" aria-label="Open the inquiry record" sx={{ color: 'primary.main' }} onClick={() => navigate(`/leads/view/${p.row.id}`)}>
+              <ViewIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        );
+      },
+    },
+  ];
+  const gridColumns = listView === 'simple' ? simpleColumns : orderedColumns;
 
   const totalCount = data?.totalCount ?? 0;
 
@@ -1094,9 +1238,9 @@ const LeadsPage: React.FC = () => {
       {/* Filters + view controls */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <Box sx={{ width: { xs: '100%', sm: 360 }, maxWidth: '100%' }}>
-          <SearchField width="100%" value={search} onChange={setSearch} placeholder="Search Nexora Serial, RFQ, buyer or email" />
+          <SearchField width="100%" value={search} onChange={setSearch} placeholder="Search by serial, RFQ number, buyer or email" />
         </Box>
-        <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ width: { xs: '100%', sm: 'auto' }, minWidth: { sm: 160 } }} label="Lead Source">
+        <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ width: { xs: '100%', sm: 'auto' }, minWidth: { sm: 160 } }} label="Where it came from">
           <MenuItem value="all">All Sources</MenuItem>
           <MenuItem value="Email">Email</MenuItem>
           <MenuItem value="Manual">Manual</MenuItem>
@@ -1125,7 +1269,7 @@ const LeadsPage: React.FC = () => {
         {!view && (
           <Tooltip title={untriagedOnly
             ? 'Showing only inquiries nobody has opened yet. Turn off to include the ones already in progress.'
-            : 'Show only inquiries nobody has opened yet.'}>
+            : 'Show only inquiries nobody has opened yet.'} describeChild>
             <ToggleButton
               size="small"
               value="untriaged"
@@ -1134,10 +1278,10 @@ const LeadsPage: React.FC = () => {
                 setUntriagedOnly((current) => !current);
                 setPaginationModel((current) => ({ ...current, page: 0 }));
               }}
-              aria-label="Untriaged only"
+              aria-label="Not opened yet"
               sx={{ textTransform: 'none', fontWeight: 700 }}
             >
-              Untriaged only
+              Not opened yet
             </ToggleButton>
           </Tooltip>
         )}
@@ -1151,11 +1295,26 @@ const LeadsPage: React.FC = () => {
         <Box sx={{ flexGrow: 1 }} />
         {!isLoading && !isError && (
           <Typography variant="body2" sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>
-            {totalCount} {totalCount === 1 ? 'lead' : 'leads'}
+            {totalCount} {totalCount === 1 ? 'inquiry' : 'inquiries'}
           </Typography>
         )}
         {/* Progressive disclosure: the layout controls are still here, one click away, rather
             than sitting on the default path competing with the day's work. */}
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>View</Typography>
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={listView}
+            onChange={(_e, value: ViewChoice | null) => {
+              if (value) applyView(value);
+            }}
+            aria-label="List view"
+          >
+            <Tooltip title="Five plain columns, no sideways scrolling." describeChild><ToggleButton value="simple" aria-label="Simple view">Simple</ToggleButton></Tooltip>
+            <Tooltip title="Every field, in the column order you saved under Display." describeChild><ToggleButton value="spreadsheet" aria-label="Spreadsheet view">Spreadsheet</ToggleButton></Tooltip>
+          </ToggleButtonGroup>
+        </Stack>
         <Button
           size="small"
           variant="text"
@@ -1168,7 +1327,11 @@ const LeadsPage: React.FC = () => {
         </Button>
         <Collapse in={displayOpen} sx={{ width: '100%' }}>
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', pt: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
-            <ColumnPreferences preferences={columnPreferences} />
+            {listView === 'spreadsheet' ? (
+              <ColumnPreferences preferences={columnPreferences} />
+            ) : (
+              <Typography variant="caption" color="text.secondary">Switch to the Spreadsheet view to choose and order columns.</Typography>
+            )}
             <ToggleButtonGroup
               size="small"
               exclusive
@@ -1179,6 +1342,7 @@ const LeadsPage: React.FC = () => {
               aria-label="Row density"
             >
               <ToggleButton value="comfortable" aria-label="Comfortable rows">Comfortable</ToggleButton>
+              <ToggleButton value="standard" aria-label="Standard rows">Standard</ToggleButton>
               <ToggleButton value="compact" aria-label="Compact rows">Compact</ToggleButton>
             </ToggleButtonGroup>
           </Box>
@@ -1294,7 +1458,7 @@ const LeadsPage: React.FC = () => {
         ) : (
           <DataGrid
             rows={rows}
-            columns={orderedColumns}
+            columns={gridColumns}
             rowCount={totalCount}
             loading={isLoading}
             slots={{ noRowsOverlay }}
@@ -1311,8 +1475,13 @@ const LeadsPage: React.FC = () => {
             disableRowSelectionOnClick
             getRowId={(r) => r.id}
             density={density}
-            columnVisibilityModel={columnPreferences.columnVisibilityModel}
-            onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange}
+            getRowHeight={listView === 'simple' ? () => 'auto' : undefined}
+            {...(listView === 'spreadsheet'
+              ? {
+                  columnVisibilityModel: columnPreferences.columnVisibilityModel,
+                  onColumnVisibilityModelChange: columnPreferences.onColumnVisibilityModelChange,
+                }
+              : {})}
           />
         )}
       </Paper>
@@ -1365,7 +1534,7 @@ const LeadsPage: React.FC = () => {
           <ListItemIcon>
             <ViewIcon fontSize="small" color="primary" />
           </ListItemIcon>
-          <ListItemText>Open lifecycle</ListItemText>
+          <ListItemText>Open the record</ListItemText>
         </MenuItem>
       </Menu>
 

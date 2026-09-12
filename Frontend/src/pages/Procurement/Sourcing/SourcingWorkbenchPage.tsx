@@ -1752,7 +1752,7 @@ function DataTable({
   const count = body?.props?.children?.length ?? 0;
   return (
     <Paper variant="outlined" sx={{ overflowX: "auto" }}>
-      <Table size="small" sx={{ minWidth: 900 }}>
+      <Table size="small" sx={{ minWidth: 900, "& thead .MuiTableCell-root": { fontWeight: 700, bgcolor: "action.hover", whiteSpace: "nowrap" }, "& tbody tr:hover": { bgcolor: "action.hover" } }}>
         {children}
       </Table>
       {count === 0 && (
