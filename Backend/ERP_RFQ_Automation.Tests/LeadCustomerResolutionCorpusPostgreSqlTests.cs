@@ -59,6 +59,42 @@ public sealed class LeadCustomerResolutionCorpusPostgreSqlTests(PostgreSqlTestDa
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task An_sec_print_carrying_the_buyers_own_mail_address_still_links_on_its_delivery_address()
+    {
+        // THE DEFECT: the consignee rule treated every sender domain not registered to the
+        // customer as a rival buyer, and the domain tier returns whenever a domain IS registered
+        // to anybody, so every corporate domain reaching the rule was "a rival". An SEC print that
+        // prints its buyer's own address (57322@se.com.sa) beside "Saudi Electricity
+        // Company-JIZAN AREA" was demoted to a 0.70 suggestion, explained as "from se.com.sa, which
+        // is not Saudi Electricity Company". The lead-680 fixtures above only passed because they
+        // carry no address at all.
+        var suffix = Random.Shared.Next(250_000, 289_999);
+        var tenant = 9_410_000L + suffix;
+        var customerId = 9_420_000L + suffix;
+        var leadId = 9_430_000L + suffix;
+
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenant);
+            Seed.Customer(seed, customerId, tenant, "Saudi Electricity Company");
+            var lead = Seed.Lead(seed, leadId, tenant, buyersName: "Buyer");
+            lead.DeliveryLocation = "Saudi Electricity Company-JIZAN AREA";
+            lead.CustomerBuyerEmailExtracted = "57322@se.com.sa";
+            lead.EmailIngestsId = null;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(tenant);
+        var outcome = await new LeadCustomerResolutionService(context).ResolveAsync(tenant, leadId);
+
+        Assert.Equal(customerId, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(0.88m, outcome.Confidence);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task A_hyphenated_surname_finds_the_contact_an_equality_test_could_never_match()
     {
         // THE DEFECT: the pre-filter compared LastName.ToUpper() with the last token of the

@@ -449,8 +449,16 @@ public static class CustomerIdentityResolver
             if (selfDomains.Contains(domain)) return;
 
             addresses.Add(address);
-            // A shared consumer mailbox says nothing about an organisation.
-            if (!SyntheticIdentityGuard.IsFreeMailDomain(domain)) domains.Add(domain);
+            // A shared consumer mailbox says nothing about an organisation, and neither does a
+            // procurement network's relay: noreply@bidnet.com delivers every buyer's RFQ. The
+            // learner now refuses to mint a Domain row for a relay, but until 2026-09-12 it refused
+            // only free mail, so the same confirmation that taught the live tenant's "Saudi Aramco"
+            // a bidnet.com address also proposed bidnet.com as its Domain. A row like that, already
+            // in the store, would auto-link every later bidnet RFQ — from any buyer — at S2's 0.95.
+            // Refusing the domain HERE is what makes such rows inert without waiting for a data
+            // clean-up. The exact address is still evidence (S1), exactly as for free mail.
+            if (!SyntheticIdentityGuard.IsFreeMailDomain(domain) && !SyntheticIdentityGuard.IsPortalRelayDomain(domain))
+                domains.Add(domain);
         }
     }
 
@@ -693,20 +701,42 @@ public static class CustomerIdentityResolver
     /// the page itself claims about who is buying, read once per lead.
     /// </summary>
     private sealed record PageIdentityClaims(
-        string? CompetingDomain,
+        IReadOnlyList<string> SenderDomains,
+        IReadOnlyDictionary<long, HashSet<string>> DomainsVouchedFor,
         HashSet<long> NameKeyOwners,
         string? BuyerNameOnDocument)
     {
         public static PageIdentityClaims Read(
             LeadClientEvidence evidence, GuardedEvidence guarded, ClientResolutionCorpus corpus)
         {
-            // A procurement portal relays mail on behalf of every buyer on its network, so its
-            // domain names no organisation at all and cannot compete with one. Without this, an
-            // ordinary SEC enquiry that happened to arrive through Ariba would be demoted to a
-            // suggestion because "ansmtp.ariba.com is not Saudi Electricity Company" — true, and
-            // beside the point: the postman is not a rival buyer.
-            var competingDomain = guarded.Domains
-                .FirstOrDefault(domain => !SyntheticIdentityGuard.IsPortalRelayDomain(domain));
+            // Guard has already removed synthetic, self, free-mail and portal-relay domains, so
+            // every domain left is an organisation's own. A relay in particular never reaches
+            // here: the postman is not a rival buyer, and an ordinary SEC enquiry that arrived
+            // through Ariba must not be demoted because "ansmtp.ariba.com is not Saudi Electricity
+            // Company". Ordered, so the sentence a rep reads names the same domain on every run.
+            var senderDomains = guarded.Domains.OrderBy(domain => domain, StringComparer.Ordinal).ToList();
+
+            // A domain the customer's own records write from is that customer's, whatever its
+            // letters spell: a contact a person entered on the customer, or an earlier lead from
+            // that address that a person resolved to the customer. Both are facts somebody set,
+            // not inference, so they are read before any guess about what a domain "looks like".
+            var vouched = new Dictionary<long, HashSet<string>>();
+            if (senderDomains.Count > 0)
+            {
+                foreach (var contact in corpus.Contacts)
+                    Vouch(contact.CustomerId, contact.Email);
+                foreach (var prior in corpus.PriorSenderResolutions)
+                    Vouch(prior.CustomerId, prior.SenderEmail);
+            }
+
+            void Vouch(long customerId, string? email)
+            {
+                var domain = RoutingValueNormalizer.DomainFromEmail(email);
+                if (domain is null || !guarded.Domains.Contains(domain)) return;
+                if (!vouched.TryGetValue(customerId, out var domains))
+                    vouched[customerId] = domains = new HashSet<string>(StringComparer.Ordinal);
+                domains.Add(domain);
+            }
 
             // The company-name field is a statement about who is buying. It belongs to a customer
             // when it IS their name, or an alias a person verified against them.
@@ -724,7 +754,8 @@ public static class CustomerIdentityResolver
             }
 
             return new PageIdentityClaims(
-                competingDomain,
+                senderDomains,
+                vouched,
                 owners,
                 guarded.NameKey.Length > 0 ? evidence.CustomerCompanyName?.Trim() : null);
         }
@@ -735,12 +766,27 @@ public static class CustomerIdentityResolver
         /// </summary>
         public string? CompetesWith(long customerId, string customerName, List<Hit> domainHits)
         {
-            // domainHits is empty by the time the passage scan runs — S2 returns whenever a
-            // sender domain matches anybody — but the question is "does this domain point at
-            // THIS customer", and asking it of the hits keeps the answer right if the tier
-            // order ever changes.
-            if (CompetingDomain is not null && !domainHits.Any(hit => hit.CustomerId == customerId))
-                return $"But this document is from {CompetingDomain}, which is not {customerName}.";
+            // A SENDER DOMAIN COMPETES ONLY WHEN NOTHING TIES IT TO THIS CUSTOMER.
+            //
+            // domainHits is always empty by the time the passage scan runs — S2 returns the moment
+            // a sender domain matches anybody — so "the domain is not registered to this customer"
+            // was true of EVERY corporate domain that reached this line. As first written, the rule
+            // therefore demoted the first e-mail from any customer whose domain nobody had
+            // registered yet, and every SEC portal print that carries the buyer's own address
+            // (57322@se.com.sa) on the page: "Saudi Electricity Company-JIZAN" in the delivery
+            // address, se.com.sa on the page, and the rep was told "this document is from
+            // se.com.sa, which is not Saudi Electricity Company". The rule is for the EPC
+            // contractor mailing from hdec.com about an Aramco site, and it is kept for exactly
+            // that: a domain that neither the customer's own records write from nor the customer's
+            // name spells out.
+            if (SenderDomains.Count > 0 && !domainHits.Any(hit => hit.CustomerId == customerId))
+            {
+                DomainsVouchedFor.TryGetValue(customerId, out var vouched);
+                var pageSpeaksForCustomer = SenderDomains.Any(domain =>
+                    (vouched?.Contains(domain) ?? false) || DomainNamesCustomer(domain, customerName));
+                if (!pageSpeaksForCustomer)
+                    return $"But this document is from {SenderDomains[0]}, which is not {customerName}.";
+            }
 
             if (BuyerNameOnDocument is not null && !NameKeyOwners.Contains(customerId))
                 return $"But the document names \"{BuyerNameOnDocument}\" as the buying " +
@@ -748,6 +794,76 @@ public static class CustomerIdentityResolver
 
             return null;
         }
+    }
+
+    /// <summary>
+    /// Whether a mail domain's own name spells this customer: the whole name ("neom.com"), a word
+    /// of it ("aramco.com" for Saudi Aramco, "marafiq.com.sa"), its initials ("swcc.gov.sa" for
+    /// Saline Water Conversion Corporation, "se.com.sa" for Saudi Electricity), or the name with
+    /// its Arabic article written in ("almajdouie.com" for Al-Majdouie).
+    ///
+    /// It is used in ONE direction only — to stop a domain contradicting a customer whose name
+    /// is already written, whole, in a passage about the buyer — so a generous reading costs at
+    /// most a consignee that should have been a suggestion, never a link on the domain alone.
+    /// It is never used to FIND a customer.
+    /// </summary>
+    internal static bool DomainNamesCustomer(string? domain, string? customerName)
+    {
+        var label = OrganisationLabel(domain);
+        if (label.Length < 2) return false;
+        var key = CustomerNameNormalizer.LooseKey(customerName);
+        if (key.Length == 0) return false;
+
+        var tokens = key.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (label.Length >= 3 && tokens.Contains(label, StringComparer.Ordinal)) return true;
+
+        var tight = CustomerNameNormalizer.TightKey(customerName);
+        // LooseKey drops a leading "Al"/"El", and a domain is written with it: al-majdouie.com.
+        if (tight.Length > 0
+            && (label == tight || label == "AL" + tight || label == "EL" + tight))
+            return true;
+
+        var acronym = CustomerNameNormalizer.AcronymKey(customerName);
+        if (acronym.Length > 0 && label == acronym) return true;
+
+        // Initials of the words that carry identity: "SAUDI ELECTRICITY" (COMPANY is legal
+        // noise) is SE, and se.com.sa is the domain Saudi Electricity Company actually mails from.
+        var initials = new string(tokens
+            .Where(token => !DomainInitialsSkipWords.Contains(token) && char.IsLetter(token[0]))
+            .Select(token => token[0])
+            .ToArray());
+        return initials.Length >= 2 && label == initials;
+    }
+
+    private static readonly HashSet<string> DomainInitialsSkipWords = new(StringComparer.Ordinal)
+    {
+        "AND", "OF", "THE", "FOR"
+    };
+
+    /// <summary>Second-level labels a country registry puts under its code: se.COM.sa, swcc.GOV.sa, x.CO.uk.</summary>
+    private static readonly HashSet<string> GenericSecondLevelLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "com", "co", "net", "org", "gov", "edu", "ac", "mil", "sch", "med"
+    };
+
+    /// <summary>
+    /// The label that names the organisation that registered a domain, upper-cased with
+    /// separators removed: "se" in portal.se.com.sa, "aramco" in mail.aramco.com, "hdec" in
+    /// hdec.com. Empty when there is none.
+    /// </summary>
+    internal static string OrganisationLabel(string? domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain)) return string.Empty;
+        var value = domain.Trim().TrimEnd('.');
+        var at = value.LastIndexOf('@');
+        if (at >= 0) value = value[(at + 1)..];
+        var labels = value.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (labels.Length < 2) return string.Empty;
+
+        var registered = labels.Length - 2;
+        if (labels.Length >= 3 && labels[^1].Length == 2 && GenericSecondLevelLabels.Contains(labels[^2]))
+            registered = labels.Length - 3;
+        return new string(labels[registered].Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     }
 
     /// <summary>"SAUDI ELECTRICITY COMPANY" inside "SAUDI ELECTRICITY COMPANY JIZAN AREA", as whole words — never inside another word.</summary>

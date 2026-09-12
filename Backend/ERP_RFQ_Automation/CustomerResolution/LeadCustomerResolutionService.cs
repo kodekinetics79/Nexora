@@ -245,14 +245,6 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         }
 
         var sender = ParseAddress(ingestFrom) ?? ParseAddress(lead.Clientemail);
-        // THE NAME ON THE MAILBOX, WHICH WAS PARSED AND THROWN AWAY. EmailService stores the
-        // sender as the mail client wrote it — "SEC Procurement <noreply@portal.se.com.sa>" —
-        // and this method kept the address and discarded the words in front of it. On a
-        // portal-relayed request that display name is frequently the ONLY unambiguous
-        // statement of the buying organisation anywhere in the message: the relay domain names
-        // the postman, the document header names nobody, and the human who configured the
-        // mailbox typed the buyer's name by hand. It is kept now and read as a header.
-        var senderDisplayName = ParseDisplayName(ingestFrom) ?? ParseDisplayName(lead.Clientemail);
 
         var businessUnitName = await _db.BusinessUnits.AsNoTracking().IgnoreQueryFilters()
             .Where(b => b.Id == businessUnitId)
@@ -265,6 +257,15 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .Take(50)
             .ToListAsync(ct);
 
+        // THE NAME ON THE MAILBOX, WHICH WAS PARSED AND THROWN AWAY. EmailService stores the
+        // sender as the mail client wrote it — "SEC Procurement <noreply@portal.se.com.sa>" —
+        // and this method kept the address and discarded the words in front of it. It is kept
+        // now, and SenderDisplayName decides what it is allowed to say: read after the tenant's
+        // own mailboxes are known, because a rep forwarding a bid puts OUR name on it.
+        var envelope = SenderDisplayName(ingestFrom, tenantMailboxes);
+        if (envelope.Name is null) envelope = SenderDisplayName(lead.Clientemail, tenantMailboxes);
+        var senderDisplayName = envelope.Name;
+
         var selfNames = new List<string>();
         if (!string.IsNullOrWhiteSpace(businessUnitName)) selfNames.Add(businessUnitName!);
         if (!string.IsNullOrWhiteSpace(lead.SupplierNameOnDocument)) selfNames.Add(lead.SupplierNameOnDocument!);
@@ -272,12 +273,9 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         // The direction-of-trade firewall, applied to the two passages that come off the
         // ENVELOPE rather than off the document. A forwarded or replied-to message carries OUR
         // OWN trading name in the display name ("ALI ZAID AL QURAISHI Sales <sales@...>") and in
-        // the subject line, and neither is a statement about a buyer. It matters more than it
-        // used to: a header passage that names a company now demotes what the delivery address
-        // says, so our own name arriving at header strength would suppress the one place a
-        // portal print writes the buyer (lead 680 carried nothing but
-        // "Saudi Electricity Company-DAMMAM"). The resolver applies this same guard to every
-        // candidate NAME; this applies it to the two values before they become evidence at all.
+        // the subject line, and neither is a statement about a buyer. The resolver already
+        // refuses any candidate NAME that is ours; this refuses the two values before they
+        // become evidence at all, so no tier that reads passages has to remember to.
         var selfNameKeys = selfNames
             .Select(CustomerNameNormalizer.LooseKey)
             .Where(key => key.Length > 0)
@@ -307,7 +305,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             SupplierNameOnDocument = lead.SupplierNameOnDocument,
             RfqNumber = lead.Rfqno,
             BuyerPersonName = lead.BuyersName,
-            Passages = Passages(lead, senderDisplayName, ingestSubject),
+            Passages = Passages(lead, senderDisplayName, ingestSubject, envelope.Role),
             TenantSelfNameKeys = selfNames,
             TenantSelfDomains = tenantMailboxes
         };
@@ -375,8 +373,14 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     /// happened to emit first. Collect in three passes; fill every header first, then every
     /// ship-to, then item text with whatever budget is left.
     /// </summary>
+    /// <param name="senderDisplayNameRole">
+    /// What the mailbox display name may say, as decided by <see cref="SenderDisplayName"/>.
+    /// Defaults to item text, the role that can never link a lead on its own, so a caller that
+    /// forgets to ask cannot turn a person's name into a header.
+    /// </param>
     internal static IReadOnlyList<DocumentPassage> Passages(
-        Lead lead, string? senderDisplayName = null, string? emailSubject = null)
+        Lead lead, string? senderDisplayName = null, string? emailSubject = null,
+        PassageRole senderDisplayNameRole = PassageRole.ItemText)
     {
         const int maxPassages = 120;
         const int maxChars = 600;
@@ -419,12 +423,13 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         // the database and read by nothing in the product. Both are about the buyer by definition.
         Add("company named on the document", lead.CustomerCompanyNameExtracted, PassageRole.BuyerHeader);
         Add("the sentence that names the buyer", lead.CustomerCompanyEvidence, PassageRole.BuyerHeader);
-        // A person typed the mailbox display name on purpose, and on a portal-relayed request
-        // ("SEC Procurement <noreply@portal.se.com.sa>") it is the only unambiguous statement of
-        // the buyer anywhere in the message. The subject is written by a person too, but it as
-        // often names a third party as the sender ("re: Aramco spec for your SEC bid"), so it is
-        // worth no more than any other incidental mention.
-        Add("the name on the sender's mailbox", senderDisplayName, PassageRole.BuyerHeader);
+        // On a portal relay or a no-reply mailbox ("SEC Procurement <noreply@portal.se.com.sa>")
+        // the display name is the organisation, and can be the only statement of the buyer in the
+        // whole message; on a person's mailbox it is that person. SenderDisplayName tells the two
+        // apart. The subject is written by a person too, but it as often names a third party as
+        // the sender ("re: Aramco spec for your SEC bid"), so it is worth no more than any other
+        // incidental mention.
+        Add("the name on the sender's mailbox", senderDisplayName, senderDisplayNameRole);
         Add("the e-mail subject", emailSubject, PassageRole.ItemText);
         Add("delivery address", lead.DeliveryLocation, PassageRole.ShipTo);
         foreach (var item in lead.LeadItems ?? [])
@@ -470,6 +475,56 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     }
 
     /// <summary>
+    /// The mailbox display name, and what it is allowed to say about who is buying.
+    ///
+    /// A HEADER ONLY WHERE IT CANNOT BE A PERSON'S NAME. It was first read as a header — link
+    /// strength, the same weight as the company-name field — on every message. Nearly every real
+    /// message is "Firstname Lastname &lt;person@company&gt;", and the resolver now scans one-word
+    /// trade names of four letters or more, which in this market are very often family names:
+    /// Al-Rashid Trading keys to RASHID, Al-Nasser Group to NASSER. "Rashid Al-Otaibi
+    /// &lt;r.otaibi@se.com.sa&gt;" would have linked an SEC enquiry to Al-Rashid Trading at 0.88 and
+    /// asked nobody. <see cref="PassageRole.BuyerHeader"/> is what a document states about who is
+    /// buying; a person's own name on their own mailbox is not that.
+    ///
+    /// So the name is a header on the two kinds of mailbox no person answers: a portal relay,
+    /// which writes the buyer organisation into the display name because its own domain names
+    /// only the postman, and a no-reply mailbox. Anywhere else it is a mention — offered to a
+    /// rep, never decided for them. A mailbox the resolver refuses as evidence at all (Nexora's
+    /// own ingestion labels, or the tenant's own domain when a rep forwards a bid) contributes no
+    /// name, because the name on it is ours. That mirrors the resolver's Guard exactly.
+    /// </summary>
+    internal static (string? Name, PassageRole Role) SenderDisplayName(
+        string? from, IReadOnlyCollection<string> tenantMailboxes)
+    {
+        var name = ParseDisplayName(from);
+        var address = ParseAddress(from);
+        var domain = RoutingValueNormalizer.DomainFromEmail(address);
+        if (name is null || address is null || string.IsNullOrWhiteSpace(domain)
+            || SyntheticIdentityGuard.IsSyntheticDomain(domain))
+            return (null, PassageRole.ItemText);
+
+        foreach (var mailbox in tenantMailboxes)
+        {
+            if (string.IsNullOrWhiteSpace(mailbox)) continue;
+            var own = mailbox.Contains('@')
+                ? RoutingValueNormalizer.DomainFromEmail(mailbox)
+                : mailbox.Trim().ToLowerInvariant();
+            if (string.Equals(own, domain, StringComparison.OrdinalIgnoreCase))
+                return (null, PassageRole.ItemText);
+        }
+
+        // "noreply", "no-reply", "no_reply", "do-not-reply", "donotreply-sourcing": separators
+        // are printing, so only the letters are compared.
+        var local = new string(address[..address.LastIndexOf('@')].Where(char.IsLetter).ToArray());
+        var noReply = local.StartsWith("noreply", StringComparison.Ordinal)
+                      || local.StartsWith("donotreply", StringComparison.Ordinal);
+
+        return SyntheticIdentityGuard.IsPortalRelayDomain(domain) || noReply
+            ? (name, PassageRole.BuyerHeader)
+            : (name, PassageRole.ItemText);
+    }
+
+    /// <summary>
     /// RFC-parses an address out of either shape ("Name &lt;a@b&gt;" or "a@b") and lowercases it.
     /// Returns null for anything that is not a single deliverable address.
     /// </summary>
@@ -495,8 +550,11 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).Distinct().ToArray();
         var domains = addresses
             .Select(RoutingValueNormalizer.DomainFromEmail)
+            // The same domains the resolver's Guard keeps: a relay's Domain row can never match
+            // there, so it is not worth a read here.
             .Where(d => !string.IsNullOrWhiteSpace(d) && !SyntheticIdentityGuard.IsSyntheticDomain(d)
-                        && !SyntheticIdentityGuard.IsFreeMailDomain(d))
+                        && !SyntheticIdentityGuard.IsFreeMailDomain(d)
+                        && !SyntheticIdentityGuard.IsPortalRelayDomain(d))
             .Select(d => d!).Distinct().ToArray();
         var accounts = evidence.AccountReferences
             .Select(x => RoutingValueNormalizer.Normalize(CustomerIdentifierType.ErpAccount, x))

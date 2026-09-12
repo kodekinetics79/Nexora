@@ -146,14 +146,20 @@ public sealed class LeadCustomerResolutionPassageTests
     // ── the e-mail envelope ───────────────────────────────────────────────────
 
     [Fact]
-    public void The_name_on_the_mailbox_becomes_header_evidence_and_the_subject_item_text()
+    public void The_name_on_a_no_reply_mailbox_becomes_header_evidence_and_the_subject_item_text()
     {
         // "SEC Procurement <noreply@portal.se.com.sa>" was parsed and the only unambiguous
         // statement of the buyer in the whole message was thrown away with the display name.
+        // What is true now: the name is a header because nobody answers a no-reply mailbox, so
+        // the name on it is the organisation's and cannot be a person's. The role is taken from
+        // SenderDisplayName, exactly as the service takes it.
+        var (displayName, role) = LeadCustomerResolutionService.SenderDisplayName(
+            "SEC Procurement <noreply@portal.se.com.sa>", []);
         var passages = LeadCustomerResolutionService.Passages(
             LeadWith(lead => lead.DeliveryLocation = "Gate 4, Ras Tanura"),
-            senderDisplayName: "SEC Procurement",
-            emailSubject: "RFQ 4500123456 - spares");
+            senderDisplayName: displayName,
+            emailSubject: "RFQ 4500123456 - spares",
+            senderDisplayNameRole: role);
 
         var mailbox = Assert.Single(passages, p => p.Text == "SEC Procurement");
         Assert.Equal(PassageRole.BuyerHeader, mailbox.Role);
@@ -178,6 +184,52 @@ public sealed class LeadCustomerResolutionPassageTests
     [InlineData(null, null)]
     public void The_display_name_is_kept_only_when_it_is_a_name(string? raw, string? expected)
         => Assert.Equal(expected, LeadCustomerResolutionService.ParseDisplayName(raw));
+
+    [Theory]
+    [InlineData("SEC Procurement <noreply@portal.se.com.sa>", "SEC Procurement", PassageRole.BuyerHeader)]
+    [InlineData("Marafiq Tenders <do-not-reply@marafiq.com.sa>", "Marafiq Tenders", PassageRole.BuyerHeader)]
+    // A relay's own domain names only the postman, so it writes the buyer into the display name.
+    [InlineData("Saudi Aramco <ordersender-prod@ansmtp.ariba.com>", "Saudi Aramco", PassageRole.BuyerHeader)]
+    // A person's own mailbox: the name is kept as a mention, never as a statement about the buyer.
+    [InlineData("\"Rashid Al-Otaibi\" <r.otaibi@se.com.sa>", "Rashid Al-Otaibi", PassageRole.ItemText)]
+    // A rep forwarding a bid from the tenant's own domain: the name on it is ours.
+    [InlineData("Ali Zaid Sales <sales@alquraishi.example>", null, PassageRole.ItemText)]
+    // Nexora's own ingestion label is plumbing, whatever it is called.
+    [InlineData("Manual Upload <manual@upload.com>", null, PassageRole.ItemText)]
+    [InlineData("ali@se.com.sa", null, PassageRole.ItemText)]
+    [InlineData(null, null, PassageRole.ItemText)]
+    public void The_mailbox_name_is_a_header_only_where_it_cannot_be_a_persons_name(
+        string? from, string? expectedName, PassageRole expectedRole)
+    {
+        var (name, role) = LeadCustomerResolutionService.SenderDisplayName(from, ["rfq@alquraishi.example"]);
+
+        Assert.Equal(expectedName, name);
+        Assert.Equal(expectedRole, role);
+    }
+
+    [Fact]
+    public void A_person_whose_name_shares_a_word_with_a_customer_is_offered_that_customer_and_never_linked_to_it()
+    {
+        // THE HAZARD, whole: one-word trade names of four letters or more are scannable, and in
+        // this market they are family names — Al-Rashid Trading keys to RASHID. Read as a header,
+        // "Rashid Al-Otaibi <r.otaibi@se.com.sa>" linked an SEC enquiry to Al-Rashid Trading at
+        // 0.88. As a mention it is a suggestion a rep can dismiss in a glance.
+        const string from = "\"Rashid Al-Otaibi\" <r.otaibi@se.com.sa>";
+        var (displayName, role) = LeadCustomerResolutionService.SenderDisplayName(from, []);
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 1,
+            SenderEmail = LeadCustomerResolutionService.ParseAddress(from),
+            Passages = LeadCustomerResolutionService.Passages(LeadWith(_ => { }), displayName, null, role),
+        };
+        var corpus = new ClientResolutionCorpus { Customers = [new CustomerNameSnapshot(7, "Al-Rashid Trading")] };
+
+        var outcome = CustomerIdentityResolver.Resolve(evidence, corpus, new CustomerResolutionPolicy());
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Equal(7L, Assert.Single(outcome.Candidates).CustomerId);
+    }
 
     // ── the customer-name prefilter ───────────────────────────────────────────
 

@@ -993,6 +993,136 @@ public sealed class CustomerIdentityResolverTests
         Assert.Equal(Policy.NameInItemTextConfidence, outcome.Confidence);
     }
 
+    // ── A BUYER'S OWN MAIL DOMAIN DOES NOT CONTRADICT ITS OWN NAME ────────────
+
+    [Theory]
+    // An SEC buyer writing from SEC's own domain, which nobody has registered on the customer yet.
+    [InlineData("ali.nasser@se.com.sa", null, "Saudi Electricity Company", "Saudi Electricity Company-DAMMAM")]
+    // The shape of an SEC portal print: our ingestion label as the sender and the buyer's own
+    // address printed on the page (SEC bids carry 57322@se.com.sa).
+    [InlineData("extraction@pipeline.local", "57322@se.com.sa", "Saudi Electricity Company", "Saudi Electricity Company-JIZAN AREA")]
+    [InlineData("tenders@marafiq.com.sa", null, "Marafiq", "MARAFIQ Yanbu Warehouse, Yanbu Al-Sinaiyah")]
+    [InlineData("buyer@aramco.com", null, "Saudi Aramco", "Saudi Aramco Ras Tanura Refinery")]
+    [InlineData("procurement@swcc.gov.sa", null, "Saline Water Conversion Corporation", "Saline Water Conversion Corporation Jubail Plant")]
+    public void A_buyers_own_unregistered_mail_domain_does_not_contradict_its_name_in_the_delivery_address(
+        string sender, string? documentBuyerEmail, string customerName, string deliveryAddress)
+    {
+        // THE DEFECT: the consignee rule demoted a ship-to name whenever the page carried a sender
+        // domain not registered to that customer. S2 returns the moment a domain matches anybody,
+        // so by the passage tier EVERY corporate domain was unregistered — the rule demoted the
+        // first e-mail from every new customer and every SEC print carrying the buyer's own
+        // address, and told the rep "this document is from se.com.sa, which is not Saudi
+        // Electricity Company". A domain that spells the customer's own name is the customer.
+        var corpus = Corpus(customers: [new(Sec, customerName)]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = sender,
+            DocumentBuyerEmail = documentBuyerEmail,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+        Assert.DoesNotContain("which is not", outcome.Explanation);
+    }
+
+    [Fact]
+    public void A_contractors_domain_on_its_own_still_demotes_the_site_owner_in_the_address()
+    {
+        // The Hyundai enquiry with no company-name field extracted. The sender domain is then the
+        // ONLY thing on the page that disagrees with the address, and it must still be heard:
+        // hdec.com spells nothing of Saudi Aramco.
+        var corpus = Corpus(customers: [new(OtherCustomer, "Saudi Aramco")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "procurement@hdec.com",
+            Passages = [new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(Policy.ShipToDemotedConfidence, outcome.Confidence);
+        Assert.Contains("this document is from hdec.com, which is not Saudi Aramco", outcome.Explanation);
+    }
+
+    [Fact]
+    public void A_domain_the_customers_own_records_write_from_is_that_customers_whatever_it_spells()
+    {
+        // Arabian Pipes Company mails from apco-ksa.com, and nothing in the name spells that. A
+        // contact a person entered on the customer, or an earlier lead from that address a person
+        // resolved to it, is the customer telling us so — a fact, read before any guess.
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "khalid@apco-ksa.com",
+            Passages = [new DocumentPassage("delivery address", "Arabian Pipes Company - Dammam 2nd Industrial City", true)],
+        };
+        IReadOnlyList<CustomerNameSnapshot> customers = [new(Sec, "Arabian Pipes Company")];
+
+        var unvouched = CustomerIdentityResolver.Resolve(evidence, Corpus(customers: customers), Policy);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, unvouched.Status);
+        Assert.Equal(Policy.ShipToDemotedConfidence, unvouched.Confidence);
+
+        var byContact = CustomerIdentityResolver.Resolve(evidence, Corpus(
+            customers: customers,
+            contacts: [new(77, Sec, "Procurement@APCO-KSA.com", "Procurement", "Desk")]), Policy);
+        Assert.Equal(Sec, byContact.CustomerId);
+        Assert.Equal(Policy.NameInAddressConfidence, byContact.Confidence);
+
+        var byPriorLead = CustomerIdentityResolver.Resolve(evidence, Corpus(
+            customers: customers,
+            priorSenders: [new("khalid@apco-ksa.com", Sec)]), Policy);
+        Assert.Equal(Sec, byPriorLead.CustomerId);
+        Assert.Equal(Policy.NameInAddressConfidence, byPriorLead.Confidence);
+    }
+
+    [Fact]
+    public void A_relay_domain_taught_before_the_learner_refused_it_can_no_longer_link_at_the_domain_tier()
+    {
+        // Until 2026-09-12 the learner refused only free mail as a Domain, so a confirmation on a
+        // bidnet.com-relayed RFQ proposed bidnet.com as that customer's Domain. The row outlives
+        // the fix, and S2 would link every later bidnet RFQ — from any buyer — to that customer at
+        // 0.95. The relay names the postman: this SEC enquiry links on its delivery address and the
+        // stale row does not even reach the candidate list.
+        var corpus = Corpus(
+            customers: [new(OtherCustomer, "Saudi Aramco"), new(Sec, "Saudi Electricity Company")],
+            identifiers:
+            [
+                new(1, OtherCustomer, CustomerIdentifierType.Domain, "bidnet.com", true, 0.95m,
+                    CustomerIdentifierSources.LeadReviewLearned),
+            ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "alerts@bidnet.com",
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.DoesNotContain(outcome.Candidates, candidate => candidate.CustomerId == OtherCustomer);
+    }
+
+    [Theory]
+    [InlineData("se.com.sa", "Saudi Electricity Company", true)]          // initials of the words that carry identity
+    [InlineData("portal.se.com.sa", "Saudi Electricity Company", true)]   // a host under the registered name
+    [InlineData("marafiq.com.sa", "Marafiq", true)]
+    [InlineData("aramco.com", "Saudi Aramco", true)]                      // one word of the name
+    [InlineData("swcc.gov.sa", "Saline Water Conversion Corporation", true)]
+    [InlineData("almajdouie.com", "Al-Majdouie Group", true)]             // the article is written into a domain
+    [InlineData("neom.com", "NEOM", true)]
+    [InlineData("hdec.com", "Saudi Aramco", false)]                       // the EPC contractor
+    [InlineData("apco-ksa.com", "Arabian Pipes Company", false)]          // true, but only a record can say so
+    [InlineData("notaramco.com", "Saudi Aramco", false)]                  // a name inside another word
+    [InlineData("", "Saudi Aramco", false)]
+    [InlineData("aramco.com", "", false)]
+    public void A_domain_names_a_customer_only_when_its_own_label_spells_that_name(
+        string domain, string customerName, bool expected)
+        => Assert.Equal(expected, CustomerIdentityResolver.DomainNamesCustomer(domain, customerName));
+
     // ── AN AUTO-LINK MUST CLEAR THE FLOOR ─────────────────────────────────────
 
     [Fact]
