@@ -153,6 +153,15 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
       lead={lead}
       onClose={() => setDialogOpen(false)}
       onResolved={() => onChanged?.()}
+      // The document already told us the company, the buyer and the sentence that proves it.
+      // Opening this dialog empty made the rep retype a name the page was displaying two inches
+      // above the button. The lead-detail screen has passed a prefill all along.
+      prefill={{
+        name: lead.customerCompanyNameExtracted,
+        email: lead.clientemail,
+        contactName: lead.buyersName,
+        evidence: lead.customerCompanyEvidence,
+      }}
       {...(deferred ? { onSelect } : {})}
     />
   );
@@ -344,6 +353,10 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
 
   // ── Unresolved: show what we DO know, then a way forward. ─────────────────
   const sender = realSenderAddress(lead.clientemail);
+  // The company the document named, when the reader found one. Production, 2026-09-12: a Marafiq
+  // RFQ read "MARAFIQ" and the sentence proving it, then offered the rep an empty search box.
+  const documentName = (lead.customerCompanyNameExtracted ?? '').trim();
+  const namedOnDocument = documentName.length > 0 && documentName.length <= 60 ? documentName : null;
   const evidence: EvidenceRow[] = [];
   if (sender) evidence.push({ label: 'Sent from', value: sender });
   if (lead.customerCompanyNameExtracted?.trim()) {
@@ -372,21 +385,32 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
         <Typography sx={{ fontWeight: 900, fontSize: '1.05rem' }}>No client linked yet</Typography>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 560 }}>
-        {evidence.length > 0
-          ? 'Nexora could not match this to a client on file. Here is everything it does know — enough to pick the right one.'
-          : 'This document carries nothing that identifies the buying organisation, so nothing was guessed.'}
+        {namedOnDocument
+          ? `No customer on your list matches this document. It names ${namedOnDocument}, which looks like a buyer you have not set up yet.`
+          : evidence.length > 0
+            ? 'No customer on your list matches this document. Here is everything it does know — enough to pick the right one.'
+            : 'Nothing on this document says who is buying, so nothing was guessed.'}
       </Typography>
       {evidence.length > 0 && <EvidenceList rows={evidence} />}
       {canResolveClient && (
-        <Button
-          variant="contained"
-          size="small"
-          startIcon={<ClientIcon />}
-          onClick={openDialog}
-          sx={{ mt: 1.75, fontWeight: 800, textTransform: 'none' }}
-        >
-          Find client
-        </Button>
+        <Stack direction="row" spacing={1} sx={{ mt: 1.75, flexWrap: 'wrap', gap: 1 }}>
+          {/* The commonest reason a document does not match is that the buyer is new. Offering
+              the company BY NAME turns a search the rep has to retype into one click. */}
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<ClientIcon />}
+            onClick={openDialog}
+            sx={{ fontWeight: 800, textTransform: 'none' }}
+          >
+            {namedOnDocument ? `Set up ${namedOnDocument}` : 'Choose the customer'}
+          </Button>
+          {namedOnDocument && (
+            <Button size="small" onClick={openDialog} sx={{ fontWeight: 800, textTransform: 'none' }}>
+              Search your customers
+            </Button>
+          )}
+        </Stack>
       )}
     </Box>,
     'unresolved',
