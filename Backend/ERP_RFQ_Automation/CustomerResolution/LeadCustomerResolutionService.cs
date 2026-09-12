@@ -307,6 +307,15 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             passages.Add(new DocumentPassage(where, trimmed, namesTheBuyer));
         }
 
+        // The two strongest statements on the page, and until now the weakest evidence in the
+        // engine. The company-name field was compared only for an exact key match and then
+        // fuzzily, so "Saudi Aramco Ras Tanura Refinery" written there resolved to NOTHING while
+        // the identical string in the delivery address linked at 0.88. And the short verbatim
+        // sentence the extractor captures precisely because it names the buying organisation
+        // ("MARAFIQ invites bidders in accordance with our Request for Quotation") was written to
+        // the database and read by nothing in the product. Both are about the buyer by definition.
+        Add("company named on the document", lead.CustomerCompanyNameExtracted, namesTheBuyer: true);
+        Add("the sentence that names the buyer", lead.CustomerCompanyEvidence, namesTheBuyer: true);
         Add("delivery address", lead.DeliveryLocation, namesTheBuyer: true);
         foreach (var item in lead.LeadItems ?? [])
         {

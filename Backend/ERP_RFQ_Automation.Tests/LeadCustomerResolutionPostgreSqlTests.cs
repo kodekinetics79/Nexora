@@ -136,7 +136,12 @@ public sealed class LeadCustomerResolutionPostgreSqlTests(PostgreSqlTestDatabase
         var first = await service.ResolveAsync(tenant, leadId);
         var second = await service.ResolveAsync(tenant, leadId);
 
-        Assert.Equal(LeadCustomerMatchStatuses.Suggested, first.Status);
+        // The company name printed on the document is now read as a statement about the buyer, so
+        // "Saudi Electricity Co." links to "Saudi Electricity Company" outright where it used to
+        // manage only a 0.75 suggestion. What this test guards is re-runnability, and that is
+        // unchanged: the (tenant, lead, rank) unique index makes a lazy delete-then-insert a live
+        // failure, so the second pass must replace the candidate rather than add to it.
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, first.Status);
         Assert.Equal(first.Status, second.Status);
         await using var verify = database.ContextFor(tenant);
         Assert.Single(await verify.Set<LeadCustomerMatchCandidate>().Where(c => c.LeadId == leadId).ToListAsync());

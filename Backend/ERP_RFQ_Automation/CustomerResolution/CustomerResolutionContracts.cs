@@ -271,6 +271,12 @@ public sealed record CustomerResolutionPolicy
     public decimal PriorSenderSuggestionConfidence { get; init; } = 0.65m;
     public decimal ContactPersonSuggestionConfidence { get; init; } = 0.60m;
     public decimal RfqPatternSuggestionConfidence { get; init; } = 0.55m;
+    /// <summary>
+    /// How many characters an ERP/portal account number must carry before it is allowed to link a
+    /// lead by itself. An SAP company code is four characters and is shared by every affiliate of a
+    /// group, so matching one at authoritative confidence claims eleven companies at once.
+    /// </summary>
+    public int MinimumErpAccountLength { get; init; } = 5;
 
     public decimal AuthoritativeConfidence { get; init; } = 1.00m;
     public decimal DomainConfidence { get; init; } = 0.95m;

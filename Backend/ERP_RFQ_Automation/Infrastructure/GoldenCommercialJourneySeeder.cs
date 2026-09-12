@@ -371,11 +371,25 @@ public static class GoldenCommercialJourneySeeder
                     $"Golden customer resolution neither selected nor proposed fixture customer "
                     + $"{customerId} for Lead {lead.Id}.");
 
-            // An exact company name without a verified identifier is deliberately only a
-            // suggestion under the production resolver's confidence policy. Complete the same
-            // governed human-link command the workbench uses: it records review audit, advances
-            // concurrency and appends an immutable revision with inherited source lineage.
-            if (!resolution.CustomerId.HasValue)
+            // The fixture's starting state is a lead whose customer a PERSON confirmed, so the
+            // same governed human-link command the workbench uses runs here: it records review
+            // audit, advances concurrency and appends an immutable revision with inherited
+            // source lineage.
+            //
+            // TRAP (cost: one red pilot gate). This ran only when resolution returned NO
+            // customer, on the assumption that a company name without a verified identifier can
+            // never be more than a suggestion. Once the resolver learned to read the buyer's own
+            // words it began AUTO-MATCHING this fixture, the link was skipped, and the lead
+            // stayed machine-matched. Routing counts only a human-decided customer as ownership
+            // evidence (CommercialRoutingApplicationService), so the golden lead routed
+            // NO_MATCH_EVIDENCE, kept AssignTo null, and became invisible to the very salesperson
+            // this seeder creates. Confidence in the resolver must never decide whether the
+            // fixture's human confirmation happens.
+            //
+            // Safe on an already-linked lead: the customer is identical, so the re-pointing guard
+            // does not apply, and the resulting human status is what protects the link from any
+            // later machine resolution.
+            if (!LeadCustomerMatchStatuses.IsHumanDecided(lead.CustomerMatchStatus))
             {
                 var linked = await new LeadRepository(db).LinkClientAsync(
                     lead.Id,
