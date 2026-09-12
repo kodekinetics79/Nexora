@@ -88,6 +88,23 @@ export interface LeadResponseDTO {
   customerMatchReasonCode?: string | null;
   /** 0..1 confidence behind `customerMatchStatus`. */
   customerMatchConfidence?: number | null;
+  /**
+   * The resolver's OWN sentence for this match, quoting the document it read —
+   * `"Saudi Electricity Company" appears in the delivery address: "Saudi Electricity
+   * Company-DAMMAM".` or `Shares the corporate sender domain se.com.sa.`
+   *
+   * Written by CustomerIdentityResolver, stored on the lead, and filled by both
+   * LeadRepository projections (list and detail) since client identity shipped. It was
+   * simply never declared on this side, so every screen threw the sentence away and
+   * printed a generic category phrase built from `customerMatchReasonCode` instead —
+   * "Matched because the company name on the document is a close match" tells a rep
+   * nothing they can check against the page in front of them, which is the whole job.
+   *
+   * Optional because payloads that predate client-organisation identity carry none, and
+   * because the resolver leaves it null when it had nothing to say; callers fall back to
+   * the reason-code phrase.
+   */
+  customerMatchExplanation?: string | null;
   /** The buying organisation as printed on the document (never our own name). */
   customerCompanyNameExtracted?: string | null;
   /** ≤120-char verbatim snippet that names the buying organisation. */
@@ -241,6 +258,12 @@ export interface AcceptedLeadResponseDTO {
   customerMatchStatus?: string | null;
   customerMatchReasonCode?: string | null;
   customerMatchConfidence?: number | null;
+  /**
+   * The resolver's own sentence, quoting the document. Same field and same fallback rule
+   * as `LeadResponseDTO.customerMatchExplanation`: when the queue projection does not
+   * carry it, the cell falls back to the reason-code phrase rather than inventing one.
+   */
+  customerMatchExplanation?: string | null;
   clientCandidates?: ClientCandidateDTO[] | null;
   // FR-RFQ-04. The delivery date the BUYER asked for, carried onto the accepted-lead
   // queues because that is where a trader works the bid and commits a lead time.
