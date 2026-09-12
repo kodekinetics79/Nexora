@@ -276,7 +276,7 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
   const hiddenReasons = withheldReasons(item.reasons);
 
   return (
-    <Paper component="article" variant="outlined" sx={{ p: { xs: 2, md: 2.5 }, borderRadius: 2 }}>
+    <Paper component="article" variant="outlined" sx={{ p: { xs: 1.5, md: 2 }, borderRadius: 1 }}>
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ alignItems: { xs: 'stretch', md: 'center' } }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap', mb: 0.75 }}>
@@ -499,27 +499,42 @@ export default function LeadIngestionBatchPage() {
 
   return (
     <Box sx={{ maxWidth: 1400, mx: 'auto', p: { xs: 2, md: 3 } }}>
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, mb: 3 }}>
-        <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800 }}>Batch reconciliation</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>Batch {batch.batchId}</Typography>
-        </Box>
-        <Stack direction="row" spacing={1}>
-          {canCreateLeads && <Button startIcon={<BackIcon />} onClick={() => navigate('/procurement/leads/manual-upload')}>New upload</Button>}
+      {/* One line. The title, the batch reference and the controls used to take three bands of the
+          page before the reader reached anything that had happened to their documents. */}
+      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'baseline', flexWrap: 'wrap', rowGap: 1, mb: 2 }}>
+        <Typography variant="h6" component="h1" sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>Batch reconciliation</Typography>
+        <Tooltip title={`Batch ${batch.batchId}`} describeChild>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ fontFamily: 'monospace', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: { xs: 160, sm: 320 } }}
+          >
+            {batch.batchId}
+          </Typography>
+        </Tooltip>
+        <Box sx={{ flexGrow: 1 }} />
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+          {canCreateLeads && <Button size="small" startIcon={<BackIcon />} onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ textTransform: 'none' }}>New upload</Button>}
           {canRetryHolds && (
             <Button
+              size="small"
               variant="contained"
               color="warning"
-              startIcon={retryMutation.isPending ? <CircularProgress size={16} /> : <RetryIcon />}
+              startIcon={retryMutation.isPending ? <CircularProgress size={14} /> : <RetryIcon />}
               onClick={() => retryMutation.mutate()}
               disabled={retryMutation.isPending}
+              sx={{ textTransform: 'none', whiteSpace: 'nowrap' }}
             >
               {retryMutation.isPending ? 'Retrying…' : `Retry ${heldCount} held file${heldCount === 1 ? '' : 's'}`}
             </Button>
           )}
-          <Button variant="outlined" startIcon={batchQuery.isFetching ? <CircularProgress size={16} /> : <RefreshIcon />} onClick={() => batchQuery.refetch()} disabled={batchQuery.isFetching}>
-            Refresh
-          </Button>
+          <Tooltip title="Check for new results now. This page also updates itself." describeChild>
+            <span>
+              <Button size="small" variant="text" startIcon={batchQuery.isFetching ? <CircularProgress size={14} /> : <RefreshIcon />} onClick={() => batchQuery.refetch()} disabled={batchQuery.isFetching} sx={{ textTransform: 'none' }}>
+                Refresh
+              </Button>
+            </span>
+          </Tooltip>
         </Stack>
       </Stack>
 
@@ -529,9 +544,9 @@ export default function LeadIngestionBatchPage() {
         onDecide={(leadId) => navigate(`/procurement/leads/${leadId}/workbench`)}
         onOpenInquiries={() => navigate('/procurement/leads/all')}
       />
-      <Grid container spacing={1.5} sx={{ mb: 3 }}>
+      <Grid container spacing={1} sx={{ mb: 1.5 }}>
         {metrics.map((metric) => (
-          <Grid key={metric.label} size={{ xs: 6, sm: 4, lg: 1.5 }}>
+          <Grid key={metric.label} size={{ xs: 6, sm: 4, md: 3 }}>
             <BatchMetricFilterCard
               label={metric.label}
               value={metric.value}
@@ -614,28 +629,41 @@ export default function LeadIngestionBatchPage() {
         )}
       </Box>
 
-      <Alert severity={pendingCount > 0 ? 'info' : batch.rejected > 0 ? 'warning' : 'success'} sx={{ mb: 2 }}>
-        {pendingCount > 0
-          ? `${pendingCount} document${pendingCount === 1 ? '' : 's'} still processing. This page updates itself.`
-          : `Processing complete: ${batch.logicalInquiries} inquiries classified${batch.rejected > 0 ? `, including ${batch.rejected} rejected or unsupported` : ' with no processing failures'}.`}
-      </Alert>
-
-      <Alert severity={batch.externalOccurrences > 0 ? 'warning' : 'success'} sx={{ mb: 3 }}>
-        {batch.externalOccurrences > 0
-          ? `${batch.localFirstOccurrences ?? 0} local-first and ${batch.externalOccurrences} external occurrence${batch.externalOccurrences === 1 ? '' : 's'}. ${batch.externalCost == null ? 'Provider cost is not priced.' : `Recorded external cost: ${batch.externalCost.toFixed(4)}.`}`
-          : `${batch.localFirstOccurrences ?? 0} reconciled occurrence${batch.localFirstOccurrences === 1 ? '' : 's'} used local-first processing. No external provider use is recorded.`}
-      </Alert>
+      {/* Two full-height banners repeated what the panel above already says and what a reader
+          checks once. Same two sentences, one dense line, colour carried by the text itself. */}
+      <Stack
+        direction={{ xs: 'column', md: 'row' }}
+        spacing={{ xs: 0.25, md: 3 }}
+        sx={{ mb: 2.5, px: 0.25, flexWrap: 'wrap', rowGap: 0.25 }}
+      >
+        <Typography
+          variant="caption"
+          sx={{ color: pendingCount > 0 ? 'info.main' : batch.rejected > 0 ? 'warning.main' : 'text.secondary' }}
+        >
+          {pendingCount > 0
+            ? `${pendingCount} document${pendingCount === 1 ? '' : 's'} still processing. This page updates itself.`
+            : `Processing complete: ${batch.logicalInquiries} inquiries classified${batch.rejected > 0 ? `, including ${batch.rejected} rejected or unsupported` : ' with no processing failures'}.`}
+        </Typography>
+        <Typography
+          variant="caption"
+          sx={{ color: batch.externalOccurrences > 0 ? 'warning.main' : 'text.secondary' }}
+        >
+          {batch.externalOccurrences > 0
+            ? `${batch.localFirstOccurrences ?? 0} local-first and ${batch.externalOccurrences} external occurrence${batch.externalOccurrences === 1 ? '' : 's'}. ${batch.externalCost == null ? 'Provider cost is not priced.' : `Recorded external cost: ${batch.externalCost.toFixed(4)}.`}`
+            : `${batch.localFirstOccurrences ?? 0} reconciled occurrence${batch.localFirstOccurrences === 1 ? '' : 's'} used local-first processing. No external provider use is recorded.`}
+        </Typography>
+      </Stack>
 
       <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, mb: 1.5 }}>
-        <Typography variant="h6" sx={{ fontWeight: 900 }}>Reconciled inquiries</Typography>
-        <Typography variant="body2" color="text.secondary">{visibleItems.length} of {batch.items.length} recorded occurrence{batch.items.length === 1 ? '' : 's'}</Typography>
+        <Typography sx={{ fontWeight: 700, fontSize: '0.78rem', letterSpacing: '.09em', textTransform: 'uppercase', color: 'text.secondary' }}>Reconciled inquiries</Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>{visibleItems.length} of {batch.items.length} recorded occurrence{batch.items.length === 1 ? '' : 's'}</Typography>
       </Stack>
       {batch.items.length === 0 ? (
         <Alert severity="info">No ingestion occurrences have been recorded for this batch yet.</Alert>
       ) : visibleItems.length === 0 ? (
         <Alert severity="info">No documents match this category.</Alert>
       ) : (
-        <Stack spacing={1.5}>
+        <Stack spacing={1}>
           {visibleItems.map((item) => (
             <ReconciliationRow
               key={`${item.sourceDocumentOccurrenceId ?? 'lead'}:${item.occurrenceId}:${item.classification}`}
