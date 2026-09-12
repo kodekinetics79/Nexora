@@ -58,7 +58,12 @@ public static class CustomerIdentityResolver
                         CustomerMatchReasonCodes.SenderEmailExact,
                         $"Sender address {identifier.NormalizedValue} is registered to this client."));
                     break;
-                case CustomerIdentifierType.ErpAccount when guarded.AccountReferences.Contains(identifier.NormalizedValue):
+                // A four-character account number is a company code, not an identity. On an SAP
+                // print a line's company reference is 1000 / 2000 / SA01, shared across every
+                // affiliate of a group, and this is the strongest tier in the engine.
+                case CustomerIdentifierType.ErpAccount
+                    when identifier.NormalizedValue.Length >= policy.MinimumErpAccountLength
+                         && guarded.AccountReferences.Contains(identifier.NormalizedValue):
                     authoritative.Add(new Hit(identifier.CustomerId, policy.AuthoritativeConfidence,
                         CustomerMatchReasonCodes.ErpAccountExact,
                         $"Portal/ERP account {identifier.NormalizedValue} belongs to this client."));
@@ -130,16 +135,35 @@ public static class CustomerIdentityResolver
         if (guarded.Passages.Count > 0)
         {
             var namesToFind = new List<(long CustomerId, string Key, string Display, bool Taught, bool Initials)>();
+            // A DERIVED acronym that two customers share identifies neither: "Saudi Cable Company",
+            // "Saudi Ceramics Company" and "Saudi Chemical Company" all derive SCC, and without this
+            // every document carrying those three letters is a permanent stalemate. A TAUGHT alias
+            // is a deliberate human statement about one customer and is never suppressed here.
+            var derivedAcronyms = corpus.Customers
+                .Select(c => (c.CustomerId, Key: CustomerNameNormalizer.AcronymKey(c.Name)))
+                .Where(x => x.Key.Length > 0)
+                .GroupBy(x => x.Key, StringComparer.Ordinal)
+                .Where(g => g.Select(x => x.CustomerId).Distinct().Count() == 1)
+                .ToDictionary(g => g.Key, g => g.First().CustomerId, StringComparer.Ordinal);
             foreach (var customer in corpus.Customers)
             {
                 var key = CustomerNameNormalizer.LooseKey(customer.Name);
-                if (key.Length >= 8 && key.Split(' ').Length >= 2 && !guarded.IsSelfName(key))
+                // Two words and eight characters was written for "Saudi Electricity Company" and it
+                // makes the commonest buyer names in the country invisible: SABIC, NEOM, Marafiq,
+                // Sadara, SATORP, SAMREF, Ma'aden. A Saudi buyer's trade name IS one word, and a
+                // one-word name of four characters or more that is not an ordinary word is as
+                // distinctive as any two-word one — "Marafiq" names exactly one company.
+                var oneWord = key.Split(' ').Length == 1;
+                var scannable = oneWord
+                    ? key.Length >= 4 && !CustomerNameNormalizer.IsAmbiguousAcronym(key)
+                    : key.Length >= 8;
+                if (scannable && !guarded.IsSelfName(key))
                     namesToFind.Add((customer.CustomerId, key, customer.Name, false, false));
                 // "SEC Materials West Plant" names Saudi Electricity Company by its initials, and
                 // nobody should have to teach the system that. Derived, never stored: it follows
                 // the customer's name wherever the name goes.
                 var initials = CustomerNameNormalizer.AcronymKey(customer.Name);
-                if (initials.Length > 0 && !guarded.IsSelfName(initials))
+                if (initials.Length > 0 && derivedAcronyms.ContainsKey(initials) && !guarded.IsSelfName(initials))
                     namesToFind.Add((customer.CustomerId, initials, customer.Name, false, true));
             }
             foreach (var identifier in corpus.Identifiers)
@@ -226,14 +250,22 @@ public static class CustomerIdentityResolver
 
         if (!string.IsNullOrWhiteSpace(evidence.RfqNumber))
         {
+            // A numbering shape means something only while exactly one customer uses it. Two
+            // customers taught the same shape produced two 0.55 suggestions and the ranking then
+            // broke the tie on the database id, so the rep was shown the lower primary key dressed
+            // as evidence. Production, 2026-09-12: an SEC bid was offered to Saudi Aramco at 55%
+            // because Aramco had been taught C-plus-nine-digits from an earlier confirmation.
+            var patternHits = new List<Hit>();
             foreach (var identifier in corpus.Identifiers)
             {
                 if (identifier.IdentifierType != CustomerIdentifierType.RfqNumberPattern) continue;
                 if (!RfqNumberPattern.Matches(identifier.NormalizedValue, evidence.RfqNumber)) continue;
-                suggestions.Add(new Hit(identifier.CustomerId, policy.RfqPatternSuggestionConfidence,
+                patternHits.Add(new Hit(identifier.CustomerId, policy.RfqPatternSuggestionConfidence,
                     CustomerMatchReasonCodes.RfqPattern,
                     $"RFQ number {evidence.RfqNumber} follows this client's numbering."));
             }
+            if (patternHits.Select(hit => hit.CustomerId).Distinct().Count() == 1)
+                suggestions.AddRange(patternHits);
         }
 
         var candidates = Rank(suggestions, names, policy);
@@ -389,11 +421,17 @@ public static class CustomerIdentityResolver
         }
 
         var candidates = Rank(hits, names, policy);
+        // Nothing was decided, so nothing is 95% certain. Reporting the winning candidate's
+        // confidence on a refusal made two customers on one corporate domain read as
+        // "AMBIGUOUS at 95%", and the sentence named neither of them nor the evidence.
+        var tied = string.Join(" and ", candidates.Take(3).Select(candidate => candidate.CustomerName));
         outcome = new ClientResolutionOutcome(
             LeadCustomerMatchStatuses.Ambiguous, null, null,
-            candidates.Count > 0 ? candidates[0].Confidence : 0m,
+            0m,
             CustomerMatchReasonCodes.Ambiguous,
-            $"{distinct.Length} clients share this evidence; a person must choose.",
+            candidates.Count > 0
+                ? $"{tied} match the same evidence ({candidates[0].Explanation}) Pick one."
+                : $"{distinct.Length} clients share this evidence; a person must choose.",
             candidates);
         return true;
     }

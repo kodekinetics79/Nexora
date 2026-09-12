@@ -496,6 +496,132 @@ public sealed class CustomerIdentityResolverTests
     }
 
     [Fact]
+    public void A_one_word_trade_name_is_found_in_the_sentence_that_names_the_buyer()
+    {
+        // Production, 2026-09-12: a Marafiq RFQ was read perfectly — the company name, the sentence
+        // proving it, our vendor code and the buyer — and resolved to nothing. The passage scan
+        // required two words and eight characters, written for "Saudi Electricity Company", which
+        // makes the commonest buyer names in the country invisible: Marafiq, SABIC, NEOM, Sadara,
+        // SATORP, Ma'aden. A Saudi buyer's trade name IS one word.
+        var corpus = Corpus(customers: [new(Sec, "Marafiq"), new(OtherCustomer, "Saudi Aramco")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10, RfqNumber = "HFE-26-202",
+            Passages = [new DocumentPassage("the sentence that names the buyer",
+                "MARAFIQ invites bidders in accordance with our Request for Quotation(RFQ).", true)]
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Fact]
+    public void A_short_or_ordinary_one_word_name_is_still_refused()
+    {
+        // Four characters is the floor, and a name that is an ordinary address word is refused
+        // however long: "Gate" would otherwise link on "Gate 4, Ras Tanura".
+        var corpus = Corpus(customers: [new(Sec, "ACE"), new(OtherCustomer, "Gate")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "ACE deliveries to Gate 4, Ras Tanura", true)]
+        }, corpus, Policy);
+
+        Assert.Null(outcome.CustomerId);
+    }
+
+    [Fact]
+    public void Initials_that_are_an_ordinary_address_word_never_link()
+    {
+        // "Arabian Refinery Engineering Associates" derives AREA, and every SEC print says
+        // "West Operating Area". Before this the wrong customer was linked at 0.85.
+        var corpus = Corpus(customers: [new(OtherCustomer, "Arabian Refinery Engineering Associates")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery location", "SEC Materials West Plant-West Operating Area", true)]
+        }, corpus, Policy);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.NotEqual(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+    }
+
+    [Fact]
+    public void Initials_two_customers_share_identify_neither()
+    {
+        // Saudi Cable, Saudi Ceramics and Saudi Chemical all derive SCC. Before this, every
+        // document carrying those three letters was a permanent stalemate.
+        var corpus = Corpus(customers:
+        [
+            new(Sec, "Saudi Cable Company"),
+            new(OtherCustomer, "Saudi Ceramics Company"),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "SCC Jubail plant, gate 2", true)]
+        }, corpus, Policy);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.NotEqual(LeadCustomerMatchStatuses.Ambiguous, outcome.Status);
+    }
+
+    [Fact]
+    public void A_four_character_company_code_no_longer_links_a_lead()
+    {
+        // On an SAP print a line's company reference is 1000 / 2000 / SA01, shared by every
+        // affiliate of a group. Matching one at authoritative confidence claimed eleven companies.
+        var corpus = Corpus(customers: [new(Sec, "Yanbu National Petrochemical Company")], identifiers:
+        [
+            new(1, Sec, CustomerIdentifierType.ErpAccount, "1000", true, 1.00m, CustomerIdentifierSources.MasterData),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10, AccountReferences = ["1000"],
+        }, corpus, Policy);
+
+        Assert.Null(outcome.CustomerId);
+    }
+
+    [Fact]
+    public void A_numbering_shape_two_customers_share_suggests_neither()
+    {
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saudi Aramco")], identifiers:
+        [
+            new(1, Sec, CustomerIdentifierType.RfqNumberPattern, @"^C\d{9}$", false, 0.50m, CustomerIdentifierSources.LeadReviewLearned),
+            new(2, OtherCustomer, CustomerIdentifierType.RfqNumberPattern, @"^C\d{9}$", false, 0.50m, CustomerIdentifierSources.LeadReviewLearned),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10, RfqNumber = "C001832162",
+        }, corpus, Policy);
+
+        Assert.DoesNotContain(outcome.Candidates, candidate => candidate.ReasonCode == CustomerMatchReasonCodes.RfqPattern);
+    }
+
+    [Fact]
+    public void An_ambiguous_result_claims_no_confidence_and_names_the_clients()
+    {
+        // Two customers on one corporate domain used to read "AMBIGUOUS at 95%" — the confidence
+        // of a link the engine had just refused to make — and the sentence named neither.
+        var corpus = Corpus(customers: [new(Sec, "Zamil Industrial"), new(OtherCustomer, "Zamil Steel")], identifiers:
+        [
+            new(1, Sec, CustomerIdentifierType.Domain, "zamil.com", true, 0.95m, CustomerIdentifierSources.MasterData),
+            new(2, OtherCustomer, CustomerIdentifierType.Domain, "zamil.com", true, 0.95m, CustomerIdentifierSources.MasterData),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10, SenderEmail = "buyer@zamil.com",
+        }, corpus, Policy);
+
+        Assert.Equal(LeadCustomerMatchStatuses.Ambiguous, outcome.Status);
+        Assert.Equal(0m, outcome.Confidence);
+        Assert.Contains("Zamil Industrial", outcome.Explanation);
+        Assert.Contains("Zamil Steel", outcome.Explanation);
+    }
+
+    [Fact]
     public void A_rule_an_administrator_entered_on_the_setup_screen_links_the_lead()
     {
         // Setup → Routing rules writes Source = MasterData. A portal vendor code entered there
@@ -547,9 +673,11 @@ public sealed class CustomerIdentityResolverTests
     }
 
     [Fact]
-    public void A_one_word_customer_name_and_a_word_inside_another_word_never_match()
+    public void A_placeholder_name_and_a_word_inside_another_word_never_match()
     {
-        // "Test" is anybody's word; "SEC" inside "SECOND" is not SEC.
+        // A one-word trade name now matches on its own, because Marafiq, SABIC and NEOM are how
+        // Saudi buyers write themselves. "Test" is not one of those: a placeholder customer record
+        // is scaffolding, and it is refused by name. "SEC" inside "SECOND" is still not SEC.
         var corpus = Corpus(customers: [new(OtherCustomer, "Test"), new(Sec, "Saudi Electricity Company")],
             identifiers: [Alias(1, Sec, "SEC")]);
         var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
