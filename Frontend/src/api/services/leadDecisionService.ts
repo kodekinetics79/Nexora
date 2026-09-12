@@ -42,6 +42,8 @@ export interface LeadDecisionLineDTO {
   itemMaterialCode?: string | null;
   /** The buyer's long text for the line, standing instructions removed. */
   specification?: string | null;
+  /** The buyer's own columns kept beside the line: approved makers, standing instructions, material type… */
+  extras?: Record<string, string> | null;
   quantity?: number | null;
   unitOfMeasure?: string | null;
   currency?: string | null;

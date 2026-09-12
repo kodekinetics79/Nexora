@@ -30,6 +30,38 @@ const renderTable = (count: number, decisions: Record<number, { decision: 'Bid' 
     />,
   );
 
+describe('what the buyer wrote about a line', () => {
+  it('folds the specification and the buyer\'s own columns behind one Details link on the line', () => {
+    render(
+      <LinesTable
+        leadId={407}
+        lines={[{
+          ...line(9),
+          itemMaterialCode: '000000002000008965',
+          specification: 'MODULE; 16 CHANNEL FAILSAFE RELAY OUTPUT MODULE TYPE, WITH CSA/NRTL/C (CLASS I DIV.2) APPROVAL',
+          extras: { 'Approved manufacturers': 'BENTLY-NEVADA LLC (US): P/N 3500/33-02-02, model 3500/33; GE OIL AND GAS THE NETHERLANDS B (NL): P/N 3500/33-02-02', 'Material Type': '9CAT' },
+        }]}
+        decisions={{}}
+        unitOptions={[{ code: 'EA', label: 'Each' }]}
+        currencyOptions={[{ code: 'SAR', label: 'Saudi riyal' }]}
+        reasonCodes={[]}
+        readOnly={false}
+        onChange={vi.fn()}
+        onOpenDocument={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Material 000000002000008965/)).toBeInTheDocument();
+    expect(screen.queryByText(/CSA\/NRTL\/C/)).not.toBeInTheDocument();          // folded: the list stays a list
+    fireEvent.click(screen.getByRole('button', { name: /Show details for line 00009/ }));
+    expect(screen.getByText(/CSA\/NRTL\/C \(CLASS I DIV.2\) APPROVAL/)).toBeInTheDocument();
+    expect(screen.getByText(/BENTLY-NEVADA LLC \(US\): P\/N 3500\/33-02-02/)).toBeInTheDocument();
+    expect(screen.getByText('Approved manufacturers:')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Hide details for line 00009/ }));
+    expect(screen.queryByText(/CSA\/NRTL\/C/)).not.toBeInTheDocument();
+  });
+});
+
 describe('a long bid list', () => {
   it('draws a page of lines at a time and says where you are', () => {
     renderTable(5);

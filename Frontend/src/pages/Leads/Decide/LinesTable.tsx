@@ -87,6 +87,12 @@ const LineRow = React.memo(function LineRow({
       : line.manufacturerName,
   ].filter(Boolean).join(' · ');
   const showDetailRow = !readOnly && (skipping || unverified || (quoting && Boolean(line.needsAttention)));
+  // What the buyer wrote about the line beyond its name: the specification and their own
+  // columns (approved makers, standing instructions). Folded by default — a 1,500-line list
+  // must stay a list — and one click away, on the line, not in a dialog.
+  const extraEntries = Object.entries(line.extras ?? {}).filter(([, value]) => Boolean(value));
+  const hasDetails = Boolean(line.specification?.trim()) || extraEntries.length > 0;
+  const [detailsOpen, setDetailsOpen] = React.useState(false);
 
   return (
     <>
@@ -100,7 +106,36 @@ const LineRow = React.memo(function LineRow({
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
             {[`Line ${label}`, detail].filter(Boolean).join(' · ')}
+            {hasDetails ? (
+              <>
+                {' · '}
+                <Link
+                  component="button"
+                  type="button"
+                  onClick={() => setDetailsOpen((open) => !open)}
+                  aria-expanded={detailsOpen}
+                  aria-label={`${detailsOpen ? 'Hide' : 'Show'} details for line ${label}`}
+                  sx={{ fontWeight: 700, verticalAlign: 'baseline' }}
+                >
+                  {detailsOpen ? 'Hide details' : 'Details'}
+                </Link>
+              </>
+            ) : null}
           </Typography>
+          {detailsOpen ? (
+            <Box sx={{ mt: 1, mb: 0.5, pl: 1.5, borderLeft: 2, borderColor: 'divider', maxWidth: 760 }}>
+              {line.specification?.trim() ? (
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary', mb: extraEntries.length ? 1 : 0 }}>
+                  {line.specification.trim()}
+                </Typography>
+              ) : null}
+              {extraEntries.map(([key, value]) => (
+                <Typography key={key} variant="body2" sx={{ color: 'text.secondary', whiteSpace: 'pre-wrap' }}>
+                  <Box component="span" sx={{ fontWeight: 700, color: 'text.primary' }}>{key}: </Box>{value}
+                </Typography>
+              ))}
+            </Box>
+          ) : null}
           {choice === 'Clarify' ? (
             <Chip size="small" label="Waiting on the customer" color="warning" variant="outlined" sx={{ mt: 0.5 }} />
           ) : null}
