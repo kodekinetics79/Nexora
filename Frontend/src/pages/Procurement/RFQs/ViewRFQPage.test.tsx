@@ -192,6 +192,8 @@ describe('ViewRFQPage — cross-module Lead links', () => {
   it('routes the general Canonical Lead action only to the guarded Lead detail destination', async () => {
     render(<ViewRFQPage />, { wrapper });
 
+    // The general information block sits inside the collapsed "Request details" fold.
+    fireEvent.click(await screen.findByRole('button', { name: /Request details/ }));
     fireEvent.click(await screen.findByRole('button', { name: 'Open Canonical Lead' }));
     expect(testAccess.navigate).toHaveBeenCalledWith('/procurement/leads/view/55');
   });
@@ -377,6 +379,7 @@ describe('ViewRFQPage — immutable customer request terms', () => {
     }));
     render(<ViewRFQPage />, { wrapper });
 
+    fireEvent.click(await screen.findByRole('button', { name: /Request details/ }));
     expect(await screen.findByRole('heading', { name: 'Customer request terms' })).toBeInTheDocument();
     expect(screen.getByText('CUSTOMER-RFQ-77')).toBeInTheDocument();
     expect(screen.getByText('Plant 4 · Receiving Bay B')).toBeInTheDocument();
