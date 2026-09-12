@@ -359,9 +359,11 @@ public sealed class DocxTableParser
         if (string.IsNullOrWhiteSpace(fileName)) return null;
         // A single letter glued to the digits is part of the number: SEC bids are "C001835789",
         // and "SE RFP-C001835789.doc" read as 001835789 lost the letter the buyer quotes back.
-        // A longer letter run ("RFP6000000003") is a word, not a prefix.
+        // A longer letter run ("RFP6000000003") is a word, not a prefix — except the document-type
+        // word itself glued to the number: "SE RFPC001831551.doc" (production, 2026-09-12) is
+        // "RFP" + "C001831551", not a word called RFPC. RFP/RFQ are skipped before the prefix.
         foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
-                     fileName, @"(?<![A-Za-z\d])(?<prefix>[A-Z])?(?<digits>\d{9,})(?!\d)"))
+                     fileName, @"(?<![A-Za-z\d])(?:RF[PQ])?(?<prefix>[A-Z])?(?<digits>\d{9,})(?!\d)"))
         {
             // "Quotation Request 20260910120000.docx" carries an export timestamp, not a
             // number: a 12- or 14-digit run opening with a plausible year is skipped.
