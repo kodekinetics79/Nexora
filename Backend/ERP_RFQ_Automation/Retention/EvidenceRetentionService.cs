@@ -46,7 +46,8 @@ public sealed class EvidenceRetentionService(
     LegacyAttachmentPurgeResolver legacyCopies,
     CommercialDocumentArchiveService archive,
     ILogger<EvidenceRetentionService> log,
-    IDataProtectionProvider? dataProtection = null)
+    IDataProtectionProvider? dataProtection = null,
+    ITenantDeletionReceipts? receipts = null)
 {
     private const string Area = "EvidenceRetention";
     private const int BatchSize = 200;
@@ -224,11 +225,11 @@ public sealed class EvidenceRetentionService(
         var policy = await LoadPolicyAsync(tenantId, ct)
             ?? EvidenceRetentionPolicy.Default(tenantId, DateTime.UtcNow);
 
-        if (!command.IsDryRun && !policy.IsEnabled)
-            throw new PlatformGovernanceConflictException(
-                "Evidence retention is not enabled for this tenant. Irreversible deletion is opt-in: "
-                + "save a retention policy first, then run the purge.");
-
+        // No standing-policy gate here. The IsEnabled switch is consent to a STANDING rule; a
+        // manually confirmed run proves its own intent (signed preview, written reason, typed
+        // count, Idempotency-Key) and requiring the tenant to switch on automatic deletion of
+        // everything in order to delete what he has just previewed was an imposition, not a
+        // control. See EvidenceRetentionPolicy.IsEnabled.
         if (!command.IsDryRun)
         {
             var replay = await ReplayAsync(tenantId, idempotencyKey, ct);
@@ -259,6 +260,13 @@ public sealed class EvidenceRetentionService(
                 throw new PlatformGovernanceConflictException(
                     "The protected-document or eligibility state changed after this preview. Nothing was "
                     + "deleted. Run a new preview and confirm the current document set.");
+
+            // The second confirmation, verified here rather than in the browser: the number the
+            // administrator typed must be the number this run is about to delete.
+            if (command.ConfirmedCount != eligible.Count)
+                throw new PlatformGovernanceValidationException(
+                    $"Type the number of documents being deleted — {eligible.Count} — to confirm. "
+                    + "The number did not match, so nothing was deleted.");
         }
         var skipped = await SkipReportAsync(tenantId, policy, now, eligible, ct);
 
@@ -310,6 +318,19 @@ public sealed class EvidenceRetentionService(
         {
             await RecordRunAsync(tenantId, actorUserId, idempotencyKey, reason, policy, result, ct);
             await RecordKeptAsync(tenantId, actorUserId, idempotencyKey, reason, policy, result, ct);
+            // After the audit rows are committed: a receipt that cannot be sent must not fail a
+            // deletion that has already happened, and the audit must not depend on mail.
+            var notified = receipts is null ? 0 : await receipts.SendAsync(tenantId, actorUserId,
+                new TenantDeletionReceipt(
+                    $"{purged} stored document file(s) deleted",
+                    [
+                        new("Documents whose original file was deleted", purged.ToString("N0")),
+                        new("Space freed", $"{bytesReclaimed:N0} bytes"),
+                        new("Documents kept back", skipped.Count.ToString("N0")),
+                        new("Retention policy in force", policy.PolicyCode)
+                    ],
+                    reason), ct);
+            result = result with { AdministratorsNotified = notified };
         }
         return result;
     }

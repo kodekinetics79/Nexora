@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert, AlertTitle, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent,
-  DialogContentText, DialogTitle, Divider, FormControlLabel, Paper, Stack, Switch, Table,
+  DialogContentText, DialogTitle, Divider, Paper, Stack, Table,
   TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography,
 } from '@mui/material';
 import {
@@ -19,6 +19,8 @@ import {
 import { EmptyState, ErrorState, LoadingState } from '../../platform/components/States';
 import { looksLikeTechnicalNoise, toPresentableError } from '../../utils/apiErrors';
 import { useAuth } from '../../context/AuthContext';
+import NextStepPanel from '../../components/common/NextStepPanel';
+import FinalDeleteCheckDialog from '../../components/common/FinalDeleteCheckDialog';
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Storage & Retention — the tenant-facing control for reclaiming disk space.
@@ -34,6 +36,12 @@ import { useAuth } from '../../context/AuthContext';
  * during extraction; deleting the original leaves every one of those copies in place. Saying
  * otherwise on an irreversible-action screen would be a false compliance answer, so the disclosure
  * says the opposite, in the confirmation the user cannot skip.
+ *
+ * Two confirmations, not one. The first dialog says what goes and what stays and asks for a fixed
+ * word; the second asks for the NUMBER being deleted, typed back, and the server verifies that
+ * number against its own count before it deletes anything. And no standing policy has to be
+ * switched on first: the retention period is the tenant's setting, the floor is one day, and a
+ * confirmed run proves its own intent. Nexora does not impose a data policy on a customer.
  * ──────────────────────────────────────────────────────────────────────────── */
 
 const NOT_REPORTED = 'Not reported';
@@ -307,7 +315,6 @@ export default function StorageRetentionPage() {
   });
 
   const [retentionDays, setRetentionDays] = useState<string>(String(EVIDENCE_RETENTION_DEFAULT_DAYS));
-  const [isEnabled, setIsEnabled] = useState(false);
   const [policyReason, setPolicyReason] = useState('');
   const [preview, setPreview] = useState<EvidenceRetentionRunResult | null>(null);
   const [receipt, setReceipt] = useState<EvidenceRetentionRunResult | null>(null);
@@ -321,6 +328,8 @@ export default function StorageRetentionPage() {
     { documents: number; bytes: number | null; excluded: number | null } | null
   >(null);
   const [confirmText, setConfirmText] = useState('');
+  /** The second confirmation. Opens only after the first dialog's phrase has been typed. */
+  const [finalCheckOpen, setFinalCheckOpen] = useState(false);
   const [purgeReason, setPurgeReason] = useState('');
   const [purgeKey, setPurgeKey] = useState<string | null>(null);
 
@@ -336,6 +345,7 @@ export default function StorageRetentionPage() {
   const [cleanupReceipt, setCleanupReceipt] = useState<TenantDataCleanupResult | null>(null);
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
   const [cleanupConfirmText, setCleanupConfirmText] = useState('');
+  const [cleanupFinalCheckOpen, setCleanupFinalCheckOpen] = useState(false);
   const [cleanupKey, setCleanupKey] = useState<string | null>(null);
   /** Frozen when the dialog opens: the figures in an irreversible dialog must not move. */
   const [cleanupTarget, setCleanupTarget] = useState<
@@ -347,7 +357,6 @@ export default function StorageRetentionPage() {
     const policy = summary.data?.policy;
     if (!policy) return;
     setRetentionDays(String(policy.retentionDays ?? EVIDENCE_RETENTION_DEFAULT_DAYS));
-    setIsEnabled(policy.isEnabled ?? false);
   }, [summary.data]);
 
   // The server owns the bounds; the local constants are only the fallback when it does not say.
@@ -361,7 +370,9 @@ export default function StorageRetentionPage() {
   const savePolicy = useMutation({
     mutationFn: () => platformGovernanceService.updateEvidenceRetentionPolicy({
       retentionDays: parsedDays,
-      isEnabled,
+      // The standing-rule flag is not a control on this screen: no scheduler reads it, and a
+      // confirmed manual run no longer depends on it. Whatever the server holds is carried over.
+      isEnabled: summary.data?.policy.isEnabled ?? false,
       reason: policyReason.trim(),
     }),
     onSuccess: async () => {
@@ -385,16 +396,19 @@ export default function StorageRetentionPage() {
   });
 
   const executePurge = useMutation({
-    mutationFn: () => platformGovernanceService.runEvidenceRetentionPurge({
+    mutationFn: (confirmedCount: number) => platformGovernanceService.runEvidenceRetentionPurge({
       dryRun: false,
       reason: purgeReason.trim(),
       previewToken: preview?.previewToken ?? undefined,
+      // The second confirmation, verified by the server against its own count.
+      confirmedCount,
       // Reused across retries of THIS confirmed purge so a lost response cannot delete twice.
       idempotencyKey: purgeKey ?? newIdempotencyKey(),
     }),
     onSuccess: async (result) => {
       setReceipt(result);
       setPreview(null);
+      setFinalCheckOpen(false);
       setConfirmOpen(false);
       setConfirmText('');
       setPurgeKey(null);
@@ -425,17 +439,20 @@ export default function StorageRetentionPage() {
   });
 
   const runCleanup = useMutation({
-    mutationFn: () => platformGovernanceService.runTenantDataCleanup({
+    mutationFn: (confirmedCount: number) => platformGovernanceService.runTenantDataCleanup({
       buckets: chosen,
       dryRun: false,
       reason: cleanupReason.trim(),
       confirmation: CONFIRM_PHRASE,
+      // The second confirmation, verified by the server against its own count.
+      confirmedCount,
       // Reused across retries of THIS confirmed run so a lost response cannot delete twice.
       idempotencyKey: cleanupKey ?? newIdempotencyKey(),
     }),
     onSuccess: async (result) => {
       setCleanupReceipt(result);
       setCleanupPreview(null);
+      setCleanupFinalCheckOpen(false);
       setCleanupConfirmOpen(false);
       setCleanupConfirmText('');
       setCleanupKey(null);
@@ -468,6 +485,7 @@ export default function StorageRetentionPage() {
   };
   const closeCleanupConfirm = () => {
     if (runCleanup.isPending) return;
+    setCleanupFinalCheckOpen(false);
     setCleanupConfirmOpen(false);
     setCleanupConfirmText('');
     setCleanupKey(null);
@@ -479,11 +497,12 @@ export default function StorageRetentionPage() {
   const hasSomethingToDelete = previewShown && eligible !== null && eligible > 0;
   const confirmPhraseTyped = confirmText.trim() === CONFIRM_PHRASE;
   const purgeReasonGiven = purgeReason.trim().length > 0;
-  /** The saved switch records consent for a manually confirmed purge; it starts no scheduler. */
-  const policyOptedIn = summary.data?.policy.isEnabled === true;
   const hasSignedPreview = preview?.previewToken != null;
+  // No standing-policy switch in this gate: a preview, a reason and two typed confirmations are
+  // the tenant's consent for THIS run. Nexora does not require automatic deletion to be switched
+  // on before a person may delete what he has just read.
   const canDelete = canManageRetention && hasSomethingToDelete && hasSignedPreview
-    && purgeReasonGiven && policyOptedIn;
+    && purgeReasonGiven;
 
   const excluded = useMemo(() => preview?.skipped ?? [], [preview]);
 
@@ -500,11 +519,63 @@ export default function StorageRetentionPage() {
   };
   const closeConfirm = () => {
     if (executePurge.isPending) return;
+    setFinalCheckOpen(false);
     setConfirmOpen(false);
     setConfirmText('');
     setPurgeKey(null);
     executePurge.reset();
   };
+
+  /* ── The next step, derived from what the page already holds ──────────────
+   * One sentence near the top so the administrator never has to work out from four tiles and
+   * three sections what this screen is for or where to start. "Unknown" is said as unknown: a
+   * failed query is never read as zero. */
+  const clearableBytes = tenantData.isSuccess
+    ? tenantData.data.buckets.filter((b) => b.canClear).reduce((sum, b) => sum + (b.bytes ?? 0), 0)
+    : null;
+  const clearableCount = tenantData.isSuccess
+    ? tenantData.data.buckets.filter((b) => b.canClear).length
+    : null;
+  const reclaimableBytes = summary.data?.storage.reclaimableBytes ?? null;
+  const reclaimableDocuments = summary.data?.storage.reclaimableDocumentCount ?? null;
+  const nextStep = (() => {
+    if (!canManageRetention) {
+      return {
+        tone: 'info' as const,
+        sentence: 'You can see what your documents use and what is protected. Only a super administrator can free space here.',
+        target: null as string | null,
+      };
+    }
+    if (!tenantData.isSuccess && summary.data?.storage.usedBytes == null) {
+      return {
+        tone: 'warning' as const,
+        sentence: 'How much can be freed is unknown right now. Nothing has been deleted.',
+        target: null as string | null,
+      };
+    }
+    const partsClear = clearableCount !== null && clearableCount > 0;
+    const partsAge = reclaimableDocuments !== null && reclaimableDocuments > 0;
+    if (partsClear) {
+      return {
+        tone: 'info' as const,
+        sentence: `${formatBytes(clearableBytes)} can be freed now from mail and files that never became anything. Tick a group below and preview it. Nothing is deleted until you confirm twice.`,
+        target: 'clear-nothing-heading',
+      };
+    }
+    if (partsAge) {
+      return {
+        tone: 'info' as const,
+        sentence: `${formatBytes(reclaimableBytes)} can be freed now from ${formatCount(reclaimableDocuments)} documents older than your retention period. Preview them further down. Nothing is deleted until you confirm twice.`,
+        target: 'reclaim-heading',
+      };
+    }
+    return {
+      tone: 'success' as const,
+      sentence: 'Nothing can be freed right now: every stored file is still in use, inside your retention period, or protected. Shorten the retention period below if you want originals kept for less time.',
+      target: 'retention-policy-heading',
+    };
+  })();
+  const jumpTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   if (summary.isLoading) {
     return (
@@ -548,9 +619,22 @@ export default function StorageRetentionPage() {
         <Typography variant="h5" component="h1" sx={{ fontWeight: 800 }}>Storage &amp; Retention</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 760, mt: 0.5 }}>
           See how much space your uploaded documents use, decide how long Nexora keeps the original
-          files, and reclaim space once the details have been extracted from them.
+          files, and free space when you choose to. What to keep is your decision; what Nexora
+          never deletes for anyone is listed on this page.
         </Typography>
       </Box>
+
+      <NextStepPanel
+        tone={nextStep.tone}
+        title="Next step"
+        sentence={nextStep.sentence}
+        testId="storage-next-step"
+        action={nextStep.target ? (
+          <Button variant="outlined" size="small" onClick={() => jumpTo(nextStep.target!)}>
+            Take me there
+          </Button>
+        ) : undefined}
+      />
 
       {!canManageRetention && (
         <Alert severity="info" sx={{ mb: 3 }}>
@@ -759,6 +843,11 @@ export default function StorageRetentionPage() {
                     {formatCount(cleanupReceipt.filesDeleted)} files ·{' '}
                     {formatBytes(cleanupReceipt.bytesReclaimed)} freed
                   </Typography>
+                  {cleanupReceipt.administratorsNotified > 0 && (
+                    <Typography variant="body2" sx={{ mt: 0.5 }}>
+                      A receipt was emailed to {formatCount(cleanupReceipt.administratorsNotified)} administrator{cleanupReceipt.administratorsNotified === 1 ? '' : 's'} of this workspace.
+                    </Typography>
+                  )}
                 </Alert>
                 {cleanupReceipt.refused.length > 0 && (
                   <Box sx={{ mt: 1.5 }}><RefusalList rows={cleanupReceipt.refused} /></Box>
@@ -825,28 +914,16 @@ export default function StorageRetentionPage() {
 
       {/* ── Retention policy ────────────────────────────────────────────────── */}
       <Box component="section" aria-labelledby="retention-policy-heading" sx={{ mb: 3 }}>
-        <Typography id="retention-policy-heading" variant="h6" component="h2" sx={{ fontWeight: 750, mb: 1.5 }}>
-          Retention policy
+        <Typography id="retention-policy-heading" variant="h6" component="h2" sx={{ fontWeight: 750, mb: 0.5 }}>
+          How long to keep original files
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 760, mb: 1.5 }}>
+          Your setting, from one day upwards. It decides which documents the age-based deletion
+          below may offer; nothing is deleted on a schedule in this build, and nothing is deleted
+          without your preview and two confirmations.
         </Typography>
         <Paper variant="outlined" sx={{ p: 2.5 }}>
           <Stack sx={{ gap: 2.5 }}>
-            <FormControlLabel
-              control={(
-                <Switch
-                  checked={isEnabled}
-                  onChange={(_event, checked) => setIsEnabled(checked)}
-                  disabled={!canManageRetention}
-                  slotProps={{ input: { 'aria-describedby': 'retention-enabled-help' } }}
-                />
-              )}
-              label="Allow permanent deletion once files pass the retention period"
-            />
-            <Typography id="retention-enabled-help" variant="body2" color="text.secondary" sx={{ mt: -1.5, ml: 6 }}>
-              Off by default. Turning this on records consent and enables a super administrator to
-              run a separate preview and confirmed deletion below. It does not start an automatic
-              deletion schedule in this build.
-            </Typography>
-
             <TextField
               label="Keep original files for (days after extraction finishes)"
               type="number"
@@ -855,7 +932,7 @@ export default function StorageRetentionPage() {
               disabled={!canManageRetention}
               error={daysError !== null}
               helperText={daysError
-                ?? `${EVIDENCE_RETENTION_DEFAULT_DAYS} days is the configured default. Choose a period that matches your organisation's approved retention policy, contractual duties, legal holds, and applicable laws.`}
+                ?? `${EVIDENCE_RETENTION_DEFAULT_DAYS} days is the default. One day is the minimum, so a file that is still being read is never offered. Beyond that the period is yours to set.`}
               slotProps={{
                 htmlInput: {
                   min: minDays,
@@ -975,13 +1052,6 @@ export default function StorageRetentionPage() {
               Enter a reason to enable permanent deletion.
             </Typography>
           )}
-          {previewShown && !policyOptedIn && (
-            <Alert severity="info" sx={{ mt: 2 }}>
-              Permanent deletion is opt-in. Turn on “Allow permanent deletion” above and save the
-              policy first — that saved policy is your recorded consent to irreversible deletion.
-              Previews stay available either way.
-            </Alert>
-          )}
 
           {dryRun.isError && (
             <Alert severity="error" sx={{ mt: 2 }}>
@@ -1061,6 +1131,11 @@ export default function StorageRetentionPage() {
                     ? ` · ${formatCount(receipt.legacyCopiesDeleted)} older duplicate copies also removed`
                     : ''}
                 </Typography>
+                {receipt.administratorsNotified > 0 && (
+                  <Typography variant="body2" sx={{ mt: 0.5 }}>
+                    A receipt was emailed to {formatCount(receipt.administratorsNotified)} administrator{receipt.administratorsNotified === 1 ? '' : 's'} of this workspace.
+                  </Typography>
+                )}
                 {receipt.disclosure && (
                   <Typography variant="body2" sx={{ mt: 1 }}>{receipt.disclosure}</Typography>
                 )}
@@ -1107,21 +1182,13 @@ export default function StorageRetentionPage() {
             </Typography>
           </DialogContentText>
 
-          {runCleanup.isError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {toPresentableError(runCleanup.error, {
-                fallbackMessage: 'The removal did not complete. Preview again to see where things stand before retrying.',
-              }).message}
-            </Alert>
-          )}
-
           <TextField
             label={`Type ${CONFIRM_PHRASE} to confirm`}
             value={cleanupConfirmText}
             onChange={(event) => setCleanupConfirmText(event.target.value)}
             fullWidth
             autoComplete="off"
-            helperText={`Type ${CONFIRM_PHRASE} in capitals. This is the last step.`}
+            helperText={`Type ${CONFIRM_PHRASE} in capitals. One more check follows.`}
           />
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
@@ -1131,12 +1198,28 @@ export default function StorageRetentionPage() {
             color="error"
             startIcon={<DeleteForeverOutlined />}
             disabled={!cleanupPhraseTyped || !canRunCleanup || runCleanup.isPending}
-            onClick={() => runCleanup.mutate()}
+            onClick={() => setCleanupFinalCheckOpen(true)}
           >
-            {runCleanup.isPending ? 'Removing…' : 'Remove them'}
+            Remove them
           </Button>
         </DialogActions>
       </Dialog>
+
+      <FinalDeleteCheckDialog
+        open={cleanupConfirmOpen && cleanupFinalCheckOpen}
+        count={(cleanupTarget?.messages ?? 0) + (cleanupTarget?.files ?? 0)}
+        noun="messages and files"
+        consequence={`This frees ${formatBytes(cleanupTarget?.bytes)}. Nexora keeps no backup of these; the record of each message stays.`}
+        confirmLabel="Remove them for good"
+        busy={runCleanup.isPending}
+        error={runCleanup.isError
+          ? toPresentableError(runCleanup.error, {
+            fallbackMessage: 'The removal did not complete. Preview again to see where things stand before retrying.',
+          }).message
+          : null}
+        onBack={() => { if (!runCleanup.isPending) { setCleanupFinalCheckOpen(false); runCleanup.reset(); } }}
+        onConfirm={(count) => runCleanup.mutate(count)}
+      />
 
       {/* ── Irreversible-action confirmation ────────────────────────────────── */}
       <Dialog
@@ -1183,21 +1266,13 @@ export default function StorageRetentionPage() {
             the linked records, legal holds, and retention duties.
           </Alert>
 
-          {executePurge.isError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {toPresentableError(executePurge.error, {
-                fallbackMessage: 'The deletion did not complete. Re-run the preview to see the current position before trying again.',
-              }).message}
-            </Alert>
-          )}
-
           <TextField
             label={`Type ${CONFIRM_PHRASE} to confirm`}
             value={confirmText}
             onChange={(event) => setConfirmText(event.target.value)}
             fullWidth
             autoComplete="off"
-            helperText={`Type ${CONFIRM_PHRASE} in capitals. This is the last step before the files are gone.`}
+            helperText={`Type ${CONFIRM_PHRASE} in capitals. One more check follows before the files are gone.`}
           />
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
@@ -1207,12 +1282,28 @@ export default function StorageRetentionPage() {
             color="error"
             startIcon={<DeleteForeverOutlined />}
             disabled={!confirmPhraseTyped || !canDelete || executePurge.isPending}
-            onClick={() => executePurge.mutate()}
+            onClick={() => setFinalCheckOpen(true)}
           >
-            {executePurge.isPending ? 'Deleting…' : `Delete ${formatCount(confirmTarget?.documents)} documents`}
+            {`Delete ${formatCount(confirmTarget?.documents)} documents`}
           </Button>
         </DialogActions>
       </Dialog>
+
+      <FinalDeleteCheckDialog
+        open={confirmOpen && finalCheckOpen}
+        count={confirmTarget?.documents ?? 0}
+        noun="documents"
+        consequence={`This frees ${formatBytes(confirmTarget?.bytes)}. Nexora keeps no backup of these files; their records and everything extracted from them stay.`}
+        confirmLabel={`Delete ${formatCount(confirmTarget?.documents)} documents for good`}
+        busy={executePurge.isPending}
+        error={executePurge.isError
+          ? toPresentableError(executePurge.error, {
+            fallbackMessage: 'The deletion did not complete. Re-run the preview to see the current position before trying again.',
+          }).message
+          : null}
+        onBack={() => { if (!executePurge.isPending) { setFinalCheckOpen(false); executePurge.reset(); } }}
+        onConfirm={(count) => executePurge.mutate(count)}
+      />
     </Box>
   );
 }

@@ -32,16 +32,14 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
     /// <summary>
     /// THE test this feature exists for.
     ///
-    /// <para>The age policy's floor is 30 days and its minimum is enforced by a database check
-    /// constraint, so an age-gated cleanup cannot reach a two-day-old message however it is
-    /// configured. A message that produced no inquiry and no lead has no downstream artefact to
-    /// protect, so the floor's rationale — "a tenant must not destroy documents he may still
-    /// need" — does not reach it, and it is waived. Both halves are asserted together: the
-    /// message IS cleared, and the age policy still refuses the same window.</para>
+    /// <para>The age purge selects DOCUMENTS by date. A message that produced no inquiry and no
+    /// lead is not a document at all, so no age policy can reach it however it is configured;
+    /// this path selects by OUTCOME instead, with only a 24-hour settle guard. The message IS
+    /// cleared, and its tombstone survives with who, when and why.</para>
     /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task A_message_that_produced_nothing_is_cleared_far_inside_the_thirty_day_floor()
+    public async Task A_message_that_produced_nothing_is_cleared_by_outcome_not_by_age()
     {
         var tenantId = NewTenantId();
         var root = NewRoot();
@@ -53,8 +51,11 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             var message = await SeedMessageAsync(db, tenantId, files, "no-outcome",
                 ageDays: 2, triage: "Uncertain");
 
-            Assert.True(2 < EvidenceRetentionPolicy.MinimumRetentionDays,
-                "The fixture must sit inside the floor or it proves nothing.");
+            // The age policy's floor is now one day (a settle guard, not a retention opinion), so
+            // the message sits outside it; what still separates the two paths is the AXIS. The
+            // age purge selects documents by date; this path selects mail by outcome, and a
+            // message that produced nothing is not a document the age purge can ever see.
+            Assert.Equal(1, EvidenceRetentionPolicy.MinimumRetentionDays);
             Assert.True(File.Exists(files.ResolvePath(message.RawKey)));
 
             var service = NewService(db, files);
@@ -64,8 +65,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.True(bucket.Bytes > 0);
             Assert.True(bucket.CanClear);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, "clear-1",
-                Clear(TenantDataBuckets.MailThatProducedNothing), default);
+            var result = await ClearAsync(service, tenantId, 9, "clear-1", TenantDataBuckets.MailThatProducedNothing);
 
             Assert.Equal(1, result.MessagesCleared);
             Assert.True(result.BytesReclaimed > 0);
@@ -90,13 +90,13 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
     }
 
     /// <summary>
-    /// The control that proves the waiver is a real change and not a suite that is always green:
-    /// the AGE policy still refuses the identical window, so the floor is waived only where the
-    /// rationale does not reach.
+    /// The age policy's floor is one day — a settle guard, not a retention opinion. Zero is
+    /// refused (a document ingested a minute ago may still be mid-extraction); anything from one
+    /// day up is the tenant's to set. Nexora does not impose a data policy on a customer.
     /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task The_age_policy_floor_is_untouched_and_still_refuses_a_short_window()
+    public async Task The_age_policy_floor_is_one_day_and_the_rest_is_the_tenants_to_set()
     {
         var tenantId = NewTenantId();
         await using var db = database.ContextFor(null);
@@ -111,9 +111,15 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
 
         var refused = await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
             retention.UpdatePolicyAsync(tenantId, 9, "floor-check",
-                new UpdateEvidenceRetentionPolicyCommand(2, true, "Try to configure the floor away."),
+                new UpdateEvidenceRetentionPolicyCommand(0, true, "Try to configure the settle guard away."),
                 default));
-        Assert.Contains("30", refused.Message);
+        Assert.Contains("1", refused.Message);
+
+        db.ChangeTracker.Clear();
+        var twoDays = await retention.UpdatePolicyAsync(tenantId, 9, "two-days",
+            new UpdateEvidenceRetentionPolicyCommand(2, true, "Two days is what this business wants."),
+            default);
+        Assert.Equal(2, twoDays.Policy.RetentionDays);
     }
 
     /// <summary>
@@ -140,8 +146,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.Equal(0, Bucket(await service.GetAsync(tenantId, default),
                 TenantDataBuckets.MailThatProducedNothing).Count);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, "clear-fresh",
-                Clear(TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.MailTriagedAsNoise), default);
+            var result = await ClearAsync(service, tenantId, 9, "clear-fresh", TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.MailTriagedAsNoise);
             Assert.Equal(0, result.MessagesCleared);
             Assert.True(File.Exists(files.ResolvePath(message.RawKey)));
 
@@ -181,8 +186,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.Equal(0, Bucket(view, TenantDataBuckets.MailThatProducedNothing).Count);
             Assert.Equal(0, Bucket(view, TenantDataBuckets.MailTriagedAsNoise).Count);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, $"clear-{produced}",
-                Clear(TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.MailTriagedAsNoise), default);
+            var result = await ClearAsync(service, tenantId, 9, $"clear-{produced}", TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.MailTriagedAsNoise);
             Assert.Equal(0, result.MessagesCleared);
             Assert.True(File.Exists(files.ResolvePath(message.RawKey)),
                 $"{produced}: the stored message must survive.");
@@ -219,8 +223,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.Equal(3, both.MessagesCleared);
 
             db.ChangeTracker.Clear();
-            var noiseOnly = await service.RunCleanupAsync(tenantId, 9, "clear-noise",
-                Clear(TenantDataBuckets.MailTriagedAsNoise), default);
+            var noiseOnly = await ClearAsync(service, tenantId, 9, "clear-noise", TenantDataBuckets.MailTriagedAsNoise);
             Assert.Equal(2, noiseOnly.MessagesCleared);
 
             // Scoped to THIS tenant's mailbox: the integration database is shared, so an
@@ -266,8 +269,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.Equal(0, Bucket(await service.GetAsync(tenantId, default),
                 TenantDataBuckets.MailThatProducedNothing).Count);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, $"clear-{parseStatus}",
-                Clear(TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.MailTriagedAsNoise), default);
+            var result = await ClearAsync(service, tenantId, 9, $"clear-{parseStatus}", TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.MailTriagedAsNoise);
             Assert.Equal(0, result.MessagesCleared);
             Assert.True(File.Exists(files.ResolvePath(message.RawKey)),
                 $"{parseStatus}: the stored message must survive so recovery can still read it.");
@@ -305,8 +307,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.Equal(1, bucket.Count);
             Assert.True(bucket.Bytes > 0);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, "sweep-1",
-                Clear(TenantDataBuckets.OrphanedStoredFiles), default);
+            var result = await ClearAsync(service, tenantId, 9, "sweep-1", TenantDataBuckets.OrphanedStoredFiles);
 
             Assert.Equal(1, result.FilesDeleted);
             Assert.True(result.BytesReclaimed > 0);
@@ -356,8 +357,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.Equal(0, Bucket(await service.GetAsync(tenantId, default),
                 TenantDataBuckets.OrphanedStoredFiles).Count);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, $"sweep-{protection}",
-                Clear(TenantDataBuckets.OrphanedStoredFiles), default);
+            var result = await ClearAsync(service, tenantId, 9, $"sweep-{protection}", TenantDataBuckets.OrphanedStoredFiles);
 
             Assert.Equal(0, result.FilesDeleted);
             Assert.Equal(0, result.BytesReclaimed);
@@ -398,8 +398,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.False(bucket.CanClear);
             Assert.Equal(TenantDataControlCopy.StorageCannotList, bucket.BlockedReason);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, "sweep-blind",
-                Clear(TenantDataBuckets.OrphanedStoredFiles), default);
+            var result = await ClearAsync(service, tenantId, 9, "sweep-blind", TenantDataBuckets.OrphanedStoredFiles);
             Assert.Equal(0, result.FilesDeleted);
             Assert.Contains(result.Refused, x => x.Why == TenantDataControlCopy.StorageCannotList);
         }
@@ -472,8 +471,29 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
                 service.RunCleanupAsync(tenantId, 9, "clear-noreason",
                     new TenantDataCleanupCommand([TenantDataBuckets.MailThatProducedNothing],
-                        false, "   ", TenantDataControlCopy.ConfirmationPhrase), default));
+                        false, "   ", TenantDataControlCopy.ConfirmationPhrase, 1), default));
             Assert.True(File.Exists(files.ResolvePath(message.RawKey)));
+
+            // And the second confirmation: the typed count must be the run's own count. Right
+            // phrase, right reason, wrong number — nothing goes.
+            db.ChangeTracker.Clear();
+            var wrong = await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.RunCleanupAsync(tenantId, 9, "clear-wrongcount",
+                    new TenantDataCleanupCommand([TenantDataBuckets.MailThatProducedNothing],
+                        false, "Typed the wrong number.", TenantDataControlCopy.ConfirmationPhrase, 2), default));
+            Assert.Contains("1", wrong.Message);
+            Assert.True(File.Exists(files.ResolvePath(message.RawKey)));
+
+            db.ChangeTracker.Clear();
+            await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.RunCleanupAsync(tenantId, 9, "clear-nocount",
+                    new TenantDataCleanupCommand([TenantDataBuckets.MailThatProducedNothing],
+                        false, "No number typed.", TenantDataControlCopy.ConfirmationPhrase), default));
+            Assert.True(File.Exists(files.ResolvePath(message.RawKey)));
+            db.ChangeTracker.Clear();
+            Assert.Empty(await db.TenantGovernanceAuditEvents.AsNoTracking()
+                .Where(x => x.BusinessUnitId == tenantId && x.Action == TenantDataControlService.ActionCleanupRun)
+                .ToListAsync());
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -492,14 +512,12 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             await SeedMessageAsync(db, tenantId, files, "replayed", ageDays: 5, triage: "Noise");
             var service = NewService(db, files);
 
-            var first = await service.RunCleanupAsync(tenantId, 9, "clear-once",
-                Clear(TenantDataBuckets.MailThatProducedNothing), default);
+            var first = await ClearAsync(service, tenantId, 9, "clear-once", TenantDataBuckets.MailThatProducedNothing);
             Assert.Equal(1, first.MessagesCleared);
             Assert.False(first.IdempotentReplay);
 
             db.ChangeTracker.Clear();
-            var replay = await service.RunCleanupAsync(tenantId, 9, "clear-once",
-                Clear(TenantDataBuckets.MailThatProducedNothing), default);
+            var replay = await ClearAsync(service, tenantId, 9, "clear-once", TenantDataBuckets.MailThatProducedNothing);
             Assert.True(replay.IdempotentReplay);
             Assert.Equal(first.MessagesCleared, replay.MessagesCleared);
             Assert.Equal(first.BytesReclaimed, replay.BytesReclaimed);
@@ -529,8 +547,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             Assert.Equal(0, Bucket(view, TenantDataBuckets.MailThatProducedNothing).Count);
             Assert.Equal(0, Bucket(view, TenantDataBuckets.OrphanedStoredFiles).Count);
 
-            var result = await service.RunCleanupAsync(tenantA, 9, "clear-cross",
-                Clear(TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.OrphanedStoredFiles), default);
+            var result = await ClearAsync(service, tenantA, 9, "clear-cross", TenantDataBuckets.MailThatProducedNothing, TenantDataBuckets.OrphanedStoredFiles);
             Assert.Equal(0, result.MessagesCleared);
             Assert.Equal(0, result.FilesDeleted);
             Assert.True(File.Exists(files.ResolvePath(messageB.RawKey)));
@@ -567,8 +584,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             });
 
             db.ChangeTracker.Clear();
-            await NewService(db, files).RunCleanupAsync(tenantId, 9, "clear-enforced",
-                Clear(TenantDataBuckets.MailThatProducedNothing), default);
+            await ClearAsync(NewService(db, files), tenantId, 9, "clear-enforced", TenantDataBuckets.MailThatProducedNothing);
 
             // 2. A recorded purge cannot be un-stamped or rewritten.
             await Assert.ThrowsAnyAsync<Npgsql.PostgresException>(async () =>
@@ -691,8 +707,7 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
             await SeedFinanceProtectedDocumentAsync(db, tenantId, files);
             await SeedMessageAsync(db, tenantId, files, "cleared-one", ageDays: 5, triage: "Noise");
 
-            await NewService(db, files).RunCleanupAsync(tenantId, 9, "clear-audit",
-                Clear(TenantDataBuckets.MailThatProducedNothing), default);
+            await ClearAsync(NewService(db, files), tenantId, 9, "clear-audit", TenantDataBuckets.MailThatProducedNothing);
 
             var run = await db.TenantGovernanceAuditEvents.AsNoTracking()
                 .SingleAsync(x => x.BusinessUnitId == tenantId
@@ -724,8 +739,23 @@ public sealed class TenantDataControlTests(PostgreSqlTestDatabase database)
 
     private sealed record SeededMessage(long Id, string MessageId, string RawKey);
 
-    private static TenantDataCleanupCommand Clear(params string[] buckets) =>
-        new(buckets, false, "Clearing what produced nothing.", TenantDataControlCopy.ConfirmationPhrase);
+    /// <summary>
+    /// The real flow: preview, then remove with the figure the preview showed typed back as the
+    /// second confirmation. Every clearing test goes through here so that the server-side count
+    /// check is exercised on every path, not only in the test written for it.
+    /// </summary>
+    private static async Task<TenantDataCleanupResult> ClearAsync(TenantDataControlService service,
+        long tenantId, long actorUserId, string idempotencyKey, params string[] buckets)
+    {
+        var preview = await service.RunCleanupAsync(tenantId, actorUserId, $"{idempotencyKey}:preview",
+            Preview(buckets), default);
+        return await service.RunCleanupAsync(tenantId, actorUserId, idempotencyKey,
+            Clear(preview.MessagesCleared + preview.FilesDeleted, buckets), default);
+    }
+
+    private static TenantDataCleanupCommand Clear(int confirmedCount, params string[] buckets) =>
+        new(buckets, false, "Clearing what produced nothing.", TenantDataControlCopy.ConfirmationPhrase,
+            confirmedCount);
 
     private static TenantDataCleanupCommand Preview(params string[] buckets) =>
         new(buckets, true, "Preview.", null);

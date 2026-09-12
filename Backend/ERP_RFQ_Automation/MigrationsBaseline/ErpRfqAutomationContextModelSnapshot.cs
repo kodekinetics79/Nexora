@@ -21921,7 +21921,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("evidence_retention_policies", null, t =>
                         {
-                            t.HasCheckConstraint("CK_evidence_retention_policies_retention_days", "\"RetentionDays\" >= 30 AND \"RetentionDays\" <= 3650");
+                            t.HasCheckConstraint("CK_evidence_retention_policies_retention_days", "\"RetentionDays\" >= 1 AND \"RetentionDays\" <= 3650");
                         });
                 });
 
