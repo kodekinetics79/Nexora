@@ -148,9 +148,12 @@ public sealed class CommercialLineResolutionApplicationService(
                 existing.Add(serviceResolution);
                 continue;
             }
+            var alternates = new[] { snapshot.MaterialCode, snapshot.Part }
+                .Where(value => !string.IsNullOrWhiteSpace(value) && PartKey(value!) != requestedPart)
+                .Select(value => value!.Trim()).Distinct().ToList();
             var product = await productResolver.ResolveAsync(new ProductResolutionRequest(
                 businessUnitId, revision.Id, line.Id, requestedPart, snapshot.Manufacturer,
-                snapshot.Description, [new("lead_revision_line", $"lead-revision:{revision.Id}:line:{line.Id}", requestedPart)]), ct);
+                snapshot.Description, [new("lead_revision_line", $"lead-revision:{revision.Id}:line:{line.Id}", requestedPart)], alternates), ct);
             var productId = product.DecisionState == ProductResolutionDecisionState.AutoLinked
                 ? product.ResolvedProductId : null;
             var inventory = productId.HasValue

@@ -38,6 +38,20 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
         var match = _matches.GetOrAdd(key, _ => Match(snapshot.Products, snapshot.References, request,
             normalizedPart, normalizedManufacturer));
 
+        // The other numbers on the line, in order, until one finds something. A buyer's material
+        // number and a maker's part number name the same part; the catalogue may hold either.
+        foreach (var alternate in request.AlternateIdentifiers ?? Array.Empty<string>())
+        {
+            if (match.RankedCandidates.Count > 0) break;
+            var alternatePart = ProductIdentityNormalizer.NormalizePartNumber(alternate);
+            if (alternatePart is null || alternatePart == normalizedPart) continue;
+            var alternateRequest = request with { OriginalPartNumber = alternate };
+            var alternateKey = new ProductMatchKey(request.BusinessUnitId, alternatePart, normalizedManufacturer,
+                alternate.Trim(), request.Description?.Trim());
+            match = _matches.GetOrAdd(alternateKey, _ => Match(snapshot.Products, snapshot.References, alternateRequest,
+                alternatePart, normalizedManufacturer));
+        }
+
         return new ProductResolutionResult(
             request.BusinessUnitId,
             request.SourceLeadRevisionId,

@@ -29,6 +29,12 @@ public sealed record ProductResolutionEvidence(
     string? RawValue = null,
     string? Detail = null);
 
+/// <param name="AlternateIdentifiers">
+/// Other numbers the line carries for the same part — a buyer's material number beside a
+/// maker's part number. Tried in order after <paramref name="OriginalPartNumber"/>; the first
+/// that finds anything decides. A line keyed by the buyer's number in the catalogue used to
+/// miss when the maker's number was asked for alone.
+/// </param>
 public sealed record ProductResolutionRequest(
     long BusinessUnitId,
     long SourceLeadRevisionId,
@@ -36,7 +42,8 @@ public sealed record ProductResolutionRequest(
     string? OriginalPartNumber,
     string? OriginalManufacturer,
     string? Description,
-    IReadOnlyList<ProductResolutionEvidence> Evidence);
+    IReadOnlyList<ProductResolutionEvidence> Evidence,
+    IReadOnlyList<string>? AlternateIdentifiers = null);
 
 public sealed record ProductIdentityCandidate(
     long BusinessUnitId,

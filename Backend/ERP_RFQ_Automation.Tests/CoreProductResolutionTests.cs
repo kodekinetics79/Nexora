@@ -38,6 +38,23 @@ public sealed class CoreProductResolutionTests
     }
 
     [Fact]
+    public async Task TheLinesOtherNumber_IsTriedWhenTheFirstFindsNothing()
+    {
+        // SEC's line: maker's number LBE830P-1, SEC material 909101154. The catalogue keys the
+        // product by the material number. Asking for the maker's number alone found nothing and
+        // the line read "No catalog match found" while the product sat in stock.
+        var resolver = Resolver(Product(9, 11, "909101154", "LBE830P-1"));
+
+        var byMakerOnly = await resolver.ResolveAsync(Request(11, "LBE830P-1"));
+        Assert.Equal(9, byMakerOnly.ResolvedProductId);           // the model number is an identity too
+
+        var neither = await resolver.ResolveAsync(Request(11, "NOT-IN-CATALOGUE") with { AlternateIdentifiers = ["909101154"] });
+        Assert.Equal(ProductResolutionDecisionState.AutoLinked, neither.DecisionState);
+        Assert.Equal(9, neither.ResolvedProductId);
+        Assert.Equal("NOT-IN-CATALOGUE", neither.OriginalPartNumber);   // the line's own number is still what was asked
+    }
+
+    [Fact]
     public async Task CanonicalCompactPart_ResolvesUniqueSeparatedCatalogIdentity()
     {
         var resolver = Resolver(Product(5, 11, "CORE-ATP-100"));

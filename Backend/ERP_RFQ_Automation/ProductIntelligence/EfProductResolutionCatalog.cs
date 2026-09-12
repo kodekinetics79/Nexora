@@ -19,11 +19,14 @@ public sealed class EfProductResolutionCatalog : IProductResolutionCatalog
             .AsNoTracking()
             .Where(product => product.Buid == businessUnitId && product.IsActive != false)
             .OrderBy(product => product.Id)
+            // PartNo is the catalogue's own number (for a trading house, most often the buyer's
+            // material number); ModelNo is the maker's. Both are identities. DocId is a document
+            // reference and was standing in for the maker's number, so no maker's number ever matched.
             .Select(product => new ProductIdentityCandidate(
                 businessUnitId,
                 product.Id,
                 product.PartNo,
-                product.DocId,
+                product.ModelNo,
                 null,
                 product.ProductName,
                 product.Description))
