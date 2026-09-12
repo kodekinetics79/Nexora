@@ -209,6 +209,8 @@ public sealed class EventPrintAccuracyTests
         Assert.Equal(1.0m, line.ManufacturerName.Confidence);
         Assert.Contains(line.ManufacturerName.Transformations, t => t.StartsWith("read_from_manufacturing_part_text", StringComparison.Ordinal));
         Assert.Equal("AA 323073-01", line.ExtraFields!["Manufacturer part numbers"]);
+        // One maker, one number: it is the line's part number, not only an extra to open.
+        Assert.Equal("AA 323073-01", line.ManufacturerPartNumber.Value);
     }
 
     [Fact]

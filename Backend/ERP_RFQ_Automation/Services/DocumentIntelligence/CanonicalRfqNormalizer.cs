@@ -556,6 +556,23 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             line.ManufacturerName.Evidence.Clear();
             line.ManufacturerName.Evidence.Add(Evidence(row, "row", maker));
         }
+
+        // One approved maker and one part number: that IS the part number, not a list to
+        // keep beside the line. Aramco's prints state it this way on most lines, and a line
+        // with a maker but an empty part-number field made a rep open the extras to find it.
+        if (reading.Manufacturers.Count == 1 && reading.PartNumbers.Count == 1
+            && line.ManufacturerPartNumber.Kind == CanonicalValueKind.Missing)
+        {
+            var part = reading.PartNumbers[0];
+            line.ManufacturerPartNumber.Value = part;
+            line.ManufacturerPartNumber.OriginalValue = source.Value;
+            line.ManufacturerPartNumber.Kind = CanonicalValueKind.Extracted;
+            line.ManufacturerPartNumber.Confidence = 1.0m;
+            line.ManufacturerPartNumber.ValidationStatus = ValidationStatus.Valid;
+            line.ManufacturerPartNumber.Transformations.Add($"read_from_manufacturing_part_text: \"{source.Key}\" names one part number for the one approved maker");
+            line.ManufacturerPartNumber.Evidence.Clear();
+            line.ManufacturerPartNumber.Evidence.Add(Evidence(row, "row", part));
+        }
     }
 
     /// <summary>The raw manufacturing part text kept on the line; the reading above carries what matters.</summary>
