@@ -43,8 +43,18 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         if (!lead.CurrentRevisionId.HasValue)
             throw new InvalidOperationException("The lead has no immutable current revision. Reconcile its source evidence first.");
 
-        var revision = await _db.Set<LeadRevision>().AsNoTracking().Include(x => x.Items)
+        // Two queries, not one join. A revision carries the whole document's snapshot JSON
+        // (300 KB for a 1,500-line bid list), and a single joined Include repeated that column
+        // once per item: the database answered in milliseconds while 450 MB crossed the wire and
+        // the screen said "Loading the request…" for eighteen seconds. (AsSplitQuery is not an
+        // option here: the tenant scope holds the request's transaction, and EF would try to
+        // open another.)
+        var revision = await _db.Set<LeadRevision>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == lead.CurrentRevisionId.Value, ct);
+        foreach (var revisionItem in await _db.Set<LeadItemRevision>().AsNoTracking()
+                     .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
+                     .OrderBy(x => x.LineNumber).ThenBy(x => x.Id).ToListAsync(ct))
+            revision.Items.Add(revisionItem);
         var occurrence = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == revision.EstablishedByOccurrenceId, ct);
         var links = await _db.Set<LeadOccurrenceDocument>().AsNoTracking()
@@ -298,7 +308,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 lineDecision is null ? null : new LineParticipationDto(lineDecision.Choice.ToString(),
                     lineDecision.ReasonCode, lineDecision.ReasonNotes, lineDecision.ProductId,
                     lineDecision.Quantity, lineDecision.UnitOfMeasure, lineDecision.Currency,
-                    lineDecision.CatalogPolicyVersion, lineDecision.WarningSnapshotJson));
+                    lineDecision.CatalogPolicyVersion, lineDecision.WarningSnapshotJson),
+                // The buyer's own number and their long text: the maker's part number above is a
+                // different thing, and a rep needs both to know what is being asked for.
+                canonical?.ItemMaterialCode, canonical?.MaterialPotext, LineExtras(canonical));
         }).ToArray();
 
         var hasFrozenCommercialHeader = LeadRevisionCommercialSnapshot.TryParse(
@@ -454,6 +467,26 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             : value;
     }
 
+    /// <summary>
+    /// The buyer's own columns kept beside the line (approved makers, standing instructions,
+    /// material type…), for the screen. The raw texts the readers already digested are left
+    /// out: they are the source of the fields above, not something to read twice.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string>? LineExtras(LeadItem? canonical)
+    {
+        var extras = canonical is null ? null : ExtraFieldsJson.Deserialize(canonical.ExtraFields);
+        if (extras is null || extras.Count == 0) return null;
+        var shown = extras
+            .Where(pair => !RawTextExtras.Contains(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
+            .ToDictionary(pair => pair.Key, pair => pair.Value.Length <= 600 ? pair.Value : pair.Value[..600] + " …", StringComparer.Ordinal);
+        return shown.Count == 0 ? null : shown;
+    }
+
+    private static readonly HashSet<string> RawTextExtras = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Manufacturing Part Text", "Material PO Text", "Material PO text",
+    };
+
     internal static bool HasIdentityEvidence(IEnumerable<LineFieldEvidenceProjection> evidence)
         => evidence.Any(field => IdentityEvidenceFieldNames.Contains(CanonicalFieldName(field.FieldName)));
 
@@ -608,7 +641,9 @@ public sealed record LeadDecisionLineDto(long Id, long RevisionLineId, string? L
     string? CatalogResolution, IReadOnlyList<CatalogMatchDto> CatalogMatches, long? BestMatchProductId,
     decimal CatalogConfidence, bool NeedsAttention, string? AttentionReason, string CatalogPolicyVersion,
     string WarningSnapshotJson, string VerificationStatus,
-    string? VerificationDetail, LineParticipationDto? Participation);
+    string? VerificationDetail, LineParticipationDto? Participation,
+    string? ItemMaterialCode = null, string? Specification = null,
+    IReadOnlyDictionary<string, string>? Extras = null);
 public sealed record FitCriterionDto(string Code, string Label, string? Description, string Decision, string? Note);
 public sealed record FitAssessmentDto(int Version, string OverallDecision, string Rationale,
     IReadOnlyList<FitCriterionDto> Criteria, string? AssessedBy, DateTimeOffset? AssessedAtUtc);

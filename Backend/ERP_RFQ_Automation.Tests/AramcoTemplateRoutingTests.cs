@@ -1,17 +1,22 @@
+using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Extraction.Templates;
+using ERP_RFQ_Automation.Services.DocumentIntelligence;
+using ERP_RFQ_Automation.Services.Interfaces;
+using ERP_RFQ_Automation.Tests.Support;
 
 namespace ERP_RFQ_Automation.Tests;
 
 /// <summary>
-/// The template is tried BEFORE the model, and a refusal routes rather than fails.
-///
-/// <para>This is where the cost saving actually lands. The parser existing changes nothing on
-/// its own — an Aramco bid list only stops costing money when the dispatch consults it before
-/// planning chunks.</para>
+/// The Aramco bid list template reads a document into the SAME rows a spreadsheet produces,
+/// and those rows take the structured path: normaliser, canonical import, evidence ledger.
+/// These tests drive the paid entry point with a model that explodes if called, so they prove
+/// both that the template is reached and that what it produces can be cited line by line.
 /// </summary>
 public sealed class AramcoTemplateRoutingTests
 {
+    // Numbered by non-blank line so the evidence assertions below can name a row.
     private const string Preamble = """
         MATERIALS E-BIDDING SYSTEM
         Bid Materials List (Low Value Bid)
@@ -39,49 +44,117 @@ public sealed class AramcoTemplateRoutingTests
         Req Qty
         Resp Qty
         For Foreign Suppliers, If the delivery type is CIF or DDP, Supplier must attach.
-        """;
+        """;                                                  // 26 lines; the first record starts on line 27
+
+    private static ChunkedExtractionService NewService(ExplodingLlm llm)
+        => new(llm, new CanonicalRfqNormalizer(), new NoopLogger<ChunkedExtractionService>());
+
+    private static DocumentExtractionInput Doc(string text, string name = "bid.doc")
+        => new() { BusinessUnitId = 1, SourceDocumentName = name, HeaderText = text, ReceivedOn = new DateTime(2021, 2, 16, 8, 0, 0, DateTimeKind.Utc) };
 
     [Fact]
-    public void An_Aramco_bid_list_is_extracted_with_no_model_call()
+    public async Task An_Aramco_bid_list_is_extracted_with_no_model_call()
     {
         var text = Preamble + "\n" + string.Join("\n",
             "10", "902017274", "3801", "EA", "176", "KEY:SHAFT,SQUARE", "SHAPE:", "SQUARE;",
             "20", "902017276", "3801", "EA", "89", "SEAL,4 MM DIA");
+        var llm = new ExplodingLlm();
 
-        var outcome = AramcoBidListExtraction.TryExtract(text, "bid.doc", out var rejection);
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(text));
 
-        Assert.NotNull(outcome);
-        Assert.Null(rejection);
-        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome!.Status);
-
-        // THE POINT: no provider was consulted, so the ledger must not name one.
+        Assert.False(llm.WasCalled);
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
         Assert.Null(outcome.AiProviderClass);
         Assert.Equal(ExtractionProcessingPath.DeterministicRules, outcome.ProcessingPath);
-
-        // Nothing is lost by reading it ourselves.
         Assert.Equal(2, outcome.ExtractedItemCount);
         Assert.Equal(outcome.ExpectedItemCount, outcome.ExtractedItemCount);
+        Assert.Contains(outcome.Diagnostics, d => d.Contains("template", StringComparison.OrdinalIgnoreCase));
 
         var first = outcome.Result!.Items[0];
         Assert.Equal("902017274", first.ItemMaterialCode);
         Assert.Equal("10", first.LineItemNo);
         Assert.Equal(176, first.Quantity);
         Assert.Equal("EA", first.UnitOfMeasure);
-        Assert.Equal("3801", first.StorageLocation);
-        Assert.Contains("SQUARE;", first.ProductShortDescription);
+        Assert.Equal("KEY:SHAFT,SQUARE", first.ProductShortName);
+        Assert.Contains("SQUARE;", first.ItemText);
+        Assert.Equal("3801", first.ExtraFields!["Ship To"]);   // the buyer's plant code, under the buyer's own label
 
-        // The customer's own bid number becomes the RFQ reference — read, never invented.
         Assert.Equal("C001046933", outcome.Result.Rfqno);
+        Assert.Equal("1G5-Fawzi Alomari", outcome.Result.BuyersName);
         Assert.Equal("2021-02-28", outcome.Result.BidClosingDate);
+
+        // The header block that is not a row: the portal, and OUR account there. Captured to
+        // be excluded from customer matching, exactly as the model path records them.
+        Assert.Equal("MATERIALS E-BIDDING SYSTEM", outcome.Result.CustomerPortalName);
+        Assert.Equal("ALI ZAID AL-QURAISHI&PARTNERS EL", outcome.Result.SupplierNameOnDocument);
+        Assert.Equal("2004414", outcome.Result.SupplierAccountRefOnDocument);
+        // The buyer's instruction to bidders is kept verbatim, as evidence, not as a line.
+        Assert.Equal("For Foreign Suppliers, If the delivery type is CIF or DDP, Supplier must attach.", outcome.DocumentNarrative);
+    }
+
+    [Fact]
+    public async Task Every_value_cites_the_line_it_was_printed_on()
+    {
+        // This is what was missing. The template returned lead items with no canonical import,
+        // the ledger wrote no evidence for the door, and the Decide screen marked every line
+        // "no source document on file" — a perfectly read bid that could not be quoted.
+        var text = Preamble + "\n" + string.Join("\n",
+            "10", "902017274", "3801", "EA", "176", "KEY:SHAFT,SQUARE", "SHAPE:", "SQUARE;");
+
+        var outcome = await NewService(new ExplodingLlm()).ExtractUnstructuredAsync(Doc(text));
+
+        var document = Assert.Single(outcome.CanonicalImport!.Documents);
+        var line = Assert.Single(document.LineItems);
+        Assert.Equal("'Bid Materials List'!A11", Assert.Single(document.RfqNo.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A18", Assert.Single(document.BuyerName.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A13", Assert.Single(document.BidClosingDate.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A27", Assert.Single(line.LineItemNo.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A28", Assert.Single(line.CustomerMaterialCode.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A30", Assert.Single(line.UnitOfMeasure.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A31", Assert.Single(line.Quantity.Evidence).Location);
+        Assert.Equal("176", Assert.Single(line.Quantity.Evidence).RawValue);
+        Assert.Equal("'Bid Materials List'!A32", Assert.Single(line.ProductName.Evidence).Location);
+        Assert.Equal(ValidationStatus.Valid, line.ValidationStatus);
+    }
+
+    [Fact]
+    public async Task A_record_without_a_ship_to_still_cites_its_unit_and_quantity()
+    {
+        var text = Preamble + "\n" + string.Join("\n", "10", "902017274", "M", "2.5", "CABLE,ELEC");
+
+        var outcome = await NewService(new ExplodingLlm()).ExtractUnstructuredAsync(Doc(text));
+
+        var line = Assert.Single(Assert.Single(outcome.CanonicalImport!.Documents).LineItems);
+        Assert.Equal("'Bid Materials List'!A29", Assert.Single(line.UnitOfMeasure.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A30", Assert.Single(line.Quantity.Evidence).Location);
+        Assert.Equal("'Bid Materials List'!A31", Assert.Single(line.ProductName.Evidence).Location);
+        var item = Assert.Single(outcome.Result!.Items);
+        Assert.Equal(2.5m, item.Quantity);            // fractional quantities are preserved exactly
+        Assert.Null(item.ExtraFields);                 // nothing invented for the blank Ship To
+    }
+
+    [Fact]
+    public void The_buyer_is_the_person_named_under_Buyer_not_the_address()
+    {
+        // "Address | Buyer | Buyer Tel" is one label block; reading two lines past "Buyer"
+        // landed on the address, and every lead from this door named "Saudi Arabia" as its buyer.
+        var text = Preamble + "\n" + string.Join("\n", "10", "902017274", "3801", "EA", "5", "ITEM");
+
+        var bid = AramcoBidListParser.Parse(text);
+
+        Assert.Equal("1G5-Fawzi Alomari", bid.Buyer);
+        Assert.Equal(18, bid.Rows!.Buyer);
+        Assert.Equal(11, bid.Rows.Bidno);
+        Assert.Equal(20, bid.Rows.ColumnHeader);
     }
 
     [Fact]
     public void A_document_that_is_not_an_Aramco_bid_list_routes_to_the_model_silently()
     {
-        var outcome = AramcoBidListExtraction.TryExtract(
+        var rows = AramcoBidListExtraction.TryRead(
             "Please quote 5 EA of ABC-123.", "email_body.txt", out var rejection);
 
-        Assert.Null(outcome);
+        Assert.Null(rows);
         // Not a refusal — it was simply never ours. Nothing to warn about.
         Assert.Null(rejection);
     }
@@ -94,37 +167,40 @@ public sealed class AramcoTemplateRoutingTests
         var text = Preamble + "\n" + string.Join("\n",
             "10", "902017274", "3801", "176", "EA", "KEY:SHAFT");   // unit and quantity swapped
 
-        var outcome = AramcoBidListExtraction.TryExtract(text, "bid.doc", out var rejection);
+        var rows = AramcoBidListExtraction.TryRead(text, "bid.doc", out var rejection);
 
-        Assert.Null(outcome);
+        Assert.Null(rows);
         Assert.NotNull(rejection);
         Assert.Contains("neither a unit of measure nor a plant code", rejection);
     }
 
     [Fact]
-    public void A_fractional_quantity_is_preserved_exactly()
-    {
-        // Truncating 2.5 to 2 would under-quote by 20%; routing it to review would also lose
-        // a value the deterministic parser read exactly.
-        var text = Preamble + "\n" + string.Join("\n",
-            "10", "902017274", "3801", "M", "2.5", "CABLE,ELEC");
-
-        var outcome = AramcoBidListExtraction.TryExtract(text, "bid.doc", out _);
-
-        Assert.NotNull(outcome);
-        var line = Assert.Single(outcome!.Result!.Items);
-        Assert.Equal(2.5m, line.Quantity);
-        Assert.Equal(1.0d, line.QuantityConfidence);
-    }
-
-    [Fact]
-    public void Deterministic_reads_are_certain_and_say_so()
+    public async Task Deterministic_reads_are_certain_and_say_so()
     {
         var text = Preamble + "\n" + string.Join("\n", "10", "902017274", "3801", "EA", "5", "ITEM");
-        var outcome = AramcoBidListExtraction.TryExtract(text, "bid.doc", out _);
 
-        var line = Assert.Single(outcome!.Result!.Items);
+        var outcome = await NewService(new ExplodingLlm()).ExtractUnstructuredAsync(Doc(text));
+
+        var line = Assert.Single(outcome.Result!.Items);
         Assert.Equal(1.0d, line.ItemConfidence);
+        Assert.Equal(1.0d, line.QuantityConfidence);
         Assert.Equal(1.0d, outcome.Result.OverallConfidence);
+    }
+
+    private sealed class ExplodingLlm : ILLMService
+    {
+        public bool WasCalled { get; private set; }
+        public AiProviderClass ProviderClass => AiProviderClass.External;
+
+        public Task<LeadExtractionResult?> ExtractLeadDataAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+        {
+            WasCalled = true;
+            throw new InvalidOperationException("The model must not be called for a document the template can read.");
+        }
+
+        public Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<BoqDraftResult?>(null);
     }
 }

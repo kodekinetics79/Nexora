@@ -81,9 +81,13 @@ public sealed class EfManufacturerKnowledge : IManufacturerKnowledge
 
         if (patterns.Count == 0) return ManufacturerKnowledgeSnapshot.Empty(businessUnitId);
 
+        // A name is "known" for description matching only once it has been confirmed as often
+        // as a part-number family must be. One approved line naming "Universal" would otherwise
+        // turn every "UNIVERSAL JOINT" into a Universal product.
         var known = patterns
-            .Select(p => p.Manufacturer.Trim())
-            .Where(name => name.Length > 0)
+            .GroupBy(p => p.Manufacturer.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Key.Length > 0 && group.Sum(p => p.ObservationCount) >= ManufacturerInference.MinimumObservations)
+            .Select(group => group.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         return new ManufacturerKnowledgeSnapshot(businessUnitId, patterns, known);

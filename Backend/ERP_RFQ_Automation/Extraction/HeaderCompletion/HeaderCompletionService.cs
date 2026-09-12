@@ -98,7 +98,7 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
         => input.IsStructured
            && input.StructuredRows is { Count: > 0 } rows
            && MissingFields(rows).Count > 0
-           && ComposeHeaderText(rows[0], input.DocumentNarrative).Length > 0;
+           && ComposeHeaderText(rows, input.DocumentNarrative).Length > 0;
 
     public async Task<HeaderCompletionOutcome> CompleteAsync(DocumentExtractionInput input, CancellationToken ct = default)
     {
@@ -109,7 +109,7 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
         if (missing.Count == 0)
             return HeaderCompletionOutcome.None("nothingMissing");
 
-        var text = ComposeHeaderText(rows[0], input.DocumentNarrative);
+        var text = ComposeHeaderText(rows, input.DocumentNarrative);
         if (text.Length == 0)
             return HeaderCompletionOutcome.None("noHeaderText");
 
@@ -197,17 +197,26 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
         => CompletableFields.Where(field => rows.All(row => string.IsNullOrWhiteSpace(Get(row, field)))).ToList();
 
     /// <summary>
-    /// The text the model reads: the unrecognised document-level labels, then the unrecognised
-    /// column headings of the first line with their values, then the prose outside the table.
-    /// Never a line item.
+    /// The text the model reads: the unrecognised document-level labels, then an unrecognised
+    /// column only when EVERY line carries the same value under it (a "Cut-off" column that
+    /// repeats one date is a document fact written per line), then the prose outside the table.
+    /// A column whose value differs between lines is a line fact — "Cust Ref" or "Need Date"
+    /// per item — and sending the first line's would have made line 1's date the document's.
     /// </summary>
-    internal static string ComposeHeaderText(RfqSpreadsheetRow first, string? narrative)
+    internal static string ComposeHeaderText(IReadOnlyList<RfqSpreadsheetRow> rows, string? narrative)
     {
         var sb = new StringBuilder();
+        if (rows.Count == 0) return string.Empty;
+        var first = rows[0];
         foreach (var (label, value) in first.UnmappedHeaderLabels)
             sb.Append(label).Append(": ").AppendLine(value);
         foreach (var (label, value) in first.UnmappedColumns)
-            sb.Append(label).Append(": ").AppendLine(value);
+        {
+            var sameOnEveryLine = rows.All(row =>
+                row.UnmappedColumns.TryGetValue(label, out var other) && string.Equals(other?.Trim(), value.Trim(), StringComparison.Ordinal));
+            if (sameOnEveryLine)
+                sb.Append(label).Append(": ").AppendLine(value);
+        }
         if (!string.IsNullOrWhiteSpace(narrative))
         {
             var prose = narrative.Trim();

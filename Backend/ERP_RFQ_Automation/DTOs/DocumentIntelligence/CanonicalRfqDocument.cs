@@ -89,6 +89,10 @@ public sealed class CanonicalRfqLineItem
     public CanonicalValue<string> Currency { get; set; } = new();
     public CanonicalValue<string> ManufacturerName { get; set; } = new();
     public CanonicalValue<string> ManufacturerPartNumber { get; set; } = new();
+    /// <summary>The buyer's own material/stock number, when the document states one. See RfqSpreadsheetRow.CustomerMaterialCode.</summary>
+    public CanonicalValue<string> CustomerMaterialCode { get; set; } = new();
+    /// <summary>The buyer's long text for the line (SAP "Material PO text"), with the standing instruction separated out.</summary>
+    public CanonicalValue<string> MaterialPoText { get; set; } = new();
     public CanonicalValue<int> LeadTimeDays { get; set; } = new();
 
     /// <summary>The buyer's note against the line. Never validated — a note cannot be "wrong".</summary>

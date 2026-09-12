@@ -13,18 +13,35 @@ namespace ERP_RFQ_Automation.Extraction.Templates;
 /// <param name="ReqUnit">Unit of measure exactly as the sheet wrote it. Never translated here.</param>
 /// <param name="ReqQty">Required quantity.</param>
 /// <param name="Description">Short noun line plus its full specification block.</param>
+/// <param name="Rows">Where each value sits in the document, so the ledger can cite it. Null only on hand-built records.</param>
+/// <param name="ReqQtyText">The quantity exactly as printed ("1,000"), kept beside the parsed value for the evidence ledger.</param>
 public sealed record AramcoBidLine(
-    string BidLine, string ItemNo, string ShipTo, string ReqUnit, decimal ReqQty, string Description);
+    string BidLine, string ItemNo, string ShipTo, string ReqUnit, decimal ReqQty, string Description,
+    AramcoBidLineRows? Rows = null, string? ReqQtyText = null);
+
+/// <summary>
+/// Where a record's values sit: 1-based positions among the document's non-blank lines, in
+/// the order the parser read them. <c>ShipTo</c> is 0 when the document leaves it blank. A
+/// description's position is that of its first line.
+/// </summary>
+public sealed record AramcoBidLineRows(int BidLine, int ItemNo, int ShipTo, int ReqUnit, int ReqQty, int Description);
 
 /// <param name="Lines">Parsed lines, document order.</param>
 /// <param name="Bidno">The customer's own bid number — becomes the Lead's RFQ reference.</param>
 /// <param name="Rejection">Null when the parse is trustworthy; otherwise why it must not be used.</param>
+/// <param name="Rows">Where the header values sit, 1-based; 0 when a value was not found.</param>
+/// <param name="VendorName">OUR name as the customer's portal prints it (the Vendname column). Identifies us, never the buyer.</param>
+/// <param name="Note">The buyer's instructions printed between the column labels and the first record ("For Foreign Suppliers…"), verbatim. Null when there are none.</param>
 public sealed record AramcoBidList(
     IReadOnlyList<AramcoBidLine> Lines, string? Bidno, string? VendorCode,
-    string? Buyer, DateOnly? BidDate, DateOnly? BidClose, string? Rejection)
+    string? Buyer, DateOnly? BidDate, DateOnly? BidClose, string? Rejection,
+    AramcoBidListRows? Rows = null, string? VendorName = null, string? Note = null)
 {
     public bool IsTrustworthy => Rejection is null && Lines.Count > 0;
 }
+
+/// <summary>Positions of the header values and of the "Bid Line" column label, 1-based among non-blank lines.</summary>
+public sealed record AramcoBidListRows(int Bidno, int Buyer, int BidDate, int BidClose, int ColumnHeader);
 
 /// <summary>
 /// Reads a Saudi Aramco "MATERIALS E-BIDDING SYSTEM — Bid Materials List" deterministically,
@@ -73,7 +90,11 @@ public static partial class AramcoBidListParser
     /// inside specification text, so the completeness cross-check counted phantom items and
     /// refused every document in the corpus.
     /// </summary>
-    [GeneratedRegex(@"^\d{9}$", RegexOptions.CultureInvariant)]
+    /// <para>A Saudi Electricity list writes the dummy material code "DM10" (and its siblings
+    /// DM1..DM9999) for free-text items that have no catalogue number. Twenty-one such lines
+    /// were refused as "not a material number", the document fell to the model, and the model
+    /// path refused it as too large. The dummy code is the item number the buyer wrote.</para>
+    [GeneratedRegex(@"^(?:\d{9}|DM\d{1,4})$", RegexOptions.CultureInvariant)]
     private static partial Regex MaterialNumber();
 
     [GeneratedRegex(@"^\d{1,6}$", RegexOptions.CultureInvariant)]
@@ -111,10 +132,21 @@ public static partial class AramcoBidListParser
         if (headerEnd < 0)
             return Empty("The six-column header block was not found in the expected order.");
 
-        var (bidno, vendor, buyer, bidDate, bidClose) = ReadHeader(lines, headerEnd);
+        var (bidno, vendor, vendorName, buyer, bidDate, bidClose, headerRows) = ReadHeader(lines, headerEnd);
+        // headerEnd is the index just past the six labels; the first label's 1-based row is
+        // therefore headerEnd - ColumnHeaders.Length + 1.
+        headerRows = headerRows with { ColumnHeader = headerEnd - ColumnHeaders.Length + 1 };
 
         var parsed = new List<AramcoBidLine>();
         var index = headerEnd;
+
+        // Anything printed between the column labels and the first record is the buyer's
+        // instruction to bidders — CIF/DDP alternatives, packing lists. It is kept verbatim
+        // and travels with the lead as evidence; it is not a line and never becomes one.
+        var firstRecord = NextRecordStart(lines, headerEnd);
+        var note = firstRecord > headerEnd
+            ? string.Join("\n", lines.Skip(headerEnd).Take(firstRecord - headerEnd))
+            : null;
 
         while (index < lines.Count)
         {
@@ -142,11 +174,13 @@ public static partial class AramcoBidListParser
             string unit;
             string qtyText;
             int fieldEnd;
+            int shipToRow;
 
             if (UnitToken().IsMatch(lines[start + 2]))
             {
                 // Ship To omitted: item, unit, quantity.
                 shipTo = null;
+                shipToRow = 0;
                 unit = lines[start + 2];
                 qtyText = start + 3 < lines.Count ? lines[start + 3] : string.Empty;
                 fieldEnd = start + 4;
@@ -155,6 +189,7 @@ public static partial class AramcoBidListParser
             {
                 // Ship To present: item, plant, unit, quantity.
                 shipTo = lines[start + 2];
+                shipToRow = start + 3;
                 unit = lines[start + 3];
                 qtyText = lines[start + 4];
                 fieldEnd = start + 5;
@@ -181,7 +216,12 @@ public static partial class AramcoBidListParser
             if (description.Length == 0)
                 return Empty($"Item {itemNo} carries no description.");
 
-            parsed.Add(new AramcoBidLine(bidLine, itemNo, shipTo ?? string.Empty, unit, qty, description));
+            // 1-based rows: the index of each value plus one. Unit and quantity are the two
+            // lines just before the description, whether or not Ship To was printed.
+            var rows = new AramcoBidLineRows(
+                BidLine: start + 1, ItemNo: start + 2, ShipTo: shipToRow,
+                ReqUnit: fieldEnd - 1, ReqQty: fieldEnd, Description: fieldEnd + 1);
+            parsed.Add(new AramcoBidLine(bidLine, itemNo, shipTo ?? string.Empty, unit, qty, description, rows, qtyText));
             index = stop;
         }
 
@@ -197,7 +237,7 @@ public static partial class AramcoBidListParser
                 $"The document contains {codes} material number(s) but {parsed.Count} record(s) "
                 + "were read; the layout is not the one this template expects.");
 
-        return new AramcoBidList(parsed, bidno, vendor, buyer, bidDate, bidClose, null);
+        return new AramcoBidList(parsed, bidno, vendor, buyer, bidDate, bidClose, null, headerRows, vendorName, note);
     }
 
     /// <summary>
@@ -240,11 +280,12 @@ public static partial class AramcoBidListParser
     /// offset past the label row. Every field is optional: a missing buyer name is not a reason
     /// to refuse a document whose line items are perfectly readable.
     /// </summary>
-    private static (string? Bidno, string? Vendor, string? Buyer, DateOnly? Date, DateOnly? Close)
+    private static (string? Bidno, string? Vendor, string? VendorName, string? Buyer, DateOnly? Date, DateOnly? Close, AramcoBidListRows Rows)
         ReadHeader(List<string> lines, int limit)
     {
-        string? bidno = null, vendor = null, buyer = null;
+        string? bidno = null, vendor = null, vendorName = null, buyer = null;
         DateOnly? date = null, close = null;
+        int bidnoRow = 0, dateRow = 0, closeRow = 0, buyerRow = 0;
 
         var labels = lines.Take(limit).ToList();
         var anchor = labels.FindIndex(l => l.Equals("Vendor Code", StringComparison.OrdinalIgnoreCase));
@@ -252,16 +293,39 @@ public static partial class AramcoBidListParser
         {
             // Vendor Code | Vendname | Bidno | Bid Date | Bid Close  →  five values follow.
             vendor = Value(labels, anchor + 5);
+            vendorName = Value(labels, anchor + 6);
             bidno  = Value(labels, anchor + 7);
             date   = Date(Value(labels, anchor + 8));
             close  = Date(Value(labels, anchor + 9));
+            // 1-based rows of the values that were read; a blank stays 0.
+            if (bidno is not null) bidnoRow = anchor + 8;
+            if (date is not null) dateRow = anchor + 9;
+            if (close is not null) closeRow = anchor + 10;
         }
 
+        // The buyer's name sits in a label block — "Address | Buyer | Buyer Tel" on every real
+        // print — whose values follow in the same order. Reading a fixed two lines past the
+        // label landed on the ADDRESS ("Saudi Arabia") and every lead named the country as
+        // its buyer. The value is the block's values start plus the label's position in it.
         var buyerLabel = labels.FindIndex(l => l.Equals("Buyer", StringComparison.OrdinalIgnoreCase));
-        if (buyerLabel >= 0 && buyerLabel + 2 < labels.Count) buyer = Value(labels, buyerLabel + 2);
+        if (buyerLabel >= 0)
+        {
+            var blockStart = buyerLabel;
+            while (blockStart > 0 && IsBuyerBlockLabel(labels[blockStart - 1])) blockStart--;
+            var blockEnd = buyerLabel + 1;
+            while (blockEnd < labels.Count && IsBuyerBlockLabel(labels[blockEnd])) blockEnd++;
+            var valueIndex = blockEnd + (buyerLabel - blockStart);
+            buyer = Value(labels, valueIndex);
+            if (buyer is not null) buyerRow = valueIndex + 1;
+        }
 
-        return (bidno, vendor, buyer, date, close);
+        return (bidno, vendor, vendorName, buyer, date, close, new AramcoBidListRows(bidnoRow, buyerRow, dateRow, closeRow, 0));
     }
+
+    private static bool IsBuyerBlockLabel(string line) =>
+        line.Equals("Address", StringComparison.OrdinalIgnoreCase)
+        || line.Equals("Buyer", StringComparison.OrdinalIgnoreCase)
+        || line.Equals("Buyer Tel", StringComparison.OrdinalIgnoreCase);
 
     private static string? Value(List<string> lines, int index) =>
         index >= 0 && index < lines.Count && lines[index].Length > 0 ? lines[index] : null;

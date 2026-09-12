@@ -276,6 +276,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             SupplierNameOnDocument = lead.SupplierNameOnDocument,
             RfqNumber = lead.Rfqno,
             BuyerPersonName = lead.BuyersName,
+            Passages = Passages(lead),
             TenantSelfNameKeys = selfNames,
             TenantSelfDomains = tenantMailboxes
         };
@@ -285,6 +286,50 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     /// RFC-parses an address out of either shape ("Name &lt;a@b&gt;" or "a@b") and lowercases it.
     /// Returns null for anything that is not a single deliverable address.
     /// </summary>
+    /// <summary>
+    /// The places a buyer writes its own name on a request, whatever printed it: the delivery
+    /// address and storage locations are ABOUT the buyer; item text may merely mention one.
+    /// Bounded, because a 1,500-line print states a location on every line.
+    /// </summary>
+    internal static IReadOnlyList<DocumentPassage> Passages(Lead lead)
+    {
+        const int maxPassages = 120;
+        const int maxChars = 600;
+        var passages = new List<DocumentPassage>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Add(string where, string? text, bool namesTheBuyer)
+        {
+            if (string.IsNullOrWhiteSpace(text) || passages.Count >= maxPassages) return;
+            var trimmed = text.Trim();
+            if (trimmed.Length > maxChars) trimmed = trimmed[..maxChars];
+            if (!seen.Add(trimmed)) return;
+            passages.Add(new DocumentPassage(where, trimmed, namesTheBuyer));
+        }
+
+        Add("delivery address", lead.DeliveryLocation, namesTheBuyer: true);
+        foreach (var item in lead.LeadItems ?? [])
+        {
+            Add("storage location", item.StorageLocation, namesTheBuyer: true);
+            var extra = ExtraFieldsJson.Deserialize(item.ExtraFields);
+            if (extra is not null)
+            {
+                foreach (var (label, value) in extra)
+                {
+                    var aboutTheBuyer = label.Contains("location", StringComparison.OrdinalIgnoreCase)
+                        || label.Contains("deliver", StringComparison.OrdinalIgnoreCase)
+                        || label.Contains("ship", StringComparison.OrdinalIgnoreCase)
+                        || label.Contains("site", StringComparison.OrdinalIgnoreCase)
+                        || label.Contains("plant", StringComparison.OrdinalIgnoreCase);
+                    Add(aboutTheBuyer ? $"{label.ToLowerInvariant()} field" : "item text", value, aboutTheBuyer);
+                }
+            }
+            Add("item text", item.ItemText, namesTheBuyer: false);
+            Add("item text", item.MaterialPotext, namesTheBuyer: false);
+        }
+        return passages;
+    }
+
     internal static string? ParseAddress(string? value)
     {
         var trimmed = value?.Trim();
@@ -325,6 +370,9 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             ? $"{portalKey}|{supplierAccountKey}"
             : string.Empty;
         var hasRfq = !string.IsNullOrWhiteSpace(evidence.RfqNumber);
+        // Every name a profile or a reviewer has taught, so the document's passages can be
+        // searched for them. Bounded by the same cap as the rest of the corpus.
+        var searchNames = evidence.Passages.Count > 0;
 
         // Only active customers of this tenant can ever be linked.
         var identifiers = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
@@ -337,7 +385,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                 (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
                 (i.IdentifierType == CustomerIdentifierType.TaxRegistration && taxRegistrations.Contains(i.NormalizedValue)) ||
                 ((i.IdentifierType == CustomerIdentifierType.Alias || i.IdentifierType == CustomerIdentifierType.CustomerName)
-                    && nameKey != "" && i.NormalizedValue == nameKey) ||
+                    && ((nameKey != "" && i.NormalizedValue == nameKey) || (searchNames && i.IsVerified))) ||
                 (i.IdentifierType == CustomerIdentifierType.PortalAccount
                     && portalAccountKey != "" && i.NormalizedValue == portalAccountKey) ||
                 (i.IdentifierType == CustomerIdentifierType.RfqNumberPattern && hasRfq))

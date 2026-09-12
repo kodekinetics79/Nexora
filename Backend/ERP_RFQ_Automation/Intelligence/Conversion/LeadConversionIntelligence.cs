@@ -280,11 +280,15 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             // details and must never be used as identity fallbacks.
             var revisionLine = revisionLines.SingleOrDefault(line => line.LeadItemId == item.Id);
             if (revisionLine is null) continue;
-            var part = FirstValue(item.ManufacturerPartNumber, item.ItemMaterialCode);
+            // The buyer's material number first (it is what a trading house keys its catalogue
+            // by), the maker's number as the alternate; either may be the one the catalogue holds.
+            var part = FirstValue(item.ItemMaterialCode, item.ManufacturerPartNumber);
+            var alternates = new[] { item.ManufacturerPartNumber, item.ItemMaterialCode, item.AlternatePartNumber }
+                .Where(value => !string.IsNullOrWhiteSpace(value) && value!.Trim() != part).Select(value => value!.Trim()).Distinct().ToList();
             var description = FirstValue(item.ProductShortDescription, item.ProductShortName, item.ItemText);
             var resolution = await _productResolver.ResolveAsync(new ProductResolutionRequest(
                 businessUnitId, revisionId.Value, revisionLine.Id, part, item.ManufacturerName, description,
-                [new ProductResolutionEvidence("canonical-lead-line", $"lead:{leadId}:item:{item.Id}", part)]), ct);
+                [new ProductResolutionEvidence("canonical-lead-line", $"lead:{leadId}:item:{item.Id}", part)], alternates), ct);
             var matches = resolution.RankedCandidates.Take(MaxMatchesPerLine).Select(candidate => new ProductMatch
             {
                 ProductId = candidate.ProductId,
@@ -294,6 +298,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 Score = candidate.Confidence,
                 Reason = candidate.Reason
             }).ToList();
+            // An empty answer from the resolver is not an authority; the code-and-name scoring
+            // below still gets its turn. Recording the empty result as final is how a product
+            // sitting in the catalogue under the line's own material number read "No catalog
+            // match found" while the decision brief, on the same data, said it was in stock.
+            if (matches.Count == 0) continue;
             result[item.Id] = new AuthoritativeMatch(matches,
                 resolution.DecisionState == ProductResolutionDecisionState.AutoLinked
                     ? resolution.ResolvedProductId : null);

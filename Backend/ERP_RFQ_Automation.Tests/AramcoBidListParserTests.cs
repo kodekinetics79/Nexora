@@ -72,6 +72,24 @@ public sealed class AramcoBidListParserTests
     }
 
     [Fact]
+    public void A_dummy_material_code_is_an_item_number()
+    {
+        // A Saudi Electricity list writes "DM10" for free-text items with no catalogue number.
+        var result = AramcoBidListParser.Parse(Doc(
+            "10", "DM10", "PC", "10",
+            "Cable Terminations Kits 240MM Raychem Termination Kit : Heat shrink, straight, 34.5 KV",
+            "20", "DM10", "PC", "10",
+            "Cable Terminations Kits 150MM Raychem Termination Kit : Heat shrink, straight, 34.5 KV"));
+
+        Assert.True(result.IsTrustworthy, result.Rejection);
+        Assert.Equal(2, result.Lines.Count);
+        Assert.All(result.Lines, line => Assert.Equal("DM10", line.ItemNo));
+        Assert.Equal(new[] { "10", "20" }, result.Lines.Select(line => line.BidLine));
+        Assert.Equal(10m, result.Lines[0].ReqQty);
+        Assert.StartsWith("Cable Terminations Kits 240MM", result.Lines[0].Description);
+    }
+
+    [Fact]
     public void A_record_with_no_ship_to_is_read_not_refused()
     {
         // Real documents leave Ship To blank. A fixed five-value record read the unit as a

@@ -4,22 +4,31 @@ using System.Globalization;
 using System.Linq;
 using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Extraction.Templates;
 using ERP_RFQ_Automation.Extraction.Quantities;
 
 namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 
 public interface ICanonicalRfqNormalizer
 {
-    CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId);
+    /// <param name="receivedOn">
+    /// When the document arrived. The one thing it decides: an ambiguous closing date whose
+    /// day-first reading was already past at arrival, while its month-first reading was still to
+    /// come, is read month-first (a live tender does not close before it is received).
+    /// </param>
+    CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId, DateTime? receivedOn = null);
 }
 
 public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
 {
-    public CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId)
+    public CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId, DateTime? receivedOn = null)
     {
         var result = new CanonicalRfqImportResult();
+        var arrived = (receivedOn ?? DateTime.UtcNow).Date;
         var materialRows = rows
-            .Where(r => HasAnyValue(r.RfqNo, r.BuyerName, r.ProductName, r.Quantity, r.UnitPrice, r.Currency))
+            // Currency is deliberately not a sign of a line: a document-level "Currency: USD" is
+            // stamped onto every row, junk rows included, before this filter runs.
+            .Where(r => HasAnyValue(r.RfqNo, r.BuyerName, r.ProductName, r.Quantity, r.UnitPrice))
             .ToList();
 
         var duplicateKeys = materialRows
@@ -43,11 +52,15 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 UnmappedHeaders = new Dictionary<string, string>(first.UnmappedHeaderLabels, StringComparer.Ordinal)
             };
 
+            ResolveDateOrder(document, arrived);
+
             // What THIS document states, decided from the document's own rows before any
             // line is judged. See CanonicalValue.StatedInDocument for why the review signal
             // is worthless without it.
             var stated = StatedFields(group);
             MarkHeaderExpectations(document, stated);
+
+            var customerNumbered = CustomerLineNumbersUsable(group);
 
             var lineOrdinal = 0;
             foreach (var row in group)
@@ -58,7 +71,11 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 lineOrdinal++;
                 var line = new CanonicalRfqLineItem
                 {
-                    LineItemNo = TextValue(lineOrdinal.ToString(CultureInfo.InvariantCulture), row, "row", CanonicalValueKind.Derived, 1.0m),
+                    // The buyer's own line number when the document states one for every line,
+                    // otherwise ours. See RfqSpreadsheetRow.CustomerLineNumber.
+                    LineItemNo = customerNumbered
+                        ? TextValue(row.CustomerLineNumber, row, "row")
+                        : TextValue(lineOrdinal.ToString(CultureInfo.InvariantCulture), row, "row", CanonicalValueKind.Derived, 1.0m),
                     ProductName = RequiredText(row.ProductName, row, RfqSpreadsheetFields.ProductName, "PRODUCT_NAME", "Product name is required."),
                     Quantity = QuantityValue(row.Quantity, row, RfqSpreadsheetFields.Quantity, "QUANTITY"),
                     UnitOfMeasure = TextValue(row.UnitOfMeasure, row, RfqSpreadsheetFields.UnitOfMeasure),
@@ -66,12 +83,18 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                     Currency = TextValue(row.Currency, row, RfqSpreadsheetFields.Currency),
                     ManufacturerName = TextValue(row.ManufacturerName, row, RfqSpreadsheetFields.ManufacturerName),
                     ManufacturerPartNumber = TextValue(row.ManufacturerPartNumber, row, RfqSpreadsheetFields.ManufacturerPartNumber),
+                    CustomerMaterialCode = TextValue(row.CustomerMaterialCode, row, RfqSpreadsheetFields.CustomerMaterialCode),
                     LeadTimeDays = IntValue(row.LeadTimeDays, row, RfqSpreadsheetFields.LeadTimeDays, true, "LEAD_TIME_DAYS"),
                     ItemText = TextValue(row.ItemText, row, RfqSpreadsheetFields.ItemText),
+                    MaterialPoText = TextValue(row.MaterialPoText, row, RfqSpreadsheetFields.MaterialPoText),
                     ExtraFields = row.UnmappedColumns.Count == 0
                         ? null
                         : new Dictionary<string, string>(row.UnmappedColumns, StringComparer.Ordinal)
                 };
+
+                CanonicaliseCurrency(line.Currency);
+                ReadManufacturingPartText(line, row);
+                ReadMaterialPoText(line, row);
 
                 var lineKey = BuildLineKey(row);
                 if (duplicateKeys.TryGetValue(lineKey, out var duplicateRows))
@@ -306,6 +329,286 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         return value;
     }
 
+    /// <summary>Marker left on an ambiguous date read month-first on the document's own evidence.</summary>
+    private const string MonthFirstTransformation = "read_month_first";
+
+    /// <summary>
+    /// One document, one date order. "10/8/2026" is read day-first by convention, and that is
+    /// wrong for a sourcing portal that prints month-first. The document itself can say which,
+    /// in two ways, tried in this order:
+    /// <list type="number">
+    /// <item>Its own issue date. A tender is published before it closes, so the order under which
+    /// the publish date precedes the closing date is the order the document is written in. When
+    /// only one order satisfies that, it is taken.</item>
+    /// <item>Its arrival. A live tender does not close before it is received, so when the
+    /// day-first closing date was already past on the day the document arrived and the
+    /// month-first one was still to come, the document is month-first.</item>
+    /// </list>
+    /// Every other ambiguous date on the document is then read the same way, and the closing
+    /// date stays flagged for the reviewer, with the reason.
+    /// </summary>
+    private static void ResolveDateOrder(CanonicalRfqDocument document, DateTime arrived)
+    {
+        var closing = document.BidClosingDate;
+        if (closing.Kind != CanonicalValueKind.Normalized)
+            return;
+        if (!IsAmbiguous(closing))
+        {
+            // The closing date could only be read one way ("9/16/2026" has no 16th month), so
+            // it is certain — but the issue date beside it may still be ambiguous, and a document
+            // is not issued after it closes. "Publish time 9/10/2026, Due date 9/16/2026" read as
+            // issued 9 October and closing 16 September, and the ledger refused the lead for a
+            // closing date before its issue date. Read the issue date in the only order that
+            // keeps it before the close.
+            var issued = document.ReceivedDate;
+            if (IsAmbiguous(issued) && issued.Kind == CanonicalValueKind.Normalized
+                && issued.Value.Date > closing.Value.Date
+                && RfqDateParser.SwapDayAndMonth(issued.Value) is { } issuedMonthFirst
+                && issuedMonthFirst.Date <= closing.Value.Date)
+                ReadMonthFirst(issued,
+                    $"{MonthFirstTransformation}: read day-first, the issue date ({issued.Value:d MMMM yyyy}) would fall after the closing date ({closing.Value:d MMMM yyyy}), which is certain; read month-first it was issued on {issuedMonthFirst:d MMMM yyyy}");
+            return;
+        }
+        var dayFirst = closing.Value;
+        if (RfqDateParser.SwapDayAndMonth(dayFirst) is not { } monthFirst)
+            return;
+
+        string? reason = null;
+
+        var received = document.ReceivedDate;
+        if (received.Kind == CanonicalValueKind.Normalized)
+        {
+            var receivedDayFirst = received.Value;
+            var receivedMonthFirst = IsAmbiguous(received) ? RfqDateParser.SwapDayAndMonth(received.Value) ?? received.Value : received.Value;
+            var dayFirstConsistent = receivedDayFirst.Date <= dayFirst.Date;
+            var monthFirstConsistent = receivedMonthFirst.Date <= monthFirst.Date;
+            if (dayFirstConsistent && !monthFirstConsistent)
+                return;
+            if (monthFirstConsistent && !dayFirstConsistent)
+                reason = $"{MonthFirstTransformation}: read day-first, the closing date ({dayFirst:d MMMM yyyy}) would come before the document's own issue date ({receivedDayFirst:d MMMM yyyy}); read month-first it closes on {monthFirst:d MMMM yyyy}, after it was issued on {receivedMonthFirst:d MMMM yyyy}";
+        }
+
+        if (reason is null)
+        {
+            if (dayFirst.Date >= arrived || monthFirst.Date < arrived)
+                return;
+            reason = $"{MonthFirstTransformation}: the day-first reading ({dayFirst:d MMMM yyyy}) was already past when the document arrived ({arrived:d MMMM yyyy}); the month-first reading ({monthFirst:d MMMM yyyy}) is the one that can still close";
+        }
+
+        ReadMonthFirst(closing, reason);
+        foreach (var other in new[] { document.ReceivedDate, document.RequiredDeliveryDate })
+            if (IsAmbiguous(other) && other.Kind == CanonicalValueKind.Normalized)
+                ReadMonthFirst(other, $"{MonthFirstTransformation}: same order as this document's closing date");
+    }
+
+    private static void ReadMonthFirst(CanonicalValue<DateTime> value, string reason)
+    {
+        if (RfqDateParser.SwapDayAndMonth(value.Value) is not { } swapped) return;
+        value.Value = DateTime.SpecifyKind(swapped, value.Value.Kind);
+        value.Transformations.Add(reason);
+    }
+
+    private static bool WasReadMonthFirst(CanonicalValue<DateTime> value)
+        => value.Transformations.Any(t => t.StartsWith(MonthFirstTransformation, StringComparison.Ordinal));
+
+    /// <summary>The buyer's own numbering is used only when every line of the document carries a distinct one.</summary>
+    private static bool CustomerLineNumbersUsable(IEnumerable<RfqSpreadsheetRow> rows)
+    {
+        var numbers = rows.Select(r => r.CustomerLineNumber?.Trim()).ToList();
+        return numbers.Count > 0
+               && numbers.All(n => !string.IsNullOrEmpty(n))
+               && numbers.Distinct(StringComparer.Ordinal).Count() == numbers.Count;
+    }
+
+    /// <summary>"US Dollar" → "USD", recorded as a transformation; an unknown word is kept as written.</summary>
+    private static void CanonicaliseCurrency(CanonicalValue<string> currency)
+    {
+        if (currency.Value is null) return;
+        var code = CurrencyNames.ToIsoCode(currency.Value);
+        if (code is null || string.Equals(code, currency.Value, StringComparison.Ordinal)) return;
+        currency.Transformations.Add($"currency_name_to_iso: \"{currency.Value}\" read as {code}");
+        currency.Value = code;
+    }
+
+    /// <summary>
+    /// An SAP sourcing export packs the buyer's APPROVED makers and their part numbers into one
+    /// "Manufacturing Part Text" cell (see <see cref="ManufacturingPartText"/>). A line that names
+    /// exactly one maker there has its manufacturer stated, and it is read as stated; a line that
+    /// names several is a choice the buyer allows, so the list travels with the line for the
+    /// reviewer and the manufacturer field stays empty rather than guessing between them. The
+    /// makers' own part numbers travel with the line too; the buyer's material number keeps the
+    /// part-number field it has always had.
+    /// </summary>
+    /// <summary>Standing instructions kept beside the line, bounded: they repeat on every line of a print.</summary>
+    private const int MaxRetainedInstructionChars = 600;
+
+    /// <summary>
+    /// SAP's "Material PO text" carries three things in one cell — the specification, the
+    /// maker the buyer references with their part number, and the buyer's standing
+    /// instruction. A quote needs them apart: the specification stays as the line's long
+    /// text, the maker and part number land on the line (derived, and only when the line does
+    /// not state them itself), and the instruction is kept beside the line under its own
+    /// name rather than buried in the specification.
+    /// </summary>
+    private static void ReadMaterialPoText(CanonicalRfqLineItem line, RfqSpreadsheetRow row)
+    {
+        var raw = line.MaterialPoText.Value;
+        string? sourceKey = null;
+        if (string.IsNullOrWhiteSpace(raw) && line.ExtraFields is not null)
+        {
+            // The text may have arrived under a label the vocabulary did not map to the field.
+            var source = line.ExtraFields.FirstOrDefault(pair =>
+                RfqHeaderVocabulary.Normalize(pair.Key) is "materialpotext" or "potext" or "materialpurchaseordertext");
+            if (source.Key is not null) { raw = source.Value; sourceKey = source.Key; }
+        }
+        if (string.IsNullOrWhiteSpace(raw) || !Extraction.Templates.SapMaterialPoText.Recognises(raw)) return;
+
+        var reading = Extraction.Templates.SapMaterialPoText.Read(raw);
+        if (reading.IsEmpty) return;
+
+        if (reading.Specification.Length > 0)
+        {
+            if (line.MaterialPoText.Kind == CanonicalValueKind.Missing)
+            {
+                line.MaterialPoText.Kind = CanonicalValueKind.Extracted;
+                line.MaterialPoText.Confidence = 1.0m;
+                line.MaterialPoText.ValidationStatus = ValidationStatus.Valid;
+                line.MaterialPoText.StatedInDocument = true;
+                line.MaterialPoText.Evidence.Add(Evidence(row, "row", raw));
+            }
+            line.MaterialPoText.OriginalValue ??= raw;
+            line.MaterialPoText.Value = reading.Specification;
+            if (reading.Instructions is not null)
+                line.MaterialPoText.Transformations.Add("po_text_split: the buyer's standing instruction was separated from the specification");
+        }
+
+        var extras = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (reading.Makers.Count > 1)
+            extras["Other makers named"] = string.Join("; ", reading.Makers.Skip(1)
+                .Select(m => m.PartNumber is null ? m.Name : $"{m.Name} P/N {m.PartNumber}"));
+        if (reading.Instructions is not null)
+            extras["Buyer's standing instructions"] = reading.Instructions.Length <= MaxRetainedInstructionChars
+                ? reading.Instructions : reading.Instructions[..MaxRetainedInstructionChars] + " …";
+        if (line.ExtraFields is not null)
+            foreach (var (key, value) in line.ExtraFields)
+                if (key != sourceKey) extras.TryAdd(key, value);     // the raw cell now lives on the line itself
+        line.ExtraFields = extras.Count == 0 ? null : extras;
+
+        var first = reading.Makers.FirstOrDefault();
+        if (first is null) return;
+        if (line.ManufacturerName.Kind == CanonicalValueKind.Missing)
+            Derive(line.ManufacturerName, first.Name, raw, row, $"read_from_material_po_text: the buyer references {first.Name}");
+        var number = first.PartNumber ?? first.Model;
+        if (number is not null && line.ManufacturerPartNumber.Kind == CanonicalValueKind.Missing)
+            Derive(line.ManufacturerPartNumber, number, raw, row, $"read_from_material_po_text: {first.Name}'s number as the buyer wrote it");
+    }
+
+    private static void Derive(CanonicalValue<string> target, string value, string source, RfqSpreadsheetRow row, string note)
+    {
+        target.Value = value;
+        target.OriginalValue = source;
+        target.Kind = CanonicalValueKind.Derived;
+        target.Confidence = 0.85m;
+        target.ValidationStatus = ValidationStatus.Valid;
+        target.StatedInDocument = true;
+        target.Transformations.Add(note);
+        target.Evidence.Clear();
+        target.Evidence.Add(Evidence(row, RfqSpreadsheetFields.MaterialPoText, value));
+    }
+
+    /// <summary>"BENTLY-NEVADA LLC (US): P/N 3500/33-02-02, model 3500/33, replaces 3500/33-02-01, WILL SHIP AS PARTS 149986-01".</summary>
+    private static string DescribeVendor(ManufacturingPartText.ApprovedVendor vendor)
+    {
+        var facts = new List<string>();
+        if (vendor.PartNumber is not null) facts.Add($"P/N {vendor.PartNumber}");
+        if (vendor.ModelNumber is not null && (vendor.PartNumber is null || !string.Equals(vendor.ModelNumber, vendor.PartNumber, StringComparison.OrdinalIgnoreCase)))
+            facts.Add($"model {vendor.ModelNumber}");
+        if (vendor.SupersededNumbers.Count > 0) facts.Add($"replaces {string.Join(", ", vendor.SupersededNumbers)}");
+        if (vendor.Remarks is not null) facts.Add(vendor.Remarks);
+        var who = vendor.Country is null ? vendor.Maker : $"{vendor.Maker} ({vendor.Country})";
+        if (vendor.Vendor is not null) who += $" via {vendor.Vendor}";
+        return facts.Count == 0 ? who : $"{who}: {string.Join(", ", facts)}";
+    }
+
+    private static void ReadManufacturingPartText(CanonicalRfqLineItem line, RfqSpreadsheetRow row)
+    {
+        if (line.ExtraFields is null) return;
+        var source = line.ExtraFields.FirstOrDefault(pair =>
+            RfqHeaderVocabulary.Normalize(pair.Key) is "manufacturingparttext" or "manufacturerparttext" or "mfrparttext");
+        if (source.Key is null || !ManufacturingPartText.Recognises(source.Value)) return;
+
+        var reading = ManufacturingPartText.Read(source.Value);
+        if (reading.IsEmpty) return;
+
+        // What was read from the text goes FIRST, and the raw text is shortened. The line's
+        // extra fields are stored under a 2 KB cap that drops entries from the end, and a cell
+        // naming four approved makers runs past it on its own: on two real bid lists the
+        // approved-maker list and the part numbers were computed and then silently dropped
+        // from 45 and 50 lines. The full text stays in the retained document.
+        var ordered = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (reading.Manufacturers.Count > 1)
+            ordered["Approved manufacturers"] = reading.Vendors.Count > 0
+                ? string.Join("; ", reading.Vendors.Select(DescribeVendor))
+                : string.Join("; ", reading.Manufacturers);
+        if (reading.PartNumbers.Count > 0)
+            ordered["Manufacturer part numbers"] = string.Join("; ", reading.PartNumbers);
+        if (reading.SupersededNumbers.Count > 0)
+            ordered["Superseded part numbers"] = string.Join("; ", reading.SupersededNumbers);
+        foreach (var (key, value) in line.ExtraFields)
+            ordered[key] = key == source.Key && value.Length > MaxRetainedPartTextChars
+                ? value[..MaxRetainedPartTextChars] + " …"
+                : value;
+        line.ExtraFields = ordered;
+
+        if (reading.Manufacturers.Count == 1 && line.ManufacturerName.Kind == CanonicalValueKind.Missing)
+        {
+            var maker = reading.Manufacturers[0];
+            line.ManufacturerName.Value = maker;
+            line.ManufacturerName.OriginalValue = source.Value;
+            line.ManufacturerName.Kind = CanonicalValueKind.Extracted;
+            line.ManufacturerName.Confidence = 1.0m;
+            line.ManufacturerName.ValidationStatus = ValidationStatus.Valid;
+            line.ManufacturerName.Transformations.Add($"read_from_manufacturing_part_text: \"{source.Key}\" names one approved maker");
+            line.ManufacturerName.Evidence.Clear();
+            line.ManufacturerName.Evidence.Add(Evidence(row, "row", maker));
+        }
+
+        // Several approved vendors naming the same number: the buyer wants that maker part,
+        // whoever supplies it. The number is certain even though the maker is not one name.
+        if (reading.Manufacturers.Count > 1 && reading.AgreedPartNumber is { } agreed
+            && line.ManufacturerPartNumber.Kind == CanonicalValueKind.Missing)
+        {
+            line.ManufacturerPartNumber.Value = agreed;
+            line.ManufacturerPartNumber.OriginalValue = source.Value;
+            line.ManufacturerPartNumber.Kind = CanonicalValueKind.Derived;
+            line.ManufacturerPartNumber.Confidence = 0.9m;
+            line.ManufacturerPartNumber.ValidationStatus = ValidationStatus.Valid;
+            line.ManufacturerPartNumber.Transformations.Add($"read_from_manufacturing_part_text: every approved vendor in \"{source.Key}\" states this number");
+            line.ManufacturerPartNumber.Evidence.Clear();
+            line.ManufacturerPartNumber.Evidence.Add(Evidence(row, "row", agreed));
+        }
+
+        // One approved maker and one part number: that IS the part number, not a list to
+        // keep beside the line. Aramco's prints state it this way on most lines, and a line
+        // with a maker but an empty part-number field made a rep open the extras to find it.
+        if (reading.Manufacturers.Count == 1 && reading.PartNumbers.Count == 1
+            && line.ManufacturerPartNumber.Kind == CanonicalValueKind.Missing)
+        {
+            var part = reading.PartNumbers[0];
+            line.ManufacturerPartNumber.Value = part;
+            line.ManufacturerPartNumber.OriginalValue = source.Value;
+            line.ManufacturerPartNumber.Kind = CanonicalValueKind.Extracted;
+            line.ManufacturerPartNumber.Confidence = 1.0m;
+            line.ManufacturerPartNumber.ValidationStatus = ValidationStatus.Valid;
+            line.ManufacturerPartNumber.Transformations.Add($"read_from_manufacturing_part_text: \"{source.Key}\" names one part number for the one approved maker");
+            line.ManufacturerPartNumber.Evidence.Clear();
+            line.ManufacturerPartNumber.Evidence.Add(Evidence(row, "row", part));
+        }
+    }
+
+    /// <summary>The raw manufacturing part text kept on the line; the reading above carries what matters.</summary>
+    private const int MaxRetainedPartTextChars = 600;
+
     /// <summary>Marker left on a date the parser could read but not disambiguate.</summary>
     private const string AmbiguousDateTransformation = "ambiguous_day_month";
 
@@ -318,7 +621,10 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     /// <summary>The reviewer-facing wording, identical to the customer-purchase-order path.</summary>
     private static string AmbiguityMessage(CanonicalValue<DateTime> value, string field)
         => $"\"{value.OriginalValue}\" is ambiguous — both parts of the {field} are 12 or lower, so it could be "
-           + "either day/month or month/day. It has been read day-first; confirm it.";
+           + "either day/month or month/day. "
+           + (WasReadMonthFirst(value)
+               ? $"It has been read month-first ({value.Value:d MMMM yyyy}) on the document's own evidence; confirm it."
+               : "It has been read day-first; confirm it.");
 
     /// <summary>
     /// Reads a line's demand quantity through the shared <see cref="QuantityParser"/>.
@@ -515,6 +821,8 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         RfqSpreadsheetFields.DeliveryLocation => "M",
         RfqSpreadsheetFields.RequiredDeliveryDate => "N",
         RfqSpreadsheetFields.AgreementReference => "O",
+        RfqSpreadsheetFields.CustomerMaterialCode => "P",
+        RfqSpreadsheetFields.MaterialPoText => "Q",
         _ => "row"
     };
 
@@ -552,7 +860,8 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             row.BuyerName,
             row.ProductName,
             row.Quantity,
-            row.ManufacturerPartNumber
+            row.ManufacturerPartNumber,
+            row.CustomerMaterialCode
         }.Select(v => (v ?? "").Trim().ToLowerInvariant()));
     }
 
@@ -583,6 +892,8 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             Consider(RfqSpreadsheetFields.Currency, row.Currency);
             Consider(RfqSpreadsheetFields.ManufacturerName, row.ManufacturerName);
             Consider(RfqSpreadsheetFields.ManufacturerPartNumber, row.ManufacturerPartNumber);
+            Consider(RfqSpreadsheetFields.CustomerMaterialCode, row.CustomerMaterialCode);
+            Consider(RfqSpreadsheetFields.MaterialPoText, row.MaterialPoText);
             Consider(RfqSpreadsheetFields.LeadTimeDays, row.LeadTimeDays);
             Consider(RfqSpreadsheetFields.ItemText, row.ItemText);
             Consider(RfqSpreadsheetFields.DeliveryLocation, row.DeliveryLocation);
@@ -627,6 +938,8 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         MarkUnstated(line.Currency, RfqSpreadsheetFields.Currency, stated, resolveToValid: true);
         MarkUnstated(line.ManufacturerName, RfqSpreadsheetFields.ManufacturerName, stated, resolveToValid: true);
         MarkUnstated(line.ManufacturerPartNumber, RfqSpreadsheetFields.ManufacturerPartNumber, stated, resolveToValid: true);
+        MarkUnstated(line.CustomerMaterialCode, RfqSpreadsheetFields.CustomerMaterialCode, stated, resolveToValid: true);
+        MarkUnstated(line.MaterialPoText, RfqSpreadsheetFields.MaterialPoText, stated, resolveToValid: true);
         MarkUnstated(line.LeadTimeDays, RfqSpreadsheetFields.LeadTimeDays, stated, resolveToValid: true);
         MarkUnstated(line.ItemText, RfqSpreadsheetFields.ItemText, stated, resolveToValid: true);
     }

@@ -174,7 +174,6 @@ public sealed class NativeSpreadsheetParserTests
     [Theory]
     [InlineData("Material Code")]
     [InlineData("Item Code")]
-    [InlineData("Part No")]
     [InlineData("Material No")]
     [InlineData("Material Number")]
     [InlineData("Stock Code")]
@@ -182,14 +181,33 @@ public sealed class NativeSpreadsheetParserTests
     [InlineData("SAP Material")]
     [InlineData("Customer Part No")]
     [InlineData("Buyer Part Number")]
-    [InlineData("Catalogue No")]
     public void A_buyer_catalog_number_column_survives_under_any_of_its_headings(string header)
     {
+        // The buyer's OWN number lands on the line as its material code — it is not the maker's
+        // part number, and showing it as one gave the rep a "part number" nobody could look up.
         var rows = Parser.ParseCsv(Csv(
             $"{header},Description,Quantity,UOM",
             "A2A50006470,Gasket spiral wound,4,EA"), "test.csv");
 
-        Assert.Equal("A2A50006470", Assert.Single(rows).ManufacturerPartNumber);
+        var row = Assert.Single(rows);
+        Assert.Equal("A2A50006470", row.CustomerMaterialCode);
+        Assert.Null(row.ManufacturerPartNumber);
+    }
+
+    [Theory]
+    [InlineData("Part No")]
+    [InlineData("Manufacturer Part Number")]
+    [InlineData("MPN")]
+    [InlineData("Catalogue No")]
+    public void A_makers_part_number_column_is_the_part_number(string header)
+    {
+        var rows = Parser.ParseCsv(Csv(
+            $"{header},Description,Quantity,UOM",
+            "3RT2015-1BB41,Contactor,4,EA"), "test.csv");
+
+        var row = Assert.Single(rows);
+        Assert.Equal("3RT2015-1BB41", row.ManufacturerPartNumber);
+        Assert.Null(row.CustomerMaterialCode);
     }
 
     /// <summary>

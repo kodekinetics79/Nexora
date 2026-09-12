@@ -84,6 +84,14 @@ public static class RfqDateParser
         "MM/dd/yyyy", "M/d/yyyy", "M/dd/yyyy", "MM/d/yyyy",
         "dd MMM yyyy", "d MMM yyyy", "MMM d, yyyy", "MMM dd, yyyy",
         "dd MMMM yyyy", "d MMMM yyyy", "MMMM d, yyyy", "MMMM dd, yyyy",
+        // "Sat, 2 Jan, 2027" — how a sourcing portal prints a requested delivery date. The
+        // weekday and the comma after the month made every one of a 1,500-line RFP's delivery
+        // dates "unsupported", so the buyer's requirement was lost on every line.
+        "d MMM, yyyy", "dd MMM, yyyy", "d MMMM, yyyy", "dd MMMM, yyyy",
+        "ddd, d MMM, yyyy", "ddd, dd MMM, yyyy", "ddd, d MMMM, yyyy", "ddd, dd MMMM, yyyy",
+        "ddd, d MMM yyyy", "ddd, dd MMM yyyy", "ddd, d MMMM yyyy", "ddd, dd MMMM yyyy",
+        "dddd, d MMM, yyyy", "dddd, dd MMM, yyyy", "dddd, d MMMM, yyyy", "dddd, dd MMMM, yyyy",
+        "dddd, d MMM yyyy", "dddd, dd MMM yyyy", "dddd, d MMMM yyyy", "dddd, dd MMMM yyyy",
     };
 
     /// <summary>A numeric day/month/year token, used only to test for day-month ambiguity.</summary>
@@ -189,6 +197,24 @@ public static class RfqDateParser
         catch (ArgumentOutOfRangeException)
         {
             // Outside Umm al-Qura's supported range. Unreadable is the honest answer.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The other reading of an ambiguous numeric date: the value with day and month exchanged,
+    /// or null when the exchange is not a real date. A caller that has document-level evidence
+    /// for month-first order (see <c>CanonicalRfqNormalizer</c>) uses this rather than re-parsing.
+    /// </summary>
+    public static DateTime? SwapDayAndMonth(DateTime value)
+    {
+        if (value.Day > 12) return null;
+        try
+        {
+            return new DateTime(value.Year, value.Day, value.Month, value.Hour, value.Minute, value.Second, value.Kind);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
             return null;
         }
     }

@@ -414,6 +414,108 @@ public sealed class CustomerIdentityResolverTests
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    // ── THE NAME THE BUYER WROTE ──────────────────────────────────────────────
+    // A sourcing portal's print names no buyer in a "buyer" field; it names the buyer in the
+    // delivery address and repeats it in the item text. The name is the one thing that survives
+    // the buyer changing portal or ERP, so it must be enough on its own.
+
+    [Fact]
+    public void A_known_customers_name_inside_the_delivery_address_links_the_lead()
+    {
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Test Customer")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10, RfqNumber = "C001835789",
+            Passages = [new DocumentPassage("storage location field", "Saudi Electricity Company-Jizan Area", true)]
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Contains("storage location", outcome.Explanation);
+    }
+
+    [Fact]
+    public void A_rule_an_administrator_entered_on_the_setup_screen_links_the_lead()
+    {
+        // Setup → Routing rules writes Source = MasterData. A portal vendor code entered there
+        // is a deliberate fact about the customer, not a guess.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")], identifiers:
+        [
+            new(1, Sec, CustomerIdentifierType.PortalAccount, "MATERIALS E BIDDING SYSTEM|2004414", true, 0.95m, CustomerIdentifierSources.MasterData),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            CustomerPortalName = "MATERIALS E-BIDDING SYSTEM", SupplierAccountRefOnDocument = "2004414",
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+    }
+
+    [Fact]
+    public void A_taught_alias_in_the_item_text_is_a_suggestion_not_a_link()
+    {
+        // "SEC" in "AFFIX SEC SPECIFIED BARCODE" is a strong hint and a weak proof: item text
+        // may mention a third party. A reviewer taught the alias, so it is offered, not applied.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")], identifiers: [Alias(1, Sec, "SEC")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10, RfqNumber = "C001835789",
+            Passages = [new DocumentPassage("item text", "* FOR THIS ITEM YOU ARE REQUIRED TO AFFIX SEC SPECIFIED BARCODE", false)]
+        }, corpus, Policy);
+
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(Sec, Assert.Single(outcome.Candidates).CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+    }
+
+    [Fact]
+    public void Two_customers_named_in_the_address_leave_the_choice_to_a_person()
+    {
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Jizan Power Holdings")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company c/o Jizan Power Holdings, Jizan", true)]
+        }, corpus, Policy);
+
+        Assert.Equal(LeadCustomerMatchStatuses.Ambiguous, outcome.Status);
+        Assert.Null(outcome.CustomerId);
+    }
+
+    [Fact]
+    public void A_one_word_customer_name_and_a_word_inside_another_word_never_match()
+    {
+        // "Test" is anybody's word; "SEC" inside "SECOND" is not SEC.
+        var corpus = Corpus(customers: [new(OtherCustomer, "Test"), new(Sec, "Saudi Electricity Company")],
+            identifiers: [Alias(1, Sec, "SEC")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "Test site, SECOND FLOOR, Riyadh", true)]
+        }, corpus, Policy);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Empty(outcome.Candidates);
+    }
+
+    [Fact]
+    public void The_tenants_own_name_in_a_passage_is_never_a_customer()
+    {
+        var corpus = Corpus(customers: [new(OtherCustomer, "ALI ZAID AL-QURAISHI & PARTNERS")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "Deliver to ALI ZAID AL-QURAISHI & PARTNERS warehouse, Dammam", true)],
+            TenantSelfNameKeys = ["ALI ZAID AL-QURAISHI & PARTNERS"]
+        }, corpus, Policy);
+
+        Assert.Null(outcome.CustomerId);
+    }
+
     private static CustomerIdentifierSnapshot Alias(long id, long customerId, string normalizedValue) =>
         new(id, customerId, CustomerIdentifierType.Alias, normalizedValue, true, 0.90m,
             CustomerIdentifierSources.LeadReviewLearned);

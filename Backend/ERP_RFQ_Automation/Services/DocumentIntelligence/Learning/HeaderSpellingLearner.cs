@@ -65,6 +65,7 @@ public sealed class HeaderSpellingLearner : IHeaderSpellingLearner
         var candidates = await CandidateLabelsAsync(businessUnitId, lead, ct);
         if (candidates.Count == 0)
             return new HeaderSpellingLearningResult(0, 0, [SkipNoCandidates]);
+        var readFromALabel = await FieldsReadFromARecognisedLabelAsync(businessUnitId, lead, ct);
 
         var matches = new Dictionary<string, (string Field, string Label)>(StringComparer.Ordinal);
         var ambiguous = new HashSet<string>(StringComparer.Ordinal);
@@ -86,13 +87,17 @@ public sealed class HeaderSpellingLearner : IHeaderSpellingLearner
                 matches[spelling] = (field, label);
         }
 
-        if (!string.IsNullOrWhiteSpace(lead.Rfqno))
+        // A field the parser read from a label it already knew teaches nothing: the approved
+        // value merely coincides with some other label's value ("Clarification Deadline" on the
+        // one tender where it equals the closing date), and learning it would re-route the
+        // field on every later document from that customer.
+        if (!string.IsNullOrWhiteSpace(lead.Rfqno) && !readFromALabel.Contains(RfqSpreadsheetFields.RfqNo))
         {
             var wanted = RfqHeaderVocabulary.Normalize(lead.Rfqno);
             Consider(RfqSpreadsheetFields.RfqNo, value => RfqHeaderVocabulary.Normalize(value) == wanted);
         }
 
-        if (lead.BidClosingDate is { } closing)
+        if (lead.BidClosingDate is { } closing && !readFromALabel.Contains(RfqSpreadsheetFields.BidClosingDate))
             Consider(RfqSpreadsheetFields.BidClosingDate, value => RfqDateParser.Read(value).Value?.Date == closing.Date);
 
         var skips = new List<string>();
@@ -179,6 +184,35 @@ public sealed class HeaderSpellingLearner : IHeaderSpellingLearner
                 candidates.TryAdd(label, value);
 
         return candidates;
+    }
+
+    /// <summary>
+    /// Header fields the extraction read deterministically, from a label the vocabulary already
+    /// knew. Evidence written by the anchored model completion carries its own marker and does
+    /// not count: that reading is exactly what a reviewer's confirmation should turn into a
+    /// learned label.
+    /// </summary>
+    private async Task<HashSet<string>> FieldsReadFromARecognisedLabelAsync(long businessUnitId, Lead lead, CancellationToken ct)
+    {
+        var read = new HashSet<string>(StringComparer.Ordinal);
+        if (_db.Model.FindEntityType(typeof(FieldEvidence)) is null || _db.Model.FindEntityType(typeof(CanonicalInquiry)) is null)
+            return read;
+
+        var rows = await (from field in _db.Set<FieldEvidence>().AsNoTracking()
+                          join inquiry in _db.Set<CanonicalInquiry>().AsNoTracking() on field.InquiryId equals inquiry.Id
+                          where inquiry.BusinessUnitId == businessUnitId && inquiry.LeadId == lead.Id
+                                && field.LineItemId == null
+                                && (field.FieldName == "RfqNo" || field.FieldName == "BidClosingDate")
+                                && field.NormalizedValue != null
+                          select new { field.FieldName, field.TransformationsJson })
+            .ToListAsync(ct);
+        foreach (var row in rows)
+        {
+            if (row.TransformationsJson is not null && row.TransformationsJson.Contains("ai_header_completion", StringComparison.Ordinal))
+                continue;
+            read.Add(row.FieldName == "RfqNo" ? RfqSpreadsheetFields.RfqNo : RfqSpreadsheetFields.BidClosingDate);
+        }
+        return read;
     }
 
     private static Dictionary<string, string> ParseDictionary(string? json)

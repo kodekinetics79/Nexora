@@ -121,15 +121,28 @@ public sealed class MacroPolicyAndRejectionTruthTests
     [Fact]
     public async Task Unrecognised_content_names_the_format_the_file_claims_to_be()
     {
-        // The classic case: an HTML or SpreadsheetML export saved with an .xls name.
+        // The classic case: an HTML export saved with a .pdf name. (An HTML page named as an
+        // Office file is no longer a mismatch — sourcing portals export event prints exactly so,
+        // and the document reader reads their tables as it reads a Word document's.)
+        var result = await InspectAsync(
+            Encoding.UTF8.GetBytes("<html><body><table><tr><td>RFQ</td></tr></table></body></html>"),
+            "rfq.pdf");
+
+        Assert.Equal(FileInspectionStatus.Rejected, result.Status);
+        Assert.Equal(DocumentInspectionErrorCodes.DocumentRejected, result.ErrorCode);
+        Assert.Contains(".pdf", result.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("macro", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task An_HTML_export_saved_with_an_Office_name_is_cleared_for_the_reader()
+    {
         var result = await InspectAsync(
             Encoding.UTF8.GetBytes("<html><body><table><tr><td>RFQ</td></tr></table></body></html>"),
             "rfq.xls");
 
-        Assert.Equal(FileInspectionStatus.Rejected, result.Status);
-        Assert.Equal(DocumentInspectionErrorCodes.DocumentRejected, result.ErrorCode);
-        Assert.Contains(".xls", result.Reason, StringComparison.Ordinal);
-        Assert.DoesNotContain("macro", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(FileInspectionStatus.Cleared, result.Status);
+        Assert.Equal("text/html", result.DetectedContentType);
     }
 
     [Fact]
@@ -183,7 +196,7 @@ public sealed class MacroPolicyAndRejectionTruthTests
         yield return (CreateOleCompound("WordDocument"), "mislabelled.xls");
         yield return (CreateOleCompound("Workbook"), "mislabelled.doc");
         yield return ("%PDF-1.7\n"u8.ToArray(), "renamed.xls");
-        yield return (Encoding.UTF8.GetBytes("<html><body>quote</body></html>"), "export.xls");
+        yield return (Encoding.UTF8.GetBytes("<html><body>quote</body></html>"), "export.pdf");
         yield return (Convert.FromHexString("D0CF11E0A1B11AE10000"), "truncated.xls");
         yield return ([0x50, 0x4B, 0x03, 0x04, 0x01], "broken.xlsx");
         yield return (CreateOpenXmlPackage(

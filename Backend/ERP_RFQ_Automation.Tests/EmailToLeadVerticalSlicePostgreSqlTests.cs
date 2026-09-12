@@ -1063,7 +1063,7 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
 
         public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
             IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
-            CancellationToken ct = default, string? documentNarrative = null)
+            CancellationToken ct = default, string? documentNarrative = null, DateTime? receivedOn = null)
         {
             NativeXlsxDocumentName = sourceName;
             Assert.Equal("priced-schedule.xlsx", sourceName);

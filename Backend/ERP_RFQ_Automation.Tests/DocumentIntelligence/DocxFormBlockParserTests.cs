@@ -42,7 +42,7 @@ public class DocxFormBlockParserTests
         Assert.Equal("BATTERY: LEAD ACID, 12 V, 6 CELLS", parsed[0].ProductName);
         Assert.Equal("1", parsed[0].Quantity);
         Assert.Equal("each", parsed[0].UnitOfMeasure);
-        Assert.Equal("000000002000008534", parsed[0].ManufacturerPartNumber);
+        Assert.Equal("000000002000008534", parsed[0].CustomerMaterialCode);
         Assert.Equal("Fri, 1 Jan, 2027", parsed[0].RequiredDeliveryDate);
         Assert.Equal("4", parsed[1].Quantity);
         Assert.Equal("2", parsed[2].Quantity);
@@ -121,28 +121,85 @@ public class DocxFormBlockParserTests
     }
 
     [Fact]
-    public void FewerThanThreeRepetitions_IsNotTreatedAsAForm()
+    public void TwoItems_UnderNumberedHeadings_AreTwoLines()
     {
-        // A left-hand value is only believed to be a LABEL once it recurs, and two occurrences is
-        // not enough to tell a repeated form from a two-row panel that happens to share a word.
-        // Nothing is lost by refusing: a two-item enquiry is a single cheap chunk on the model
-        // path, whereas mistaking a panel for a line-item list invents items nobody asked for.
+        // A label no longer has to recur three times to be believed: "Quantity" and "Material
+        // Number" are labels the vocabulary already knows. Recurrence alone sent every one- and
+        // two-item print to the model — paid, and off by default — for a table we can read.
         var rows = new List<string> { "Name|Alternative|Value" };
         rows.AddRange(Item("8 BATTERY", "BATTERY, 12 V", "1 each", "M-1"));
         rows.AddRange(Item("9 BEARING", "BEARING, SHELL", "1 each", "M-2"));
 
-        Assert.Empty(_parser.Parse(Grid(rows.ToArray()), "rfp.docx", "Table 7"));
+        var parsed = _parser.Parse(Grid(rows.ToArray()), "rfp.docx", "Table 7");
+
+        Assert.Equal(2, parsed.Count);
+        Assert.Equal("BATTERY, 12 V", parsed[0].ProductName);
+        Assert.Equal("M-2", parsed[1].CustomerMaterialCode);
     }
 
     [Fact]
-    public void ASingleBlock_IsNotTreatedAsAForm()
+    public void ASingleItem_UnderANumberedHeading_IsOneLine()
     {
-        // One block is a summary panel, not a line-item list. Refusing costs nothing: the
-        // document keeps whatever behaviour it already had.
+        // The SEC portal sends one-item event prints. One numbered heading with a countable
+        // quantity beneath it is one line, exactly as it is when it has neighbours.
         var parsed = _parser.Parse(Grid(new List<string> { "Name|Alternative|Value" }
-            .Concat(Item("8 BATTERY", "BATTERY, 12 V", "1 each", "M-1")).ToArray()), "rfp.docx", "Table 7");
+            .Concat(Item("8 BATTERY, 12 V", "BATTERY, 12 V", "1 each", "M-1")).ToArray()), "rfp.docx", "Table 7");
+
+        var row = Assert.Single(parsed);
+        Assert.Equal("BATTERY, 12 V", row.ProductName);
+        Assert.Equal("1", row.Quantity);
+        Assert.Equal("M-1", row.CustomerMaterialCode);
+        Assert.Equal("8", row.CustomerLineNumber);
+    }
+
+    [Fact]
+    public void ALoneQuantityUnderNoHeading_IsNotALine()
+    {
+        // A summary panel that happens to state a quantity is not an item: nothing introduced
+        // it as one. Refusing keeps a terms table from becoming a phantom line.
+        var parsed = _parser.Parse(Grid(
+            "Term|Value",
+            "Quantity|5",
+            "Lead Time (In Days)|7",
+            "Payment Terms|30 days"), "rfp.docx", "Table 3");
 
         Assert.Empty(parsed);
+    }
+
+    [Fact]
+    public void ThePortalsCutShortHeadingAndRepeatedCodeCell_StillYieldOneCleanLine()
+    {
+        // Exactly as the SEC portal prints it: the heading is cut with "...", and the material
+        // cell repeats the heading after the code.
+        var rows = new List<string> { "Name|Alternative|Value",
+            "8 10 909101154 BATTERY,STORAGE,MAX VOLT ...||",
+            "10 909101154 BATTERY,STORAGE,MAX VOLT 1.5 V,830AH||",
+            "Price||", "Quantity||92 each", "Extended Price||",
+            "Storage Location||Saudi Electricity Company-Jizan Area",
+            "Manufacturer Name||", "Manufacturer Part Number||",
+            "Material Code||909101154 10 909101154 BATTERY,STORAGE,MAX VOLT 1.5 V,830AH",
+            "Item Text||;Item text:Including Supply, Installation and Testing" };
+
+        var row = Assert.Single(_parser.Parse(Grid(rows.ToArray()), "SE RFP-C001835789.doc", "Table 5"));
+        Assert.Equal("10", row.CustomerLineNumber);
+        Assert.Equal("BATTERY,STORAGE,MAX VOLT 1.5 V,830AH", row.ProductName);
+        Assert.Equal("909101154", row.CustomerMaterialCode);
+        Assert.Equal("92", row.Quantity);
+        Assert.Equal("each", row.UnitOfMeasure);
+        Assert.Equal("Saudi Electricity Company-Jizan Area", row.UnmappedColumns["Storage Location"]);
+    }
+
+    [Fact]
+    public void TheBuyersLineNumberInsideTheTitle_WinsOverThePrintsSectionIndex()
+    {
+        // "8 10 909101154 BATTERY…" is section 8 of the print; the buyer's line is 10 and the
+        // material is 909101154, which the block also states. The name is what follows both.
+        var rows = new List<string> { "Name|Alternative|Value" };
+        rows.AddRange(Item("8 10 909101154 BATTERY,STORAGE", "10 909101154 BATTERY,STORAGE", "92 each", "909101154"));
+
+        var row = Assert.Single(_parser.Parse(Grid(rows.ToArray()), "rfp.docx", "Table 7"));
+        Assert.Equal("10", row.CustomerLineNumber);
+        Assert.Equal("BATTERY,STORAGE", row.ProductName);
     }
 
     [Fact]

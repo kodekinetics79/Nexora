@@ -107,7 +107,7 @@ namespace ERP_RFQ_Automation.Services
                 });
             }
 
-            var canonicalImport = _canonicalNormalizer.NormalizeSpreadsheetRows(rows, businessUnitId);
+            var canonicalImport = _canonicalNormalizer.NormalizeSpreadsheetRows(rows, businessUnitId, DateTime.UtcNow);
             var blockingIssues = canonicalImport.Issues
                 .Where(i => i.Severity == ValidationSeverity.Error)
                 .Take(10)

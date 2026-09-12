@@ -9,6 +9,14 @@ public sealed class RfqSpreadsheetRow
     public Dictionary<int, string> HeadersByColumn { get; set; } = new();
     public Dictionary<string, int> FieldColumnNumbers { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, string> FieldSourceAddresses { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>
+    /// The buyer's OWN number for this line, when the document states one ("8 MODULE ADAPT ESD"
+    /// heads the eighth section of an event print). A rep replying "item 8" must mean what the
+    /// buyer's portal calls item 8; numbering the lines 1..n from our side broke that
+    /// cross-reference on every line of a 1,500-line RFP.
+    /// </summary>
+    public string? CustomerLineNumber { get; set; }
+
     public string? RfqNo { get; set; }
     public string? BuyerName { get; set; }
     public string? ReceivedDate { get; set; }
@@ -27,6 +35,21 @@ public sealed class RfqSpreadsheetRow
     public string? Currency { get; set; }
     public string? ManufacturerName { get; set; }
     public string? ManufacturerPartNumber { get; set; }
+
+    /// <summary>
+    /// The buyer's OWN catalogue number for the line — an Aramco/SAP material number, a
+    /// stock code — as distinct from the maker's part number. Nothing infers it: a reader
+    /// sets it only when the document labels the value as the buyer's material. It lands on
+    /// <c>LeadItem.ItemMaterialCode</c> and reaches the evidence ledger as "ItemMaterialCode".
+    /// </summary>
+    public string? CustomerMaterialCode { get; set; }
+
+    /// <summary>
+    /// The buyer's long text for the line — SAP's "Material PO text": the noun and its
+    /// attributes, the maker and part number it references, and the buyer's standing
+    /// instructions. Read as the line's specification; see SapMaterialPoText.
+    /// </summary>
+    public string? MaterialPoText { get; set; }
     public string? LeadTimeDays { get; set; }
 
     /// <summary>FR-RFQ-04. Saudi region or city for delivery, in the buyer's own wording.</summary>
@@ -97,6 +120,8 @@ public static class RfqSpreadsheetFields
     public const string Currency = nameof(RfqSpreadsheetRow.Currency);
     public const string ManufacturerName = nameof(RfqSpreadsheetRow.ManufacturerName);
     public const string ManufacturerPartNumber = nameof(RfqSpreadsheetRow.ManufacturerPartNumber);
+    public const string CustomerMaterialCode = nameof(RfqSpreadsheetRow.CustomerMaterialCode);
+    public const string MaterialPoText = nameof(RfqSpreadsheetRow.MaterialPoText);
     public const string LeadTimeDays = nameof(RfqSpreadsheetRow.LeadTimeDays);
     public const string ItemText = nameof(RfqSpreadsheetRow.ItemText);
     public const string DeliveryLocation = nameof(RfqSpreadsheetRow.DeliveryLocation);

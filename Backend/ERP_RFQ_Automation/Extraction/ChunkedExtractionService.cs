@@ -60,6 +60,14 @@ public sealed class DocumentExtractionInput
     public string SourceId { get; init; } = Guid.NewGuid().ToString("N");
 
     /// <summary>
+    /// When the document arrived (UTC), for the deterministic readers' date rules — a closing
+    /// date is read month-first when the day-first reading is already past on arrival. The
+    /// structured door receives it as an argument; this carries it to the template inside the
+    /// unstructured door. Null falls back to "now", which is right only on the day of arrival.
+    /// </summary>
+    public DateTime? ReceivedOn { get; init; }
+
+    /// <summary>
     /// The queue lease attempt (<see cref="ExtractionJob.Attempts"/>) this pass runs
     /// under. Monotonic for the life of the job — every claim increments it and
     /// dead-letter recovery extends MaxAttempts without ever resetting it — and it is
@@ -136,6 +144,15 @@ public sealed class DocumentExtractionInput
 
 public sealed class ChunkedExtractionOutcome
 {
+    /// <summary>The same outcome carrying a different result. Every other member is copied, so a member added to this class must be added here too.</summary>
+    internal ChunkedExtractionOutcome WithResult(LeadExtractionResult? result) => new()
+    {
+        Status = Status, Result = result, ExpectedItemCount = ExpectedItemCount, ExtractedItemCount = ExtractedItemCount,
+        ReviewReason = ReviewReason, Diagnostics = Diagnostics, AiProviderClass = AiProviderClass, ProcessingPath = ProcessingPath,
+        OcrStatus = OcrStatus, OcrPageCount = OcrPageCount, PageCount = PageCount, PageCountAuthoritative = PageCountAuthoritative,
+        OcrTruncated = OcrTruncated, SplitResults = SplitResults, CanonicalImport = CanonicalImport, DocumentNarrative = DocumentNarrative
+    };
+
     public ExtractionOutcomeStatus Status { get; init; }
     public LeadExtractionResult? Result { get; init; }
 
@@ -217,7 +234,11 @@ public interface IChunkedExtractionService
     /// null by default: the deterministic parse does not depend on it, and a caller that has
     /// none simply passes nothing.
     /// </param>
-    Task<ChunkedExtractionOutcome> ExtractStructuredAsync(IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default, string? documentNarrative = null);
+    /// <param name="receivedOn">
+    /// When the document arrived, from the job. The normaliser reads an ambiguous closing date
+    /// against it; defaulting to "now" made a re-run months later read a different date.
+    /// </param>
+    Task<ChunkedExtractionOutcome> ExtractStructuredAsync(IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default, string? documentNarrative = null, DateTime? receivedOn = null);
 }
 
 /// <summary>
@@ -549,9 +570,29 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         //
         // A refusal is a routing decision, not a failure — the document falls through and is
         // read by the model exactly as before. Nothing is lost by trying.
-        if (Templates.AramcoBidListExtraction.TryExtract(
-                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templated)
+        if (Templates.AramcoBidListExtraction.TryRead(
+                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } reading)
         {
+            // The rows take the structured path from here — normaliser, canonical import,
+            // evidence ledger — so a line read by the template can cite its source exactly
+            // like a spreadsheet cell can. Nothing below this point is consulted.
+            var structured = await ExtractStructuredAsync(
+                reading.Rows, input.BusinessUnitId, input.SourceDocumentName, ct,
+                documentNarrative: reading.Narrative, receivedOn: input.ReceivedOn);
+            // The header block that is not a row: which portal printed this and under which
+            // vendor account of OURS. The model path records these; the template read them
+            // and dropped them. Deterministic, so certain.
+            var templated = structured.Result is null ? structured : structured.WithResult(structured.Result with
+            {
+                CustomerPortalName = Templates.AramcoBidListExtraction.PortalName,
+                CustomerPortalNameConfidence = 1.0d,
+                SupplierNameOnDocument = reading.SupplierName,
+                SupplierNameOnDocumentConfidence = reading.SupplierName is null ? null : 1.0d,
+                SupplierAccountRefOnDocument = reading.SupplierAccountRef,
+                SupplierAccountRefOnDocumentConfidence = reading.SupplierAccountRef is null ? null : 1.0d
+            });
+            templated.Diagnostics.Insert(0,
+                $"Aramco bid list template: {reading.Rows.Count} line item(s) read without a model call.");
             _log.LogInformation(
                 "{Document} was read from the Aramco bid list template: {Items} line item(s), no model call.",
                 input.SourceDocumentName, templated.ExtractedItemCount);
@@ -968,10 +1009,10 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
     public async Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
         IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default,
-        string? documentNarrative = null)
+        string? documentNarrative = null, DateTime? receivedOn = null)
     {
         // Deterministic parse — runs in milliseconds for 10k rows, no LLM call.
-        var import = _normalizer.NormalizeSpreadsheetRows(rows, businessUnitId);
+        var import = _normalizer.NormalizeSpreadsheetRows(rows, businessUnitId, receivedOn);
         var diagnostics = new List<string>
         {
             $"Structured parse produced {import.Documents.Count} RFQ group(s) from {rows.Count} row(s)."
@@ -1263,7 +1304,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             CompanyRef: null, CompanyRefConfidence: 0,
             CustomerAccountPortalId: null, CustomerAccountPortalIdConfidence: 0,
             CustomerRfqno: null, CustomerRfqnoConfidence: 0,
-            ItemMaterialCode: null, ItemMaterialCodeConfidence: 0,
+            ItemMaterialCode: line.CustomerMaterialCode.Value,
+            ItemMaterialCodeConfidence: (double)line.CustomerMaterialCode.Confidence,
             CommodityProduct: null, CommodityProductConfidence: 0,
             BuyerName: null, BuyerNameConfidence: 0,
             LineItemNo: line.LineItemNo.Value, LineItemNoConfidence: (double)line.LineItemNo.Confidence,
@@ -1290,7 +1332,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             AlternateProductName: null, AlternateProductNameConfidence: 0,
             AlternatePartNumber: null, AlternatePartNumberConfidence: 0,
             ItemText: line.ItemText.Value, ItemTextConfidence: (double)line.ItemText.Confidence,
-            MaterialPotext: null, MaterialPotextConfidence: 0,
+            MaterialPotext: line.MaterialPoText.Value, MaterialPotextConfidence: (double)line.MaterialPoText.Confidence,
             // Same rule as UnitPrice. A lead time of 0 means "deliver immediately"; emitting it
             // for a value we could not read is a false commercial fact, not a harmless default.
             LeadTime: line.LeadTimeDays.Kind == CanonicalValueKind.Normalized
@@ -1328,12 +1370,16 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             line.ManufacturerName.Value, line.ManufacturerName.Confidence);
         AddEvidence(result, "ManufacturerPartNumber", line.ManufacturerPartNumber.Evidence,
             line.ManufacturerPartNumber.Value, line.ManufacturerPartNumber.Confidence);
+        AddEvidence(result, "ItemMaterialCode", line.CustomerMaterialCode.Evidence,
+            line.CustomerMaterialCode.Value, line.CustomerMaterialCode.Confidence);
         AddEvidence(result, "LeadTime", line.LeadTimeDays.Evidence,
             line.LeadTimeDays.Kind == CanonicalValueKind.Normalized
                 ? line.LeadTimeDays.Value.ToString(CultureInfo.InvariantCulture) : null,
             line.LeadTimeDays.Confidence);
         AddEvidence(result, "ItemText", line.ItemText.Evidence,
             line.ItemText.Value, line.ItemText.Confidence);
+        AddEvidence(result, "MaterialPotext", line.MaterialPoText.Evidence,
+            line.MaterialPoText.Value, line.MaterialPoText.Confidence);
         return result;
     }
 

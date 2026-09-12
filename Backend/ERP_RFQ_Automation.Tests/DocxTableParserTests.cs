@@ -174,7 +174,7 @@ public sealed class DocxTableParserTests
         Assert.Equal("BATTERY: LEAD ACID, 12 V, 6 CELLS", parsed[0].ProductName);
         Assert.Equal("1", parsed[0].Quantity);
         Assert.Equal("each", parsed[0].UnitOfMeasure);
-        Assert.Equal("000000002000008534", parsed[0].ManufacturerPartNumber);
+        Assert.Equal("000000002000008534", parsed[0].CustomerMaterialCode);
 
         // The buyer asks US for the price; nothing may be read into it.
         Assert.All(parsed, r => Assert.Null(r.UnitPrice));

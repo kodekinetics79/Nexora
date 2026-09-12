@@ -17,6 +17,7 @@ public static class CustomerMatchReasonCodes
     public const string LearnedAlias = "LEARNED_ALIAS";
     public const string LearnedPortalAccount = "LEARNED_PORTAL_ACCOUNT";
     public const string NameExactUnverified = "NAME_EXACT_UNVERIFIED";
+    public const string NameInDocument = "NAME_IN_DOCUMENT";
     public const string NameFuzzy = "NAME_FUZZY";
     public const string RfqPattern = "RFQ_PATTERN";
     public const string PriorSender = "PRIOR_SENDER";
@@ -38,9 +39,17 @@ public static class CustomerIdentifierSources
     /// </summary>
     public const string LeadReviewLearned = "LeadReviewLearned";
 
-    /// <summary>Sources trusted enough for the learned-alias auto-link tier (S3).</summary>
+    /// <summary>What the Setup → Routing rules screen writes: a rule an administrator entered on purpose.</summary>
+    public const string MasterData = "MasterData";
+
+    /// <summary>
+    /// Sources trusted enough for the learned-alias auto-link tier (S3). An administrator's own
+    /// entry on the setup screen belongs here: a portal vendor code or an "also known as" typed
+    /// in deliberately is at least as reliable as a reviewer's confirmation — and until it was
+    /// listed, a rule entered there could route a lead but never link its customer.
+    /// </summary>
     public static readonly string[] TrustedForAutoLink =
-        [LeadReviewLearned, "CustomerProfile", "CustomerImport"];
+        [LeadReviewLearned, "CustomerProfile", "CustomerImport", MasterData];
 }
 
 /// <summary>
@@ -168,12 +177,24 @@ public sealed record LeadClientEvidence
     /// <summary>The buyer PERSON (Leads.BuyersName). Never an organisation.</summary>
     public string? BuyerPersonName { get; init; }
 
+    /// <summary>
+    /// Text the document states that may carry the buyer's own name — the delivery address,
+    /// a storage location, an item's text. A customer writes its name on its own documents
+    /// whatever system printed them, so this is the evidence that survives a portal change.
+    /// </summary>
+    public IReadOnlyList<DocumentPassage> Passages { get; init; } = [];
+
     /// <summary>LooseKeys of the tenant's own trading names — nothing may ever match these.</summary>
     public IReadOnlyCollection<string> TenantSelfNameKeys { get; init; } = [];
 
     /// <summary>The tenant's own mail domains — nothing may ever match these.</summary>
     public IReadOnlyCollection<string> TenantSelfDomains { get; init; } = [];
 }
+
+/// <param name="Where">Where the text sits, in the words a person would use: "delivery address", "storage location", "item text".</param>
+/// <param name="Text">The text as the document states it.</param>
+/// <param name="NamesTheBuyer">True where the passage is ABOUT the buyer (an address, a site); false for item text, where a name may be incidental.</param>
+public sealed record DocumentPassage(string Where, string Text, bool NamesTheBuyer);
 
 public sealed record CustomerIdentifierSnapshot(
     long Id,
@@ -234,6 +255,10 @@ public sealed record CustomerResolutionPolicy
 
     public decimal FuzzyMaximumConfidence { get; init; } = 0.85m;
     public decimal ExactNameSuggestionConfidence { get; init; } = 0.75m;
+    /// <summary>A known customer's full name written in the document's delivery address or site: links.</summary>
+    public decimal NameInAddressConfidence { get; init; } = 0.88m;
+    /// <summary>The same name, or a taught alias, inside an item's text: a suggestion, the name may be incidental.</summary>
+    public decimal NameInItemTextConfidence { get; init; } = 0.70m;
     public decimal PriorSenderSuggestionConfidence { get; init; } = 0.65m;
     public decimal ContactPersonSuggestionConfidence { get; init; } = 0.60m;
     public decimal RfqPatternSuggestionConfidence { get; init; } = 0.55m;

@@ -69,8 +69,14 @@ public sealed class CommercialLineResolutionApplicationService(
         if (!lead.CurrentRevisionId.HasValue)
             throw new InvalidOperationException("The lead has no immutable current revision.");
 
-        var revision = await db.Set<LeadRevision>().AsNoTracking().Include(x => x.Items)
+        // Two queries, not one join: the revision's snapshot JSON must not be repeated once per
+        // item (see LeadDecisionWorkbenchService for the measurement).
+        var revision = await db.Set<LeadRevision>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == lead.CurrentRevisionId.Value, ct);
+        foreach (var revisionItem in await db.Set<LeadItemRevision>().AsNoTracking()
+                     .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
+                     .OrderBy(x => x.LineNumber).ThenBy(x => x.Id).ToListAsync(ct))
+            revision.Items.Add(revisionItem);
         var existing = await db.Set<LeadLineCommercialResolution>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
             .OrderBy(x => x.LeadLineId).ToListAsync(ct);
@@ -142,9 +148,12 @@ public sealed class CommercialLineResolutionApplicationService(
                 existing.Add(serviceResolution);
                 continue;
             }
+            var alternates = new[] { snapshot.MaterialCode, snapshot.Part }
+                .Where(value => !string.IsNullOrWhiteSpace(value) && PartKey(value!) != requestedPart)
+                .Select(value => value!.Trim()).Distinct().ToList();
             var product = await productResolver.ResolveAsync(new ProductResolutionRequest(
                 businessUnitId, revision.Id, line.Id, requestedPart, snapshot.Manufacturer,
-                snapshot.Description, [new("lead_revision_line", $"lead-revision:{revision.Id}:line:{line.Id}", requestedPart)]), ct);
+                snapshot.Description, [new("lead_revision_line", $"lead-revision:{revision.Id}:line:{line.Id}", requestedPart)], alternates), ct);
             var productId = product.DecisionState == ProductResolutionDecisionState.AutoLinked
                 ? product.ResolvedProductId : null;
             var inventory = productId.HasValue
