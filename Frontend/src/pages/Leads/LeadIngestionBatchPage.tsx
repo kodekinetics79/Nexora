@@ -38,6 +38,7 @@ import dayjs from 'dayjs';
 import leadService from '../../api/services/leadService';
 import type { BatchReconciliationItemDTO, LeadMatchCandidateDTO, MatchReviewDecisionAction } from '../../api/services/leadService';
 import { clientStatusLabel } from './ClientCell';
+import UploadProgressPanel from './UploadProgressPanel';
 import { useAuth } from '../../context/AuthContext';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import { presentableServerText } from '../../utils/apiErrors';
@@ -522,6 +523,12 @@ export default function LeadIngestionBatchPage() {
         </Stack>
       </Stack>
 
+      {/* What is happening, per document, while the batch polls; and what to press when it is done. */}
+      <UploadProgressPanel
+        batch={batch}
+        onDecide={(leadId) => navigate(`/procurement/leads/${leadId}/workbench`)}
+        onOpenInquiries={() => navigate('/procurement/leads/all')}
+      />
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
         {metrics.map((metric) => (
           <Grid key={metric.label} size={{ xs: 6, sm: 4, lg: 1.5 }}>
@@ -609,7 +616,7 @@ export default function LeadIngestionBatchPage() {
 
       <Alert severity={pendingCount > 0 ? 'info' : batch.rejected > 0 ? 'warning' : 'success'} sx={{ mb: 2 }}>
         {pendingCount > 0
-          ? `${pendingCount} occurrence${pendingCount === 1 ? '' : 's'} still processing. Refresh to see completed classifications.`
+          ? `${pendingCount} document${pendingCount === 1 ? '' : 's'} still processing. This page updates itself.`
           : `Processing complete: ${batch.logicalInquiries} inquiries classified${batch.rejected > 0 ? `, including ${batch.rejected} rejected or unsupported` : ' with no processing failures'}.`}
       </Alert>
 
