@@ -1,3 +1,4 @@
+import { alpha } from '@mui/material/styles';
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -40,6 +41,7 @@ import lifecycleService from '../../../api/services/commercialLifecycleService';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 import procurementService from '../../../api/services/procurementService';
 import commercialLearningService from '../../../api/services/commercialLearningService';
+import NextStepPanel from '../../../components/common/NextStepPanel';
 import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
 import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
 import { formatMoney } from '../../../utils/currency';
@@ -245,8 +247,8 @@ const ViewRFQPage: React.FC = () => {
   // is advisory, and blocking a rep because advice failed to load is the same defect in a
   // different costume.
   const canPrepareQuote = intelligence?.commercialDecision !== 'NO_QUOTE_REVIEW';
-  const canOpenRecommendedAction = Boolean(intelligence?.nextBestAction.userOverrideAllowed &&
-    intelligence.nextBestAction.overrideAction.startsWith('/') && hasPermission('RFQ Management'));
+  const canOpenRecommendedAction = Boolean(intelligence?.nextBestAction?.userOverrideAllowed &&
+    intelligence.nextBestAction?.overrideAction?.startsWith('/') && hasPermission('RFQ Management'));
   const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));
   const offersByLine = new Map<number, number>();
   for (const offer of sourcingQuery.data?.offers ?? []) {
@@ -297,7 +299,7 @@ const ViewRFQPage: React.FC = () => {
   // The score is a heuristic rounded to two decimals by the server. Rendering "62.75%" claims a
   // precision the model does not have.
   const readinessPercent = intelligence ? Math.round(intelligence.readinessScore) : 0;
-  const primaryBlocker = intelligence?.nextBestAction.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
+  const primaryBlocker = intelligence?.nextBestAction?.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
   const readinessNarrative = intelligence && canPrepareQuote && intelligence.commercialDecision !== 'VIABLE_READY'
     ? 'Draft can start now. Resolve the highlighted commercial blockers before releasing it to the customer.'
     : primaryBlocker;
@@ -313,16 +315,84 @@ const ViewRFQPage: React.FC = () => {
     // distributor. Saying "every line has an evidence-backed fulfilment route" there would be
     // false, so the enabled-with-blockers case gets its own sentence: supply coverage is a
     // condition of quote RELEASE, not of starting one, and the reason now says exactly that.
-    : !canPrepareQuote ? intelligence.nextBestAction.explanation
+    : !canPrepareQuote ? (intelligence.nextBestAction?.explanation ?? 'A commercial review is outstanding.')
     : intelligence.commercialDecision === 'VIABLE_READY'
       ? 'Every line being quoted has an evidence-backed fulfilment route.'
-      : `You can start the quote now. ${intelligence.nextBestAction.explanation}`;
+      : `You can start the quote now. ${intelligence.nextBestAction?.explanation ?? ''}`.trim();
   // A deadline is overdue only if it is a real date. `new Date('0001-01-01') < new Date()` is
   // perfectly true, which is how a sentinel used to be coloured and presented as a passed
   // customer deadline — the leak utils/dates.ts exists to close.
   const deadline = parseDateSafe(rfq.bidClosingDate);
   const overdue = deadline !== null && deadline < new Date();
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
+  // What this RFQ is waiting for, in one sentence, from facts the page already holds.
+  // Order is the order a rep works: match the catalogue, cover the shortages, then quote.
+  // A failed or missing check is said as such; it is never read as "nothing is short".
+  const awards = sourcingQuery.data?.awards ?? [];
+  const solicitations = sourcingQuery.data?.solicitations ?? [];
+  const quoteDraft = sourcingQuery.data?.customerQuoteDraft ?? null;
+  const unresolvedCount = rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length;
+  const isAwarded = (lineId: number) => awards.some((a) => a.rfqItemId === lineId && ['APPROVED', 'SPLITAPPROVED'].includes((a.status ?? '').replaceAll('_', '').toUpperCase()));
+  const isAsked = (lineId: number) => solicitations.some((sol) => sol.requestedRfqItemIds.includes(lineId));
+  const shortLines = [...sourcingLines.values()].filter((line) => line.shortfallQuantity > 0 && line.resolution !== 'INCOMING' && !isAwarded(line.id));
+  const shortNotAsked = shortLines.filter((line) => !line.sourcingCaseId || !isAsked(line.id));
+  const shortWithSuppliers = shortLines.filter((line) => line.sourcingCaseId && isAsked(line.id));
+  const canCreateQuote = hasPermission('Quotations', 'create');
+  const nextStep: { tone: 'info' | 'warning' | 'error' | 'success'; title: string; sentence: string; action?: React.ReactNode } | null =
+    sourcingQuery.isLoading || intelligenceQuery.isLoading
+      ? null
+      : sourcingQuery.isError
+        ? {
+            tone: 'error', title: 'Coverage is unknown',
+            sentence: 'Stock and supplier coverage could not be loaded, so this screen cannot say what is left to do. Try again before quoting.',
+            action: <Button variant="outlined" color="error" onClick={() => sourcingQuery.refetch()} sx={{ borderRadius: 2 }}>Try again</Button>,
+          }
+        : !sourcingQuery.isSuccess
+          ? null
+          : unresolvedCount > 0
+            ? {
+                tone: 'warning', title: 'Next step',
+                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} could not be matched to your catalogue. Use the product button on each line ("Resolve catalogue product" or "Change product") so stock and suppliers can be checked.${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
+                action: <Button variant="outlined" onClick={() => setLineFilter('unresolved')} sx={{ borderRadius: 2 }}>Show unmatched lines</Button>,
+              }
+            : shortNotAsked.length > 0
+              ? {
+                  tone: 'warning', title: 'Next step',
+                  sentence: `${shortNotAsked.length} of ${shortLines.length} short line${shortLines.length === 1 ? '' : 's'} ${shortNotAsked.length === 1 ? 'has' : 'have'} not been put to a supplier yet. Create a sourcing case on each to ask for a price.`,
+                  action: <Button variant="outlined" onClick={() => setLineFilter('sourcing')} sx={{ borderRadius: 2 }}>Show lines to source</Button>,
+                }
+              : shortWithSuppliers.length > 0
+                ? {
+                    tone: 'info', title: 'Next step',
+                    sentence: `${shortWithSuppliers.length} line${shortWithSuppliers.length === 1 ? ' is' : 's are'} with suppliers. Capture their replies and approve the best offer in the Sourcing workbench.`,
+                    action: hasPermission('Supplier History') ? <Button variant="outlined" startIcon={<WorkbenchIcon />} onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)} sx={{ borderRadius: 2 }}>Open Sourcing workbench</Button> : undefined,
+                  }
+                : quoteDraft
+                  ? {
+                      tone: 'success', title: 'Next step',
+                      sentence: `Quote ${quoteDraft.quoteNumber} exists for this RFQ. Open it to see where it stands and what it still needs.`,
+                      action: <Button variant="contained" startIcon={<QuoteDraftIcon />} onClick={() => navigate(`/sales/quotes/view/${quoteDraft.quoteId}`)} sx={{ fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap' }}>Open quote {quoteDraft.quoteNumber}</Button>,
+                    }
+                  : !canPrepareQuote
+                    ? {
+                        tone: 'error', title: 'This RFQ cannot be quoted yet',
+                        sentence: intelligence?.nextBestAction?.explanation ?? prepareQuoteReason ?? 'A commercial review is outstanding.',
+                      }
+                    : !intelligence
+                      ? {
+                          tone: 'info', title: 'Next step',
+                          sentence: canCreateQuote
+                            ? 'Every line is covered from stock or an approved offer. Commercial readiness could not be checked; you can start the draft and the server rechecks every gate before release.'
+                            : 'Every line is covered. Ask someone with quoting rights to prepare the quote draft.',
+                        }
+                      : {
+                          tone: 'info', title: 'Next step',
+                          sentence: canCreateQuote
+                            ? (intelligence.commercialDecision === 'VIABLE_READY'
+                              ? 'Every line has a route: stock or an approved supplier offer. Prepare the quote draft.'
+                              : `Every line is covered. Prepare the quote draft; the remaining commercial checks happen on the quote. ${intelligence.nextBestAction?.explanation ?? ''}`.trim())
+                            : 'Every line is covered. Ask someone with quoting rights to prepare the quote draft.',
+                        };
 
   return (
     <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
@@ -339,7 +409,7 @@ const ViewRFQPage: React.FC = () => {
 
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, gap: 2, flexDirection: { xs: 'column', lg: 'row' } }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', minWidth: 0 }}>
-            <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: 0, whiteSpace: 'nowrap' }}>
+            <Typography variant="h4" sx={{ fontWeight: 800, color: 'text.primary', letterSpacing: 0, whiteSpace: 'nowrap' }}>
               {rfq.rfqno}
             </Typography>
             {rfq.nexoraSerial ? (
@@ -367,7 +437,7 @@ const ViewRFQPage: React.FC = () => {
               sx={{ fontWeight: 900, fontSize: '0.65rem', textTransform: 'uppercase' }}
             />
           </Box>
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { lg: 'sticky' }, top: 8, zIndex: 2 }}>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { lg: 'sticky' }, top: 8, zIndex: 2, p: 0.75, borderRadius: 2, bgcolor: (t) => alpha(t.palette.background.default, 0.72), backdropFilter: 'blur(10px)' }}>
             <Button
               variant="outlined"
               startIcon={<BackIcon />}
@@ -377,14 +447,16 @@ const ViewRFQPage: React.FC = () => {
               Back
             </Button>
             {rfq.commercialCaseId && (
-              <Button
-                variant="outlined"
-                startIcon={<WorkspaceIcon />}
-                onClick={() => navigate(`/commercial-cases/${rfq.commercialCaseId}`)}
-                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-              >
-                Workspace
-              </Button>
+              <Tooltip title="The whole case for this customer request: lead, RFQ, quote and order in one place." describeChild>
+                <Button
+                  variant="outlined"
+                  startIcon={<WorkspaceIcon />}
+                  onClick={() => navigate(`/commercial-cases/${rfq.commercialCaseId}`)}
+                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+                >
+                  Workspace
+                </Button>
+              </Tooltip>
             )}
             {/*
               The sourcing workbench for THIS RFQ had no door on this page. It was reachable only
@@ -393,24 +465,28 @@ const ViewRFQPage: React.FC = () => {
               of the journey was, in navigation terms, undiscoverable from the RFQ it belongs to.
             */}
             {hasPermission('Supplier History') && (
-              <Button
-                variant="outlined"
-                startIcon={<WorkbenchIcon />}
-                onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)}
-                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-              >
-                Sourcing
-              </Button>
+              <Tooltip title="Ask suppliers for prices on the short lines, capture their replies and approve the best offer." describeChild>
+                <Button
+                  variant="outlined"
+                  startIcon={<WorkbenchIcon />}
+                  onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)}
+                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+                >
+                  Sourcing
+                </Button>
+              </Tooltip>
             )}
             {hasPermission('Quotations') && (
-              <Button
-                variant="outlined"
-                startIcon={<PricingIcon />}
-                onClick={() => navigate(`/procurement/rfqs/${rfq.id}/pricing`)}
-                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-              >
-                Smart Pricing
-              </Button>
+              <Tooltip title="Suggested sell prices from your history and the customer's targets." describeChild>
+                <Button
+                  variant="outlined"
+                  startIcon={<PricingIcon />}
+                  onClick={() => navigate(`/procurement/rfqs/${rfq.id}/pricing`)}
+                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+                >
+                  Smart Pricing
+                </Button>
+              </Tooltip>
             )}
             {hasPermission('RFQ Management', 'edit') && <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />}
             {hasPermission('Quotations', 'create') && (
@@ -439,7 +515,7 @@ const ViewRFQPage: React.FC = () => {
             )}
           </Stack>
         </Box>
-        <Paper sx={{ mt: 2, p: 2, borderRadius: 1, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
+        <Paper sx={{ mt: 2, p: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
           <Grid container spacing={2} sx={{ alignItems: 'center' }}>
             <Grid size={{ xs: 12, md: 3 }}><DataField label="Customer / contact" value={`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`} /></Grid>
             <Grid size={{ xs: 6, md: 2 }}><DataField label="Account Owner" value={rfq.accountOwnerName || 'Unassigned'} /></Grid>
@@ -454,6 +530,11 @@ const ViewRFQPage: React.FC = () => {
             </Grid>
           </Grid>
         </Paper>
+        {nextStep && (
+          <Box sx={{ mt: 2 }}>
+            <NextStepPanel tone={nextStep.tone} title={nextStep.title} sentence={nextStep.sentence} action={nextStep.action} testId="rfq-next-step" />
+          </Box>
+        )}
       </Box>
 
       <Grid container spacing={3}>
@@ -496,13 +577,13 @@ const ViewRFQPage: React.FC = () => {
             </Box>
             {/* Line Items */}
             <Paper sx={{ borderRadius: 1, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-              <Box sx={{ p: 2.5, bgcolor: '#fafafa', borderBottom: '1px solid', borderColor: 'divider' }}>
-                <Typography sx={{ fontWeight: 950, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
+              <Box sx={{ p: 2.5, bgcolor: 'action.hover', borderBottom: '1px solid', borderColor: 'divider' }}>
+                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
                   RFQ Lines ({rfq.rfqitems.length})
                 </Typography>
               </Box>
               <Box sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 1100 }}>
-                <TableHead sx={{ bgcolor: '#fcfcfc' }}>
+                <TableHead sx={{ bgcolor: 'action.hover' }}>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>#</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Product / Description</TableCell>
@@ -596,7 +677,7 @@ const ViewRFQPage: React.FC = () => {
                       </TableCell>
                       <TableCell>
                         <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id) ? statusLabel(sourcingLines.get(item.id)!.resolution) : 'Checking'}</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>ATP {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Available {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
                       </TableCell>
                       <TableCell><Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}><Chip size="small" icon={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? <ApproveIcon /> : <UndecidedIcon />} label={`${intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0}/${offersByLine.get(item.id) ?? 0} eligible`} color={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? 'success' : 'default'} />{(intelligenceLines.get(item.id)?.bidQualityFlags.length ?? 0) > 0 && <Typography variant="caption" color="warning.main">{intelligenceLines.get(item.id)?.bidQualityFlags.length} quality finding(s)</Typography>}</Stack></TableCell>
                       <TableCell>
@@ -684,7 +765,7 @@ const ViewRFQPage: React.FC = () => {
                   )}
                 </TableBody>
               </Table></Box>
-              <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', bgcolor: '#fafafa' }}>
+              <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', bgcolor: 'action.hover' }}>
                 <Stack direction="row" spacing={4}>
                    <Box sx={{ textAlign: 'right' }}>
                       <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total lines</Typography>
@@ -701,7 +782,7 @@ const ViewRFQPage: React.FC = () => {
             {/* Explanations and details keep every field and control they had; they are
                 folded so the page reads top-down: lines, then how to fulfil them, then the
                 record behind them. Nothing here is a different screen. */}
-            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1 }}>
+            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
               <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                 <Box>
                   <Typography sx={{ fontWeight: 900 }}>Ways to fulfil this request</Typography>
@@ -760,7 +841,7 @@ const ViewRFQPage: React.FC = () => {
                 </Stack>
               </AccordionDetails>
             </Accordion>
-            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1 }}>
+            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
               <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                 <Box>
                   <Typography sx={{ fontWeight: 900 }}>Line intelligence and processing evidence</Typography>
@@ -775,7 +856,7 @@ const ViewRFQPage: React.FC = () => {
                 </Stack>
               </AccordionDetails>
             </Accordion>
-            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1 }}>
+            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
               <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                 <Box>
                   <Typography sx={{ fontWeight: 900 }}>Request details</Typography>
@@ -850,7 +931,7 @@ const ViewRFQPage: React.FC = () => {
           <Grid container spacing={3}>
             <Grid size={{ xs: 12, md: 6 }}>
             {/* Immutable Lead-to-RFQ lineage; no participation is editable after promotion. */}
-            <Paper component="section" aria-labelledby="promotion-lineage-heading" sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'primary.lighter' }}>
+            <Paper component="section" aria-labelledby="promotion-lineage-heading" sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: (t) => alpha(t.palette.primary.main, t.palette.mode === 'dark' ? 0.14 : 0.06) }}>
                 <Typography variant="caption" sx={{ fontWeight: 900, color: 'primary.main', textTransform: 'uppercase', mb: 1, display: 'block' }}>
                   RFQ promotion lineage
                 </Typography>

@@ -32,6 +32,7 @@ import leadDecisionService, {
 import decisionService from '../../../api/services/decisionService';
 import leadService from '../../../api/services/leadService';
 import LeadOwnerControl from '../LeadOwnerControl';
+import NextStepPanel from '../../../components/common/NextStepPanel';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
@@ -573,6 +574,15 @@ const DecidePage: React.FC = () => {
         </Alert>
       ) : null}
 
+      {/* The next step, first. The same sentence repeats beside the one button in the sticky bar
+          under the lines, so a rep never has to scroll to learn what the request is waiting for. */}
+      <NextStepPanel
+        tone={busy ? 'info' : next.kind === 'ready' ? 'success' : next.kind === 'blocked' || (unowned && !locked) ? 'warning' : next.kind === 'closed' ? 'info' : 'info'}
+        title="Next step"
+        sentence={unowned && !locked ? 'Assign an owner first: take it, or give it to someone, at the top of this request.' : footerSentence}
+        testId="decide-next-step"
+      />
+
       <Paper variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
         {/* WHO IS ASKING */}
         <Box component="section" aria-labelledby="decide-customer" sx={{ p: { xs: 2, sm: 3 }, borderBottom: 1, borderColor: 'divider' }}>
@@ -750,7 +760,7 @@ const DecidePage: React.FC = () => {
 
             {/* Pinned to the bottom of the window: a 32-line request must not hide its one
                 button under a scroll. The bar is part of the page, so it ends where the page ends. */}
-            <Box sx={{ position: 'sticky', bottom: 0, zIndex: 2, bgcolor: 'background.paper', borderTop: 1, borderColor: 'divider', mt: 2, pt: 1.5, pb: 0.5, mx: { xs: -2, sm: -3 }, px: { xs: 2, sm: 3 } }}>
+            <Box sx={{ position: 'sticky', bottom: 0, zIndex: 2, bgcolor: 'background.paper', borderTop: 1, borderColor: 'divider', boxShadow: '0 -8px 20px -16px rgba(15,18,24,0.55)', mt: 2, pt: 1.5, pb: 0.5, mx: { xs: -2, sm: -3 }, px: { xs: 2, sm: 3 } }}>
             <Stack direction="row" spacing={2} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}>
               <Button
                 variant="contained"

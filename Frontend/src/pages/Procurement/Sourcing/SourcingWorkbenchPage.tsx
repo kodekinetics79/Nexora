@@ -49,6 +49,7 @@ import {
   WarningAmber,
 } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
+import NextStepPanel from "../../../components/common/NextStepPanel";
 import procurementService, {
   INCOTERMS_2020,
   type Incoterm,
@@ -519,7 +520,7 @@ function SourcingWorkbenchPage() {
   );
   const failedSolicitations =
     workbench?.solicitations.filter(
-      (s) => s.status.replaceAll("_", "").toUpperCase() === "DELIVERYFAILED",
+      (s) => (s.status ?? "").replaceAll("_", "").toUpperCase() === "DELIVERYFAILED",
     ) ?? [];
   const blockedOffers = Object.values(comparisonsQuery.data ?? {}).flatMap(
     (comparison) => comparison.lines.filter((line) => !line.eligible),
@@ -543,6 +544,62 @@ function SourcingWorkbenchPage() {
     hasPermission("Orders", "edit") && hasPermission("Products", "edit");
   const referenceQueries = [currenciesQuery, warehousesQuery];
   const referenceDataFailed = referenceQueries.some((query) => query.isError);
+  // What sourcing is waiting for, in one sentence, from the workbench the page already holds.
+  // Every status goes through one normaliser; a failed or empty read is said as such.
+  const norm = (status: string | null | undefined) => (status ?? "").replaceAll("_", "").toUpperCase();
+  const sols = workbench?.solicitations ?? [];
+  const awaitingSuppliers = sols.filter((s) => ["PENDINGDISPATCH", "DISPATCHING", "SENT"].includes(norm(s.status)));
+  const uncertainDeliveries = failedSolicitations.filter((s) => s.deliveryOutcome === "UNCERTAIN");
+  const notDelivered = failedSolicitations.filter((s) => s.deliveryOutcome !== "UNCERTAIN");
+  const linesWithOffers = new Set((workbench?.offers ?? []).map((offer) => offer.rfqItemId));
+  const awardedLineIds = new Set((workbench?.awards ?? []).filter((a) => ["APPROVED", "SPLITAPPROVED"].includes(norm(a.status))).map((a) => a.rfqItemId));
+  const linesAwaitingAward = unresolvedLines.filter((line) => linesWithOffers.has(line.id) && !awardedLineIds.has(line.id));
+  const repliesNotCaptured = sols.filter((s) => norm(s.status) === "RESPONDED" && !s.requestedRfqItemIds.some((id) => linesWithOffers.has(id)));
+  const shortNotAsked = unresolvedLines.filter((line) => line.resolution !== "INCOMING" && !awardedLineIds.has(line.id) && !sols.some((s) => s.requestedRfqItemIds.includes(line.id)));
+  const shortAskedDeclined = unresolvedLines.filter((line) => line.resolution !== "INCOMING" && !awardedLineIds.has(line.id) && !linesWithOffers.has(line.id)
+    && sols.some((s) => s.requestedRfqItemIds.includes(line.id)) && sols.filter((s) => s.requestedRfqItemIds.includes(line.id)).every((s) => ["DECLINED", "EXPIRED"].includes(norm(s.status))));
+  const draftLines = workbench?.customerQuoteDraft?.lines ?? [];
+  const unpricedDraftLines = draftLines.filter((line) => Number(line.unitPrice || 0) === 0);
+  const unpricedWithAward = unpricedDraftLines.filter((line) => awardedLineIds.has(line.rfqItemId));
+  const openQuoteButton = workbench?.customerQuoteDraft
+    ? <Button variant="contained" startIcon={<OpenInNew />} onClick={() => navigate(`/sales/quotes/view/${workbench.customerQuoteDraft!.quoteId}`)}>Open the quote</Button>
+    : undefined;
+  const nextStep: { tone: "info" | "warning" | "error" | "success"; sentence: string; action?: React.ReactNode } | null = !workbench
+    ? null
+    : workbench.lines.length === 0
+      ? { tone: "info", sentence: "No sourcing lines exist for this RFQ yet. Nothing here is waiting on you.", action: rfqId ? <Button variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined }
+      : uncertainDeliveries.length > 0
+        ? { tone: "error", sentence: `${uncertainDeliveries.length} supplier RFQ${uncertainDeliveries.length === 1 ? "" : "s"} may or may not have reached the supplier. Check with them before retrying; a retry can send it twice.`, action: <Button variant="contained" color="error" onClick={() => setTab(1)}>Open Solicitations</Button> }
+        : notDelivered.length > 0
+          ? { tone: "error", sentence: `${notDelivered.length} supplier RFQ${notDelivered.length === 1 ? " was" : "s were"} not delivered. Retry ${notDelivered.length === 1 ? "it" : "them"} from the Solicitations tab. Nothing reached the supplier, so a retry cannot send it twice.`, action: <Button variant="contained" color="error" onClick={() => setTab(1)}>Open Solicitations</Button> }
+          : repliesNotCaptured.length > 0
+            ? { tone: "warning", sentence: `${repliesNotCaptured.length} supplier repl${repliesNotCaptured.length === 1 ? "y is" : "ies are"} in but not captured yet. Capture ${repliesNotCaptured.length === 1 ? "it" : "them"} from the Solicitations tab.`, action: <Button variant="contained" onClick={() => setTab(1)}>Capture the reply</Button> }
+            : linesAwaitingAward.length > 0
+              ? { tone: "warning", sentence: `Offers are in for ${linesAwaitingAward.length} line${linesAwaitingAward.length === 1 ? "" : "s"}. Compare them and approve the best one.`, action: <Button variant="contained" onClick={() => setTab(2)}>Compare supplier offers</Button> }
+              : shortAskedDeclined.length > 0
+                ? { tone: "warning", sentence: `Every supplier asked for ${shortAskedDeclined.length} line${shortAskedDeclined.length === 1 ? "" : "s"} has declined or let the request expire. Ask a different supplier.`, action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortAskedDeclined[0])}>Ask another supplier</Button> : undefined }
+                : shortNotAsked.length > 0
+                  ? { tone: "warning", sentence: canSolicit
+                        ? `${shortNotAsked.length} line${shortNotAsked.length === 1 ? " is" : "s are"} still short and no supplier has been asked. Send a supplier RFQ${shortNotAsked.length === 1 ? "" : ", one line at a time"}.`
+                        : `${shortNotAsked.length} line${shortNotAsked.length === 1 ? " is" : "s are"} still short. Ask a buyer with sourcing rights to send a supplier RFQ.`,
+                      action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortNotAsked[0])}>Ask suppliers{shortNotAsked.length === 1 ? "" : " for the first line"}</Button> : undefined }
+                  : awaitingSuppliers.length > 0 && unresolvedLines.some((line) => !awardedLineIds.has(line.id))
+                    ? { tone: "info", sentence: `Waiting for ${awaitingSuppliers.length} supplier${awaitingSuppliers.length === 1 ? "" : "s"} to reply. When a reply arrives, capture it from the Solicitations tab.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
+                    : approvedUnconverted.length > 0 && !workbench.customerQuoteDraft
+                      ? { tone: "info", sentence: "Every short line has an approved supplier offer. Go back to the RFQ and prepare the customer quote draft.", action: rfqId ? <Button variant="contained" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined }
+                      : unpricedWithAward.length > 0
+                        ? { tone: "info", sentence: `Quote ${workbench.customerQuoteDraft?.quoteNumber} has ${unpricedWithAward.length} unpriced line${unpricedWithAward.length === 1 ? "" : "s"} with an approved offer. Price ${unpricedWithAward.length === 1 ? "it" : "them"} from the offer.`, action: <Button variant="contained" onClick={() => setTab(2)}>Price from the offer</Button> }
+                        : unpricedDraftLines.length > 0
+                          ? { tone: "info", sentence: `Quote ${workbench.customerQuoteDraft?.quoteNumber} has ${unpricedDraftLines.length} unpriced line${unpricedDraftLines.length === 1 ? "" : "s"} covered from stock. Price ${unpricedDraftLines.length === 1 ? "it" : "them"} by hand on the quote.`, action: openQuoteButton }
+                          : workbench.customerQuoteDraft
+                            ? { tone: awaitingSuppliers.length > 0 ? "info" : "success", sentence: awaitingSuppliers.length > 0
+                                  ? `Quote ${workbench.customerQuoteDraft.quoteNumber} is priced, but ${awaitingSuppliers.length} supplier RFQ${awaitingSuppliers.length === 1 ? " is" : "s are"} still open. Open the quote to see where it stands.`
+                                  : approvedUnconverted.length > 0
+                                    ? `Quote ${workbench.customerQuoteDraft.quoteNumber} is priced. ${approvedUnconverted.length} approved offer${approvedUnconverted.length === 1 ? " has" : "s have"} no purchase order yet; raise ${approvedUnconverted.length === 1 ? "it" : "them"} once the customer accepts.`
+                                    : `Sourcing is complete and quote ${workbench.customerQuoteDraft.quoteNumber} is priced. Open it to see where it stands.`, action: openQuoteButton }
+                            : awaitingSuppliers.length > 0
+                              ? { tone: "info", sentence: `Every line is covered, but ${awaitingSuppliers.length} supplier RFQ${awaitingSuppliers.length === 1 ? " is" : "s are"} still open. Nothing else is waiting on you.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
+                              : { tone: "success", sentence: "Every line is covered from stock or an approved offer. Nothing is waiting on suppliers.", action: rfqId ? <Button variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined };
 
   const openSourcingCase = useMutation({
     mutationFn: async (line: (typeof unresolvedLines)[number]) =>
@@ -617,13 +674,14 @@ function SourcingWorkbenchPage() {
           <Tooltip title={rfqId ? "Back to this RFQ" : "Back to RFQs"}>
             <Button
               variant="outlined"
+              startIcon={<ArrowBack />}
               aria-label={rfqId ? "Back to this RFQ" : "Back to RFQs"}
               onClick={() =>
                 navigate(rfqId ? `/procurement/rfqs/view/${rfqId}` : "/procurement/rfqs/all")
               }
-              sx={{ minWidth: 40, px: 1 }}
+              sx={{ borderRadius: 2, borderColor: "divider", color: "text.secondary", whiteSpace: "nowrap" }}
             >
-              <ArrowBack />
+              {rfqId ? "Back to RFQ" : "Back"}
             </Button>
           </Tooltip>
           <Box>
@@ -675,43 +733,30 @@ function SourcingWorkbenchPage() {
           >
             Refresh
           </Button>
-          {rfqId && canSolicit && (
-            <Button
-              variant="contained"
-              startIcon={<Send />}
-              onClick={() => unresolvedLines[0] && openSourcingCase.mutate(unresolvedLines[0])}
-              disabled={unresolvedLines.length === 0}
-            >
-              Open governed sourcing
-            </Button>
-          )}
+
         </Stack>
       </Stack>
 
-      {(unresolvedLines.length > 0 ||
-        failedSolicitations.length > 0 ||
+      {nextStep && (
+        <NextStepPanel tone={nextStep.tone} title="Next step" sentence={nextStep.sentence} action={nextStep.action} testId="sourcing-next-step" />
+      )}
+
+      {(failedSolicitations.length > 0 ||
         blockedOffers.length > 0) && (
         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
           <Typography sx={{ fontWeight: 800, mb: 1 }}>
             Needs attention
           </Typography>
           <Stack spacing={1}>
-            {unresolvedLines.length > 0 && (
-              <Alert severity="warning">
-                {unresolvedLines.length} RFQ line
-                {unresolvedLines.length === 1 ? "" : "s"} still require sourcing
-                or review.
-              </Alert>
-            )}
             {failedSolicitations.length > 0 && (
-              <Alert severity="error">
+              <Alert severity="error" variant="outlined">
                 {failedSolicitations.length} supplier delivery attempt
                 {failedSolicitations.length === 1 ? "" : "s"} failed. Review the
                 error evidence and retry.
               </Alert>
             )}
             {blockedOffers.length > 0 && (
-              <Alert severity="info">
+              <Alert severity="info" variant="outlined">
                 {blockedOffers.length} supplier offer
                 {blockedOffers.length === 1 ? "" : "s"} cannot be awarded until
                 missing commercial evidence is resolved.
@@ -750,10 +795,10 @@ function SourcingWorkbenchPage() {
           variant="scrollable"
           scrollButtons="auto"
         >
-          <Tab label={`Coverage (${workbench.lines.length})`} />
-          <Tab label={`Solicitations (${workbench.solicitations.length})`} />
-          <Tab label={`Supplier offers (${workbench.offers.length})`} />
-          <Tab label={`Purchase orders (${workbench.purchaseOrders.length})`} />
+          <Tab label={<Tooltip title="Each RFQ line: what is in stock, what is short, and whether a supplier has been asked." describeChild><span>{`Coverage (${workbench.lines.length})`}</span></Tooltip>} />
+          <Tab label={<Tooltip title="The supplier RFQs sent out, whether they were delivered, and where to capture a reply." describeChild><span>{`Solicitations (${workbench.solicitations.length})`}</span></Tooltip>} />
+          <Tab label={<Tooltip title="Supplier prices side by side. Approve the best one, then price the customer quote from it." describeChild><span>{`Supplier offers (${workbench.offers.length})`}</span></Tooltip>} />
+          <Tab label={<Tooltip title="Purchase orders raised to suppliers from approved offers, and their receipts." describeChild><span>{`Purchase orders (${workbench.purchaseOrders.length})`}</span></Tooltip>} />
         </Tabs>
       </Paper>
 

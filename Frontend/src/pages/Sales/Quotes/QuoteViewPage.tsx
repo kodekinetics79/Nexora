@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, Stack, Button, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Divider, CircularProgress, Card, CardContent, Tooltip, Alert, AlertTitle, Link,
+  Divider, CircularProgress, Card, CardContent, Tooltip, Alert, Link,
   Breadcrumbs, Accordion, AccordionSummary, AccordionDetails, Menu, MenuItem, ListItemIcon, ListItemText
 } from '@mui/material';
 import {
@@ -33,9 +33,11 @@ import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
 import { summariseStoredQuote } from './quoteTotals';
+import { alpha } from '@mui/material/styles';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
+import NextStepPanel from '../../../components/common/NextStepPanel';
 import procurementService from '../../../api/services/procurementService';
 import { statusLabel } from '../../../utils/statusLabels';
 
@@ -322,13 +324,16 @@ const QuoteViewPage: React.FC = () => {
 
   // Which control is THE next step. Exactly one contained button per state; a contained button
   // that is also disabled points the rep at a dead end, so a blocked draft promotes Edit instead.
-  const statusUpper = (quote.statusValue || '').toUpperCase();
-  const primaryAction: 'send' | 'edit' | 'outcome' | 'po' | 'pdf' | null =
-    statusUpper === 'ACCEPTED' ? 'po'
-      : quote.statusValue === 'Sent' ? 'outcome'
-        : statusUpper === 'ORDERED' ? 'pdf'
-          : isDraftQuote ? (sendBlockedReason === null ? 'send' : 'edit')
-            : null;
+  const statusUpper = (quote.statusCode || quote.statusValue || '').toUpperCase();
+  const isSentQuote = quote.statusValue === 'Sent';
+  const isSuperseded = Boolean(revisionInfo?.supersededByQuoteNo);
+  const primaryAction: 'send' | 'edit' | 'responded' | 'outcome' | 'po' | 'pdf' | null =
+    isSuperseded ? null
+      : quote.statusValue === 'Accepted' ? 'po'
+        : isSentQuote ? (quote.respondedOn ? 'outcome' : 'responded')
+          : statusUpper === 'ORDERED' ? 'pdf'
+            : isDraftQuote ? (sendBlockedReason === null ? 'send' : 'edit')
+              : null;
   const blockerRows = sendReadiness?.blockers?.length
     ? sendReadiness.blockers.map((blocker) => ({
         key: blocker.code,
@@ -338,31 +343,130 @@ const QuoteViewPage: React.FC = () => {
           : undefined,
       }))
     : sendBlockedReason ? [{ key: 'client', ...sendBlockedReason }] : [];
-  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null;
+  // Pre-send gates only matter while the quote can still be sent; on an ordered or closed
+  // quote they would argue with the sentence that says it is finished.
+  const showPreSendGates = isDraftQuote || isSentQuote;
+  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || (showPreSendGates && (supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null));
   // The sentence that tells the rep what happens next, in every state, derived from facts the
   // page already holds. The screen drives; the rep never has to work out the next move.
-  const blockerCount = blockerRows.length + (revisionImpactPresentation ? 1 : 0) + (supplierValidityWarnings.length > 0 ? 1 : 0);
+  const blockerCount = blockerRows.length + (showPreSendGates && revisionImpactPresentation ? 1 : 0) + (showPreSendGates && supplierValidityWarnings.length > 0 ? 1 : 0);
   const nextStepText = revisionInfo?.supersededByQuoteNo
     ? `A newer revision replaces this quote. Work on ${revisionInfo.supersededByQuoteNo} instead.`
     : statusUpper === 'ORDERED'
       ? 'This quote became an order. Export the PDF if the customer needs a copy; nothing else is left to do here.'
       : quote.outcomeOn && statusUpper !== 'ACCEPTED'
         ? 'The outcome is recorded. Revise this quote if the customer comes back.'
-        : statusUpper === 'ACCEPTED'
-          ? 'The customer accepted. Capture their purchase order to turn this quote into an order.'
+        : quote.statusValue === 'Accepted'
+          ? (awardQuote
+            ? 'The customer accepted. Capture their purchase order to turn this quote into an order.'
+            : 'The customer accepted, but this quote has no linked case, customer or currency, so the purchase order cannot be captured yet.')
           : quote.statusValue === 'Sent'
             ? (quote.respondedOn
               ? 'The customer replied. Record the outcome: won, lost or expired.'
               : 'Waiting for the customer. Mark "Customer responded" when they reply, or record the outcome.')
             : isDraftQuote
               ? (sendBlockedReason === null
-                ? 'Prices are in and nothing is blocking. Send this quote to the customer.'
+                ? (blockerCount > 0
+                  ? `Nothing blocks sending, but check the ${blockerCount === 1 ? 'item' : `${blockerCount} items`} below first.`
+                  : 'Prices are in and nothing is blocking. Send this quote to the customer.')
                 : `Fix the ${blockerCount === 1 ? 'item' : `${blockerCount} items`} below, then send the quote.`)
-              : null;
+              : 'This quote is closed. Revise it if the customer comes back.';
   const moreMenuOpen = Boolean(moreAnchor);
+  const sendControl = hasPermission('Quotations', 'edit')
+    && !isSuperseded
+    && quote.statusValue?.toUpperCase() !== 'ORDERED'
+    && (isDraftQuote || isSentQuote)
+    ? (
+      <Tooltip title={sendBlockedReason ? `${blockerCount || 1} thing${(blockerCount || 1) === 1 ? '' : 's'} must be fixed first — see the list below` : ''}>
+        <Box
+          component="span"
+          role={sendBlockedReason ? 'button' : undefined}
+          aria-disabled={sendBlockedReason ? 'true' : undefined}
+          tabIndex={sendBlockedReason ? 0 : -1}
+          sx={{ display: 'inline-flex', borderRadius: 2, '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 } }}
+        >
+          <Button
+            variant={primaryAction === 'send' ? 'contained' : 'outlined'}
+            startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
+            disabled={sendBlockedReason !== null}
+            title={sendBlockedReason?.text}
+            onClick={() => setEmailOpen(true)}
+            sx={{ borderRadius: 2, fontWeight: primaryAction === 'send' ? 800 : undefined, whiteSpace: 'nowrap' }}
+          >
+            {isDraftQuote ? 'Send to customer' : 'Send again'}
+          </Button>
+        </Box>
+      </Tooltip>
+    ) : null;
+  const editControl = hasPermission('Quotations', 'edit') ? (
+    <Tooltip title={quote.statusValue?.toUpperCase() === 'ORDERED' ? 'An ordered quote can no longer be edited.' : 'Change prices, validity, discounts and remarks.'} describeChild>
+      <span>
+        <Button
+          variant={primaryAction === 'edit' ? 'contained' : 'outlined'}
+          startIcon={<EditIcon />}
+          onClick={() => navigate(`/sales/quotes/edit/${id}`)}
+          disabled={quote.statusValue?.toUpperCase() === 'ORDERED'}
+          sx={{ borderRadius: 2, fontWeight: primaryAction === 'edit' ? 800 : undefined, whiteSpace: 'nowrap' }}
+        >
+          Edit
+        </Button>
+      </span>
+    </Tooltip>
+  ) : null;
+  const respondedControl = hasPermission('Quotations', 'edit') && !isSuperseded && isSentQuote && !quote.respondedOn ? (
+    <Tooltip title="Note that the customer has replied. The quote stops counting as stale." describeChild>
+      <span>
+        <Button
+          variant={primaryAction === 'responded' ? 'contained' : 'outlined'}
+          startIcon={respondedMutation.isPending ? <CircularProgress size={18} /> : <RespondedIcon />}
+          onClick={() => respondedMutation.mutate()}
+          disabled={respondedMutation.isPending}
+          sx={{ borderRadius: 2, fontWeight: primaryAction === 'responded' ? 800 : undefined, whiteSpace: 'nowrap' }}
+        >
+          Customer responded
+        </Button>
+      </span>
+    </Tooltip>
+  ) : null;
+  const outcomeControl = hasPermission('Quotations', 'edit') && !isSuperseded && isSentQuote ? (
+    <Tooltip title="Close this quote as won, lost or expired, with the reason." describeChild>
+      <Button
+        variant={primaryAction === 'outcome' ? 'contained' : 'outlined'}
+        color="warning"
+        startIcon={<OutcomeIcon />}
+        onClick={() => setOutcomeOpen(true)}
+        sx={{ borderRadius: 2, fontWeight: 800, whiteSpace: 'nowrap' }}
+      >
+        Record outcome
+      </Button>
+    </Tooltip>
+  ) : null;
+  const poControl = hasPermission('Orders', 'create') && quote.statusValue === 'Accepted' ? (
+    <Tooltip title={!awardQuote ? 'This quote needs a linked commercial case, a customer and a currency before a client PO can be captured.' : ''}>
+      <Box component="span" role={!awardQuote ? 'button' : undefined} aria-disabled={!awardQuote ? 'true' : undefined} tabIndex={!awardQuote ? 0 : -1} sx={{ display: 'inline-flex', borderRadius: 2, '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 } }}>
+        <Button
+            variant="contained"
+            color="primary"
+            startIcon={<OrderIcon />}
+            onClick={() => setAwardOpen(true)}
+            disabled={!awardQuote || quote.statusValue?.toUpperCase() === 'ORDERED'}
+            sx={{ borderRadius: 2, fontWeight: 800, whiteSpace: 'nowrap' }}
+        >
+          Capture Client PO
+        </Button>
+      </Box>
+    </Tooltip>
+  ) : null;
+  // The control that belongs beside the next-step sentence. The rail keeps the rest.
+  const panelAction = primaryAction === 'send' ? sendControl
+    : primaryAction === 'edit' ? editControl
+      : primaryAction === 'responded' ? respondedControl
+        : primaryAction === 'outcome' ? outcomeControl
+          : primaryAction === 'po' ? poControl
+            : null;
 
   return (
-    <Box sx={{ p: { xs: 1.5, md: 3 }, bgcolor: 'background.default', minHeight: '100vh', minWidth: 0, overflowX: 'hidden' }}>
+    <Box sx={{ p: { xs: 1.5, md: 3 }, maxWidth: 1600, mx: 'auto', bgcolor: 'background.default', minHeight: '100vh', minWidth: 0, overflowX: 'hidden' }}>
       <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 1.5 }}>
         <Link component="button" variant="caption" onClick={() => navigate('/sales/quotes')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
           Quotes
@@ -374,8 +478,8 @@ const QuoteViewPage: React.FC = () => {
           The serial and the record facts live in the strip and the folds below. */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, gap: 2, flexDirection: { xs: 'column', lg: 'row' }, mb: 2 }}>
         <Stack direction="row" useFlexGap spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
-          <Typography variant="h4" sx={{ fontWeight: 900, lineHeight: 1.15, whiteSpace: 'nowrap' }}>Quote: {quote.quoteNo}</Typography>
-          <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
+          <Typography variant="h4" sx={{ fontWeight: 800, lineHeight: 1.15, whiteSpace: 'nowrap' }}>Quote: {quote.quoteNo}</Typography>
+          <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 700, borderRadius: 1.5 }} />
           {!quote.nexoraSerial && (
             // Shown, never hidden. A quotation with no commercial case cannot be traced from
             // inquiry to delivery, and an absent chip would read as a rendering gap rather than
@@ -392,7 +496,7 @@ const QuoteViewPage: React.FC = () => {
                 variant="outlined"
                 size="small"
                 onClick={() => navigate(`/sales/quotes/view/${revisionInfo.supersededByQuoteId}`)}
-                sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+                sx={{ fontWeight: 700, borderRadius: 1.5 }}
               />
             </Tooltip>
           )}
@@ -403,7 +507,7 @@ const QuoteViewPage: React.FC = () => {
                   ? 'Won' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'Lost' : 'Expired'}
                 color={(quote.statusCode || '').toUpperCase() === 'ACCEPTED' || (quote.statusCode || '').toUpperCase() === 'ORDERED'
                   ? 'success' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'error' : 'default'}
-                sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+                sx={{ fontWeight: 700, borderRadius: 1.5 }}
               />
             </Tooltip>
           )}
@@ -412,7 +516,7 @@ const QuoteViewPage: React.FC = () => {
               label={`Stale · no reply for ${quote.daysSinceSent ?? '?'} days`}
               color="warning"
               variant="outlined"
-              sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+              sx={{ fontWeight: 700, borderRadius: 1.5 }}
             />
           )}
           {revisionInfo && revisionInfo.revisionNo > 1 && revisionInfo.revisionOfQuoteNo && (
@@ -423,7 +527,7 @@ const QuoteViewPage: React.FC = () => {
                 variant="outlined"
                 size="small"
                 onClick={revisionInfo.revisionOfQuoteId ? () => navigate(`/sales/quotes/view/${revisionInfo.revisionOfQuoteId}`) : undefined}
-                sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+                sx={{ fontWeight: 700, borderRadius: 1.5 }}
               />
             </Tooltip>
           )}
@@ -431,31 +535,28 @@ const QuoteViewPage: React.FC = () => {
 
         {/* One action rail: Back first, the rarely used actions behind "More", and exactly one
             contained button — the next step for this quote's state — last. */}
-        <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', alignItems: 'center', position: { lg: 'sticky' }, top: 8, zIndex: 2, '& > button, & > span > button': { whiteSpace: 'nowrap' } }}>
+        <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', alignItems: 'center', position: { lg: 'sticky' }, top: 8, zIndex: 2, p: 0.75, borderRadius: 2, bgcolor: (t) => alpha(t.palette.background.default, 0.72), backdropFilter: 'blur(10px)', '& > button, & > span > button': { whiteSpace: 'nowrap' } }}>
           <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate('/sales/quotes')} sx={{ borderRadius: 2, borderColor: 'divider', color: 'text.secondary' }}>
             Back
           </Button>
-          {hasPermission('Quotations', 'edit') && <Button
-            variant={primaryAction === 'edit' ? 'contained' : 'outlined'}
-            startIcon={<EditIcon />}
-            onClick={() => navigate(`/sales/quotes/edit/${id}`)}
-            disabled={quote.statusValue?.toUpperCase() === 'ORDERED'}
-            sx={{ borderRadius: 2, fontWeight: primaryAction === 'edit' ? 800 : undefined }}
-          >
-            Edit
-          </Button>}
-          <Button
-            variant={primaryAction === 'pdf' ? 'contained' : 'outlined'}
-            startIcon={<PdfIcon />}
-            onClick={() => pdfMutation.mutate()}
-            disabled={pdfMutation.isPending || isUnpricedDraft}
-            sx={{ borderRadius: 2 }}
-          >
-            Export PDF
-          </Button>
+          {primaryAction !== 'edit' && editControl}
+          <Tooltip title={isUnpricedDraft ? 'Available once the lines are priced.' : 'Download the quotation the customer will receive.'} describeChild>
+            <span>
+              <Button
+                variant={primaryAction === 'pdf' ? 'contained' : 'outlined'}
+                startIcon={<PdfIcon />}
+                onClick={() => pdfMutation.mutate()}
+                disabled={pdfMutation.isPending || isUnpricedDraft}
+                sx={{ borderRadius: 2 }}
+              >
+                Export PDF
+              </Button>
+            </span>
+          </Tooltip>
           {hasPermission('Quotations', 'edit') && (
             <>
               <Button
+                title="Follow-up, extend validity, revise, sourcing and the source RFQ"
                 variant="outlined"
                 endIcon={<ExpandMoreIcon />}
                 aria-haspopup="menu"
@@ -507,90 +608,16 @@ const QuoteViewPage: React.FC = () => {
             </>
           )}
 
-          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && !quote.respondedOn && (
-            <Button
-              variant="outlined"
-              startIcon={respondedMutation.isPending ? <CircularProgress size={18} /> : <RespondedIcon />}
-              onClick={() => respondedMutation.mutate()}
-              disabled={respondedMutation.isPending}
-              sx={{ borderRadius: 2 }}
-            >
-              Customer responded
-            </Button>
-          )}
+          {primaryAction !== 'send' && sendControl}
 
-          {/*
-            The ONE control that puts this quote in front of the customer.
-
-            It used to render only once statusValue was already 'Sent', behind a contained
-            "Ready to Send" button that merely transitioned the lifecycle and emailed nobody. A rep
-            who clicked the prominent one got a success toast and a green Sent chip while the buyer
-            received nothing — and the quote's SentOn stayed null, so the status was a claim the
-            delivery record did not support.
-
-            The server owns the real transition: FinalizeQuoteDeliveryAsync stamps SentOn, moves the
-            lifecycle to SENT and creates the follow-up task when the mail is actually delivered. So
-            this button never touches status. It opens the recipient -> price-confirmation chain and
-            lets delivery report itself. Why it is disabled is printed in full in the panel below.
-          */}
-          {hasPermission('Quotations', 'edit')
-            && quote.statusValue?.toUpperCase() !== 'ORDERED'
-            && (isDraftQuote || quote.statusValue === 'Sent') && (
-            <Tooltip title={sendBlockedReason ? `${blockerRows.length || 1} thing${(blockerRows.length || 1) === 1 ? '' : 's'} must be fixed first — see the list below` : ''}>
-              <Box
-                component="span"
-                role={sendBlockedReason ? 'button' : undefined}
-                aria-disabled={sendBlockedReason ? 'true' : undefined}
-                tabIndex={sendBlockedReason ? 0 : -1}
-                sx={{ display: 'inline-flex', borderRadius: 2, '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 } }}
-              >
-                <Button
-                  variant={primaryAction === 'send' ? 'contained' : 'outlined'}
-                  startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
-                  disabled={sendBlockedReason !== null}
-                  title={sendBlockedReason?.text}
-                  onClick={() => setEmailOpen(true)}
-                  sx={{ borderRadius: 2, fontWeight: primaryAction === 'send' ? 800 : undefined }}
-                >
-                  {isDraftQuote ? 'Send to customer' : 'Send again'}
-                </Button>
-              </Box>
-            </Tooltip>
-          )}
-
-          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && (
-            <Button
-              variant="contained"
-              color="warning"
-              startIcon={<OutcomeIcon />}
-              onClick={() => setOutcomeOpen(true)}
-              sx={{ borderRadius: 2, fontWeight: 800 }}
-            >
-              Record outcome
-            </Button>
-          )}
-
-          {hasPermission('Orders', 'create') && quote.statusValue === 'Accepted' && (
-            <Tooltip title={!awardQuote ? 'This quote needs a linked commercial case, a customer and a currency before a client PO can be captured.' : ''}>
-              <Box component="span" sx={{ display: 'inline-flex' }}>
-                <Button
-                    variant="contained"
-                    color="primary"
-                    startIcon={<OrderIcon />}
-                    onClick={() => setAwardOpen(true)}
-                    disabled={!awardQuote || quote.statusValue?.toUpperCase() === 'ORDERED'}
-                    sx={{ borderRadius: 2, fontWeight: 800 }}
-                >
-                  Capture Client PO
-                </Button>
-              </Box>
-            </Tooltip>
-          )}
+          {primaryAction !== 'responded' && respondedControl}
+          {primaryAction !== 'outcome' && outcomeControl}
+          {primaryAction !== 'po' && poControl}
         </Stack>
       </Box>
 
       {/* Who, how to reach them, how long the offer stands. The four facts a rep opens a quote for. */}
-      <Paper sx={{ p: 2, mb: 2, borderRadius: 1, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      <Paper sx={{ p: 2, mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <Grid container spacing={2} sx={{ alignItems: 'center' }}>
           <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Customer Name</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerName || 'Customer unresolved'}</Typography></Grid>
           <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Contact</Typography><Typography sx={{ fontWeight: 700 }}>{quote.contactName || quote.customerEmail || 'Contact unresolved'}</Typography></Grid>
@@ -616,17 +643,18 @@ const QuoteViewPage: React.FC = () => {
           This list used to be split between grey captions under the Send button, three banners and a
           warning inside the totals card, and the same fact was worded differently in each. */}
       {(showBlockerPanel || nextStepText) && (
-        <Alert
-          severity={revisionImpactPresentation || supplierValidityWarnings.length > 0 ? 'error' : showBlockerPanel ? 'warning' : 'info'}
-          sx={{ mb: 2, '& .MuiAlert-message': { width: '100%' } }}
+        <NextStepPanel
+          tone={showPreSendGates && (revisionImpactPresentation || supplierValidityWarnings.length > 0) ? 'error' : showBlockerPanel ? 'warning' : primaryAction === 'send' ? 'success' : 'info'}
+          title={showBlockerPanel ? (isDraftQuote ? 'Before this quote can be sent' : 'Needs attention') : 'Next step'}
+          sentence={nextStepText ?? blockerRows[0]?.text ?? ''}
+          action={panelAction}
+          testId="quote-next-step"
         >
-          <AlertTitle sx={{ fontWeight: 800 }}>{isUnpricedDraft ? 'Commercial Review Required' : showBlockerPanel ? 'Before this quote can be sent' : 'Next step'}</AlertTitle>
-          {nextStepText && <Typography variant="body2" sx={{ fontWeight: 700, mb: showBlockerPanel ? 1 : 0 }}>{nextStepText}</Typography>}
           {isUnpricedDraft && (
             <Typography variant="body2" sx={{ mb: 1 }}>Pricing Pending · Inventory Pending · Lead Time Pending · Tax, freight and commercial validity are not yet set.</Typography>
           )}
           <Stack component="ol" spacing={1} sx={{ m: 0, pl: 2.5 }}>
-            {revisionImpactPresentation && (
+            {showPreSendGates && revisionImpactPresentation && (
               <Stack component="li" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
                 <Box>
                   <Typography sx={{ fontWeight: 800 }}>{revisionImpactPresentation.title}</Typography>
@@ -662,7 +690,7 @@ const QuoteViewPage: React.FC = () => {
                 )}
               </Typography>
             ))}
-            {supplierValidityWarnings.length > 0 && (
+            {showPreSendGates && supplierValidityWarnings.length > 0 && (
               <Stack component="li" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
                 <Box>
                   <Typography sx={{ fontWeight: 800 }}>Supplier validity does not support this Customer Quote</Typography>
@@ -672,7 +700,7 @@ const QuoteViewPage: React.FC = () => {
               </Stack>
             )}
           </Stack>
-        </Alert>
+        </NextStepPanel>
       )}
 
       {holdInfo !== null && (
@@ -694,13 +722,13 @@ const QuoteViewPage: React.FC = () => {
       <Stack spacing={3}>
         {/* The work: the lines and, directly under them, the totals they add up to. */}
         <Paper sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', maxWidth: '100%', overflow: 'hidden' }}>
-          <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
+          <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'action.hover' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
           <Box sx={{ overflowX: 'auto' }}>
             <Table size="small">
-              <TableHead><TableRow sx={{ bgcolor: 'grey.50' }}><TableCell sx={{ fontWeight: 800 }}>Ref</TableCell><TableCell sx={{ fontWeight: 800 }}>Description</TableCell><TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell><TableCell sx={{ fontWeight: 800 }}>UOM</TableCell><TableCell sx={{ fontWeight: 800 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell></TableRow></TableHead>
+              <TableHead><TableRow sx={{ bgcolor: 'action.hover' }}><TableCell sx={{ fontWeight: 800 }}>Ref</TableCell><TableCell sx={{ fontWeight: 800 }}>Description</TableCell><TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell><TableCell sx={{ fontWeight: 800 }}>UOM</TableCell><TableCell sx={{ fontWeight: 800 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell></TableRow></TableHead>
               <TableBody>
                 {quote.quoteItems.map((item, idx) => (
-                  <TableRow key={item.id}>
+                  <TableRow key={item.id} hover>
                     {/* The buyer's own line reference (their RFQ line, e.g. SAP "00010"); synthetic index only for legacy lines */}
                     <TableCell>{item.customerLineRef || idx + 1}</TableCell>
                     <TableCell><Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography><Typography variant="caption" color="text.secondary">{item.itemDescription}</Typography></TableCell>
@@ -732,8 +760,8 @@ const QuoteViewPage: React.FC = () => {
               </TableBody>
             </Table>
           </Box>
-          <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'grey.50', display: 'flex', justifyContent: 'flex-end' }}>
-            <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'primary.main', boxShadow: 'none', width: '100%', maxWidth: 440 }}>
+          <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'action.hover', display: 'flex', justifyContent: 'flex-end' }}>
+            <Card className="tabular-nums" sx={{ borderRadius: 2, border: '1px solid', borderColor: 'primary.main', boxShadow: 'none', width: '100%', maxWidth: 440 }}>
               <CardContent sx={{ p: 3 }}>
                 <Typography variant="h6" sx={{ fontWeight: 800, mb: 3 }}>Financial Summary</Typography>
                 <Stack spacing={2}>
@@ -759,10 +787,10 @@ const QuoteViewPage: React.FC = () => {
           </Box>
         </Paper>
 
-        {quote.headerRemarks && <Box sx={{ p: 2, bgcolor: 'grey.50', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
+        {quote.headerRemarks && <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
 
         {/* Evidence and record, folded. Nothing is removed; it is simply not in the rep's way. */}
-        <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1 }}>
+        <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
           <AccordionSummary expandIcon={<ExpandMoreIcon />}>
             <Box>
               <Typography sx={{ fontWeight: 900 }}>Where the prices come from</Typography>
@@ -777,7 +805,7 @@ const QuoteViewPage: React.FC = () => {
           </AccordionDetails>
         </Accordion>
 
-        <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1 }}>
+        <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
           <AccordionSummary expandIcon={<ExpandMoreIcon />}>
             <Box>
               <Typography sx={{ fontWeight: 900 }}>Quote record and lineage</Typography>

@@ -1009,10 +1009,10 @@ const LeadsPage: React.FC = () => {
         const decided = p.row.isAccepted || p.row.isRejected;
         return (
           <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
-            <Tooltip title="View">
+            <Tooltip title="Open the inquiry record">
               <IconButton
                 size="small"
-                aria-label="View"
+                aria-label="Open the inquiry record"
                 sx={{ color: 'primary.main' }}
                 onClick={() => navigate(`/leads/view/${p.row.id}`)}
               >
@@ -1027,7 +1027,7 @@ const LeadsPage: React.FC = () => {
                 onClick={() => navigate(`/procurement/leads/${p.row.id}/workbench`)}
                 sx={{ fontWeight: 700, minWidth: 0, px: 1.25, whiteSpace: 'nowrap' }}
               >
-                {decided ? 'View' : 'Decide'}
+                {decided ? 'See the decision' : 'Decide'}
               </Button>
             )}
             {!decided && (

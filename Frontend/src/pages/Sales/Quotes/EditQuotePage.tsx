@@ -1,3 +1,4 @@
+import { alpha } from '@mui/material/styles';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
@@ -28,6 +29,7 @@ import {
 import { toast } from 'react-hot-toast';
 import { calculateQuoteTotals, type DiscountKind } from './quoteTotals';
 import { formatMoney } from '../../../utils/currency';
+import NextStepPanel from '../../../components/common/NextStepPanel';
 
 interface QuoteItem {
   id?: number;
@@ -371,7 +373,7 @@ const EditQuotePage: React.FC = () => {
   }
 
   return (
-    <Box sx={{ p: 2, bgcolor: 'background.default', minHeight: '100vh' }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: 'auto', bgcolor: 'background.default', minHeight: '100vh' }}>
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
         <Box>
           <Breadcrumbs sx={{ mb: 0.5 }}>
@@ -380,7 +382,7 @@ const EditQuotePage: React.FC = () => {
           </Breadcrumbs>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
             <EditIcon color="primary" />
-            <Typography variant="h5" sx={{ fontWeight: 900 }}>Update Quote</Typography>
+            <Typography variant="h5" sx={{ fontWeight: 800 }}>Update Quote</Typography>
           </Stack>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -405,6 +407,33 @@ const EditQuotePage: React.FC = () => {
         </Stack>
       </Stack>
 
+      {/* What is still missing on this draft, so a rep sent here to "fix the items" sees them at once. */}
+      {(() => {
+        const live = items.filter((item) => !item.isDeleted);
+        const unpriced = live.filter((item) => Number(item.unitPrice || 0) === 0).length;
+        const missing = [
+          live.length === 0 ? 'at least one line' : null,
+          unpriced > 0 ? `${unpriced} line${unpriced === 1 ? ' has' : 's have'} no unit price` : null,
+          !validUntil ? 'no validity date' : null,
+          !customerId ? 'no customer' : null,
+        ].filter(Boolean) as string[];
+        return (
+          <NextStepPanel
+            tone={missing.length > 0 ? 'warning' : 'success'}
+            title="Next step"
+            sentence={missing.length > 0
+              ? `Fill in: ${missing.join(', ')}. Then press Update Quote.`
+              : 'Everything is filled in. Press Update Quote to save, then send it from the quote page.'}
+            testId="edit-quote-next-step"
+          >
+            {!currencyCode && (
+              <Typography variant="body2">
+                This quote has no currency yet. It is set when a line is priced from an approved supplier offer on the Sourcing workbench; it cannot be typed here.
+              </Typography>
+            )}
+          </NextStepPanel>
+        );
+      })()}
       {/* The guard has written this draft to sessionStorage since the day it was added; this page
           never read it back. Same banner as the lead decision workbench, the one screen that did. */}
       {guard.recoveredDraft && (
@@ -472,13 +501,13 @@ const EditQuotePage: React.FC = () => {
           </Paper>
 
           <Paper sx={{ p: 0, borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflow: 'hidden' }}>
-             <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', bgcolor: 'grey.50' }}>
+             <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', bgcolor: 'action.hover' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>LINE ITEMS ({items.filter(i => !i.isDeleted).length})</Typography>
-              <Button startIcon={<AddIcon />} variant="contained" onClick={handleAddItem} size="small" sx={{ borderRadius: 1.5, textTransform: 'none' }}>Add Product</Button>
+              <Button startIcon={<AddIcon />} variant="outlined" onClick={handleAddItem} size="small" sx={{ borderRadius: 2 }}>Add Product</Button>
             </Box>
             <Table size="small">
               <TableHead>
-                <TableRow sx={{ bgcolor: 'grey.100' }}>
+                <TableRow sx={{ bgcolor: 'action.selected' }}>
                   <TableCell sx={{ fontWeight: 800, width: 70 }}>Ref</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: '25%' }}>Product</TableCell>
                   <TableCell sx={{ fontWeight: 800 }}>Description</TableCell>
@@ -493,7 +522,7 @@ const EditQuotePage: React.FC = () => {
               </TableHead>
               <TableBody>
                 {items.filter(i => !i.isDeleted).map((item, index) => (
-                  <TableRow key={index} sx={{ '&:hover': { bgcolor: 'grey.50' } }}>
+                  <TableRow key={index} sx={{ '&:hover': { bgcolor: 'action.hover' } }}>
                     {/* Read-only: the buyer's own line reference from their RFQ */}
                     <TableCell>
                       <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{item.customerLineRef || '—'}</Typography>
@@ -586,7 +615,7 @@ const EditQuotePage: React.FC = () => {
           </Paper>
         </Grid>
         <Grid size={{ xs: 12, lg: 3 }}>
-          <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'primary.light', bgcolor: 'primary.lighter', boxShadow: 'none', position: 'sticky', top: 16 }}>
+          <Card className="tabular-nums" sx={{ borderRadius: 2, border: '1px solid', borderColor: 'primary.light', bgcolor: (t) => alpha(t.palette.primary.main, t.palette.mode === 'dark' ? 0.14 : 0.06), boxShadow: 'none', position: 'sticky', top: 16 }}>
             <CardContent sx={{ p: 2 }}>
               <Typography variant="subtitle1" sx={{ fontWeight: 800, mb: 1.5, color: 'primary.dark' }}>Revised Summary</Typography>
               <Stack spacing={1.5}>
