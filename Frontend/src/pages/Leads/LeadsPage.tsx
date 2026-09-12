@@ -134,7 +134,30 @@ interface StatusMeta {
   variant: 'filled' | 'outlined';
 }
 
+// The tenant's own status code is the fact. `isAccepted` is a legacy hard-coded id (24) that
+// this tenant does not use, so a lead already converted to an RFQ used to read "New" with a
+// Decide button beside it — the exact lie the DTO comment on `leadStatusCode` warns about.
+const STATUS_META: Record<string, StatusMeta> = {
+  CONVERTED_TO_RFQ: { label: 'Became an RFQ', color: 'success', variant: 'filled' },
+  QUOTED: { label: 'Quoted', color: 'success', variant: 'filled' },
+  NEGOTIATION: { label: 'In negotiation', color: 'success', variant: 'outlined' },
+  AWARDED: { label: 'Won', color: 'success', variant: 'filled' },
+  PARTIALLY_AWARDED: { label: 'Partly won', color: 'success', variant: 'outlined' },
+  COMPLETED: { label: 'Completed', color: 'success', variant: 'outlined' },
+  QUALIFIED: { label: 'Qualified', color: 'primary', variant: 'filled' },
+  UNDER_REVIEW: { label: 'Under review', color: 'warning', variant: 'outlined' },
+  DISQUALIFIED: { label: 'Declined', color: 'error', variant: 'outlined' },
+  LOST: { label: 'Lost', color: 'error', variant: 'outlined' },
+  CANCELLED: { label: 'Cancelled', color: 'error', variant: 'outlined' },
+  DUPLICATED: { label: 'Duplicate', color: 'warning', variant: 'outlined' },
+};
+/** A lead whose decision has been made: the row offers "See decision", not "Decide". */
+const DECIDED_CODES = new Set(['CONVERTED_TO_RFQ', 'QUOTED', 'NEGOTIATION', 'AWARDED', 'PARTIALLY_AWARDED', 'COMPLETED', 'DISQUALIFIED', 'LOST', 'CANCELLED', 'DUPLICATED']);
+const isDecided = (row: LeadResponseDTO): boolean =>
+  DECIDED_CODES.has((row.leadStatusCode ?? '').toUpperCase()) || row.isAccepted || row.isRejected;
 const leadStatus = (row: LeadResponseDTO): StatusMeta => {
+  const known = STATUS_META[(row.leadStatusCode ?? '').toUpperCase()];
+  if (known) return known;
   if (row.isAccepted) return { label: 'Accepted', color: 'success', variant: 'filled' };
   if (row.isRejected) return { label: 'Rejected', color: 'error', variant: 'outlined' };
   if (row.headerRemarks?.startsWith('[NEEDS REVIEW]')) return { label: 'Needs review', color: 'warning', variant: 'filled' };
@@ -1029,7 +1052,7 @@ const LeadsPage: React.FC = () => {
       filterable: false,
       hideable: false,
       renderCell: (p) => {
-        const decided = p.row.isAccepted || p.row.isRejected;
+        const decided = isDecided(p.row);
         return (
           <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
             <Tooltip title="Open the inquiry record">
@@ -1143,6 +1166,10 @@ const LeadsPage: React.FC = () => {
       sortable: false,
       filterable: false,
       renderCell: (p) => {
+        if (isDecided(p.row)) {
+          const meta = leadStatus(p.row);
+          return <Chip label={meta.label} color={meta.color} variant={meta.variant} size="small" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />;
+        }
         if (decisionQuery.isError) {
           return <Typography variant="caption" color="text.secondary">Read unavailable</Typography>;
         }
@@ -1175,7 +1202,7 @@ const LeadsPage: React.FC = () => {
       filterable: false,
       hideable: false,
       renderCell: (p) => {
-        const decided = p.row.isAccepted || p.row.isRejected;
+        const decided = isDecided(p.row);
         return commercialAccess.canOpenLeadWorkbench ? (
           <Button
             size="small"
