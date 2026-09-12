@@ -481,7 +481,7 @@ export default function LeadIngestionBatchPage() {
   const retryStillAwaiting = summariseSecurityRetryHolds(retryMutation.data ?? {});
   const metrics = [
     { label: 'Files received', value: batch.filesReceived, classification: null, icon: <FilesIcon color="action" /> },
-    { label: 'Inquiries found', value: batch.logicalInquiries, classification: null, icon: <ReviewIcon color="action" /> },
+    { label: 'Logical inquiries', value: batch.logicalInquiries, classification: null, icon: <ReviewIcon color="action" /> },
     { label: 'New leads', value: batch.newLeads, classification: 'new', icon: <NewIcon color="success" /> },
     { label: 'Exact duplicates', value: batch.exactDuplicates, classification: 'exactduplicate', icon: <DuplicateIcon color="info" /> },
     { label: 'Revisions', value: batch.revisions, classification: 'revision', icon: <RevisionIcon color="primary" /> },
@@ -500,7 +500,7 @@ export default function LeadIngestionBatchPage() {
     <Box sx={{ maxWidth: 1400, mx: 'auto', p: { xs: 2, md: 3 } }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, mb: 3 }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800 }}>Upload results</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800 }}>Batch reconciliation</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>Batch {batch.batchId}</Typography>
         </Box>
         <Stack direction="row" spacing={1}>

@@ -464,7 +464,7 @@ const ManualUploadLeadsPage: React.FC = () => {
                   ? 'Uploads paused — document storage is unavailable'
                   : failedJobs.length > 0 || storagePaused
                     ? `Retry ${files.length} file${files.length === 1 ? '' : 's'}`
-                    : 'Upload and read these documents'}
+                    : 'Queue for reconciliation'}
             </Button>
           </Box>
         </Box>

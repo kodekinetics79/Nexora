@@ -333,7 +333,7 @@ const ViewRFQPage: React.FC = () => {
   const quoteDraft = sourcingQuery.data?.customerQuoteDraft ?? null;
   const unresolvedCount = rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length;
   const isAwarded = (lineId: number) => awards.some((a) => a.rfqItemId === lineId && ['APPROVED', 'SPLITAPPROVED'].includes((a.status ?? '').replaceAll('_', '').toUpperCase()));
-  const isAsked = (lineId: number) => solicitations.some((sol) => sol.requestedRfqItemIds.includes(lineId));
+  const isAsked = (lineId: number) => solicitations.some((sol) => (sol.requestedRfqItemIds ?? []).includes(lineId));
   const shortLines = [...sourcingLines.values()].filter((line) => line.shortfallQuantity > 0 && line.resolution !== 'INCOMING' && !isAwarded(line.id));
   const shortNotAsked = shortLines.filter((line) => !line.sourcingCaseId || !isAsked(line.id));
   const shortWithSuppliers = shortLines.filter((line) => line.sourcingCaseId && isAsked(line.id));

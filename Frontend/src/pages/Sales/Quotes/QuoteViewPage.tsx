@@ -382,6 +382,7 @@ const QuoteViewPage: React.FC = () => {
           component="span"
           role={sendBlockedReason ? 'button' : undefined}
           aria-disabled={sendBlockedReason ? 'true' : undefined}
+          aria-label={sendBlockedReason ? `Sending is blocked: ${sendBlockedReason.text}` : undefined}
           tabIndex={sendBlockedReason ? 0 : -1}
           sx={{ display: 'inline-flex', borderRadius: 2, '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 } }}
         >
@@ -443,7 +444,7 @@ const QuoteViewPage: React.FC = () => {
   ) : null;
   const poControl = hasPermission('Orders', 'create') && quote.statusValue === 'Accepted' ? (
     <Tooltip title={!awardQuote ? 'This quote needs a linked commercial case, a customer and a currency before a client PO can be captured.' : ''}>
-      <Box component="span" role={!awardQuote ? 'button' : undefined} aria-disabled={!awardQuote ? 'true' : undefined} tabIndex={!awardQuote ? 0 : -1} sx={{ display: 'inline-flex', borderRadius: 2, '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 } }}>
+      <Box component="span" role={!awardQuote ? 'button' : undefined} aria-disabled={!awardQuote ? 'true' : undefined} aria-label={!awardQuote ? 'Capturing a client PO is blocked: this quote needs a linked commercial case, a customer and a currency.' : undefined} tabIndex={!awardQuote ? 0 : -1} sx={{ display: 'inline-flex', borderRadius: 2, '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 } }}>
         <Button
             variant="contained"
             color="primary"
@@ -598,12 +599,6 @@ const QuoteViewPage: React.FC = () => {
                     <ListItemText primary="Sourcing & offers" />
                   </MenuItem>
                 )}
-                {quote.rfqId && (
-                  <MenuItem onClick={() => { setMoreAnchor(null); navigate(`/procurement/rfqs/view/${quote.rfqId}`); }}>
-                    <ListItemIcon><NextIcon fontSize="small" /></ListItemIcon>
-                    <ListItemText primary="Open Source RFQ" secondary={`RFQ ${quote.rfqNo}`} />
-                  </MenuItem>
-                )}
               </Menu>
             </>
           )}
@@ -631,10 +626,15 @@ const QuoteViewPage: React.FC = () => {
               </Typography>
             )}
           </Grid>
-          <Grid size={{ xs: 12, md: 2 }} sx={{ display: 'flex', justifyContent: { md: 'flex-end' } }}>
-            {quote.nexoraSerial && (
-              <Chip label={`Nexora Serial: ${quote.nexoraSerial}`} variant="outlined" size="small" sx={{ fontWeight: 900, fontFamily: 'monospace', maxWidth: '100%' }} />
-            )}
+          <Grid size={{ xs: 12, md: 2 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Came from</Typography>
+            <Stack direction="row" useFlexGap spacing={0.5} sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
+              {quote.rfqId && <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${quote.rfqId}`)} sx={{ whiteSpace: 'nowrap' }}>Open Source RFQ</Button>}
+              {quote.leadId && <Button size="small" variant="text" onClick={() => navigate(`/procurement/leads/view/${quote.leadId}`)} sx={{ whiteSpace: 'nowrap' }}>Open Canonical Lead</Button>}
+              {quote.nexoraSerial && (
+                <Chip label={`Nexora Serial: ${quote.nexoraSerial}`} variant="outlined" size="small" sx={{ fontWeight: 600, fontFamily: 'monospace', maxWidth: '100%' }} />
+              )}
+            </Stack>
           </Grid>
         </Grid>
       </Paper>
@@ -826,12 +826,6 @@ const QuoteViewPage: React.FC = () => {
                   </Typography>
                 </Grid>
               )}
-              <Grid size={{ xs: 12 }}>
-                <Stack direction="row" useFlexGap spacing={1} sx={{ flexWrap: 'wrap' }}>
-                  {quote.rfqId && <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>Open Source RFQ</Button>}
-                  {quote.leadId && <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${quote.leadId}`)}>Open Canonical Lead</Button>}
-                </Stack>
-              </Grid>
             </Grid>
           </AccordionDetails>
         </Accordion>

@@ -554,10 +554,10 @@ function SourcingWorkbenchPage() {
   const linesWithOffers = new Set((workbench?.offers ?? []).map((offer) => offer.rfqItemId));
   const awardedLineIds = new Set((workbench?.awards ?? []).filter((a) => ["APPROVED", "SPLITAPPROVED"].includes(norm(a.status))).map((a) => a.rfqItemId));
   const linesAwaitingAward = unresolvedLines.filter((line) => linesWithOffers.has(line.id) && !awardedLineIds.has(line.id));
-  const repliesNotCaptured = sols.filter((s) => norm(s.status) === "RESPONDED" && !s.requestedRfqItemIds.some((id) => linesWithOffers.has(id)));
-  const shortNotAsked = unresolvedLines.filter((line) => line.resolution !== "INCOMING" && !awardedLineIds.has(line.id) && !sols.some((s) => s.requestedRfqItemIds.includes(line.id)));
+  const repliesNotCaptured = sols.filter((s) => norm(s.status) === "RESPONDED" && !(s.requestedRfqItemIds ?? []).some((id) => linesWithOffers.has(id)));
+  const shortNotAsked = unresolvedLines.filter((line) => line.resolution !== "INCOMING" && !awardedLineIds.has(line.id) && !sols.some((s) => (s.requestedRfqItemIds ?? []).includes(line.id)));
   const shortAskedDeclined = unresolvedLines.filter((line) => line.resolution !== "INCOMING" && !awardedLineIds.has(line.id) && !linesWithOffers.has(line.id)
-    && sols.some((s) => s.requestedRfqItemIds.includes(line.id)) && sols.filter((s) => s.requestedRfqItemIds.includes(line.id)).every((s) => ["DECLINED", "EXPIRED"].includes(norm(s.status))));
+    && sols.some((s) => (s.requestedRfqItemIds ?? []).includes(line.id)) && sols.filter((s) => (s.requestedRfqItemIds ?? []).includes(line.id)).every((s) => ["DECLINED", "EXPIRED"].includes(norm(s.status))));
   const draftLines = workbench?.customerQuoteDraft?.lines ?? [];
   const unpricedDraftLines = draftLines.filter((line) => Number(line.unitPrice || 0) === 0);
   const unpricedWithAward = unpricedDraftLines.filter((line) => awardedLineIds.has(line.rfqItemId));
