@@ -50,7 +50,8 @@ public sealed class TenantDataControlService(
     IEvidenceObjectStorage storage,
     IFileStorage files,
     CommercialDocumentArchiveService archive,
-    ILogger<TenantDataControlService> log)
+    ILogger<TenantDataControlService> log,
+    ITenantDeletionReceipts? receipts = null)
 {
     private const string Area = "TenantDataControl";
 
@@ -743,6 +744,16 @@ public sealed class TenantDataControlService(
                 orphans.AddRange(scan.Deletable);
         }
 
+        // The second confirmation, verified here: the number typed must be the number of items
+        // this run has just selected. A stale preview — the store changed, a message settled —
+        // fails it, and the answer is to preview again, not to guess.
+        var toRemove = mail.Count + orphans.Count;
+        if (!command.IsDryRun && command.ConfirmedCount != toRemove)
+            throw new PlatformGovernanceValidationException(
+                $"Type the number of items being removed — {toRemove} — to confirm. The number did "
+                + "not match what would be removed right now, so nothing was deleted. If the screen "
+                + "shows a different figure, preview again.");
+
         long bytes = 0;
         var messagesCleared = 0;
         var filesDeleted = 0;
@@ -786,7 +797,20 @@ public sealed class TenantDataControlService(
             TenantDataControlCopy.NotErasure, false);
 
         if (!command.IsDryRun)
+        {
             await RecordRunAsync(tenantId, actorUserId, idempotencyKey, reason, selected, result, ct);
+            var notified = receipts is null ? 0 : await receipts.SendAsync(tenantId, actorUserId,
+                new TenantDeletionReceipt(
+                    $"{messagesCleared + filesDeleted} stored message(s) and file(s) removed",
+                    [
+                        new("Stored messages cleared", messagesCleared.ToString("N0")),
+                        new("Leftover files deleted", filesDeleted.ToString("N0")),
+                        new("Space freed", $"{bytes:N0} bytes"),
+                        new("Left alone on purpose", refusals.Count.ToString("N0"))
+                    ],
+                    reason), ct);
+            result = result with { AdministratorsNotified = notified };
+        }
         return result;
     }
 

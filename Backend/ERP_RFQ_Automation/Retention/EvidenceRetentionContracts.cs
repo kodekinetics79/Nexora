@@ -36,11 +36,18 @@ public sealed record UpdateEvidenceRetentionPolicyCommand(int RetentionDays, boo
 /// "delete everything eligible". Here only an explicit <c>false</c> deletes: absent, null
 /// and true all simulate. The destructive reading must be the one that was asked for, never
 /// the one that fell out of a default.</para>
+///
+/// <para><see cref="ConfirmedCount"/> is the second confirmation, and it is verified on the
+/// SERVER against the number of documents the run is about to delete. The first confirmation
+/// (the typed phrase in the browser) proves the button was not pressed by accident; this one
+/// proves the person read the figure for THIS deletion, because a number typed from a stale or
+/// misread preview does not match and nothing is deleted.</para>
 /// </summary>
 public sealed record EvidenceRetentionPurgeCommand(
     bool? DryRun,
     string Reason,
-    string? PreviewToken = null)
+    string? PreviewToken = null,
+    int? ConfirmedCount = null)
 {
     public bool IsDryRun => DryRun is not false;
 }
@@ -62,7 +69,11 @@ public sealed record EvidenceRetentionPurgeResult(
     string Disclosure,
     bool IdempotentReplay,
     string? PreviewToken = null,
-    DateTimeOffset? PreviewExpiresOn = null);
+    DateTimeOffset? PreviewExpiresOn = null,
+    /// <summary>How many of the workspace's owner-rank administrators were emailed a receipt for
+    /// a real run. Zero on a dry run, on a replay, and when outbound mail is not configured; the
+    /// screen only claims a receipt went out when this says so.</summary>
+    int AdministratorsNotified = 0);
 
 public static class EvidenceRetentionDisclosure
 {

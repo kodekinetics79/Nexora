@@ -14,6 +14,10 @@ import {
  * The behaviours locked down here are the ones that make an IRREVERSIBLE control safe:
  *  - the delete button cannot be reached without a dry run first;
  *  - the confirmation states the count, the byte total, and that lineage survives;
+ *  - a SECOND confirmation asks for the number being deleted and sends it to the server;
+ *  - no standing "policy switch" has to be on first — the tenant is not made to opt into
+ *    automatic deletion in order to delete what he has just previewed;
+ *  - the screen says the next step itself, and says "unknown" rather than zero;
  *  - the screen never claims the purge erases personal data;
  *  - a field the backend omitted renders as "Not reported", never as 0.
  */
@@ -51,22 +55,30 @@ const storageFigures = {
   reclaimableDocumentCount: 47,
 };
 
-/** A tenant that has opted in — the only state in which a real purge is permitted. */
 const SUMMARY = readEvidenceRetentionSummary({
   policy: {
-    retentionDays: 90, isEnabled: true, minimumRetentionDays: 30,
+    retentionDays: 90, isEnabled: true, minimumRetentionDays: 1,
     maximumRetentionDays: 3650, version: 3,
   },
   storage: storageFigures,
 });
 
-/** The default state of a fresh tenant: irreversible deletion is never on out of the box. */
+/** The default state of a fresh tenant: no standing rule saved. Deleting must still work. */
 const SUMMARY_OPT_OUT = readEvidenceRetentionSummary({
   policy: {
-    retentionDays: 90, isEnabled: false, minimumRetentionDays: 30,
+    retentionDays: 90, isEnabled: false, minimumRetentionDays: 1,
     maximumRetentionDays: 3650, version: 1,
   },
   storage: storageFigures,
+});
+
+/** Nothing reclaimable by age, so the next step depends on the clear-out buckets alone. */
+const SUMMARY_NOTHING_BY_AGE = readEvidenceRetentionSummary({
+  policy: {
+    retentionDays: 90, isEnabled: false, minimumRetentionDays: 1,
+    maximumRetentionDays: 3650, version: 1,
+  },
+  storage: { ...storageFigures, reclaimableBytes: 0, reclaimableDocumentCount: 0 },
 });
 
 const DISCLOSURE = 'Dry run: 47 document(s) would be purged, freeing 1,932,735,283 bytes. '
@@ -195,6 +207,20 @@ const previewCleanup = async () => {
   await screen.findByText(/preview — nothing has been deleted/i);
 };
 
+/**
+ * The two confirmations, in order: the fixed word in the first dialog, then the number of items in
+ * the second. Returns the second dialog so a test can press its button or read its error.
+ */
+const confirmTwice = async (phraseDialog: HTMLElement, continueLabel: RegExp, count: number) => {
+  fireEvent.change(within(phraseDialog).getByLabelText(/type delete to confirm/i), { target: { value: 'DELETE' } });
+  fireEvent.click(within(phraseDialog).getByRole('button', { name: continueLabel }));
+  const finalCheck = await screen.findByRole('dialog', { name: /last check before/i });
+  fireEvent.change(within(finalCheck).getByLabelText(new RegExp(`type ${count} to confirm`, 'i')), {
+    target: { value: String(count) },
+  });
+  return finalCheck;
+};
+
 const renderPage = () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -273,13 +299,46 @@ describe('StorageRetentionPage', () => {
     expect(screen.getByText(/Nexora keeps no backup of these files/i)).toBeInTheDocument();
   });
 
-  it('defaults the policy to 90 days and says the opt-in does not start a scheduler', async () => {
+  it('defaults the period to 90 days, offers no opt-in switch, and says nothing runs on a schedule', async () => {
     getEvidenceRetention.mockResolvedValue(SUMMARY_OPT_OUT);
     renderPage();
     const days = await screen.findByLabelText(/keep original files for/i);
     expect(days).toHaveValue(90);
-    expect(screen.getByRole('checkbox', { name: /allow permanent deletion/i })).not.toBeChecked();
-    expect(screen.getByText(/does not start an automatic deletion schedule/i)).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /allow permanent deletion/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/nothing is deleted on a schedule in this build/i)).toBeInTheDocument();
+    expect(screen.getByText(/beyond that the period is yours to set/i)).toBeInTheDocument();
+  });
+
+  it('says the next step itself, with the figure it can free and where to start', async () => {
+    renderPage();
+    const panel = await screen.findByTestId('storage-next-step');
+    // Clearable buckets: 3,355,443 + 1,048,576 + 11,744,051 bytes = 15.4 MB.
+    expect(await within(panel).findByText(/15\.4 MB can be freed now from mail and files that never became anything/i)).toBeInTheDocument();
+    expect(within(panel).getByText(/nothing is deleted until you confirm twice/i)).toBeInTheDocument();
+    expect(within(panel).getByRole('button', { name: /take me there/i })).toBeInTheDocument();
+  });
+
+  it('points at the age-based deletion when only that can free space', async () => {
+    getTenantDataControl.mockResolvedValue(TENANT_DATA_EMPTY);
+    renderPage();
+    const panel = await screen.findByTestId('storage-next-step');
+    expect(await within(panel).findByText(/100 MB can be freed now from 47 documents older than your retention period/i)).toBeInTheDocument();
+  });
+
+  it('says nothing can be freed, rather than zero, when every file is in use or protected', async () => {
+    getEvidenceRetention.mockResolvedValue(SUMMARY_NOTHING_BY_AGE);
+    getTenantDataControl.mockResolvedValue(TENANT_DATA_EMPTY);
+    renderPage();
+    const panel = await screen.findByTestId('storage-next-step');
+    expect(await within(panel).findByText(/nothing can be freed right now/i)).toBeInTheDocument();
+  });
+
+  it('says how much can be freed is unknown when the figures failed to load', async () => {
+    getEvidenceRetention.mockResolvedValue(readEvidenceRetentionSummary({ policy: { retentionDays: 90 }, storage: {} }));
+    getTenantDataControl.mockRejectedValue({ response: { status: 500 } });
+    renderPage();
+    const panel = await screen.findByTestId('storage-next-step');
+    expect(await within(panel).findByText(/unknown right now\. nothing has been deleted/i)).toBeInTheDocument();
   });
 
   it('is visibly read-only and offers no callable mutations to a non-super-admin', async () => {
@@ -288,7 +347,6 @@ describe('StorageRetentionPage', () => {
 
     expect(await screen.findByText(/read-only storage view/i)).toBeInTheDocument();
     expect(screen.getByText(/only a tenant super administrator/i)).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: /allow permanent deletion/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /save retention policy/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /preview what would be deleted/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /delete stored files permanently/i })).toBeDisabled();
@@ -303,7 +361,7 @@ describe('StorageRetentionPage', () => {
     expect(runTenantDataCleanup).not.toHaveBeenCalled();
   });
 
-  it('refuses permanent deletion until the tenant has opted in', async () => {
+  it('does not make the tenant switch on a standing policy before a confirmed deletion', async () => {
     getEvidenceRetention.mockResolvedValue(SUMMARY_OPT_OUT);
     renderPage();
     await screen.findByRole('button', { name: /preview what would be deleted/i });
@@ -312,9 +370,15 @@ describe('StorageRetentionPage', () => {
     });
     await runPreview();
 
-    // A preview is always allowed; deleting is not, until the saved policy says so.
-    expect(screen.getByRole('button', { name: /delete stored files permanently/i })).toBeDisabled();
-    expect(screen.getByText(/permanent deletion is opt-in/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /delete stored files permanently/i })).toBeEnabled();
+    expect(screen.queryByText(/permanent deletion is opt-in/i)).not.toBeInTheDocument();
+    // Saving the period carries the server's own flag over untouched; the screen never sets it.
+    fireEvent.change(screen.getByLabelText(/reason for this change/i), { target: { value: 'Keep a fortnight' } });
+    fireEvent.change(screen.getByLabelText(/keep original files for/i), { target: { value: '14' } });
+    fireEvent.click(screen.getByRole('button', { name: /save retention policy/i }));
+    await waitFor(() => expect(updateEvidenceRetentionPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ retentionDays: 14, isEnabled: false }),
+    ));
   });
 
   it('renders the server disclosure verbatim rather than restating it', async () => {
@@ -333,13 +397,13 @@ describe('StorageRetentionPage', () => {
     await runPreview();
     fireEvent.click(screen.getByRole('button', { name: /delete stored files permanently/i }));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText(/type delete to confirm/i), { target: { value: 'DELETE' } });
+    const finalCheck = await confirmTwice(dialog, /delete 47 documents/i, 47);
 
     runEvidenceRetentionPurge.mockResolvedValueOnce(readEvidenceRetentionRun({
       dryRun: false, purged: 47, bytesReclaimed: 1_932_735_283,
       legacyCopiesDeleted: 12, legacyCopiesUnresolved: 3, skipped: [],
     }, false));
-    fireEvent.click(within(dialog).getByRole('button', { name: /delete 47 documents/i }));
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /delete 47 documents for good/i }));
 
     expect(await screen.findByText(/could not be matched with certainty/i)).toBeInTheDocument();
     expect(screen.getByText(/12 older duplicate copies also removed/i)).toBeInTheDocument();
@@ -354,22 +418,26 @@ describe('StorageRetentionPage', () => {
     await runPreview();
     fireEvent.click(screen.getByRole('button', { name: /delete stored files permanently/i }));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText(/type delete to confirm/i), { target: { value: 'DELETE' } });
+    const finalCheck = await confirmTwice(dialog, /delete 47 documents/i, 47);
 
     runEvidenceRetentionPurge.mockResolvedValueOnce(readEvidenceRetentionRun({
       dryRun: false, purged: 47, bytesReclaimed: 1_932_735_283, idempotentReplay: true, skipped: [],
     }, false));
-    fireEvent.click(within(dialog).getByRole('button', { name: /delete 47 documents/i }));
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /delete 47 documents for good/i }));
 
     expect(await screen.findByText(/already been carried out, so nothing further was deleted/i)).toBeInTheDocument();
   });
 
-  it('rejects a retention period below the 30-day floor', async () => {
+  it('lets the tenant keep originals for as little as one day, and refuses only zero', async () => {
     renderPage();
     const days = await screen.findByLabelText(/keep original files for/i);
-    fireEvent.change(days, { target: { value: '5' } });
     fireEvent.change(screen.getByLabelText(/reason for this change/i), { target: { value: 'Shorter window' } });
-    expect(await screen.findByText(/between 30 and 3650/i)).toBeInTheDocument();
+    fireEvent.change(days, { target: { value: '5' } });
+    expect(screen.queryByText(/between 1 and 3650/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /save retention policy/i })).toBeEnabled();
+
+    fireEvent.change(days, { target: { value: '0' } });
+    expect(await screen.findByText(/between 1 and 3650/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /save retention policy/i })).toBeDisabled();
   });
 
@@ -425,19 +493,57 @@ describe('StorageRetentionPage', () => {
     fireEvent.change(within(dialog).getByLabelText(/type delete to confirm/i), { target: { value: 'DELETE' } });
     expect(confirmButton).toBeEnabled();
 
+    // The first confirmation does not delete. It opens the second one.
+    fireEvent.click(confirmButton);
+    expect(runEvidenceRetentionPurge).toHaveBeenCalledTimes(1); // the preview only
+    const finalCheck = await screen.findByRole('dialog', { name: /last check before 47 documents go/i });
+    const finalButton = within(finalCheck).getByRole('button', { name: /delete 47 documents for good/i });
+    expect(finalButton).toBeDisabled();
+
+    // The wrong number is refused in the browser, in words.
+    fireEvent.change(within(finalCheck).getByLabelText(/type 47 to confirm/i), { target: { value: '74' } });
+    expect(finalButton).toBeDisabled();
+    expect(within(finalCheck).getByText(/that is not the number shown above/i)).toBeInTheDocument();
+
+    fireEvent.change(within(finalCheck).getByLabelText(/type 47 to confirm/i), { target: { value: '47' } });
+    expect(finalButton).toBeEnabled();
+
     runEvidenceRetentionPurge.mockResolvedValueOnce(readEvidenceRetentionRun({
       dryRun: false, scanned: 90, eligible: 47, purged: 47, bytesReclaimed: 1_932_735_283, skipped: [],
+      administratorsNotified: 2,
     }, false));
-    fireEvent.click(confirmButton);
+    fireEvent.click(finalButton);
 
+    // The typed number travels to the server, which verifies it against its own count.
     await waitFor(() => expect(runEvidenceRetentionPurge).toHaveBeenLastCalledWith(
       expect.objectContaining({
         dryRun: false,
         reason: 'Quarterly storage reclaim',
         previewToken: 'server-signed-preview-token',
+        confirmedCount: 47,
       }),
     ));
     expect(await screen.findByText(/stored files deleted/i)).toBeInTheDocument();
+    expect(screen.getByText(/a receipt was emailed to 2 administrators/i)).toBeInTheDocument();
+  });
+
+  it('shows the server refusal inside the final check and keeps the files', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /preview what would be deleted/i });
+    fireEvent.change(screen.getByLabelText(/reason for reclaiming space/i), {
+      target: { value: 'Quarterly storage reclaim' },
+    });
+    await runPreview();
+    fireEvent.click(screen.getByRole('button', { name: /delete stored files permanently/i }));
+    const dialog = await screen.findByRole('dialog');
+    const finalCheck = await confirmTwice(dialog, /delete 47 documents/i, 47);
+
+    runEvidenceRetentionPurge.mockRejectedValueOnce({
+      response: { status: 400, data: { detail: 'Type the number of documents being deleted — 46 — to confirm. The number did not match, so nothing was deleted.' } },
+    });
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /delete 47 documents for good/i }));
+    expect(await within(finalCheck).findByText(/nothing was deleted/i)).toBeInTheDocument();
+    expect(screen.queryByText(/stored files deleted/i)).not.toBeInTheDocument();
   });
 
   it('reuses one idempotency key across retries of the same confirmed purge', async () => {
@@ -449,17 +555,17 @@ describe('StorageRetentionPage', () => {
     await runPreview();
     fireEvent.click(screen.getByRole('button', { name: /delete stored files permanently/i }));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText(/type delete to confirm/i), { target: { value: 'DELETE' } });
+    const finalCheck = await confirmTwice(dialog, /delete 47 documents/i, 47);
 
     runEvidenceRetentionPurge.mockRejectedValueOnce({ response: { status: 502 } });
-    fireEvent.click(within(dialog).getByRole('button', { name: /delete 47 documents/i }));
-    await within(dialog).findByText(/temporarily unavailable|did not complete/i);
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /delete 47 documents for good/i }));
+    await within(finalCheck).findByText(/temporarily unavailable|did not complete/i);
     const firstKey = runEvidenceRetentionPurge.mock.calls.at(-1)?.[0].idempotencyKey;
 
     runEvidenceRetentionPurge.mockResolvedValueOnce(readEvidenceRetentionRun({
       dryRun: false, purged: 47, bytesReclaimed: 1_932_735_283, skipped: [],
     }, false));
-    fireEvent.click(within(dialog).getByRole('button', { name: /delete 47 documents/i }));
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /delete 47 documents for good/i }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
 
     expect(runEvidenceRetentionPurge.mock.calls.at(-1)?.[0].idempotencyKey).toBe(firstKey);
@@ -617,6 +723,30 @@ describe('StorageRetentionPage — clear out what produced nothing', () => {
     expect(within(dialog).getByRole('button', { name: /remove them$/i })).toBeDisabled();
   });
 
+  it('asks for the number of items as a second confirmation before anything is removed', async () => {
+    renderPage();
+    await screen.findByText(/mail that never became an inquiry/i);
+    await tickBucket(/mail that never became an inquiry/i);
+    await previewCleanup();
+    fireEvent.change(screen.getByLabelText(/reason for clearing this/i), {
+      target: { value: 'Removing our own test mail.' },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /remove them permanently/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/type delete to confirm/i), { target: { value: 'DELETE' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /remove them$/i }));
+    // Only the preview has been sent so far.
+    expect(runTenantDataCleanup).toHaveBeenCalledTimes(1);
+
+    // 48 messages + 170 files.
+    const finalCheck = await screen.findByRole('dialog', { name: /last check before 218 messages and files go/i });
+    expect(within(finalCheck).getByRole('button', { name: /remove them for good/i })).toBeDisabled();
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /go back/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /last check/i })).not.toBeInTheDocument());
+    expect(runTenantDataCleanup).toHaveBeenCalledTimes(1);
+  });
+
   it('sends the typed confirmation to the server so the check is not browser-only', async () => {
     runTenantDataCleanup.mockResolvedValueOnce(CLEANUP_PREVIEW).mockResolvedValueOnce(CLEANUP_RECEIPT);
     renderPage();
@@ -629,15 +759,14 @@ describe('StorageRetentionPage — clear out what produced nothing', () => {
     fireEvent.click(await screen.findByRole('button', { name: /remove them permanently/i }));
 
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText(/type delete to confirm/i), {
-      target: { value: 'DELETE' },
-    });
-    fireEvent.click(within(dialog).getByRole('button', { name: /remove them$/i }));
+    const finalCheck = await confirmTwice(dialog, /remove them$/i, 218);
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /remove them for good/i }));
 
     await waitFor(() => expect(runTenantDataCleanup).toHaveBeenLastCalledWith(
       expect.objectContaining({
         dryRun: false,
         confirmation: 'DELETE',
+        confirmedCount: 218,
         buckets: [TENANT_DATA_BUCKETS.orphanedFiles],
         reason: 'Reclaiming leftover storage.',
       }),
@@ -655,10 +784,8 @@ describe('StorageRetentionPage — clear out what produced nothing', () => {
     });
     fireEvent.click(await screen.findByRole('button', { name: /remove them permanently/i }));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText(/type delete to confirm/i), {
-      target: { value: 'DELETE' },
-    });
-    fireEvent.click(within(dialog).getByRole('button', { name: /remove them$/i }));
+    const finalCheck = await confirmTwice(dialog, /remove them$/i, 218);
+    fireEvent.click(within(finalCheck).getByRole('button', { name: /remove them for good/i }));
 
     expect(await screen.findByText(/left alone on purpose/i)).toBeInTheDocument();
     expect(screen.getByText(/we do not recognise this file's name/i)).toBeInTheDocument();
@@ -699,7 +826,7 @@ describe('StorageRetentionPage — clear out what produced nothing', () => {
     renderPage();
     await screen.findByText('256 MB');
 
-    expect(screen.getByText(/90 days is the configured default/i)).toBeInTheDocument();
+    expect(screen.getByText(/90 days is the default/i)).toBeInTheDocument();
     expect(screen.queryByText(/compliance-approved default/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/satisfy UAE and KSA/i)).not.toBeInTheDocument();
   });

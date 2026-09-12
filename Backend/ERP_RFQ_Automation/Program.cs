@@ -952,6 +952,10 @@ builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.QualityAnalytic
 builder.Services.AddScoped<ERP_RFQ_Automation.Retention.LegacyAttachmentPurgeResolver>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Retention.EvidenceRetentionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Retention.TenantDataControlService>();
+// The receipt every owner-rank administrator gets after a real deletion. Composed through
+// IEmailSender, so it is registered after AddNotifications; it never throws into the request.
+builder.Services.AddScoped<ERP_RFQ_Automation.Retention.ITenantDeletionReceipts,
+    ERP_RFQ_Automation.Retention.TenantDeletionReceiptMailer>();
 
 // SEC-H6: the app sits behind a TLS-terminating reverse proxy, so the socket peer is the
 // proxy, not the client. Without this, the rate limiter's per-IP partition
