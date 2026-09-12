@@ -146,6 +146,21 @@ describe('ClientIdentityPanel — suggested', () => {
     expect(screen.queryByText('No client linked yet')).not.toBeInTheDocument();
   });
 
+  it('says a weak hint might be the client and makes choosing the client the primary control', async () => {
+    // Production, 2026-09-12: a numbering-pattern hint at 55% read "Nexora thinks this is
+    // Saudi Aramco" beside a gold Confirm button, on a document that named Saudi Electricity.
+    getClientCandidates.mockResolvedValue([
+      { rank: 1, customerId: 30, customerName: 'Saudi Aramco', confidence: 0.55, reasonCode: 'RFQ_PATTERN' },
+    ]);
+    renderPanel(<ClientIdentityPanel lead={lead({ customerMatchStatus: 'SUGGESTED', customerMatchReasonCode: 'RFQ_PATTERN' })} />);
+
+    expect(await screen.findByText(/This might be/)).toBeInTheDocument();
+    expect(screen.getByText(/Only a weak hint/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose the client' })).toHaveClass('MuiButton-contained');
+    expect(screen.getByRole('button', { name: /Confirm Saudi Aramco/ })).toHaveClass('MuiButton-outlined');
+    expect(screen.queryByText(/Nexora thinks this is/)).not.toBeInTheDocument();
+  });
+
   it('names the suggestion, its confidence and its evidence', async () => {
     renderPanel(<ClientIdentityPanel lead={suggested} />);
 
