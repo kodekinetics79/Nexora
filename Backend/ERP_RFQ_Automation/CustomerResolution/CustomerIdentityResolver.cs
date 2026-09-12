@@ -94,6 +94,9 @@ public static class CustomerIdentityResolver
         // becomes an alias (see CustomerAliasLearner P6), so this tier cannot bootstrap
         // its own mistakes.
         var learnedHits = new List<Hit>();
+        // Portal pairs that are real evidence but name nobody on their own. Collected here and
+        // offered further down, never decided on. See the SharedSupplierNetworks branch below.
+        var sharedNetworkHits = new List<Hit>();
         foreach (var identifier in corpus.Identifiers)
         {
             if (!identifier.IsVerified) continue;
@@ -113,6 +116,28 @@ public static class CustomerIdentityResolver
                      guarded.PortalAccountKey is { Length: > 0 } &&
                      string.Equals(identifier.NormalizedValue, guarded.PortalAccountKey, StringComparison.Ordinal))
             {
+                // WHOSE NUMBER IS IT? This tier keys on "portal|our-vendor-code" and links at
+                // 0.92, which is honest only while the BUYER issued the code. Saudi Electricity
+                // Company issued our vendor code 2004414; it means nothing anywhere else, so it
+                // names SEC. An Ariba Network ID, or an Etimad supplier number, is ONE number
+                // issued by the NETWORK that identifies US to every buyer on it. Learned against
+                // the first Ariba buyer, it would auto-link every later Ariba RFQ — from any
+                // buyer at all — to that one customer at 0.92, which links without asking
+                // anybody. Teaching a second buyer makes it worse, not better: the pair then
+                // matches two customers and every Ariba document is permanently AMBIGUOUS, a
+                // state no further teaching can undo.
+                //
+                // The pair is still a true fact about a real document, so it is OFFERED at the
+                // weakest suggestion confidence in the engine. It just never decides.
+                if (SharedSupplierNetworks.IsShared(evidence.CustomerPortalName))
+                {
+                    sharedNetworkHits.Add(new Hit(identifier.CustomerId, policy.RfqPatternSuggestionConfidence,
+                        CustomerMatchReasonCodes.LearnedPortalAccount,
+                        $"Vendor code {evidence.SupplierAccountRefOnDocument} is OUR supplier number on " +
+                        $"{evidence.CustomerPortalName}, a sourcing network shared by several of your customers, " +
+                        "so it names no single buyer on its own."));
+                    continue;
+                }
                 learnedHits.Add(new Hit(identifier.CustomerId, policy.LearnedPortalAccountConfidence,
                     CustomerMatchReasonCodes.LearnedPortalAccount,
                     $"Same portal vendor code {evidence.SupplierAccountRefOnDocument} on {evidence.CustomerPortalName}."));
@@ -121,17 +146,19 @@ public static class CustomerIdentityResolver
         if (Decide(learnedHits, names, policy, out var learnedOutcome))
             return WithContact(learnedOutcome!, guarded, corpus);
 
-        // ── S4..S6 READ-ONLY SUGGESTION SCANS ─────────────────────────────────
-        // Never link. Two distinct Gulf legal entities routinely share a trade name; a
-        // first-time collision is not evidence, a human-confirmed one (S3) is.
-        // THE NAME THE BUYER WROTE. "Deliver to: Saudi Electricity Company-Jizan Area" names
-        // the customer whatever system printed the page. A known customer's full name, or an
-        // alias a reviewer taught, found as whole words inside a passage about the buyer
-        // (address, site) links the lead; inside item text it is a suggestion, because a
-        // name there may be incidental ("SEC-specified barcode"). A one-word customer name
-        // never matches on its own: "Test" or "Alpha" is anybody's word.
+        // ── S4..S6 THE NAME THE BUYER WROTE, THEN SUGGESTION-ONLY SCANS ───────
+        // A bare company-name field never links: two distinct Gulf legal entities routinely
+        // share a trade name, so a first-time collision is not evidence and a human-confirmed
+        // one (S3) is. A name written inside a PASSAGE is different — "Deliver to: Saudi
+        // Electricity Company-Jizan Area" names the customer whatever system printed the page —
+        // and what that name is worth depends on what the passage is doing: a header states who
+        // is buying, an address states where the goods go, item text may mention anyone
+        // ("SEC-specified barcode"). A one-word customer name still never matches on its own
+        // unless it is a real trade name: "Test" or "Alpha" is anybody's word.
         var namedInAddress = new List<Hit>();
         var namedInText = new List<Hit>();
+        // Ship-to hits the page itself contradicts: kept, demoted, and offered to a person.
+        var consigneeOnly = new List<Hit>();
         if (guarded.Passages.Count > 0)
         {
             var namesToFind = new List<(long CustomerId, string Key, string Display, bool Taught, bool Initials)>();
@@ -178,29 +205,77 @@ public static class CustomerIdentityResolver
                 namesToFind.Add((identifier.CustomerId, key, identifier.NormalizedValue, taught, false));
             }
 
-            foreach (var passage in guarded.Passages)
+            var passageHits = new List<Hit>();
+            for (var index = 0; index < guarded.Passages.Count; index++)
             {
+                var passage = guarded.Passages[index];
+                // Item text is the only role where a name may be incidental; a header and an
+                // address are both statements about an organisation, and are scored alike.
+                var aboutTheBuyer = passage.Role is not PassageRole.ItemText;
                 foreach (var (customerId, key, display, _, initials) in namesToFind)
                 {
                     if (!ContainsWholeWords(passage.Key, key)) continue;
                     var excerpt = passage.Text.Length <= 80 ? passage.Text : passage.Text[..80] + "…";
                     var confidence = initials
-                        ? (passage.NamesTheBuyer ? policy.NameAcronymInAddressConfidence : policy.NameAcronymInItemTextConfidence)
-                        : (passage.NamesTheBuyer ? policy.NameInAddressConfidence : policy.NameInItemTextConfidence);
-                    var hit = new Hit(customerId, confidence,
+                        ? (aboutTheBuyer ? policy.NameAcronymInAddressConfidence : policy.NameAcronymInItemTextConfidence)
+                        : (aboutTheBuyer ? policy.NameInAddressConfidence : policy.NameInItemTextConfidence);
+                    passageHits.Add(new Hit(customerId, confidence,
                         CustomerMatchReasonCodes.NameInDocument,
                         initials
                             ? $"\"{key}\", the initials of \"{display}\", appears in the {passage.Where}: \"{excerpt}\"."
-                            : $"\"{display}\" appears in the {passage.Where}: \"{excerpt}\".");
-                    (passage.NamesTheBuyer ? namedInAddress : namedInText).Add(hit);
+                            : $"\"{display}\" appears in the {passage.Where}: \"{excerpt}\".",
+                        key, index));
                 }
+            }
+
+            // WHAT THE PASSAGE IS DOING ON THE PAGE decides what its hit is allowed to do.
+            // A header names the buyer and links. Item text may mention anyone and only
+            // suggests. A delivery address names the CONSIGNEE, which is the buyer on an SEC
+            // portal print and is the site owner on an EPC contractor's enquiry — so it links
+            // only while nothing else on the page names a different organisation.
+            //
+            // The page's own claims are read ONCE. A 1,500-line print yields up to 200 passages
+            // and a tenant can carry thousands of customers; re-deriving "whose name is in the
+            // company-name field" for every hit would re-key the whole customer list per hit.
+            var claims = PageIdentityClaims.Read(evidence, guarded, corpus);
+            foreach (var hit in SuppressNamesInsideLongerNames(passageHits))
+            {
+                var role = guarded.Passages[hit.PassageIndex].Role;
+                if (role is PassageRole.ItemText)
+                {
+                    namedInText.Add(hit);
+                    continue;
+                }
+                if (role is PassageRole.BuyerHeader)
+                {
+                    namedInAddress.Add(hit);
+                    continue;
+                }
+
+                var customerName = names.TryGetValue(hit.CustomerId, out var known)
+                    ? known
+                    : $"Customer #{hit.CustomerId}";
+                var competitor = claims.CompetesWith(hit.CustomerId, customerName, domainHits);
+                if (competitor is null)
+                    namedInAddress.Add(hit);
+                else
+                    consigneeOnly.Add(hit with
+                    {
+                        Confidence = policy.ShipToDemotedConfidence,
+                        Explanation = $"{hit.Explanation} {competitor}"
+                    });
             }
         }
         if (Decide(namedInAddress, names, policy, out var namedOutcome))
             return WithContact(namedOutcome!, guarded, corpus);
 
         var suggestions = new List<Hit>();
-        suggestions.AddRange(namedInText.GroupBy(h => h.CustomerId).Select(g => g.OrderByDescending(h => h.Confidence).First()));
+        // A name in item text and a contradicted delivery address are both "offer it, do not
+        // decide it", so they compete for one row per customer and the stronger statement wins.
+        suggestions.AddRange(namedInText.Concat(consigneeOnly)
+            .GroupBy(h => h.CustomerId)
+            .Select(g => g.OrderByDescending(h => h.Confidence).First()));
+        suggestions.AddRange(sharedNetworkHits);
 
         if (guarded.NameKey.Length > 0)
         {
@@ -342,7 +417,7 @@ public static class CustomerIdentityResolver
 
         var passages = evidence.Passages
             .Where(p => !string.IsNullOrWhiteSpace(p.Text))
-            .Select(p => new GuardedPassage(p.Where, p.Text.Trim(), CustomerNameNormalizer.LooseKey(p.Text), p.NamesTheBuyer))
+            .Select(p => new GuardedPassage(p.Where, p.Text.Trim(), CustomerNameNormalizer.LooseKey(p.Text), p.Role))
             .Where(p => p.Key.Length > 0)
             .Take(200)
             .ToList();
@@ -413,6 +488,24 @@ public static class CustomerIdentityResolver
                 .OrderByDescending(h => h.Confidence)
                 .ThenBy(h => ReasonRank(h.ReasonCode))
                 .First();
+
+            // AN AUTO-LINK MUST CLEAR THE FLOOR. Every tier that reaches here was written to sit
+            // above MinimumAutoLinkConfidence, so today this rejects nothing — which is exactly
+            // why it is worth writing down. Until now "Nexora decides at 0.85 and above" existed
+            // only as an arithmetic coincidence between the constants each tier happened to pick:
+            // lowering one number in CustomerResolutionPolicy, or adding a tier that never read
+            // this file, would have started auto-linking leads at 0.70 with nothing anywhere in
+            // the engine to stop it. A wrong client on a lead is worse than an unresolved one, so
+            // below the floor the same evidence is OFFERED to a person instead of applied for them.
+            if (best.Confidence < policy.MinimumAutoLinkConfidence)
+            {
+                outcome = new ClientResolutionOutcome(
+                    LeadCustomerMatchStatuses.Suggested, null, null,
+                    best.Confidence, best.ReasonCode, best.Explanation,
+                    Rank(hits, names, policy));
+                return true;
+            }
+
             outcome = new ClientResolutionOutcome(
                 LeadCustomerMatchStatuses.AutoMatchedContactUnresolved,
                 best.CustomerId, null, best.Confidence, best.ReasonCode, best.Explanation,
@@ -496,9 +589,30 @@ public static class CustomerIdentityResolver
         _ => 99
     };
 
-    private sealed record Hit(long CustomerId, decimal Confidence, string ReasonCode, string Explanation);
+    /// <param name="MatchedKey">
+    /// For a passage hit: the normalised name key that actually matched, so a longer name can be
+    /// seen to swallow a shorter one. Empty for every other tier.
+    /// </param>
+    /// <param name="PassageIndex">
+    /// For a passage hit: which passage it came from, so both the longest-name rule and the
+    /// consignee rule can ask what that passage was DOING on the page. -1 for every other tier.
+    /// </param>
+    private sealed record Hit(
+        long CustomerId,
+        decimal Confidence,
+        string ReasonCode,
+        string Explanation,
+        string MatchedKey = "",
+        int PassageIndex = -1);
 
-    private sealed record GuardedPassage(string Where, string Text, string Key, bool NamesTheBuyer);
+    /// <summary>
+    /// One statement off the document, already normalised. It carries the ROLE and not the old
+    /// NamesTheBuyer boolean: one flag was answering two different questions ("is this about the
+    /// buyer" and "where do the goods go"), and keeping both copies around is how the two answers
+    /// drift apart. DocumentPassage derives Role from the flag, so a caller that has not been
+    /// updated behaves exactly as it did.
+    /// </summary>
+    private sealed record GuardedPassage(string Where, string Text, string Key, PassageRole Role);
 
     private sealed record GuardedEvidence(
         HashSet<string> Addresses,
@@ -518,6 +632,122 @@ public static class CustomerIdentityResolver
             string.IsNullOrEmpty(PortalAccountKey) && BuyerPersonKey.Length == 0 && Passages.Count == 0;
 
         public bool IsSelfName(string key) => SelfIdentityGuard.IsSelfName(key, SelfNameKeys);
+    }
+
+    /// <summary>
+    /// THE LONGEST NAME IN A PASSAGE IS THE ONE THE DOCUMENT MEANS.
+    ///
+    /// A delivery address reading "Saudi Aramco Total Refining and Petrochemical Company, Jubail"
+    /// contains "SAUDI ARAMCO" as whole words, so with both companies on the books one address
+    /// matched two customers and the lead went AMBIGUOUS — and with only the parent on the books
+    /// it linked to Aramco outright. SATORP is a separate joint venture with its own vendor
+    /// registration, its own payment terms and its own portal; an invoice sent to Aramco against
+    /// a SATORP order is simply not paid. The same shape covers the whole family, because every
+    /// one of them is a joint venture that put the parent's name in its own: SAMREF (Aramco and
+    /// Mobil), YASREF (Aramco and Sinopec), Luberef, Sadara (Aramco and Dow). It settles "Royal
+    /// Commission Jubail" against a bare "Royal Commission" the same way — the industrial-city
+    /// authority and the parent body are different buyers with different budgets.
+    ///
+    /// Applied only INSIDE ONE PASSAGE, because "the document wrote one name and we read two" is
+    /// a statement about one sentence. Two names in two different passages are two statements and
+    /// both deserve to be heard.
+    /// </summary>
+    private static List<Hit> SuppressNamesInsideLongerNames(List<Hit> passageHits)
+    {
+        if (passageHits.Count < 2) return passageHits;
+
+        var kept = new List<Hit>(passageHits.Count);
+        foreach (var group in passageHits.GroupBy(hit => hit.PassageIndex))
+        {
+            // Comparisons stay inside one passage, and a passage only ever holds the handful of
+            // customer names that genuinely appear in it, so this never walks the whole corpus.
+            var inPassage = group.ToList();
+            foreach (var hit in inPassage)
+            {
+                // STRICTLY longer, and spelled out in whole words: two customers whose names
+                // produce the same key are still ambiguous, and "SEC" is not swallowed by
+                // "SAUDI ELECTRICITY" because the initials are not inside that name.
+                var shadowed = inPassage.Any(other =>
+                    other.MatchedKey.Length > hit.MatchedKey.Length
+                    && ContainsWholeWords(other.MatchedKey, hit.MatchedKey));
+                if (!shadowed) kept.Add(hit);
+            }
+        }
+        return kept;
+    }
+
+    /// <summary>
+    /// A DELIVERY ADDRESS NAMES THE CONSIGNEE, which is usually — not always — the buyer.
+    ///
+    /// On a Saudi Electricity Company portal print the delivery address is the ONLY place the
+    /// buyer's name appears anywhere: production lead 680 carried "Saudi Electricity
+    /// Company-DAMMAM" and nothing else — no sender domain, no company-name field, no portal
+    /// name, no supplier block — and it has to link on that alone. On an EPC contractor's enquiry
+    /// the identical field names the site owner: Hyundai Engineering and Construction sends from
+    /// hdec.com, prints its own name at the top of the page and "Deliver to: Saudi Aramco Ras
+    /// Tanura Refinery" in the address. Reading that consignee as the buyer links the lead to
+    /// Aramco, who is buying nothing on this job, has no contract with us for it, and whose
+    /// payment terms and quote would then be the ones the rep works to.
+    ///
+    /// So a consignee links only while the page names no COMPETING organisation. This is what
+    /// the page itself claims about who is buying, read once per lead.
+    /// </summary>
+    private sealed record PageIdentityClaims(
+        string? CompetingDomain,
+        HashSet<long> NameKeyOwners,
+        string? BuyerNameOnDocument)
+    {
+        public static PageIdentityClaims Read(
+            LeadClientEvidence evidence, GuardedEvidence guarded, ClientResolutionCorpus corpus)
+        {
+            // A procurement portal relays mail on behalf of every buyer on its network, so its
+            // domain names no organisation at all and cannot compete with one. Without this, an
+            // ordinary SEC enquiry that happened to arrive through Ariba would be demoted to a
+            // suggestion because "ansmtp.ariba.com is not Saudi Electricity Company" — true, and
+            // beside the point: the postman is not a rival buyer.
+            var competingDomain = guarded.Domains
+                .FirstOrDefault(domain => !SyntheticIdentityGuard.IsPortalRelayDomain(domain));
+
+            // The company-name field is a statement about who is buying. It belongs to a customer
+            // when it IS their name, or an alias a person verified against them.
+            var owners = new HashSet<long>();
+            if (guarded.NameKey.Length > 0)
+            {
+                foreach (var customer in corpus.Customers)
+                    if (string.Equals(CustomerNameNormalizer.LooseKey(customer.Name), guarded.NameKey, StringComparison.Ordinal))
+                        owners.Add(customer.CustomerId);
+                foreach (var identifier in corpus.Identifiers)
+                    if (identifier.IsVerified
+                        && identifier.IdentifierType is CustomerIdentifierType.Alias or CustomerIdentifierType.CustomerName
+                        && string.Equals(identifier.NormalizedValue, guarded.NameKey, StringComparison.Ordinal))
+                        owners.Add(identifier.CustomerId);
+            }
+
+            return new PageIdentityClaims(
+                competingDomain,
+                owners,
+                guarded.NameKey.Length > 0 ? evidence.CustomerCompanyName?.Trim() : null);
+        }
+
+        /// <summary>
+        /// The sentence explaining what on this page disagrees with linking to this customer, or
+        /// null when nothing does. Both facts, in the words a rep would use.
+        /// </summary>
+        public string? CompetesWith(long customerId, string customerName, List<Hit> domainHits)
+        {
+            // domainHits is empty by the time the passage scan runs — S2 returns whenever a
+            // sender domain matches anybody — but the question is "does this domain point at
+            // THIS customer", and asking it of the hits keeps the answer right if the tier
+            // order ever changes.
+            if (CompetingDomain is not null && !domainHits.Any(hit => hit.CustomerId == customerId))
+                return $"But this document is from {CompetingDomain}, which is not {customerName}.";
+
+            if (BuyerNameOnDocument is not null && !NameKeyOwners.Contains(customerId))
+                return $"But the document names \"{BuyerNameOnDocument}\" as the buying " +
+                       $"organisation, which is not {customerName}.";
+
+            return null;
+        }
     }
 
     /// <summary>"SAUDI ELECTRICITY COMPANY" inside "SAUDI ELECTRICITY COMPANY JIZAN AREA", as whole words — never inside another word.</summary>

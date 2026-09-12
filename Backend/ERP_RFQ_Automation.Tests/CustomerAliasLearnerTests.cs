@@ -16,6 +16,7 @@ public sealed class CustomerAliasLearnerTests
     private const long OtherTenant = 8200;
     private const long Sec = 8301;
     private const long Aramco = 8302;
+    private const long Swcc = 8303;
 
     [Fact]
     public async Task A_human_correction_teaches_sender_domain_name_and_portal_account()
@@ -132,23 +133,222 @@ public sealed class CustomerAliasLearnerTests
         Assert.DoesNotContain(learned, i => i.IdentifierType is CustomerIdentifierType.Email or CustomerIdentifierType.Domain);
     }
 
-    [Fact]
-    public async Task P2_a_free_mail_domain_is_never_learned_as_a_domain_but_the_address_still_is()
+    [Theory]
+    // A consumer mailbox: one freight agent forwards bids for four different end customers.
+    [InlineData("Buyer Person <buyer.person@gmail.com>", "buyer.person@gmail.com")]
+    [InlineData("agent@live.com", "agent@live.com")]
+    // A procurement portal's relay, including a sending host the portal minted itself.
+    [InlineData("noreply@ariba.com", "noreply@ariba.com")]
+    [InlineData("system@s4.ansmtp.ariba.com", "system@s4.ansmtp.ariba.com")]
+    [InlineData("alerts@bidnet.com", "alerts@bidnet.com")]
+    public async Task P2_a_personal_or_relay_sender_never_becomes_an_identifier(string from, string address)
     {
+        // THE CHANGE THIS TEST GUARDS. Until now ANY confirmed sender became a VERIFIED Email
+        // identifier at 1.00 — the strongest, most exclusive thing this engine can write. On the
+        // owner's live tenant that is how "Saudi Aramco" came to own personal addresses at
+        // live.com and bidnet.com: one confirmation each, on one document each, and from then on
+        // every forward from that mailbox was pinned to Aramco whatever the attachment said.
+        //
+        // The mailbox is still evidence — an address a human typed on the customer profile still
+        // matches exactly in the resolver. What the learner refuses to do is MINT one of these
+        // from a single document.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
-        lead.EmailIngests!.FromEmail = "Buyer Person <buyer.person@gmail.com>";
-        lead.Clientemail = "buyer.person@gmail.com";
+        lead.EmailIngests!.FromEmail = from;
+        lead.Clientemail = address;
         lead.CustomerBuyerEmailExtracted = null;
 
-        await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
         await context.SaveChangesAsync();
 
         var learned = await LearnedAsync(context);
-        Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.Email
-                                      && i.NormalizedValue == "buyer.person@gmail.com");
+        Assert.DoesNotContain(learned, i => i.IdentifierType == CustomerIdentifierType.Email);
+        // The domain rule is unchanged for free mail and newly closed for relays: ariba.com was
+        // not a free-mail domain, so it used to be learned as a Domain at 0.95 and would have
+        // auto-linked the next portal-delivered RFQ from a completely different buyer.
         Assert.DoesNotContain(learned, i => i.IdentifierType == CustomerIdentifierType.Domain);
+        Assert.Contains(CustomerAliasLearner.SkipPersonalOrRelayAddress, result.SkipReasons);
+        // Everything else the document said is still learned: only the mailbox is refused.
+        Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.Alias);
+    }
+
+    [Fact]
+    public async Task P8_a_name_that_looks_nothing_like_the_customer_is_recorded_but_never_trusted()
+    {
+        // THE PRODUCTION INCIDENT. On the owner's live tenant "Saudi Aramco" carries the aliases
+        // "FULTON COUNTY GOVERNMENT", "KORICS" and "ARCENE SUPPLY SERVICES LLP". The only gates
+        // on learning the printed company name were "not empty" and "not our own name" — nothing
+        // ever compared the words on the page with the words on the customer record.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var lead = await LoadLeadAsync(context, 8401);
+        lead.CustomerCompanyNameExtracted = "FULTON COUNTY GOVERNMENT";
+
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Aramco, null, 99);
+        await context.SaveChangesAsync();
+
+        Assert.Contains(CustomerAliasLearner.SkipAliasUnlikeCustomer, result.SkipReasons);
+
+        // The reviewer's statement is not thrown away — it is filed where a person can look at
+        // it — but it is not authoritative on either axis the resolver checks.
+        var alias = await context.Set<CustomerIdentifier>()
+            .SingleAsync(i => i.IdentifierType == CustomerIdentifierType.Alias && i.EffectiveTo == null);
+        Assert.Equal(CustomerNameNormalizer.LooseKey("FULTON COUNTY GOVERNMENT"), alias.NormalizedValue);
+        Assert.False(alias.IsVerified);
+        Assert.Equal(0.50m, alias.Confidence);
+        Assert.Equal(CustomerAliasLearner.UnverifiedAliasSource, alias.Source);
+        Assert.DoesNotContain(CustomerIdentifierSources.TrustedForAutoLink, source =>
+            string.Equals(source, CustomerAliasLearner.UnverifiedAliasSource, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task P8_a_demoted_alias_does_not_resolve_the_next_document()
+    {
+        // The consequence the incident was actually made of: after ONE confirmation, every later
+        // print naming that company was offered to the wrong client. End to end, it no longer is.
+        using var db = new TestDb();
+        await using (var teaching = await SeedAsync(db))
+        {
+            var lead = await LoadLeadAsync(teaching, 8401);
+            lead.CustomerCompanyNameExtracted = "FULTON COUNTY GOVERNMENT";
+            // Strip every other signal so the alias is the only thing on trial.
+            lead.EmailIngests!.FromEmail = "extraction@pipeline.local";
+            lead.Clientemail = null;
+            lead.CustomerBuyerEmailExtracted = null;
+            lead.CustomerPortalNameExtracted = null;
+            await new CustomerAliasLearner(teaching).LearnFromReviewAsync(Tenant, lead, Aramco, null, 99);
+            await teaching.SaveChangesAsync();
+        }
+
+        await using (var seed = db.ContextFor(null))
+        {
+            var next = Seed.Lead(seed, 8603, Tenant, buyersName: "Someone Else");
+            next.Clientemail = "extraction@pipeline.local";
+            next.CustomerCompanyNameExtracted = "FULTON COUNTY GOVERNMENT";
+            await seed.SaveChangesAsync();
+            (await seed.EmailIngests.SingleAsync(x => x.Id == 20_000 + 8603)).FromEmail = "extraction@pipeline.local";
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(Tenant);
+        var outcome = await new LeadCustomerResolutionService(context).ResolveAsync(Tenant, 8603);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Unresolved, outcome.Status);
+    }
+
+    [Fact]
+    public async Task P8_the_customers_own_initials_are_still_learned_as_a_verified_alias()
+    {
+        // The gate must not break the learning loop it protects. A buyer writing its own
+        // initials is the commonest alias there is, and it scores only 0.67 on similarity —
+        // which is exactly why AcronymKey is one of the three ways in.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, Swcc, Tenant, "Saline Water Conversion Corporation");
+            await seed.SaveChangesAsync();
+        }
+        var lead = await LoadLeadAsync(context, 8401);
+        lead.CustomerCompanyNameExtracted = "SWCC";
+
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Swcc, null, 99);
+        await context.SaveChangesAsync();
+
+        Assert.DoesNotContain(CustomerAliasLearner.SkipAliasUnlikeCustomer, result.SkipReasons);
+        var alias = (await LearnedAsync(context))
+            .Single(i => i.IdentifierType == CustomerIdentifierType.Alias);
+        Assert.Equal("SWCC", alias.NormalizedValue);
+        Assert.True(alias.IsVerified);
+        Assert.Equal(0.90m, alias.Confidence);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, alias.Source);
+    }
+
+    [Theory]
+    // Spelled roughly the same — the transliteration and abbreviation variance this platform
+    // exists to absorb. A reviewer resolves it once and the loop must keep it.
+    [InlineData("SAUDI ELECTRICITY CO.", "Saudi Electricity Company", true)]
+    [InlineData("Saudi Electricty Company", "Saudi Electricity Company", true)]
+    [InlineData("MARAFIQ", "Marafiq", true)]
+    // The initials the buyer writes for itself.
+    [InlineData("SWCC", "Saline Water Conversion Corporation", true)]
+    [InlineData("SEC", "Saudi Electricity Company", true)]
+    // Longer or shorter by whole words, in either direction.
+    [InlineData("SAUDI ARABIAN OIL COMPANY - SAUDI ARAMCO", "Saudi Aramco", true)]
+    [InlineData("MARAFIQ Yanbu Power & Desalination", "Marafiq", true)]
+    // The three aliases the live tenant actually accumulated against "Saudi Aramco".
+    [InlineData("FULTON COUNTY GOVERNMENT", "Saudi Aramco", false)]
+    [InlineData("KORICS", "Saudi Aramco", false)]
+    [InlineData("ARCENE SUPPLY SERVICES LLP", "Saudi Aramco", false)]
+    // Fails closed: with no customer name there is nothing to compare against, and "accept
+    // whatever is printed" is the defect, not the fallback.
+    [InlineData("Saudi Aramco", null, false)]
+    [InlineData("Saudi Aramco", "   ", false)]
+    [InlineData("", "Saudi Aramco", false)]
+    public void The_sanity_gate_asks_only_whether_the_printed_name_could_be_this_customer(
+        string? extracted, string? customerName, bool resembles)
+        => Assert.Equal(resembles, CustomerAliasLearner.ResemblesCustomerName(extracted, customerName));
+
+    [Fact]
+    public async Task P9_a_shared_supplier_network_pair_is_skipped_while_the_buyers_own_portal_is_learned()
+    {
+        // Our Ariba Network ID is ONE number that identifies US to every buyer on the network,
+        // so "ARIBA|<our id>" names nobody. SEC issued vendor code 2004414 itself and it means
+        // nothing anywhere else, so "MATERIALS E-BIDDING SYSTEM|2004414" names SEC — that pair
+        // is the case the tier was built for and must stay learnable.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var learner = new CustomerAliasLearner(context);
+
+        var sec = await LoadLeadAsync(context, 8401);
+        await learner.LearnFromReviewAsync(Tenant, sec, Sec, null, 99);
+        await context.SaveChangesAsync();
+
+        var viaAriba = await LoadLeadAsync(context, 8402);
+        viaAriba.CustomerPortalNameExtracted = "SAP Ariba";
+        var result = await learner.LearnFromReviewAsync(Tenant, viaAriba, Aramco, null, 100);
+        await context.SaveChangesAsync();
+
+        Assert.Contains(CustomerAliasLearner.SkipSharedSupplierNetwork, result.SkipReasons);
+        var pair = await context.Set<CustomerIdentifier>()
+            .SingleAsync(i => i.IdentifierType == CustomerIdentifierType.PortalAccount
+                              && i.EffectiveTo == null);
+        Assert.Equal(Sec, pair.CustomerId);
+        Assert.EndsWith("|2004414", pair.NormalizedValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Re_confirmation_increments_the_observation_count()
+    {
+        // CORROBORATION IS RECORDED, NOT ENFORCED — deliberately, and this test pins both
+        // halves so the day the owner takes that decision the data it needs is already real.
+        //
+        // The counter climbs with every human confirmation. Nothing reads it: the resolver's
+        // learned-alias tier asks IsVerified, Source and Confidence and stops, so ONE sighting
+        // still auto-links exactly as fifty would. Requiring a second sighting before auto-link
+        // makes the platform slower to learn, which is a product call the owner has not made.
+        // Where the enforcement would go is written on CustomerAliasLearner's <remarks>.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var lead = await LoadLeadAsync(context, 8401);
+        var learner = new CustomerAliasLearner(context);
+
+        for (var confirmation = 1; confirmation <= 3; confirmation++)
+        {
+            await learner.LearnFromReviewAsync(Tenant, lead, Sec, null, 98 + confirmation);
+            await context.SaveChangesAsync();
+
+            var row = await context.Set<CustomerIdentifier>()
+                .SingleAsync(i => i.IdentifierType == CustomerIdentifierType.Alias && i.EffectiveTo == null);
+            Assert.Equal(confirmation, row.ObservationCount);
+            Assert.NotNull(row.LastObservedOn);
+            // Unchanged on purpose: the FIRST sighting is already authoritative.
+            Assert.True(row.IsVerified);
+            Assert.Contains(CustomerIdentifierSources.TrustedForAutoLink, source =>
+                string.Equals(source, row.Source, StringComparison.Ordinal));
+        }
     }
 
     [Fact]
