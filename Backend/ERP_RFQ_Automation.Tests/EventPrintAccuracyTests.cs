@@ -345,6 +345,10 @@ public sealed class EventPrintAccuracyReviewTests
     [InlineData("Export 202609101200.xlsx", null)]
     [InlineData("RFP 6000000031 - Switchgear Package.docx", "6000000031")]
     [InlineData("RFP - 60000010028 - 1 of 3.docx", "60000010028")]
+    [InlineData("SE  RFP-C001835789.doc", "C001835789")]
+    [InlineData("SE  RFPC001831551.doc", "C001831551")]
+    [InlineData("RFP6000000003.docx", "6000000003")]
+    [InlineData("RFQC001046945.doc", "C001046945")]
     public void A_timestamp_in_a_file_name_is_not_an_rfq_number(string fileName, string? expected)
         => Assert.Equal(expected, DocxTableParser.RfqNumberFromFileName(fileName));
 
