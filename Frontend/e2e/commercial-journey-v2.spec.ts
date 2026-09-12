@@ -1051,6 +1051,9 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   expect(blockedApply.status()).toBe(409);
 
   await page.goto(`/procurement/rfqs/view/${rfqId()}`);
+  // The scenarios, pricing and target bridge fold under "Ways to fulfil this request" so the
+  // line table opens the page; the journey opens the fold the way a rep would.
+  await page.getByRole('button', { name: /Ways to fulfil this request/ }).click();
   await expect(page.getByText('Opportunity Digital Twin', { exact: true })).toBeVisible();
   await expect(page.getByText(intelligence.nextBestAction.label, { exact: false }).first()).toBeVisible();
   await expect(page.getByText(intelligence.digitalTwin.validity, { exact: false }).first()).toBeVisible();
