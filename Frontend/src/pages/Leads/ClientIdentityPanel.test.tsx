@@ -106,8 +106,19 @@ describe('ClientIdentityPanel — unresolved', () => {
     expect(screen.getByText('2004414')).toBeInTheDocument();
     expect(screen.getByText('AMER S. AL-DOSSARI')).toBeInTheDocument();
 
-    // A dead end is the failure mode being fixed: there is always a way out.
-    expect(screen.getByRole('button', { name: /Find client/i })).toBeEnabled();
+    // A dead end is the failure mode being fixed: there is always a way out, and when the
+    // document names the company the way out carries its name instead of an empty search box.
+    expect(screen.getByRole('button', { name: 'Set up SAUDI ELECTRICITY COMPANY' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Search your customers' })).toBeEnabled();
+    expect(screen.getByText(/looks like a buyer you have not set up yet/i)).toBeInTheDocument();
+  });
+
+  it('falls back to a plain choose when the document names no company', async () => {
+    renderPanel(<ClientIdentityPanel lead={lead({ customerCompanyNameExtracted: null })} />);
+
+    expect(await screen.findByText('No client linked yet')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose the customer' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /^Set up/ })).not.toBeInTheDocument();
   });
 
   it("does not present Nexora's own synthetic sender as evidence", async () => {
