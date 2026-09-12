@@ -259,6 +259,15 @@ public sealed record CustomerResolutionPolicy
     public decimal NameInAddressConfidence { get; init; } = 0.88m;
     /// <summary>The same name, or a taught alias, inside an item's text: a suggestion, the name may be incidental.</summary>
     public decimal NameInItemTextConfidence { get; init; } = 0.70m;
+    /// <summary>
+    /// The customer's initials ("SEC") found as a whole word in a passage about the buyer.
+    /// Weaker than the full name, because three letters can belong to more than one company,
+    /// but written by the buyer about themselves — strong enough to link when only one
+    /// customer's initials fit. Two customers' initials in the same address stay AMBIGUOUS.
+    /// </summary>
+    public decimal NameAcronymInAddressConfidence { get; init; } = 0.85m;
+    /// <summary>The initials inside item text: a suggestion only.</summary>
+    public decimal NameAcronymInItemTextConfidence { get; init; } = 0.65m;
     public decimal PriorSenderSuggestionConfidence { get; init; } = 0.65m;
     public decimal ContactPersonSuggestionConfidence { get; init; } = 0.60m;
     public decimal RfqPatternSuggestionConfidence { get; init; } = 0.55m;

@@ -81,6 +81,41 @@ public static class CustomerNameNormalizer
         return string.Join(' ', kept);
     }
 
+    private static readonly HashSet<string> AcronymSkipTokens = new(StringComparer.Ordinal)
+    {
+        "AND", "OF", "THE", "FOR", "A", "AN", "DE", "DU", "DES", "LA", "LE", "LES"
+    };
+
+    /// <summary>
+    /// The initials a buyer writes instead of the name: "Saudi Electricity Company" -> "SEC",
+    /// "Saline Water Conversion Corporation" -> "SWCC". Built from EVERY word of the name,
+    /// legal words included, because that is how the acronym is formed in practice. Empty for
+    /// a name of fewer than three words ("Saudi Aramco"): two letters are anybody's letters.
+    /// Tokens carrying digits ("(E2E)") and articles/conjunctions are skipped.
+    /// </summary>
+    public static string AcronymKey(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var folded = Fold(value);
+        if (folded.Length == 0) return string.Empty;
+        var tokens = folded.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var start = tokens.Length > 1 && LeadingArticles.Contains(tokens[0]) ? 1 : 0;
+        var builder = new StringBuilder(8);
+        for (var i = start; i < tokens.Length; i++)
+        {
+            var token = tokens[i];
+            if (AcronymSkipTokens.Contains(token)) continue;
+            if (token.Any(char.IsDigit)) continue;
+            if (!char.IsLetter(token[0])) continue;
+            builder.Append(token[0]);
+        }
+        var acronym = builder.ToString();
+        if (acronym.Length < 3 || acronym.Length > 6) return string.Empty;
+        // "EST" or "INC" as initials would match every legal suffix on the page.
+        if (NoiseTokens.Contains(acronym)) return string.Empty;
+        return acronym;
+    }
+
     /// <summary>Fuzzy-stage key: <see cref="LooseKey"/> with every separator removed.</summary>
     public static string TightKey(string? value)
     {
