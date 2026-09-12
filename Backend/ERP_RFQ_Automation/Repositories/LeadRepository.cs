@@ -40,6 +40,8 @@ namespace ERP_RFQ_Automation.Repositories
         private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
         private readonly ICommercialLineResolutionApplicationService? _lineResolution;
         private readonly ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? _aliasLearner;
+        private readonly ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.IHeaderSpellingLearner? _headerSpellingLearner;
+        private readonly ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.IManufacturerPatternLearner? _manufacturerPatternLearner;
 
         // Optional dependencies keep existing constructions (tests, pre-wiring DI)
         // compiling and running: metrics / alias learning degrade to no-ops, the SLA
@@ -50,7 +52,9 @@ namespace ERP_RFQ_Automation.Repositories
             ILogger<LeadRepository>? logger = null,
             ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null,
             ICommercialLineResolutionApplicationService? lineResolution = null,
-            ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? aliasLearner = null)
+            ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? aliasLearner = null,
+            ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.IHeaderSpellingLearner? headerSpellingLearner = null,
+            ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.IManufacturerPatternLearner? manufacturerPatternLearner = null)
         {
             _context = context;
             _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
@@ -58,6 +62,8 @@ namespace ERP_RFQ_Automation.Repositories
             _metrics = metrics;
             _lineResolution = lineResolution;
             _aliasLearner = aliasLearner;
+            _headerSpellingLearner = headerSpellingLearner;
+            _manufacturerPatternLearner = manufacturerPatternLearner;
         }
 
         /// <summary>
@@ -1520,6 +1526,18 @@ namespace ERP_RFQ_Automation.Repositories
                 if (action == "approve")
                     await CaptureExtractionCorpusAsync(lead, audit, businessUnitId, beforeJson, afterJson, reviewedOn);
 
+                // HEADER SPELLINGS: an approved header value, matched to the unrecognised document
+                // label that carried it, teaches the tenant that label. Same savepoint discipline
+                // as the client-identity learning below.
+                if (action == "approve" && _headerSpellingLearner != null)
+                    await LearnHeaderSpellingsAsync(businessUnitId, lead, audit.Id);
+
+                // MAKER PATTERNS: every approved line that states both a manufacturer and a part
+                // number teaches which part-number family belongs to which maker, so the next bid
+                // list that names only the number gets its maker filled in.
+                if (action == "approve" && _manufacturerPatternLearner != null)
+                    await LearnManufacturerPatternsAsync(businessUnitId, lead, audit.Id);
+
                 // LEARNING LOOP: a further flush inside the SAME transaction, so what the
                 // reviewer taught commits with the review that taught it or not at all.
                 // A learning failure must never fail the review — it is wrapped in a
@@ -1760,6 +1778,107 @@ namespace ERP_RFQ_Automation.Repositories
                 lead.Id, customerId, request.ContactId, linkedBy);
 
             return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
+        /// <summary>
+        /// Turns the reviewer's header corrections into learned label spellings, inside the
+        /// review's own transaction and under its own savepoint, so a learning failure can never
+        /// fail the review.
+        /// </summary>
+        private async Task LearnHeaderSpellingsAsync(long businessUnitId, Lead lead, long reviewAuditId)
+        {
+            const string savepoint = "header_spelling_learning";
+            var currentTransaction = _context.Database.CurrentTransaction;
+            var savepointCreated = false;
+            try
+            {
+                if (currentTransaction is not null && _context.Database.IsNpgsql())
+                {
+                    await currentTransaction.CreateSavepointAsync(savepoint);
+                    savepointCreated = true;
+                }
+
+                var learned = await _headerSpellingLearner!.LearnFromReviewAsync(businessUnitId, lead, reviewAuditId);
+                await _context.SaveChangesAsync();
+
+                if (savepointCreated)
+                    await currentTransaction!.ReleaseSavepointAsync(savepoint);
+
+                if (learned.Learned + learned.Reinforced > 0)
+                    _logger?.LogInformation(
+                        "Header spelling learning for lead {LeadId}: {Learned} learned, {Reinforced} reinforced.",
+                        lead.Id, learned.Learned, learned.Reinforced);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex,
+                    "Header spelling learning failed for lead {LeadId}; the review is unaffected.", lead.Id);
+                if (savepointCreated)
+                {
+                    try { await currentTransaction!.RollbackToSavepointAsync(savepoint); }
+                    catch (Exception rollbackFailure)
+                    {
+                        _logger?.LogError(rollbackFailure,
+                            "Rolling back the header-spelling learning savepoint failed for lead {LeadId}.", lead.Id);
+                        throw;
+                    }
+                }
+                foreach (var entry in _context.ChangeTracker
+                             .Entries<ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.HeaderSpelling>()
+                             .Where(entry => entry.State != EntityState.Unchanged)
+                             .ToList())
+                    entry.State = EntityState.Detached;
+            }
+        }
+
+        /// <summary>
+        /// Turns the approved lines into maker knowledge, under the same savepoint discipline as
+        /// the other learners: a learning failure never fails the review.
+        /// </summary>
+        private async Task LearnManufacturerPatternsAsync(long businessUnitId, Lead lead, long reviewAuditId)
+        {
+            const string savepoint = "manufacturer_pattern_learning";
+            var currentTransaction = _context.Database.CurrentTransaction;
+            var savepointCreated = false;
+            try
+            {
+                if (currentTransaction is not null && _context.Database.IsNpgsql())
+                {
+                    await currentTransaction.CreateSavepointAsync(savepoint);
+                    savepointCreated = true;
+                }
+
+                var learned = await _manufacturerPatternLearner!.LearnFromReviewAsync(businessUnitId, lead, reviewAuditId);
+                await _context.SaveChangesAsync();
+
+                if (savepointCreated)
+                    await currentTransaction!.ReleaseSavepointAsync(savepoint);
+
+                if (learned.Learned + learned.Reinforced > 0)
+                    _logger?.LogInformation(
+                        "Manufacturer pattern learning for lead {LeadId}: {Learned} learned, {Reinforced} reinforced.",
+                        lead.Id, learned.Learned, learned.Reinforced);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex,
+                    "Manufacturer pattern learning failed for lead {LeadId}; the review is unaffected.", lead.Id);
+                if (savepointCreated)
+                {
+                    try { await currentTransaction!.RollbackToSavepointAsync(savepoint); }
+                    catch (Exception rollbackFailure)
+                    {
+                        _logger?.LogError(rollbackFailure,
+                            "Rolling back the manufacturer-pattern learning savepoint failed for lead {LeadId}.", lead.Id);
+                        throw;
+                    }
+                }
+                foreach (var entry in _context.ChangeTracker
+                             .Entries<ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.ManufacturerPartPattern>()
+                             .Where(entry => entry.State != EntityState.Unchanged)
+                             .ToList())
+                    entry.State = EntityState.Detached;
+            }
         }
 
         /// <summary>

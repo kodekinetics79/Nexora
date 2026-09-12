@@ -10,6 +10,7 @@ using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -306,6 +307,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     private readonly ILogger<ChunkedExtractionService> _log;
     private readonly IAiExternalProviderTrust? _externalProviderTrust;
     private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
+    private readonly IManufacturerKnowledge? _manufacturerKnowledge;
 
     // Chunk bounds. A chunk must satisfy ALL THREE constraints:
     //   1. OUTPUT-token budget (ExtractionOutputBudget) — the binding one in practice, and
@@ -360,13 +362,131 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         ICanonicalRfqNormalizer normalizer,
         ILogger<ChunkedExtractionService> log,
         IAiExternalProviderTrust? externalProviderTrust = null,
-        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null,
+        IManufacturerKnowledge? manufacturerKnowledge = null)
     {
         _llm = llm;
         _normalizer = normalizer;
         _log = log;
         _externalProviderTrust = externalProviderTrust;
         _metrics = metrics;
+        _manufacturerKnowledge = manufacturerKnowledge;
+    }
+
+    // ---- manufacturer inference ------------------------------------------
+    //
+    // Both helpers are no-ops when no knowledge service is wired or the tenant has taught
+    // nothing yet, so a deployment without the registration behaves exactly as before.
+
+    /// <summary>
+    /// Structured path: fills a manufacturer the buyer left out, on the canonical line itself,
+    /// so the evidence ledger records it as Derived with its reason rather than as a value the
+    /// document stated. Only lines whose manufacturer is <see cref="CanonicalValueKind.Missing"/>
+    /// are touched; the document's own statement is never overridden. Returns how many lines
+    /// were filled.
+    /// </summary>
+    private async Task<int> InferManufacturersAsync(
+        IEnumerable<CanonicalRfqLineItem> lines, long businessUnitId, CancellationToken ct)
+    {
+        if (_manufacturerKnowledge is null) return 0;
+        var candidates = lines.Where(l => l.ManufacturerName.Kind == CanonicalValueKind.Missing).ToList();
+        if (candidates.Count == 0) return 0;
+
+        var snapshot = await _manufacturerKnowledge.ForBusinessUnitAsync(businessUnitId, ct);
+        if (snapshot.IsEmpty) return 0;
+
+        var inferred = 0;
+        foreach (var line in candidates)
+        {
+            var result = ManufacturerInference.Infer(
+                line.ManufacturerName.Value,
+                JoinText(line.ProductName.Value, line.ItemText.Value),
+                line.ManufacturerPartNumber.Value,
+                snapshot.Patterns, snapshot.KnownManufacturers);
+            if (result is null) continue;
+
+            // The evidence points at the cell the answer was read FROM — the description or
+            // the part number — carrying the reason as its raw value, so a reviewer opening
+            // the ledger sees "inferred from pattern X7M5 at C4", not a manufacturer cell that
+            // does not exist.
+            var fromDescription = result.Reason.StartsWith(
+                ManufacturerInference.DescriptionReasonPrefix, StringComparison.Ordinal);
+            var origin = fromDescription
+                ? line.ProductName.Evidence.FirstOrDefault() ?? line.ItemText.Evidence.FirstOrDefault()
+                : line.ManufacturerPartNumber.Evidence.FirstOrDefault();
+
+            var field = line.ManufacturerName;
+            field.Value = result.Manufacturer;
+            field.Kind = CanonicalValueKind.Derived;
+            field.Confidence = result.Confidence;
+            field.ValidationStatus = ValidationStatus.Valid;
+            field.StatedInDocument = false;
+            field.Transformations.Add(result.Reason);
+            field.Evidence.Add(origin is null
+                ? new SourceEvidence { RawValue = result.Reason }
+                : new SourceEvidence
+                {
+                    SourceDocumentId = origin.SourceDocumentId,
+                    SourceDocumentName = origin.SourceDocumentName,
+                    Location = origin.Location,
+                    RawValue = result.Reason
+                });
+            inferred++;
+        }
+
+        return inferred;
+    }
+
+    /// <summary>
+    /// Unstructured path: the same inference over the model's merged items, applied once the
+    /// list is final. The item record carries no per-field provenance beyond a confidence, so
+    /// the inference confidence is written there and the diagnostics line is the only trace.
+    /// </summary>
+    private async Task<List<LeadItemData>> InferManufacturersAsync(
+        List<LeadItemData> items, long businessUnitId, List<string> diagnostics, CancellationToken ct)
+    {
+        if (_manufacturerKnowledge is null || items.Count == 0) return items;
+        if (items.All(i => !string.IsNullOrWhiteSpace(i.ManufacturerName))) return items;
+
+        var snapshot = await _manufacturerKnowledge.ForBusinessUnitAsync(businessUnitId, ct);
+        if (snapshot.IsEmpty) return items;
+
+        var inferred = 0;
+        var output = new List<LeadItemData>(items.Count);
+        foreach (var item in items)
+        {
+            var result = string.IsNullOrWhiteSpace(item.ManufacturerName)
+                ? ManufacturerInference.Infer(
+                    item.ManufacturerName,
+                    JoinText(item.ProductShortName, item.ProductShortDescription),
+                    item.ManufacturerPartNumber,
+                    snapshot.Patterns, snapshot.KnownManufacturers)
+                : null;
+            if (result is null)
+            {
+                output.Add(item);
+                continue;
+            }
+
+            output.Add(item with
+            {
+                ManufacturerName = result.Manufacturer,
+                ManufacturerNameConfidence = (double)result.Confidence
+            });
+            inferred++;
+        }
+
+        if (inferred > 0) diagnostics.Add(ManufacturerInferenceDiagnostic(inferred));
+        return output;
+    }
+
+    private static string ManufacturerInferenceDiagnostic(int count)
+        => $"Manufacturer inferred on {count} line(s) from the tenant's own history.";
+
+    private static string? JoinText(params string?[] parts)
+    {
+        var joined = string.Join(" | ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
+        return joined.Length == 0 ? null : joined;
     }
 
     /// <summary>
@@ -556,7 +676,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     ? $"The model ran out of output budget ({_llm.MaxOutputTokens} tokens) before it finished "
                       + "this document, and no line-item rows were detected to split it on."
                     : "LLM returned no result for the document.", input, diagnostics);
-            var items0 = single.Items ?? new List<LeadItemData>();
+            var items0 = await InferManufacturersAsync(
+                single.Items ?? new List<LeadItemData>(), input.BusinessUnitId, diagnostics, ct);
+            single = single with { Items = items0 };
             var incompleteOcr = input.OcrTruncated
                                 || input.OcrStatus is ExtractionOcrStatus.Partial or ExtractionOcrStatus.Failed;
             var status0 = single.OverallConfidence is < MinAcceptableConfidence || incompleteOcr
@@ -793,6 +915,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         // chunk's regions were genuinely never extracted, incomplete OCR genuinely omitted
         // content, and a populated body that produced ZERO items is a real signal on any
         // document. Row-level conservation lives on the structured path, where rows are rows.
+        mergedItems = await InferManufacturersAsync(mergedItems, input.BusinessUnitId, diagnostics, ct);
         var extracted = mergedItems.Count;
         var overall = ComputeOverallConfidence(headerSource, mergedItems);
         var merged = WithItems(headerSource, mergedItems, overall);
@@ -843,7 +966,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         };
     }
 
-    public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
+    public async Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
         IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default,
         string? documentNarrative = null)
     {
@@ -854,11 +977,17 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             $"Structured parse produced {import.Documents.Count} RFQ group(s) from {rows.Count} row(s)."
         };
 
+        // Before the canonical lines are mapped to items, so the Derived kind, the reason and
+        // the evidence pointer all reach the ledger with the rest of the line.
+        var inferredMakers = await InferManufacturersAsync(
+            import.Documents.SelectMany(d => d.LineItems), businessUnitId, ct);
+        if (inferredMakers > 0) diagnostics.Add(ManufacturerInferenceDiagnostic(inferredMakers));
+
         var allItems = import.Documents.SelectMany(d => d.LineItems).ToList();
         var expected = allItems.Count;
 
         if (expected == 0)
-            return Task.FromResult(Failed(0, "Structured file contained no valid line items."));
+            return Failed(0, "Structured file contained no valid line items.");
 
         var primary = import.Documents.First();
         var items = InheritStatedCurrency(allItems.Select(MapCanonicalItem).ToList());
@@ -901,7 +1030,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var status = reviewReason is null ? ExtractionOutcomeStatus.Ok : ExtractionOutcomeStatus.NeedsReview;
         if (reviewReason is not null) diagnostics.Add(reviewReason);
 
-        return Task.FromResult(new ChunkedExtractionOutcome
+        return new ChunkedExtractionOutcome
         {
             Status = status,
             Result = result,
@@ -913,7 +1042,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             CanonicalImport = import,
             DocumentNarrative = documentNarrative,
             ProcessingPath = ExtractionProcessingPath.DeterministicRules
-        });
+        };
     }
 
     // ---- chunking --------------------------------------------------------
@@ -1170,6 +1299,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ReceivedDate: null, ReceivedDateConfidence: 0,
             BidClosingDateLine: null, BidClosingDateLineConfidence: 0,
             ItemConfidence: AverageConfidence(line),
+            // The buyer's unrecognised columns, verbatim — the deterministic path used to drop
+            // them while the model path preserved them, so the coverage tile read 0% here.
+            ExtraFields: line.ExtraFields,
             VerifiedEvidence: evidence.Count == 0 ? null : evidence);
     }
 

@@ -146,7 +146,7 @@ public sealed class ExtractionSchemaClientFieldsTests
     {
         // The ledger attributes every call to the prompt that produced it. Changing the
         // instructions without moving the label would file v4 answers under v3.
-        Assert.Equal("rfq-extraction-v6", AiPromptVersions.StructuredRfqExtraction);
+        Assert.Equal("rfq-extraction-v7", AiPromptVersions.StructuredRfqExtraction);
     }
 
     [Fact]

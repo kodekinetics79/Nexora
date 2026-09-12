@@ -1040,6 +1040,14 @@ public sealed class CanonicalInquiry
     public CanonicalInquiryStatus Status { get; private set; }
     public DateTimeOffset CreatedOn { get; private set; }
     public DateTimeOffset UpdatedOn { get; private set; }
+
+    /// <summary>
+    /// Document-level "Label: value" pairs no spelling recognised, as a JSON object of the
+    /// buyer's own label to its text. Kept so a reviewer's later correction of the header can be
+    /// matched back to the label that stated it and the spelling learned for the tenant.
+    /// </summary>
+    public string? UnmappedHeadersJson { get; private set; }
+
     public DocumentCorpus Corpus { get; private set; } = null!;
     public ICollection<CanonicalLineItem> LineItems { get; } = new List<CanonicalLineItem>();
     public ICollection<FieldEvidence> Evidence { get; } = new List<FieldEvidence>();
@@ -1062,6 +1070,42 @@ public sealed class CanonicalInquiry
         ReceivedDate = receivedDate;
         BidClosingDate = bidClosingDate;
         UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>At most this many unmatched labels are kept per inquiry, and at most this much text.</summary>
+    public const int MaxUnmappedHeaders = 20;
+    public const int MaxUnmappedHeadersChars = 4_000;
+
+    public void RecordUnmappedHeaders(IReadOnlyDictionary<string, string> headers, DateTimeOffset? changedOn = null)
+    {
+        if (Status is CanonicalInquiryStatus.Validated or CanonicalInquiryStatus.Rejected)
+            throw new InvalidOperationException($"A {Status} inquiry cannot be changed.");
+        var kept = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (label, value) in headers)
+        {
+            if (string.IsNullOrWhiteSpace(label) || string.IsNullOrWhiteSpace(value)) continue;
+            kept[label.Trim()] = value.Trim();
+            if (kept.Count >= MaxUnmappedHeaders) break;
+        }
+        if (kept.Count == 0) return;
+        var json = System.Text.Json.JsonSerializer.Serialize(kept);
+        UnmappedHeadersJson = json.Length <= MaxUnmappedHeadersChars ? json : null;
+        UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>The recorded pairs, or an empty dictionary when none were kept.</summary>
+    public IReadOnlyDictionary<string, string> UnmappedHeaders()
+    {
+        if (string.IsNullOrWhiteSpace(UnmappedHeadersJson)) return new Dictionary<string, string>();
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(UnmappedHeadersJson)
+                   ?? new Dictionary<string, string>();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return new Dictionary<string, string>();
+        }
     }
 
     public void BindLead(long leadId, DateTimeOffset? changedOn = null)

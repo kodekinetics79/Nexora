@@ -45,6 +45,31 @@ public sealed class RfqSpreadsheetRow
     /// </summary>
     public string? ItemText { get; set; }
 
+    /// <summary>
+    /// The columns of this row that no spelling in the vocabulary named, as the buyer's own
+    /// heading and the cell's text. They used to be DROPPED: a column headed "BCD" on a bid list
+    /// never reached the lead, so the reviewer could not see what the document said and nothing
+    /// could learn the spelling from the reviewer's correction. They now travel to the line's
+    /// ExtraFields, exactly as the model path has always preserved unrecognised columns.
+    /// </summary>
+    public Dictionary<string, string> UnmappedColumns { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Document-level "Label: value" pairs the header-block reader did not recognise ("BCD:
+    /// 10/8/2026"). Shared by every row of the document; kept so the reviewer's confirmation of a
+    /// closing date can be matched back to the label that stated it and the spelling learned.
+    /// </summary>
+    public Dictionary<string, string> UnmappedHeaderLabels { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Provenance of a value that was NOT read from a labelled cell but filled in afterwards —
+    /// today only by the anchored header completion (see <c>HeaderCompletionService</c>). The
+    /// normaliser caps the field's confidence at the stated figure and records the note among the
+    /// value's transformations, so a model reading is never certified at the confidence of a
+    /// deterministic one.
+    /// </summary>
+    public Dictionary<string, RowFieldProvenance> FieldProvenance { get; set; } = new(StringComparer.Ordinal);
+
     public string SourceAddress(string fieldName, string legacyColumn)
     {
         if (FieldSourceAddresses.TryGetValue(fieldName, out var address))
@@ -55,6 +80,9 @@ public sealed class RfqSpreadsheetRow
             : $"row {RowNumber}, column {legacyColumn}";
     }
 }
+
+/// <summary>How a filled-in field came to be, and how sure the filler was.</summary>
+public sealed record RowFieldProvenance(decimal Confidence, string Note);
 
 public static class RfqSpreadsheetFields
 {

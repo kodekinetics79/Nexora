@@ -46,7 +46,8 @@ public sealed class NativeSpreadsheetParser
                     rowNumber,
                     headers,
                     fieldColumns,
-                    field => Cell(field));
+                    field => Cell(field),
+                    column => worksheet.Cells[rowNumber, column].Text);
 
                 if (IsMaterial(row))
                     rows.Add(row);
@@ -83,7 +84,8 @@ public sealed class NativeSpreadsheetParser
                 record.StartLine,
                 headers,
                 fieldColumns,
-                field => Cell(field));
+                field => Cell(field),
+                column => column <= record.Values.Count ? record.Values[column - 1] : null);
 
             if (IsMaterial(row))
                 rows.Add(row);
@@ -227,7 +229,7 @@ public sealed class NativeSpreadsheetParser
             {
                 string? Cell(string field) => ReadCell(fieldColumns, field, valueAt);
                 var row = CreateRow(sourceDocumentName, worksheetName, headerRow, rowNumber,
-                    headers, fieldColumns, Cell);
+                    headers, fieldColumns, Cell, valueAt);
                 if (IsMaterial(row))
                     rows.Add(row);
             }
@@ -264,7 +266,8 @@ public sealed class NativeSpreadsheetParser
         int rowNumber,
         Dictionary<int, string> headers,
         Dictionary<string, int> fieldColumns,
-        Func<string, string?> cell)
+        Func<string, string?> cell,
+        Func<int, string?> valueAt)
     {
         var addresses = fieldColumns.ToDictionary(
             pair => pair.Key,
@@ -280,6 +283,7 @@ public sealed class NativeSpreadsheetParser
             HeadersByColumn = new Dictionary<int, string>(headers),
             FieldColumnNumbers = new Dictionary<string, int>(fieldColumns, StringComparer.Ordinal),
             FieldSourceAddresses = addresses,
+            UnmappedColumns = UnmappedColumns(headers, fieldColumns, valueAt),
             RfqNo = cell(RfqSpreadsheetFields.RfqNo),
             BuyerName = cell(RfqSpreadsheetFields.BuyerName),
             ReceivedDate = cell(RfqSpreadsheetFields.ReceivedDate),
@@ -327,7 +331,8 @@ public sealed class NativeSpreadsheetParser
                 column => column <= cells.Count ? cells[column - 1] : null);
 
             var row = CreateRow(sourceDocumentName, worksheetName, located.Row, rowNumber,
-                located.Headers, located.FieldColumns, Cell);
+                located.Headers, located.FieldColumns, Cell,
+                column => column <= cells.Count ? cells[column - 1] : null);
             if (IsMaterial(row))
                 rows.Add(row);
         }
@@ -365,7 +370,8 @@ public sealed class NativeSpreadsheetParser
                 column => column <= cells.Count ? cells[column - 1] : null);
 
             var row = CreateRow(sourceDocumentName, worksheetName, headerRowNumber, rowNumber,
-                headerMap, columns, Cell);
+                headerMap, columns, Cell,
+                column => column <= cells.Count ? cells[column - 1] : null);
             if (IsMaterial(row))
                 rows.Add(row);
         }
@@ -396,7 +402,7 @@ public sealed class NativeSpreadsheetParser
     /// the previous behaviour: the caller maps no columns and the document falls through to the
     /// unstructured text path exactly as it did before.</para>
     /// </summary>
-    private static (int Row, Dictionary<int, string> Headers, Dictionary<string, int> FieldColumns) LocateHeader(
+    private (int Row, Dictionary<int, string> Headers, Dictionary<string, int> FieldColumns) LocateHeader(
         int firstRow, int lastRow, Func<int, Dictionary<int, string>> readHeadersAt)
     {
         var bestRow = firstRow;
@@ -425,6 +431,35 @@ public sealed class NativeSpreadsheetParser
         return (firstRow, fallback, BuildFieldColumnMap(fallback));
     }
 
+    /// <summary>At most this many unrecognised columns travel with a line — the same ceiling the model path applies to ExtraFields.</summary>
+    internal const int MaxUnmappedColumns = 20;
+
+    /// <summary>
+    /// The buyer's own headings that named no field, with this row's text under each. Blank
+    /// headings and blank cells are skipped: a value with no heading teaches nothing, and a
+    /// heading with no value on this row says nothing about this line.
+    /// </summary>
+    private static Dictionary<string, string> UnmappedColumns(
+        IReadOnlyDictionary<int, string> headers,
+        IReadOnlyDictionary<string, int> fieldColumns,
+        Func<int, string?> valueAt)
+    {
+        var mapped = new HashSet<int>(fieldColumns.Values);
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (column, heading) in headers.OrderBy(pair => pair.Key))
+        {
+            if (mapped.Contains(column) || string.IsNullOrWhiteSpace(heading))
+                continue;
+            var value = valueAt(column)?.Trim();
+            if (string.IsNullOrEmpty(value) || result.ContainsKey(heading.Trim()))
+                continue;
+            result[heading.Trim()] = value;
+            if (result.Count >= MaxUnmappedColumns)
+                break;
+        }
+        return result;
+    }
+
     private static Dictionary<int, string> ReadHeaders(int firstColumn, int lastColumn, Func<int, string?> value)
     {
         var headers = new Dictionary<int, string>();
@@ -434,43 +469,15 @@ public sealed class NativeSpreadsheetParser
     }
 
     /// <summary>
-    /// Header spellings are compared with punctuation and spacing removed, so "Qty.", "QTY",
-    /// "Unit of Measure", "U/M" and "Part No." all land on the field a buyer meant. Matching is
-    /// still exact after normalisation — substring matching would let a "Total Price" column
-    /// capture "Price".
+    /// The spellings this parser recognises. Built-in by default; a tenant's reviewers extend it
+    /// (see <see cref="RfqHeaderVocabulary.WithLearned"/>).
     /// </summary>
-    private static readonly Dictionary<string, string[]> FieldAliases = new(StringComparer.Ordinal)
-    {
-        [RfqSpreadsheetFields.RfqNo] = new[] { "rfqno", "rfq", "rfqnumber", "rfqref", "rfqreference", "enquiryno", "inquiryno", "tenderno", "bidno" },
-        [RfqSpreadsheetFields.BuyerName] = new[] { "buyername", "buyer", "customer", "customername", "client", "clientname" },
-        [RfqSpreadsheetFields.ReceivedDate] = new[] { "receiveddate", "datereceived", "rfqdate", "enquirydate" },
-        [RfqSpreadsheetFields.BidClosingDate] = new[] { "bidclosingdate", "closingdate", "duedate", "deadline", "submissiondate", "bidduedate" },
-        // "item" is deliberately absent — it is ambiguous and resolved below.
-        [RfqSpreadsheetFields.ProductName] = new[] { "productname", "product", "description", "itemdescription", "materialdescription", "materialname", "particulars" },
-        [RfqSpreadsheetFields.Quantity] = new[] { "quantity", "qty", "qtyrequired", "quantityrequired", "reqqty", "requiredqty" },
-        [RfqSpreadsheetFields.UnitOfMeasure] = new[] { "unitofmeasure", "uom", "unit", "um", "units", "measure", "unitofmeasurement", "unitmeasure" },
-        [RfqSpreadsheetFields.UnitPrice] = new[] { "unitprice", "price", "rate", "unitrate" },
-        [RfqSpreadsheetFields.Currency] = new[] { "currency", "curr", "ccy" },
-        [RfqSpreadsheetFields.ManufacturerName] = new[] { "manufacturername", "manufacturer", "make", "brand", "mfr", "mfg" },
-        // "materialcode" was here while "materialno"/"materialnumber" were not, which is an
-        // omission rather than a decision: they are one column under three headings, and an SAP
-        // export writes the second two far more often than the first. A column this list does not
-        // recognise is DROPPED — not carried through as prose — so the number never reaches the
-        // lead line and cannot be matched against the catalogue afterwards.
-        // Bare "material" is deliberately still absent: on a fabrication enquiry that column holds
-        // the material of CONSTRUCTION ("SS316", "Carbon Steel"), not an identifier.
-        [RfqSpreadsheetFields.ManufacturerPartNumber] = new[] { "manufacturerpartnumber", "mpn", "partnumber", "partno", "partcode", "modelno", "modelnumber", "materialcode", "itemcode", "materialno", "materialnumber", "stockcode", "stockno", "stocknumber", "sapmaterial", "customerpartno", "customerpartnumber", "buyerpartno", "buyerpartnumber", "catalogno", "catalogueno", "catno" },
-        // "delivery" is deliberately NOT here. A column headed exactly "Delivery" holds a date far
-        // more often than a number of days; under LeadTimeDays it failed the integer parse and was
-        // dropped, while RequiredDeliveryDate stayed null — the buyer's stated delivery date lost
-        // with no diagnostic. It now maps to the buyer's requirement, where prose ("4 weeks")
-        // yields NeedsReview and a null rather than a supplier lead time of zero.
-        [RfqSpreadsheetFields.LeadTimeDays] = new[] { "leadtimedays", "leadtime", "deliverytime", "deliveryperiod", "deliveryleadtime" },
-        [RfqSpreadsheetFields.ItemText] = new[] { "notes", "note", "remarks", "remark", "comments", "comment", "itemtext", "specification", "spec" },
-        [RfqSpreadsheetFields.DeliveryLocation] = new[] { "deliverylocation", "deliveryto", "shipto", "destination", "deliveryaddress", "deliverypoint", "site", "plant" },
-        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requireddeliverydate", "requesteddeliverydate", "deliverydate", "delivery", "requiredby", "neededby", "wanteddate" },
-        [RfqSpreadsheetFields.AgreementReference] = new[] { "agreementreference", "agreementno", "contractno", "contractreference", "framecontract", "agreement" },
-    };
+    public RfqHeaderVocabulary Vocabulary { get; }
+
+    public NativeSpreadsheetParser() : this(null) { }
+
+    public NativeSpreadsheetParser(RfqHeaderVocabulary? vocabulary)
+        => Vocabulary = vocabulary ?? RfqHeaderVocabulary.Builtin;
 
     /// <summary>
     /// The field a single header/label spelling names, or null when it names none.
@@ -481,24 +488,16 @@ public sealed class NativeSpreadsheetParser
     /// for the transposed case would drift from this one, and then the same word would mean
     /// different things depending on which way the document happened to be laid out.</para>
     /// </summary>
-    public static string? FieldForHeader(string? header)
-    {
-        var normalized = NormalizeHeader(header);
-        if (normalized.Length == 0) return null;
-        foreach (var field in FieldAliases)
-            if (field.Value.Contains(normalized, StringComparer.Ordinal))
-                return field.Key;
-        return null;
-    }
+    public string? FieldForHeader(string? header) => Vocabulary.FieldForColumn(header);
 
-    private static Dictionary<string, int> BuildFieldColumnMap(IReadOnlyDictionary<int, string> headers)
+    private Dictionary<string, int> BuildFieldColumnMap(IReadOnlyDictionary<int, string> headers)
     {
         var normalizedHeaders = headers.ToDictionary(
             pair => pair.Key,
             pair => NormalizeHeader(pair.Value));
         var result = new Dictionary<string, int>(StringComparer.Ordinal);
 
-        foreach (var field in FieldAliases)
+        foreach (var field in Vocabulary.ColumnAliases)
         {
             // Lowest column wins when a sheet repeats a spelling, so the mapping is stable
             // rather than dependent on dictionary enumeration order.
@@ -540,16 +539,7 @@ public sealed class NativeSpreadsheetParser
             result[RfqSpreadsheetFields.ManufacturerPartNumber] = column;
     }
 
-    /// <summary>Lowercase and strip everything that is not a letter or digit.</summary>
-    private static string NormalizeHeader(string? header)
-    {
-        if (string.IsNullOrWhiteSpace(header)) return string.Empty;
-        var sb = new StringBuilder(header.Length);
-        foreach (var c in header)
-            if (char.IsLetterOrDigit(c))
-                sb.Append(char.ToLowerInvariant(c));
-        return sb.ToString();
-    }
+    private static string NormalizeHeader(string? header) => RfqHeaderVocabulary.Normalize(header);
 
     private static string? ReadCell(
         IReadOnlyDictionary<string, int> fieldColumns,

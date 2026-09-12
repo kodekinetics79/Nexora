@@ -371,6 +371,7 @@ public static class EvidenceLedgerModelBuilderExtensions
             entity.Property(x => x.BuyerName).HasColumnName("buyer_name").HasMaxLength(512);
             entity.Property(x => x.ReceivedDate).HasColumnName("received_date").HasColumnType("timestamp with time zone");
             entity.Property(x => x.BidClosingDate).HasColumnName("bid_closing_date").HasColumnType("timestamp with time zone");
+            entity.Property(x => x.UnmappedHeadersJson).HasColumnName("unmapped_headers").HasColumnType("jsonb");
             entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.CreatedOn).HasColumnName("created_on").HasColumnType("timestamp with time zone");
             entity.Property(x => x.UpdatedOn).HasColumnName("updated_on").HasColumnType("timestamp with time zone");

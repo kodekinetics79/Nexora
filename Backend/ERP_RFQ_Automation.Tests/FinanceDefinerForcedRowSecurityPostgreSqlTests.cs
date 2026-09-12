@@ -535,7 +535,10 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
         // 224 -> 228 with fit assessments, participation decisions, participation line decisions
         // and RFQ promotions. These four commercial-decision ledgers are tenant-owned and each
         // receives the same forced tenant-isolation policy in the focused promotion migration.
-        Assert.Equal(228L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
+        //
+        // 228 -> 230 with header_spellings and manufacturer_part_patterns: what a tenant's
+        // reviewers taught the document parser, tenant-owned and never shared.
+        Assert.Equal(230L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
         Assert.Equal(300L, await CountAsync("pg_policy",
             "polname IN ('nexora_definer_tenant_read','nexora_definer_tenant_insert','nexora_definer_tenant_update')"));
 

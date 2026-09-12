@@ -64,7 +64,36 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         /// </summary>
         Task<BoqDraftResult?> DraftServiceBoqAsync(
             string scopeText, AiCallContext context, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Reads the HEADER text of a structured document — the labelled lines and prose around
+        /// its line-item table, never the lines — and reports the inquiry-level facts it states,
+        /// each with a verbatim span the caller verifies against the text before believing it.
+        /// A provider that does not implement it reports nothing, which leaves the document
+        /// exactly as the deterministic read left it. See <c>HeaderCompletionService</c>.
+        /// </summary>
+        Task<HeaderCompletionResult?> CompleteHeaderAsync(
+            string headerText, AiCallContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<HeaderCompletionResult?>(null);
     }
+
+    /// <summary>
+    /// What the model read from a document's header text. Every value travels with the verbatim
+    /// quote it was read from; a value without a span, or with a span the text does not contain,
+    /// is discarded by the caller.
+    /// </summary>
+    public sealed record HeaderCompletionResult(
+        [property: JsonPropertyName("Rfqno")] string? Rfqno,
+        [property: JsonPropertyName("RfqnoSpan")] string? RfqnoSpan,
+        [property: JsonPropertyName("BidClosingDate")] string? BidClosingDate,
+        [property: JsonPropertyName("BidClosingDateSpan")] string? BidClosingDateSpan,
+        [property: JsonPropertyName("RequiredDeliveryDate")] string? RequiredDeliveryDate,
+        [property: JsonPropertyName("RequiredDeliveryDateSpan")] string? RequiredDeliveryDateSpan,
+        [property: JsonPropertyName("DeliveryLocation")] string? DeliveryLocation,
+        [property: JsonPropertyName("DeliveryLocationSpan")] string? DeliveryLocationSpan,
+        [property: JsonPropertyName("AgreementReference")] string? AgreementReference,
+        [property: JsonPropertyName("AgreementReferenceSpan")] string? AgreementReferenceSpan,
+        [property: JsonPropertyName("OverallConfidence")] double? OverallConfidence);
     /// <summary>
     /// The result of one extraction call plus the reason it failed, if it failed.
     /// <paramref name="ErrorCode"/> is one of <see cref="AiErrorCodes"/> and is null on success.

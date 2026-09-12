@@ -463,6 +463,19 @@ builder.Services.AddScoped<ERP_RFQ_Automation.CustomerResolution.ILeadCustomerRe
     ERP_RFQ_Automation.CustomerResolution.LeadCustomerResolutionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner,
     ERP_RFQ_Automation.CustomerResolution.CustomerAliasLearner>();
+// What a tenant's reviewers taught the document parser about its customers' field headings:
+// read by the extraction worker per job, written only by an approved review.
+builder.Services.AddScoped<ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.ITenantHeaderVocabulary,
+    ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.TenantHeaderVocabulary>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.IHeaderSpellingLearner,
+    ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.HeaderSpellingLearner>();
+// What a tenant's reviewed lead lines taught about makers: which part-number families and
+// which names inside a description identify a manufacturer. Read during extraction, written
+// only by an approved review.
+builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.IManufacturerKnowledge,
+    ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.EfManufacturerKnowledge>();
+builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.IManufacturerPatternLearner,
+    ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.ManufacturerPatternLearner>();
 builder.Services.AddHostedService<RoutingReconciliationWorker>();
 // RBAC Authorization
 builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
@@ -794,6 +807,10 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAs
     ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryService>();
 builder.Services.AddHostedService<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryWorker>();
 builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
+// Reads a structured document's header text with the model when the vocabulary could not find
+// its closing date or RFQ number; anchored, capped, never a dependency.
+builder.Services.AddScoped<ERP_RFQ_Automation.Extraction.HeaderCompletion.IHeaderCompletionService,
+    ERP_RFQ_Automation.Extraction.HeaderCompletion.HeaderCompletionService>();
 builder.Services.AddHostedService<ExtractionWorker>();
 // ING-05: unified ingestion gateway — the ONE door to the durable queue used by the
 // modern upload endpoint, the email poller, the folder watcher and manual upload

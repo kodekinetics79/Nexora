@@ -8651,6 +8651,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("bid_closing_date");
 
+                    b.Property<string>("UnmappedHeadersJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("unmapped_headers");
+
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint")
                         .HasColumnName("business_unit_id");
@@ -21577,6 +21581,114 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("CK_supplier_purchase_order_lines_ShippedQuantity", "\"ShippedQuantity\" >= 0 AND \"ShippedQuantity\" <= \"OrderedQuantity\"");
                         });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.HeaderSpelling", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Field")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("LastObservedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long?>("LearnedFromLeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("LearnedFromReviewAuditId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("ObservationCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
+                    b.Property<string>("OriginalLabel")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Spelling")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "LearnedFromLeadId")
+                        .HasDatabaseName("ix_header_spellings_learned_from_lead")
+                        .HasFilter("\"LearnedFromLeadId\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "Spelling")
+                        .IsUnique()
+                        .HasDatabaseName("ux_header_spellings_tenant_spelling");
+
+                    b.ToTable("header_spellings", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.ManufacturerPartPattern", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("CreatedOn")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("LastObservedOn")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("LearnedFromLeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("LearnedFromReviewAuditId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Manufacturer")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("NormalizedManufacturer")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("ObservationCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
+                    b.Property<string>("Pattern")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "Pattern", "NormalizedManufacturer")
+                        .IsUnique()
+                        .HasDatabaseName("UX_manufacturer_part_patterns_tenant_pattern_maker");
+
+                    b.ToTable("manufacturer_part_patterns", (string)null);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.QuoteDelivery.QuoteDeliveryRequest", b =>
