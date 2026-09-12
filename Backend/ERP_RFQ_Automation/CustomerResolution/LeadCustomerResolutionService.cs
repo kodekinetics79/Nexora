@@ -224,6 +224,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         // that becomes Lead.Clientemail. A raw string compare between them never matches, so
         // both are RFC-parsed down to the bare address here.
         var ingestFrom = lead.EmailIngests?.FromEmail;
+        var ingestSubject = lead.EmailIngests?.EmailSubject;
         if (string.IsNullOrWhiteSpace(ingestFrom) && lead.EmailIngestsId.HasValue)
         {
             // SEC-ING-01: the tenant predicate is explicit because IgnoreQueryFilters removed the
@@ -232,14 +233,26 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             // from the mailbox poller, which until now ran with a null tenant under the BYPASSRLS
             // pipeline role. EmailIngests carries no tenant column of its own, so the predicate
             // goes through the owning mailbox exactly as the table's RLS policy does.
-            ingestFrom = await _db.EmailIngests.AsNoTracking().IgnoreQueryFilters()
+            // The subject rides along on the SAME row read: it is evidence too (below), and a
+            // second round trip for a column we already have in hand would be pure waste.
+            var ingest = await _db.EmailIngests.AsNoTracking().IgnoreQueryFilters()
                 .Where(x => x.Id == lead.EmailIngestsId.Value
                             && x.EmailConfiguration.BusinessUnitId == businessUnitId)
-                .Select(x => x.FromEmail)
+                .Select(x => new { x.FromEmail, x.EmailSubject })
                 .SingleOrDefaultAsync(ct);
+            ingestFrom = ingest?.FromEmail;
+            ingestSubject ??= ingest?.EmailSubject;
         }
 
         var sender = ParseAddress(ingestFrom) ?? ParseAddress(lead.Clientemail);
+        // THE NAME ON THE MAILBOX, WHICH WAS PARSED AND THROWN AWAY. EmailService stores the
+        // sender as the mail client wrote it — "SEC Procurement <noreply@portal.se.com.sa>" —
+        // and this method kept the address and discarded the words in front of it. On a
+        // portal-relayed request that display name is frequently the ONLY unambiguous
+        // statement of the buying organisation anywhere in the message: the relay domain names
+        // the postman, the document header names nobody, and the human who configured the
+        // mailbox typed the buyer's name by hand. It is kept now and read as a header.
+        var senderDisplayName = ParseDisplayName(ingestFrom) ?? ParseDisplayName(lead.Clientemail);
 
         var businessUnitName = await _db.BusinessUnits.AsNoTracking().IgnoreQueryFilters()
             .Where(b => b.Id == businessUnitId)
@@ -255,6 +268,24 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         var selfNames = new List<string>();
         if (!string.IsNullOrWhiteSpace(businessUnitName)) selfNames.Add(businessUnitName!);
         if (!string.IsNullOrWhiteSpace(lead.SupplierNameOnDocument)) selfNames.Add(lead.SupplierNameOnDocument!);
+
+        // The direction-of-trade firewall, applied to the two passages that come off the
+        // ENVELOPE rather than off the document. A forwarded or replied-to message carries OUR
+        // OWN trading name in the display name ("ALI ZAID AL QURAISHI Sales <sales@...>") and in
+        // the subject line, and neither is a statement about a buyer. It matters more than it
+        // used to: a header passage that names a company now demotes what the delivery address
+        // says, so our own name arriving at header strength would suppress the one place a
+        // portal print writes the buyer (lead 680 carried nothing but
+        // "Saudi Electricity Company-DAMMAM"). The resolver applies this same guard to every
+        // candidate NAME; this applies it to the two values before they become evidence at all.
+        var selfNameKeys = selfNames
+            .Select(CustomerNameNormalizer.LooseKey)
+            .Where(key => key.Length > 0)
+            .ToList();
+        if (SelfIdentityGuard.IsSelfName(CustomerNameNormalizer.LooseKey(senderDisplayName), selfNameKeys))
+            senderDisplayName = null;
+        if (SelfIdentityGuard.IsSelfName(CustomerNameNormalizer.LooseKey(ingestSubject), selfNameKeys))
+            ingestSubject = null;
 
         return new LeadClientEvidence
         {
@@ -276,69 +307,172 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             SupplierNameOnDocument = lead.SupplierNameOnDocument,
             RfqNumber = lead.Rfqno,
             BuyerPersonName = lead.BuyersName,
-            Passages = Passages(lead),
+            Passages = Passages(lead, senderDisplayName, ingestSubject),
             TenantSelfNameKeys = selfNames,
             TenantSelfDomains = tenantMailboxes
         };
     }
 
     /// <summary>
-    /// RFC-parses an address out of either shape ("Name &lt;a@b&gt;" or "a@b") and lowercases it.
-    /// Returns null for anything that is not a single deliverable address.
+    /// Labels an extracted column can carry that state WHO IS BUYING. An SAP or portal print
+    /// puts the strongest name on the page behind one of these — "Sold-to party",
+    /// "Ordering party", "Purchaser" — and until now every one of them fell through to item
+    /// text and was worth 0.70, while "Storage location" linked the lead at 0.88. The weakest
+    /// label on the page outranked the strongest, which is exactly backwards.
     /// </summary>
+    private static readonly string[] BuyerHeaderLabelWords =
+    [
+        "sold to", "soldto", "bill to", "billto", "buyer", "purchaser", "customer", "client",
+        "ordering party", "company", "organisation", "organization", "account name", "end user",
+        "requisitioner", "purchasing organisation", "purchasing organization", "purchasing group"
+    ];
+
     /// <summary>
-    /// The places a buyer writes its own name on a request, whatever printed it: the delivery
-    /// address and storage locations are ABOUT the buyer; item text may merely mention one.
-    /// Bounded, because a 1,500-line print states a location on every line.
+    /// Labels that state WHERE THE GOODS GO. Usually the buyer's own site, but a consignee is a
+    /// fact about delivery and not about who is paying — see <see cref="PassageRole.ShipTo"/>.
     /// </summary>
-    internal static IReadOnlyList<DocumentPassage> Passages(Lead lead)
+    private static readonly string[] ShipToLabelWords =
+    [
+        "location", "deliver", "ship", "site", "plant", "consignee", "receiving", "warehouse",
+        "depot", "substation", "works", "area", "region"
+    ];
+
+    /// <summary>
+    /// What an extracted column label says its value IS. Separators are printing, not meaning,
+    /// so "Sold-to party", "SOLD_TO PARTY" and "soldto party" are one label.
+    ///
+    /// A label that speaks BOTH vocabularies ("Ship-to customer", "Customer plant", "Delivery
+    /// site of the buyer") is read as a ship-to, deliberately. Reading a consignee as the buyer
+    /// is the expensive mistake this module exists to avoid — an EPC contractor buying for
+    /// Saudi Aramco prints "Deliver to: Saudi Aramco" and is not Aramco — and a header now
+    /// outranks the address, so a misread ship-to would not merely add a wrong name, it would
+    /// suppress the right one.
+    /// </summary>
+    internal static PassageRole RoleForLabel(string? label)
+    {
+        if (string.IsNullOrWhiteSpace(label)) return PassageRole.ItemText;
+        var folded = new string(label.Select(c => char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : ' ').ToArray());
+        var normalized = string.Join(' ', folded.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (normalized.Length == 0) return PassageRole.ItemText;
+
+        foreach (var word in ShipToLabelWords)
+            if (normalized.Contains(word, StringComparison.Ordinal)) return PassageRole.ShipTo;
+        foreach (var word in BuyerHeaderLabelWords)
+            if (normalized.Contains(word, StringComparison.Ordinal)) return PassageRole.BuyerHeader;
+        return PassageRole.ItemText;
+    }
+
+    /// <summary>
+    /// The places a buyer writes its own name on a request, whatever printed it, and what each
+    /// place is DOING on the page: a header states who is buying, a delivery address states
+    /// where the goods go, item text merely mentions a name that may belong to anyone. Bounded,
+    /// because a 1,500-line print states a location on every line.
+    ///
+    /// THE BUDGET IS SPENT IN ROLE ORDER, NOT PAGE ORDER. It used to fill item by item from the
+    /// top of the document: on the 1,500-line Aramco bid list the 120 slots were gone around
+    /// item 30, the delivery address and every company-name field after it never reached the
+    /// evidence at all, and whether the buyer was found came down to which line the extractor
+    /// happened to emit first. Collect in three passes; fill every header first, then every
+    /// ship-to, then item text with whatever budget is left.
+    /// </summary>
+    internal static IReadOnlyList<DocumentPassage> Passages(
+        Lead lead, string? senderDisplayName = null, string? emailSubject = null)
     {
         const int maxPassages = 120;
         const int maxChars = 600;
-        var passages = new List<DocumentPassage>();
+        var headers = new List<DocumentPassage>();
+        var shipTos = new List<DocumentPassage>();
+        var itemTexts = new List<DocumentPassage>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        void Add(string where, string? text, bool namesTheBuyer)
+        void Add(string where, string? text, PassageRole role)
         {
-            if (string.IsNullOrWhiteSpace(text) || passages.Count >= maxPassages) return;
+            if (string.IsNullOrWhiteSpace(text)) return;
+            var bucket = role switch
+            {
+                PassageRole.BuyerHeader => headers,
+                PassageRole.ShipTo => shipTos,
+                _ => itemTexts
+            };
+            // Each bucket is bounded on its own, so a long bid list cannot make this method
+            // allocate without limit before the budget below is applied.
+            if (bucket.Count >= maxPassages) return;
             var trimmed = text.Trim();
             if (trimmed.Length > maxChars) trimmed = trimmed[..maxChars];
             if (!seen.Add(trimmed)) return;
-            passages.Add(new DocumentPassage(where, trimmed, namesTheBuyer));
+            // NamesTheBuyer keeps exactly the meaning it has always had — true for anything that
+            // is ABOUT the buyer — so every tier that reads that flag behaves as before. Role is
+            // the finer statement laid on top of it.
+            bucket.Add(new DocumentPassage(where, trimmed, role != PassageRole.ItemText) { Role = role });
         }
 
-        // The two strongest statements on the page, and until now the weakest evidence in the
-        // engine. The company-name field was compared only for an exact key match and then
+        bool Full() => headers.Count >= maxPassages
+                       && shipTos.Count >= maxPassages
+                       && itemTexts.Count >= maxPassages;
+
+        // The two strongest statements on the page, and until recently the weakest evidence in
+        // the engine. The company-name field was compared only for an exact key match and then
         // fuzzily, so "Saudi Aramco Ras Tanura Refinery" written there resolved to NOTHING while
         // the identical string in the delivery address linked at 0.88. And the short verbatim
         // sentence the extractor captures precisely because it names the buying organisation
         // ("MARAFIQ invites bidders in accordance with our Request for Quotation") was written to
         // the database and read by nothing in the product. Both are about the buyer by definition.
-        Add("company named on the document", lead.CustomerCompanyNameExtracted, namesTheBuyer: true);
-        Add("the sentence that names the buyer", lead.CustomerCompanyEvidence, namesTheBuyer: true);
-        Add("delivery address", lead.DeliveryLocation, namesTheBuyer: true);
+        Add("company named on the document", lead.CustomerCompanyNameExtracted, PassageRole.BuyerHeader);
+        Add("the sentence that names the buyer", lead.CustomerCompanyEvidence, PassageRole.BuyerHeader);
+        // A person typed the mailbox display name on purpose, and on a portal-relayed request
+        // ("SEC Procurement <noreply@portal.se.com.sa>") it is the only unambiguous statement of
+        // the buyer anywhere in the message. The subject is written by a person too, but it as
+        // often names a third party as the sender ("re: Aramco spec for your SEC bid"), so it is
+        // worth no more than any other incidental mention.
+        Add("the name on the sender's mailbox", senderDisplayName, PassageRole.BuyerHeader);
+        Add("the e-mail subject", emailSubject, PassageRole.ItemText);
+        Add("delivery address", lead.DeliveryLocation, PassageRole.ShipTo);
         foreach (var item in lead.LeadItems ?? [])
         {
-            Add("storage location", item.StorageLocation, namesTheBuyer: true);
+            if (Full()) break;
+            Add("storage location", item.StorageLocation, PassageRole.ShipTo);
             var extra = ExtraFieldsJson.Deserialize(item.ExtraFields);
             if (extra is not null)
             {
                 foreach (var (label, value) in extra)
                 {
-                    var aboutTheBuyer = label.Contains("location", StringComparison.OrdinalIgnoreCase)
-                        || label.Contains("deliver", StringComparison.OrdinalIgnoreCase)
-                        || label.Contains("ship", StringComparison.OrdinalIgnoreCase)
-                        || label.Contains("site", StringComparison.OrdinalIgnoreCase)
-                        || label.Contains("plant", StringComparison.OrdinalIgnoreCase);
-                    Add(aboutTheBuyer ? $"{label.ToLowerInvariant()} field" : "item text", value, aboutTheBuyer);
+                    var role = RoleForLabel(label);
+                    Add(role == PassageRole.ItemText ? "item text" : $"{label.ToLowerInvariant()} field",
+                        value, role);
                 }
             }
-            Add("item text", item.ItemText, namesTheBuyer: false);
-            Add("item text", item.MaterialPotext, namesTheBuyer: false);
+            Add("item text", item.ItemText, PassageRole.ItemText);
+            Add("item text", item.MaterialPotext, PassageRole.ItemText);
         }
-        return passages;
+
+        var ordered = new List<DocumentPassage>(maxPassages);
+        foreach (var passage in headers.Concat(shipTos).Concat(itemTexts))
+        {
+            if (ordered.Count >= maxPassages) break;
+            ordered.Add(passage);
+        }
+        return ordered;
     }
 
+    /// <summary>
+    /// The words in front of the angle brackets: "SEC Procurement" out of
+    /// "SEC Procurement &lt;noreply@portal.se.com.sa&gt;". Null when there are none, or when the
+    /// client simply repeated the address there, which states nothing the parsed address does not.
+    /// </summary>
+    internal static string? ParseDisplayName(string? value)
+    {
+        var trimmed = value?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return null;
+        if (!MailAddress.TryCreate(trimmed, out var parsed)) return null;
+        var display = parsed.DisplayName?.Trim();
+        if (string.IsNullOrWhiteSpace(display)) return null;
+        return display.Contains('@') ? null : display;
+    }
+
+    /// <summary>
+    /// RFC-parses an address out of either shape ("Name &lt;a@b&gt;" or "a@b") and lowercases it.
+    /// Returns null for anything that is not a single deliverable address.
+    /// </summary>
     internal static string? ParseAddress(string? value)
     {
         var trimmed = value?.Trim();
@@ -379,31 +513,99 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             ? $"{portalKey}|{supplierAccountKey}"
             : string.Empty;
         var hasRfq = !string.IsNullOrWhiteSpace(evidence.RfqNumber);
-        // Every name a profile or a reviewer has taught, so the document's passages can be
-        // searched for them. Bounded by the same cap as the rest of the corpus.
+        // Taught names are only worth loading when there is document text to search them for.
         var searchNames = evidence.Passages.Count > 0;
 
-        // Only active customers of this tenant can ever be linked.
-        var identifiers = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
-            .Where(i => i.BusinessUnitId == businessUnitId && i.EffectiveTo == null)
-            // IgnoreQueryFilters is a query-level flag set above; the subquery inherits it.
-            .Where(i => _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false))
-            .Where(i =>
-                (i.IdentifierType == CustomerIdentifierType.Email && addresses.Contains(i.NormalizedValue)) ||
-                (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)) ||
-                (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
-                (i.IdentifierType == CustomerIdentifierType.TaxRegistration && taxRegistrations.Contains(i.NormalizedValue)) ||
-                ((i.IdentifierType == CustomerIdentifierType.Alias || i.IdentifierType == CustomerIdentifierType.CustomerName)
-                    && ((nameKey != "" && i.NormalizedValue == nameKey) || (searchNames && i.IsVerified))) ||
-                (i.IdentifierType == CustomerIdentifierType.PortalAccount
-                    && portalAccountKey != "" && i.NormalizedValue == portalAccountKey) ||
-                (i.IdentifierType == CustomerIdentifierType.RfqNumberPattern && hasRfq))
-            .Select(i => new CustomerIdentifierSnapshot(
-                i.Id, i.CustomerId, i.IdentifierType, i.NormalizedValue, i.IsVerified, i.Confidence, i.Source))
-            .Take(500)
-            .ToListAsync(ct);
+        // ONE ORDERED, SEPARATELY CAPPED QUERY PER CLASS OF IDENTIFIER.
+        //
+        // This was a single OR-predicate with one Take(500) and no OrderBy. Two things were
+        // wrong with that, and they are the same thing twice. A database is free to return any
+        // 500 rows that satisfy an unordered query — the plan may change with the statistics,
+        // so the SAME lead against the SAME data could resolve differently on Tuesday, and this
+        // module's whole promise to a rep is that the answer is derived, repeatable and
+        // explainable. And because one cap covered every class at once, the broad class ate the
+        // narrow one: past roughly 1,500 learned name rows in a tenant, the single row carrying
+        // the buyer's exact sender address could be cut from the result, turning a 1.00
+        // auto-link into a 0.65 "we think it might be" that a human then has to decide.
+        //
+        // Each class now has its own ORDER BY "Id" and its own budget, so a tenant that has
+        // taught the platform thousands of aliases cannot crowd out its own authoritative
+        // identifiers, and the set of rows is a function of the data alone.
+        const int maxAuthoritativeIdentifiers = 200;
+        const int maxExactNameIdentifiers = 100;
+        const int maxScannedNameIdentifiers = 500;
+        const int maxPortalAccountIdentifiers = 50;
+        const int maxRfqPatternIdentifiers = 300;
 
-        var customers = await LoadCustomerNamesAsync(businessUnitId, evidence.CustomerCompanyName, identifiers, ct);
+        // Only active customers of this tenant can ever be linked.
+        IQueryable<CustomerIdentifier> LiveIdentifiers() => _db.Set<CustomerIdentifier>()
+            .AsNoTracking().IgnoreQueryFilters()
+            .Where(i => i.BusinessUnitId == businessUnitId && i.EffectiveTo == null)
+            // IgnoreQueryFilters is a query-level flag set on this query; the subquery inherits it.
+            .Where(i => _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false));
+
+        var identifiers = new List<CustomerIdentifierSnapshot>();
+        var loadedIdentifierIds = new HashSet<long>();
+
+        async Task LoadIdentifiersAsync(IQueryable<CustomerIdentifier> query, int take)
+        {
+            var rows = await query
+                .OrderBy(i => i.Id)
+                .Select(i => new CustomerIdentifierSnapshot(
+                    i.Id, i.CustomerId, i.IdentifierType, i.NormalizedValue, i.IsVerified, i.Confidence, i.Source))
+                .Take(take)
+                .ToListAsync(ct);
+            // The classes overlap by construction (an exact name key is also a verified name),
+            // so identity is the row id — a duplicated row would count as two pieces of
+            // evidence for one customer and quietly inflate a tier.
+            foreach (var row in rows)
+                if (loadedIdentifierIds.Add(row.Id)) identifiers.Add(row);
+        }
+
+        // The authoritative classes: a value that identifies ONE organisation outright.
+        if (addresses.Length + domains.Length + accounts.Length + taxRegistrations.Length > 0)
+            await LoadIdentifiersAsync(
+                LiveIdentifiers().Where(i =>
+                    (i.IdentifierType == CustomerIdentifierType.Email && addresses.Contains(i.NormalizedValue)) ||
+                    (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)) ||
+                    (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
+                    (i.IdentifierType == CustomerIdentifierType.TaxRegistration && taxRegistrations.Contains(i.NormalizedValue))),
+                maxAuthoritativeIdentifiers);
+
+        // The name the document states, matched exactly. Loaded ahead of the open-ended scan
+        // below and on its own budget: it is the one name row that is ABOUT this document, and
+        // it is the row the old single cap was most likely to throw away.
+        if (nameKey.Length > 0)
+            await LoadIdentifiersAsync(
+                LiveIdentifiers().Where(i =>
+                    (i.IdentifierType == CustomerIdentifierType.Alias || i.IdentifierType == CustomerIdentifierType.CustomerName)
+                    && i.NormalizedValue == nameKey),
+                maxExactNameIdentifiers);
+
+        // Every name a profile or a reviewer has taught, so the document's passages can be
+        // searched for them. The broad class, and therefore the one that is capped hardest
+        // relative to what it might return.
+        if (searchNames)
+            await LoadIdentifiersAsync(
+                LiveIdentifiers().Where(i =>
+                    (i.IdentifierType == CustomerIdentifierType.Alias || i.IdentifierType == CustomerIdentifierType.CustomerName)
+                    && i.IsVerified),
+                maxScannedNameIdentifiers);
+
+        if (portalAccountKey.Length > 0)
+            await LoadIdentifiersAsync(
+                LiveIdentifiers().Where(i =>
+                    i.IdentifierType == CustomerIdentifierType.PortalAccount && i.NormalizedValue == portalAccountKey),
+                maxPortalAccountIdentifiers);
+
+        // Patterns are matched in C# (the stored regex cannot run in SQL), so they are only
+        // worth loading when this lead carries an RFQ number to match against.
+        if (hasRfq)
+            await LoadIdentifiersAsync(
+                LiveIdentifiers().Where(i => i.IdentifierType == CustomerIdentifierType.RfqNumberPattern),
+                maxRfqPatternIdentifiers);
+
+        var customers = await LoadCustomerNamesAsync(businessUnitId, evidence, identifiers, ct);
         var contacts = await LoadContactsAsync(businessUnitId, addresses, evidence.BuyerPersonName, identifiers, ct);
         var priorSenders = await LoadPriorSenderResolutionsAsync(businessUnitId, evidence.LeadId, addresses, ct);
 
@@ -417,7 +619,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     }
 
     private async Task<List<CustomerNameSnapshot>> LoadCustomerNamesAsync(
-        long businessUnitId, string? rawName, List<CustomerIdentifierSnapshot> identifiers, CancellationToken ct)
+        long businessUnitId, LeadClientEvidence evidence, List<CustomerIdentifierSnapshot> identifiers, CancellationToken ct)
     {
         var matchedIds = identifiers.Select(i => i.CustomerId).Distinct().ToArray();
 
@@ -426,18 +628,23 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         // deliberately WIDER than the comparison it feeds: LooseKey/TightKey cannot run in
         // SQL without a stored normalised column, so SQL narrows on the RAW leading
         // characters and the exact/fuzzy comparison still happens on the normalised keys in
-        // C#. Customers already matched by an identifier are always included, so no
-        // auto-link tier can ever be degraded by this fallback.
+        // C#. Customers already matched by an identifier are always included.
+        //
+        // The buckets come from the PASSAGES, not from the company-name field. The field was
+        // the only source, and on the document this fallback exists for — a portal print with
+        // no company-name field at all — it is null, so the filter collapsed to
+        // already-matched-only and the passage tier, the one tier that reads a print like lead
+        // 680, was handed an empty customer list and could match nothing. The comment here
+        // used to claim no auto-link tier could be degraded by the fallback. One was, to zero.
         var query = _db.Customers.AsNoTracking().IgnoreQueryFilters()
             .Where(c => c.Buid == businessUnitId && c.IsActive != false);
 
         var total = await query.CountAsync(ct);
         if (total > _policy.MaximumNameScanRows)
         {
-            var prefix = new string((rawName ?? string.Empty)
-                .Where(char.IsLetterOrDigit).Take(2).Select(char.ToUpperInvariant).ToArray());
-            query = prefix.Length == 2
-                ? query.Where(c => matchedIds.Contains(c.Id) || c.Name.ToUpper().StartsWith(prefix))
+            var prefixes = NameScanPrefixes(evidence).ToArray();
+            query = prefixes.Length > 0
+                ? query.Where(c => matchedIds.Contains(c.Id) || prefixes.Contains(c.Name.ToUpper().Substring(0, 2)))
                 : query.Where(c => matchedIds.Contains(c.Id));
         }
 
@@ -446,6 +653,50 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .Select(c => new CustomerNameSnapshot(c.Id, c.Name))
             .Take(_policy.MaximumNameScanRows)
             .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// The leading two characters of every word a passage about the buyer states, which is the
+    /// widest SQL-expressible net that still narrows a very large customer list. "SEC Materials
+    /// West Plant-West Operating Area" yields SE, MA, WE, PL, OP, AR — and SE is what finds
+    /// "Saudi Electricity Company".
+    ///
+    /// Words shorter than three characters are skipped: they are articles and unit codes, and
+    /// two of them would pull back most of the table for nothing.
+    /// </summary>
+    internal static IReadOnlyList<string> NameScanPrefixes(LeadClientEvidence evidence)
+    {
+        const int prefixLength = 2;
+        const int maxPrefixes = 40;
+        var prefixes = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void AddPrefix(string word)
+        {
+            if (word.Length < 3 || prefixes.Count >= maxPrefixes) return;
+            var prefix = word[..prefixLength].ToUpperInvariant();
+            if (seen.Add(prefix)) prefixes.Add(prefix);
+        }
+
+        // What the old filter used, first, so this change can only ever WIDEN the net: a name
+        // whose first two characters are the first two of the company-name field still matches.
+        var fieldPrefix = new string((evidence.CustomerCompanyName ?? string.Empty)
+            .Where(char.IsLetterOrDigit).Take(prefixLength).Select(char.ToUpperInvariant).ToArray());
+        if (fieldPrefix.Length == prefixLength && seen.Add(fieldPrefix)) prefixes.Add(fieldPrefix);
+
+        foreach (var passage in evidence.Passages)
+        {
+            if (passage.Role == PassageRole.ItemText) continue;
+            var word = new System.Text.StringBuilder();
+            foreach (var c in passage.Text)
+            {
+                if (char.IsLetterOrDigit(c)) { word.Append(c); continue; }
+                if (word.Length > 0) { AddPrefix(word.ToString()); word.Clear(); }
+            }
+            if (word.Length > 0) AddPrefix(word.ToString());
+            if (prefixes.Count >= maxPrefixes) break;
+        }
+        return prefixes;
     }
 
     private async Task<List<CustomerContactSnapshot>> LoadContactsAsync(
@@ -457,15 +708,49 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .LastOrDefault(token => token.Length > 2);
 
-        return await _db.Contacts.AsNoTracking().IgnoreQueryFilters()
-            .Where(c => c.BusinessUnitId == businessUnitId && c.CustomerId != null && c.IsActive != false)
-            .Where(c => matchedIds.Contains(c.CustomerId!.Value)
-                        || (c.Email != null && addresses.Contains(c.Email.ToLower()))
-                        || (surname != null && c.LastName.ToUpper() == surname))
-            .Select(c => new CustomerContactSnapshot(
-                c.Id, c.CustomerId!.Value, c.Email, c.FirstName, c.LastName))
-            .Take(200)
-            .ToListAsync(ct);
+        var live = _db.Contacts.AsNoTracking().IgnoreQueryFilters()
+            .Where(c => c.BusinessUnitId == businessUnitId && c.CustomerId != null && c.IsActive != false);
+
+        var contacts = new List<CustomerContactSnapshot>();
+        var loadedContactIds = new HashSet<long>();
+
+        async Task LoadContactRowsAsync(IQueryable<Contact> query, int take)
+        {
+            var rows = await query
+                .OrderBy(c => c.Id)
+                .Select(c => new CustomerContactSnapshot(
+                    c.Id, c.CustomerId!.Value, c.Email, c.FirstName, c.LastName))
+                .Take(take)
+                .ToListAsync(ct);
+            foreach (var row in rows)
+                if (loadedContactIds.Add(row.ContactId)) contacts.Add(row);
+        }
+
+        // The contacts we are surest about: of a customer an identifier already matched, or at
+        // the very address this lead came from. Skipped entirely when the lead has neither,
+        // which is the normal shape of a folder-ingested print — an always-false predicate is
+        // still a round trip.
+        if (matchedIds.Length > 0 || addresses.Length > 0)
+            await LoadContactRowsAsync(
+                live.Where(c => matchedIds.Contains(c.CustomerId!.Value)
+                                || (c.Email != null && addresses.Contains(c.Email.ToLower()))),
+                200);
+
+        // THE SURNAME PREFILTER MISSED EVERY HYPHENATED SAUDI SURNAME, which is most of them.
+        // The buyer is printed "3C2-AMER AL-DOSSARY", the last token of the normalised key is
+        // DOSSARY, and the stored contact is "Al-Dossary": an equality test on LastName never
+        // matched, so the contact tier written for exactly this SEC format could not fire at
+        // all. Containment matches the way the two spellings actually differ — one side carries
+        // the family prefix and the other does not.
+        //
+        // It is a SEPARATE query, ordered and capped on its own, for the same reason the
+        // identifier classes are: containment is far broader than equality, and a common
+        // surname fragment sharing one budget with the exact-address contacts would evict the
+        // contact we are most sure about.
+        if (surname != null)
+            await LoadContactRowsAsync(live.Where(c => c.LastName.ToUpper().Contains(surname)), 50);
+
+        return contacts;
     }
 
     private async Task<List<PriorSenderResolution>> LoadPriorSenderResolutionsAsync(
@@ -477,6 +762,9 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .Where(l => l.BusinessUnitId == businessUnitId && l.Id != leadId
                         && l.CustomerId != null && l.Clientemail != null
                         && addresses.Contains(l.Clientemail.ToLower()))
+            // Ordered for the same reason as every other corpus read: an unordered LIMIT lets
+            // the database choose which precedents this lead gets to see.
+            .OrderBy(l => l.Id)
             .Select(l => new { Email = l.Clientemail!, CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus })
             .Take(200)
             .ToListAsync(ct);

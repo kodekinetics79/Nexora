@@ -13,6 +13,7 @@ public sealed class CustomerIdentityResolverTests
 {
     private const long Sec = 5001;          // Saudi Electricity Company — the buyer
     private const long OtherCustomer = 5002;
+    private const long ThirdCustomer = 5003;
     private static readonly CustomerResolutionPolicy Policy = new();
 
     // ── S0 guards ────────────────────────────────────────────────────────────
@@ -702,6 +703,322 @@ public sealed class CustomerIdentityResolverTests
         }, corpus, Policy);
 
         Assert.Null(outcome.CustomerId);
+    }
+
+    // ── A SHARED SUPPLIER NETWORK MUST NOT LINK ───────────────────────────────
+
+    [Fact]
+    public void A_vendor_code_on_a_shared_sourcing_network_is_offered_and_never_linked()
+    {
+        // Our Ariba Network ID is ONE number issued by the NETWORK that identifies US to every
+        // buyer on it. Learned against the first Ariba buyer, the "portal|our-vendor-code" pair
+        // would auto-link every later Ariba RFQ — from any buyer at all — to that one customer
+        // at 0.92, which links without asking anybody; teach a second buyer and every Ariba
+        // document becomes permanently AMBIGUOUS instead. The pair is still a true fact about
+        // the document, so it is offered at the weakest confidence in the engine.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")], identifiers:
+        [
+            new(1, Sec, CustomerIdentifierType.PortalAccount, "SAP ARIBA|AN01234567", true, 0.92m,
+                CustomerIdentifierSources.LeadReviewLearned),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            CustomerPortalName = "SAP Ariba", SupplierAccountRefOnDocument = "AN01234567",
+        }, corpus, Policy);
+
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(Policy.RfqPatternSuggestionConfidence, outcome.Confidence);
+        Assert.Equal(Sec, Assert.Single(outcome.Candidates).CustomerId);
+        Assert.Contains("AN01234567", outcome.Explanation);
+        Assert.Contains("OUR supplier number", outcome.Explanation);
+        Assert.Contains("shared by several of your customers", outcome.Explanation);
+    }
+
+    [Fact]
+    public void The_buyers_own_portal_still_links_because_that_buyer_issued_the_code()
+    {
+        // The test for membership is "who issued the number", not "is it a portal". SEC's own
+        // MATERIALS E-BIDDING SYSTEM is buyer-operated: one buyer runs it and issues the codes
+        // in it, so vendor code 2004414 means nothing anywhere else and therefore names SEC.
+        // This is the case the tier was built for and it must keep linking at 0.92.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")], identifiers:
+        [
+            new(1, Sec, CustomerIdentifierType.PortalAccount, "MATERIALS E BIDDING SYSTEM|2004414", true, 0.92m,
+                CustomerIdentifierSources.LeadReviewLearned),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            CustomerPortalName = "MATERIALS E-BIDDING SYSTEM", SupplierAccountRefOnDocument = "2004414",
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+        Assert.Equal(Policy.LearnedPortalAccountConfidence, outcome.Confidence);
+    }
+
+    // ── THE LONGEST NAME IN A PASSAGE IS THE ONE THE DOCUMENT MEANS ───────────
+
+    [Fact]
+    public void The_longest_name_in_one_passage_wins_because_SATORP_is_not_Aramco()
+    {
+        // "Saudi Aramco Total Refining and Petrochemical Company, Jubail" contains "SAUDI
+        // ARAMCO" as whole words, so with both companies on the books the address matched two
+        // customers and the lead went AMBIGUOUS. SATORP is a separate joint venture with its own
+        // vendor registration, payment terms and portal — an invoice sent to Aramco against a
+        // SATORP order is not paid. Same shape for SAMREF, YASREF, Luberef and Sadara.
+        var corpus = Corpus(customers:
+        [
+            new(OtherCustomer, "Saudi Aramco"),
+            new(ThirdCustomer, "Saudi Aramco Total Refining and Petrochemical Company"),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "Saudi Aramco Total Refining and Petrochemical Company, Jubail", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(ThirdCustomer, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+        Assert.DoesNotContain(outcome.Candidates, candidate => candidate.CustomerId == OtherCustomer);
+    }
+
+    [Fact]
+    public void Royal_Commission_Jubail_beats_a_bare_Royal_Commission()
+    {
+        // The industrial-city authority and the parent body are different buyers with different
+        // budgets, and the longer of the two names is the one the page actually wrote.
+        var corpus = Corpus(customers:
+        [
+            new(OtherCustomer, "Royal Commission"),
+            new(ThirdCustomer, "Royal Commission Jubail"),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "Royal Commission Jubail, Industrial Area 2", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(ThirdCustomer, outcome.CustomerId);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Fact]
+    public void Two_names_in_two_different_passages_are_two_statements_and_both_are_heard()
+    {
+        // The longest-name rule is about ONE sentence naming one company twice over. A name in
+        // the address and a different name in the item text are two separate claims, and
+        // silently dropping one because the other is longer would hide evidence from the rep.
+        var corpus = Corpus(customers:
+        [
+            new(Sec, "Saudi Electricity Company"),
+            new(ThirdCustomer, "Saudi Electricity Company Jizan"),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages =
+            [
+                new DocumentPassage("delivery address", "Saudi Electricity Company Jizan, gate 2", true),
+                new DocumentPassage("item text", "Barcode to Saudi Electricity Company standard", false),
+            ],
+        }, corpus, Policy);
+
+        // The address decides (one customer survives suppression there); the item-text claim
+        // about the parent company is still on the record as a candidate.
+        Assert.Equal(ThirdCustomer, outcome.CustomerId);
+    }
+
+    // ── A DELIVERY ADDRESS NAMES THE CONSIGNEE ────────────────────────────────
+
+    [Fact]
+    public void Lead_680_an_SEC_print_carrying_only_a_delivery_address_still_links()
+    {
+        // PRODUCTION LEAD 680. An SEC portal print with no sender domain, no company-name field,
+        // no portal name and no supplier block: the delivery address is the ONLY place the buyer
+        // is named anywhere on the page. Nothing on that page competes with it, so it links.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 680,
+            SenderEmail = "extraction@pipeline.local",     // Nexora's own ingestion label; discarded
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(0.88m, outcome.Confidence);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+    }
+
+    [Fact]
+    public void Lead_682_a_Marafiq_RFQ_links_on_the_name_the_document_states()
+    {
+        // PRODUCTION LEAD 682. The document names its own buyer three times over and carries no
+        // sender at all. Nothing competes: the company-name field IS this customer's name, so
+        // the delivery address is the buyer writing their own address.
+        var corpus = Corpus(customers: [new(Sec, "Marafiq"), new(OtherCustomer, "Saudi Aramco")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 682,
+            CustomerCompanyName = "MARAFIQ",
+            SupplierAccountRefOnDocument = "1495",
+            RfqNumber = "HFE-26-202",
+            Passages =
+            [
+                new DocumentPassage("company named on the document", "MARAFIQ", true),
+                new DocumentPassage("the sentence that names the buyer",
+                    "MARAFIQ invites bidders in accordance with our Request for Quotation(RFQ).", true),
+                new DocumentPassage("delivery address",
+                    "MARAFIQ Yanbu Warehouse, Power & Desalination Plant, Yanbu Al-Sinaiyah, KSA", true),
+            ],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Fact]
+    public void An_EPC_contractors_delivery_address_only_suggests_the_site_owner()
+    {
+        // Hyundai Engineering & Construction buys on behalf of Saudi Aramco: its own name at the
+        // top of the page, "Deliver to: Saudi Aramco Ras Tanura Refinery" in the address, its own
+        // domain on the mail. Reading the consignee as the buyer linked the lead to Aramco, who
+        // is buying nothing on this job and whose payment terms the rep would then have quoted.
+        // Hyundai is not a customer here, so the honest answer is a suggestion and a sentence
+        // saying exactly what disagrees with what.
+        var corpus = Corpus(customers: [new(OtherCustomer, "Saudi Aramco")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "procurement@hdec.com",
+            CustomerCompanyName = "Hyundai Engineering & Construction",
+            Passages = [new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(Policy.ShipToDemotedConfidence, outcome.Confidence);
+        Assert.Equal(OtherCustomer, Assert.Single(outcome.Candidates).CustomerId);
+        Assert.Contains("delivery address", outcome.Explanation);
+        Assert.Contains("hdec.com", outcome.Explanation);
+        Assert.Contains("which is not Saudi Aramco", outcome.Explanation);
+    }
+
+    [Fact]
+    public void The_same_EPC_enquiry_links_to_the_contractor_once_the_contractor_is_a_customer()
+    {
+        // The identical document, with Hyundai on the books and its domain registered: the lead
+        // belongs to the company that is actually buying, and Aramco is nowhere near it.
+        var corpus = Corpus(
+            customers: [new(OtherCustomer, "Saudi Aramco"), new(Sec, "Hyundai Engineering & Construction")],
+            identifiers:
+            [
+                new(1, Sec, CustomerIdentifierType.Domain, "hdec.com", true, 0.95m, CustomerIdentifierSources.MasterData),
+            ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "procurement@hdec.com",
+            CustomerCompanyName = "Hyundai Engineering & Construction",
+            Passages = [new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderDomain, outcome.ReasonCode);
+    }
+
+    [Fact]
+    public void A_header_names_the_buyer_even_when_the_address_names_the_site_owner()
+    {
+        // Same EPC enquiry, same contractor as a customer, but nobody has registered hdec.com.
+        // The header is a statement about WHO IS BUYING and links on its own; the address is a
+        // statement about where goods go and is contradicted by the header, so it steps aside.
+        var corpus = Corpus(customers:
+        [
+            new(OtherCustomer, "Saudi Aramco"),
+            new(Sec, "Hyundai Engineering & Construction"),
+        ]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "procurement@hdec.com",
+            CustomerCompanyName = "Hyundai Engineering & Construction",
+            Passages =
+            [
+                new DocumentPassage("company named on the document", "Hyundai Engineering & Construction", true)
+                    { Role = PassageRole.BuyerHeader },
+                new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true),
+            ],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Fact]
+    public void A_portal_relay_sender_does_not_compete_with_the_delivery_address()
+    {
+        // Every RFQ that arrives through Ariba carries an Ariba sending host, whichever company
+        // issued it. The postman is not a rival buyer, so an ordinary SEC enquiry relayed through
+        // the network must still link on its delivery address exactly like lead 680.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "noreply@s4.ansmtp.ariba.com",
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Fact]
+    public void A_name_in_item_text_is_still_only_a_suggestion_whatever_else_the_page_says()
+    {
+        // Roles are three states, not two: demoting the consignee must not promote item text.
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")]);
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("item text", "Barcode to Saudi Electricity Company standard", false)],
+        }, corpus, Policy);
+
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Equal(Policy.NameInItemTextConfidence, outcome.Confidence);
+    }
+
+    // ── AN AUTO-LINK MUST CLEAR THE FLOOR ─────────────────────────────────────
+
+    [Fact]
+    public void An_auto_link_below_the_floor_is_offered_instead_of_applied()
+    {
+        // "Nexora decides at 0.85 and above" used to be an arithmetic coincidence between the
+        // constants each tier happened to pick. Lower one of them and the engine would have
+        // started auto-linking at 0.80 with nothing anywhere to stop it. The shipped policy is
+        // unchanged, so this rejects nothing today — which is exactly why it is written down.
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+        };
+        var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")]);
+
+        var lowered = CustomerIdentityResolver.Resolve(
+            evidence, corpus, new CustomerResolutionPolicy { NameInAddressConfidence = 0.80m });
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, lowered.Status);
+        Assert.Null(lowered.CustomerId);
+        Assert.Equal(0.80m, lowered.Confidence);
+        Assert.Equal(Sec, Assert.Single(lowered.Candidates).CustomerId);
+
+        var shipped = CustomerIdentityResolver.Resolve(evidence, corpus, Policy);
+        Assert.Equal(Sec, shipped.CustomerId);
+        Assert.True(shipped.Confidence >= Policy.MinimumAutoLinkConfidence);
     }
 
     private static CustomerIdentifierSnapshot Alias(long id, long customerId, string normalizedValue) =>

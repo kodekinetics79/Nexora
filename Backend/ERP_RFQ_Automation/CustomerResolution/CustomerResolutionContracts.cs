@@ -83,6 +83,22 @@ public static class SyntheticIdentityGuard
     public static bool IsSyntheticDomain(string? domain)
         => !string.IsNullOrWhiteSpace(domain) && SyntheticDomains.Contains(domain.Trim());
 
+    /// <summary>
+    /// Procurement portals and e-sourcing networks that DELIVER a buyer's request from their
+    /// own mail servers. <c>noreply@ariba.com</c> and <c>sourcing@etimad.sa</c> are the
+    /// postman, not the buyer: every RFQ that arrives through SAP Ariba carries that same
+    /// sender domain whichever company issued it. Learning one as a Domain identifier would
+    /// auto-link the NEXT portal-delivered RFQ — from a completely different buyer — to
+    /// whichever customer was taught first, and it would do it at S2's 0.95 domain
+    /// confidence, which links without asking anyone.
+    /// </summary>
+    private static readonly HashSet<string> PortalRelayDomains = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ariba.com", "ansmtp.ariba.com", "eusmtp.ariba.com", "sap.com", "sapariba.com",
+        "etimad.sa", "tenders.gov.sa", "jaggaer.com", "coupahost.com", "tejari.com",
+        "bidnet.com", "bidnetdirect.com", "demandstar.com", "bonfirehub.com"
+    };
+
     public static bool IsFreeMailDomain(string? domain)
     {
         if (string.IsNullOrWhiteSpace(domain)) return false;
@@ -90,9 +106,94 @@ public static class SyntheticIdentityGuard
         return first is not null && FreeMailFirstLabels.Contains(first);
     }
 
+    /// <summary>
+    /// True when this domain belongs to a procurement portal that relays mail on behalf of
+    /// many buyers. Exactly like a free-mail domain, the ADDRESS may still be real evidence
+    /// and may still match exactly (A1) — a human who confirms that one portal mailbox
+    /// belongs to one buyer is making a statement about one mailbox, and that costs nothing.
+    /// It must never be generalised to the DOMAIN (B1), because the domain is shared by every
+    /// buyer on the network.
+    ///
+    /// Subdomains count: a portal mints new sending hosts without telling anybody
+    /// ("s4.ansmtp.ariba.com"), so anything under a listed domain is a relay too. The
+    /// boundary is a real label separator, so "notariba.com" is not ariba.com.
+    /// </summary>
+    public static bool IsPortalRelayDomain(string? domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain)) return false;
+        var value = domain.Trim().TrimEnd('.').ToLowerInvariant();
+        // Tolerate being handed a whole address: callers hold both shapes and a silent false
+        // here would be a hole in a guard.
+        var at = value.LastIndexOf('@');
+        if (at >= 0) value = value[(at + 1)..];
+        if (value.Length == 0) return false;
+        if (PortalRelayDomains.Contains(value)) return true;
+        foreach (var relay in PortalRelayDomains)
+        {
+            if (value.Length > relay.Length
+                && value[value.Length - relay.Length - 1] == '.'
+                && value.EndsWith(relay, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>True when the address itself must be discarded outright.</summary>
     public static bool IsSyntheticAddress(string? email)
         => IsSyntheticDomain(RoutingValueNormalizer.DomainFromEmail(email));
+}
+
+/// <summary>
+/// Sourcing networks where OUR supplier number is issued by the NETWORK, not by the buyer.
+///
+/// The learned-portal-account tier (S3) keys on the pair "portal|our-vendor-code" and links
+/// at 0.92. At Saudi Electricity Company that pair is honest: vendor code 2004414 was issued
+/// by SEC, means nothing anywhere else, and therefore names SEC. On SAP Ariba our Ariba
+/// Network ID is ONE number that identifies US to every buyer on the network, and an Etimad
+/// supplier number is one number for the whole Saudi government. Learn that pair against the
+/// first Ariba buyer and every later Ariba RFQ — from any buyer at all — auto-links to that
+/// one customer. Teach a second buyer and it is worse, not better: the pair then matches two
+/// customers and every Ariba document is permanently AMBIGUOUS, a state no amount of further
+/// teaching can undo.
+///
+/// The test for membership is "who issued the number", not "is it a portal". SEC's own
+/// "MATERIALS E-BIDDING SYSTEM" is buyer-operated — one buyer runs it and issues the codes in
+/// it — so it is exactly the case the tier was built for and MUST stay learnable.
+/// </summary>
+public static class SharedSupplierNetworks
+{
+    /// <summary>
+    /// The portal names as a person writes them. Public so a test can state the whole list,
+    /// and so the reason any one portal sits on it can be argued about in review.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Names =
+    [
+        "ARIBA", "SAP ARIBA", "SAP ARIBA NETWORK", "SAP BUSINESS NETWORK", "ARIBA NETWORK",
+        "ETIMAD", "JAGGAER", "COUPA", "TENDERBOARD", "TEJARI", "ORACLE SUPPLIER NETWORK",
+        "PROCUREPORT"
+    ];
+
+    /// <summary>
+    /// Compared on <see cref="CustomerNameNormalizer.LooseKey"/> — the same key the portal
+    /// name is matched under everywhere else — so "SAP Ariba", "sap ariba network" and
+    /// "ARIBA" all land on the same entry and no amount of punctuation, casing or a stray
+    /// legal-form token can smuggle one past.
+    /// </summary>
+    private static readonly HashSet<string> Keys =
+        Names.Select(CustomerNameNormalizer.LooseKey)
+             .Where(key => key.Length > 0)
+             .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// True when a supplier number on this portal was issued by the network rather than by
+    /// the buyer, so the "portal|our-vendor-code" pair identifies NOBODY and must neither be
+    /// learned nor matched.
+    /// </summary>
+    public static bool IsShared(string? portalName)
+    {
+        var key = CustomerNameNormalizer.LooseKey(portalName);
+        return key.Length > 0 && Keys.Contains(key);
+    }
 }
 
 /// <summary>
@@ -120,13 +221,30 @@ public static class SelfIdentityGuard
         var tight = CustomerNameNormalizer.TightKey(candidateKey);
         if (tight.Length == 0) return false;
 
+        // The floor has to be SYMMETRIC, because the containment test is. It was applied only
+        // to the tenant side, and then containment ran in both directions, so any short
+        // candidate that happened to be spelled by a run of letters inside our own name was
+        // deleted as "us". With the tenant "ALI ZAID AL-QURAISHI & PARTNERS"
+        // (ALIZAIDALQURAISHI) that is AID, ZAI, RAI, SHI and a dozen more: a customer called
+        // "Arabian Industrial Development" whose initials are AID could never be found in a
+        // document, and because this is a rejection rule it happened permanently and wrote no
+        // log — the customer simply never appeared again and nobody could say why.
+        // Three letters are not distinctive enough to REJECT on, exactly as they are not
+        // distinctive enough to MATCH on, so below the floor only the two comparisons that
+        // need no distinctiveness are allowed to speak: exact key equality (a candidate that
+        // IS our name, however short) and the high-similarity check.
+        var candidateIsDistinctive = tight.Length >= MinimumDistinctiveLength;
+
         foreach (var self in selfNameKeys)
         {
             if (string.Equals(self, candidateKey, StringComparison.Ordinal)) return true;
             var selfTight = CustomerNameNormalizer.TightKey(self);
             if (selfTight.Length < MinimumDistinctiveLength) continue;
-            if (tight.Contains(selfTight, StringComparison.Ordinal)) return true;
-            if (selfTight.Contains(tight, StringComparison.Ordinal)) return true;
+            if (candidateIsDistinctive)
+            {
+                if (tight.Contains(selfTight, StringComparison.Ordinal)) return true;
+                if (selfTight.Contains(tight, StringComparison.Ordinal)) return true;
+            }
             if (CustomerNameNormalizer.JaroWinkler(tight, selfTight) >= 0.90d) return true;
         }
         return false;
@@ -191,10 +309,64 @@ public sealed record LeadClientEvidence
     public IReadOnlyCollection<string> TenantSelfDomains { get; init; } = [];
 }
 
+/// <summary>
+/// What a passage is DOING on the page.
+///
+/// One boolean was carrying two different statements and they are not the same statement.
+/// "This company is buying" and "the goods go to this address" agree on most Saudi bids,
+/// because a buyer ships to its own plant — and they part company on exactly the deals worth
+/// the most money. An EPC contractor buying on behalf of Saudi Aramco prints its own name in
+/// the header and "Deliver to: Saudi Aramco, Ras Tanura" in the address, and it IS NOT
+/// Aramco. Reading the consignee as the buyer links that lead to Aramco at full
+/// name-in-address confidence, and the real customer — named at the top of the page — never
+/// appears at all.
+/// </summary>
+public enum PassageRole
+{
+    /// <summary>
+    /// A statement about WHO IS BUYING: the company-name field, the letterhead, the sentence
+    /// the extractor captured because it names the buying organisation ("MARAFIQ invites
+    /// bidders in accordance with our Request for Quotation"). The strongest name evidence a
+    /// document carries about identity.
+    /// </summary>
+    BuyerHeader,
+
+    /// <summary>
+    /// WHERE THE GOODS GO: a delivery address, a storage location, a site or plant field.
+    /// It names the CONSIGNEE. Usually that is the buyer writing its own address — on an SEC
+    /// portal print it is the ONLY place the buyer's name appears anywhere (lead 680 carried
+    /// nothing but "Saudi Electricity Company-DAMMAM") — but a consignee is a fact about
+    /// delivery, not about who is paying.
+    /// </summary>
+    ShipTo,
+
+    /// <summary>
+    /// Incidental text: an item description, a material long text. A company name here may
+    /// belong to anyone ("AFFIX SEC SPECIFIED BARCODE" is a specification, not a buyer).
+    /// Suggestion-grade at best.
+    /// </summary>
+    ItemText
+}
+
 /// <param name="Where">Where the text sits, in the words a person would use: "delivery address", "storage location", "item text".</param>
 /// <param name="Text">The text as the document states it.</param>
 /// <param name="NamesTheBuyer">True where the passage is ABOUT the buyer (an address, a site); false for item text, where a name may be incidental.</param>
-public sealed record DocumentPassage(string Where, string Text, bool NamesTheBuyer);
+public sealed record DocumentPassage(string Where, string Text, bool NamesTheBuyer)
+{
+    /// <summary>
+    /// What this passage is doing on the page. Derived from <see cref="NamesTheBuyer"/> so
+    /// every existing caller compiles and behaves exactly as before: a passage that "names
+    /// the buyer" has always in practice meant a delivery address or a site, which is
+    /// <see cref="PassageRole.ShipTo"/>. A caller that KNOWS it is reading a header says so
+    /// with an object initializer — <c>new DocumentPassage(..., true) { Role =
+    /// PassageRole.BuyerHeader }</c>.
+    ///
+    /// Record copy semantics: <c>passage with { NamesTheBuyer = false }</c> copies the Role
+    /// that is already there rather than re-deriving it, so set Role explicitly whenever you
+    /// flip the flag.
+    /// </summary>
+    public PassageRole Role { get; init; } = NamesTheBuyer ? PassageRole.ShipTo : PassageRole.ItemText;
+}
 
 public sealed record CustomerIdentifierSnapshot(
     long Id,
@@ -253,10 +425,29 @@ public sealed record CustomerResolutionPolicy
     /// <summary>Jaro-Winkler floor on TightKey for a fuzzy SUGGESTION. Never auto-links.</summary>
     public double FuzzyNameThreshold { get; init; } = 0.90d;
 
+    /// <summary>
+    /// The line between "Nexora decided" and "a rep decides". Every confidence below is
+    /// chosen against it: 0.88 for a customer's full name in the delivery address links a
+    /// lead on its own, 0.75 for an unverified name match only suggests one. It protects the
+    /// governing rule of this module — a WRONG customer on a lead is worse than an unresolved
+    /// one — by making the auto-link threshold one number a person can read, instead of a
+    /// property of whichever tier happened to fire.
+    /// </summary>
+    public decimal MinimumAutoLinkConfidence { get; init; } = 0.85m;
+
     public decimal FuzzyMaximumConfidence { get; init; } = 0.85m;
     public decimal ExactNameSuggestionConfidence { get; init; } = 0.75m;
     /// <summary>A known customer's full name written in the document's delivery address or site: links.</summary>
     public decimal NameInAddressConfidence { get; init; } = 0.88m;
+    /// <summary>
+    /// What a name found ONLY in a ship-to passage is worth once the page names a DIFFERENT
+    /// company as the buyer. It protects the contractor case: an EPC contractor's RFQ carries
+    /// its own name in the header and "deliver to Saudi Aramco" in the address, and without a
+    /// demotion the address wins at 0.88 and the lead is linked to the site owner, who is not
+    /// buying anything. Deliberately below <see cref="MinimumAutoLinkConfidence"/>, so the
+    /// consignee becomes a suggestion a rep can accept rather than a decision made for them.
+    /// </summary>
+    public decimal ShipToDemotedConfidence { get; init; } = 0.70m;
     /// <summary>The same name, or a taught alias, inside an item's text: a suggestion, the name may be incidental.</summary>
     public decimal NameInItemTextConfidence { get; init; } = 0.70m;
     /// <summary>
@@ -296,7 +487,19 @@ public sealed record CustomerResolutionPolicy
 /// </summary>
 public static partial class RfqNumberPattern
 {
-    private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(50);
+    /// <summary>
+    /// Every pattern matched here was produced by <see cref="Derive"/>: anchored at both ends,
+    /// literal letters, counted digit runs, a single negated class — no alternation, no
+    /// backreference, no lookaround, nothing that can backtrack. The non-backtracking engine
+    /// runs them in time linear in the input, which is what lets the match timeout go.
+    ///
+    /// The timeout was not merely unnecessary, it was a correctness bug: a
+    /// RegexMatchTimeoutException was caught and reported as "does not match", so the same RFQ
+    /// number could match on an idle machine and fail to match on a loaded one. This module's
+    /// whole promise is that the same evidence gives the same answer forever; an answer that
+    /// depends on CPU load breaks that silently, and nobody can reproduce it afterwards.
+    /// </summary>
+    private const RegexOptions MatchOptions = RegexOptions.CultureInvariant | RegexOptions.NonBacktracking;
 
     public static string? Derive(string? rfqNumber)
     {
@@ -344,9 +547,14 @@ public static partial class RfqNumberPattern
         if (string.IsNullOrWhiteSpace(pattern) || string.IsNullOrWhiteSpace(rfqNumber)) return false;
         try
         {
-            return Regex.IsMatch(rfqNumber.Trim(), pattern, RegexOptions.CultureInvariant, MatchTimeout);
+            return Regex.IsMatch(rfqNumber.Trim(), pattern, MatchOptions);
         }
-        catch (RegexMatchTimeoutException) { return false; }
+        // A stored pattern predating Derive's current shape, or one edited by hand in the
+        // database, can be malformed (ArgumentException) or can use a construct the
+        // non-backtracking engine refuses, such as a lookaround (NotSupportedException).
+        // Neither is evidence about a customer, so both mean "no match" — and, unlike the
+        // timeout this replaced, they mean it for the same stored value every single time.
         catch (ArgumentException) { return false; }
+        catch (NotSupportedException) { return false; }
     }
 }
