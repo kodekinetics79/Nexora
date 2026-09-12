@@ -31,10 +31,34 @@ public static class ManufacturingPartText
         IReadOnlyList<string> Manufacturers,
         IReadOnlyList<string> PartNumbers,
         IReadOnlyList<string> SupersededNumbers,
-        string? CustomerMaterialCode)
+        string? CustomerMaterialCode,
+        IReadOnlyList<ApprovedVendor> Vendors)
     {
         public bool IsEmpty => Manufacturers.Count == 0 && PartNumbers.Count == 0 && SupersededNumbers.Count == 0 && CustomerMaterialCode is null;
+
+        /// <summary>
+        /// The one number every approved vendor states for the part, when they all agree — the
+        /// buyer is naming the same maker part through two suppliers, and that IS the part number.
+        /// Null when the vendors name different numbers, or none.
+        /// </summary>
+        public string? AgreedPartNumber
+        {
+            get
+            {
+                var numbers = Vendors.Select(v => v.PartNumber).Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n!).ToList();
+                if (numbers.Count == 0 || numbers.Count != Vendors.Count) return null;
+                return numbers.Select(Fold).Distinct().Count() == 1 ? numbers.OrderByDescending(n => n.Length).First() : null;
+            }
+        }
     }
+
+    /// <summary>One approved vendor record and the keyed values that followed it.</summary>
+    /// <param name="Maker">The manufacturer named in the record (status flags removed).</param>
+    /// <param name="Vendor">The selling vendor named in the record, when different from the maker.</param>
+    /// <param name="Country">The two-letter country the record closes with.</param>
+    public sealed record ApprovedVendor(
+        string Maker, string? Vendor, string? Country, string? PartNumber, string? ModelNumber,
+        IReadOnlyList<string> SupersededNumbers, string? Remarks, string? CustomerMaterialCode);
 
     // Names are bounded: a record that omits its trailing country code must not let the lazy
     // group run on into the next record and hand a hundred-character "maker" to the line.
@@ -47,7 +71,13 @@ public static class ManufacturingPartText
     /// (PART_NUMBER, DRAWING_NUMBER, MAT_TYPE, …, each with an "ED_" twin whose value has its
     /// punctuation stripped), so the token SHAPE is the delimiter, not a list of names.
     /// </summary>
-    private const string KeyToken = @"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+";
+    private static readonly Regex VendorRecordWithCountry = new(
+        @"(?<!\d)\d{10} - \d{10} - (?<vendor>[^\r\n]{1,80}?) - [A-Z]{2} \d{18} - \d{8} - (?<maker>[^\r\n]{1,80}?) - (?<country>[A-Z]{2})(?=\s|\z)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    // A key is UPPER_SNAKE with at least one underscore — plus REMARKS, the one single-word key
+    // these records use ("REMARKS - WILL SHIP AS PARTS 149986-01").
+    private const string KeyToken = @"(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|REMARKS)";
 
     private static readonly Regex KeyedValue = new(
         @"\b(?<key>" + KeyToken + @") - (?<value>.*?)(?=(?:\s\b" + KeyToken + @" - )|(?:\s\d{10} - \d{10} - )|\z)",
@@ -75,7 +105,7 @@ public static class ManufacturingPartText
     public static Reading Read(string? text)
     {
         if (!Recognises(text))
-            return new Reading([], [], [], null);
+            return new Reading([], [], [], null, []);
 
         var makers = new List<string>();
         foreach (Match record in VendorRecord.Matches(text!))
@@ -108,7 +138,7 @@ public static class ManufacturingPartText
                 customerCode ??= value;
         }
 
-        return new Reading(makers, parts, superseded, customerCode);
+        return new Reading(makers, parts, superseded, customerCode, ReadVendors(text!));
 
         static void Add(List<string> list, string value, bool stripped)
         {
@@ -119,6 +149,65 @@ public static class ManufacturingPartText
             else if (!stripped && list[twin].Length < value.Length)
                 list[twin] = value; // the punctuated original replaces its stripped twin
         }
+    }
+
+    /// <summary>
+    /// The records one by one: each vendor record owns the keyed values printed after it and
+    /// before the next record, so a part number is attributed to the vendor that states it.
+    /// </summary>
+    private static IReadOnlyList<ApprovedVendor> ReadVendors(string text)
+    {
+        var records = VendorRecordWithCountry.Matches(text).Cast<Match>().ToList();
+        var vendors = new List<ApprovedVendor>();
+        for (var i = 0; i < records.Count; i++)
+        {
+            var start = records[i].Index + records[i].Length;
+            var end = i + 1 < records.Count ? records[i + 1].Index : text.Length;
+            var block = text[start..end];
+
+            string? part = null, model = null, remarks = null, customerCode = null;
+            var superseded = new List<string>();
+            foreach (Match keyed in KeyedValue.Matches(block))
+            {
+                var key = keyed.Groups["key"].Value;
+                var value = keyed.Groups["value"].Value.Trim();
+                if (value.Length == 0) continue;
+                var stripped = key.StartsWith("ED_", StringComparison.Ordinal);
+                var plain = stripped ? key[3..] : key;
+                // "_C1", "_C2" are continuation lines of the same value ("REMARKS - WILL SHIP AS
+                // PARTS 149986-01", "REMARKS_C1 - AND 149992-02"); the stripped ED_ twins of a
+                // value already read in the buyer's own punctuation are ignored.
+                var continuation = Regex.Match(plain, @"_C(\d)$");
+                var field = continuation.Success ? plain[..continuation.Index] : plain;
+                if (stripped && continuation.Success) continue;
+                switch (field)
+                {
+                    case "PART_NUMBER" or "CATALOG_NUMBER": part = continuation.Success ? Append(part, value) : Prefer(part, value, stripped); break;
+                    case "MODEL_NUMBER": model = continuation.Success ? Append(model, value) : Prefer(model, value, stripped); break;
+                    case "SUPERSEDED_NUMBER":
+                        if (continuation.Success && superseded.Count > 0) { superseded[^1] = Append(superseded[^1], value)!; break; }
+                        var twin = superseded.FindIndex(s => Fold(s) == Fold(value));
+                        if (twin < 0) superseded.Add(value);
+                        else if (!stripped && superseded[twin].Length < value.Length) superseded[twin] = value;
+                        break;
+                    case "REMARKS": remarks = continuation.Success ? Append(remarks, value) : Prefer(remarks, value, stripped); break;
+                    case "CUSTOMER_MATERIAL_CODE": customerCode ??= value; break;
+                }
+            }
+
+            var maker = Clean(records[i].Groups["maker"].Value);
+            var vendor = Clean(records[i].Groups["vendor"].Value);
+            vendors.Add(new ApprovedVendor(
+                maker, string.Equals(vendor, maker, StringComparison.OrdinalIgnoreCase) ? null : vendor,
+                records[i].Groups["country"].Value, part, model, superseded, remarks, customerCode));
+        }
+        return vendors;
+
+        static string? Prefer(string? current, string value, bool stripped)
+            => current is null ? value : (!stripped && current.Length < value.Length ? value : current);
+
+        static string? Append(string? current, string value)
+            => current is null ? value : $"{current} {value}";
     }
 
     private static string Clean(string name) => StatusFlag.Replace(name.Trim(), string.Empty).Trim();

@@ -516,6 +516,20 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         target.Evidence.Add(Evidence(row, RfqSpreadsheetFields.MaterialPoText, value));
     }
 
+    /// <summary>"BENTLY-NEVADA LLC (US): P/N 3500/33-02-02, model 3500/33, replaces 3500/33-02-01, WILL SHIP AS PARTS 149986-01".</summary>
+    private static string DescribeVendor(ManufacturingPartText.ApprovedVendor vendor)
+    {
+        var facts = new List<string>();
+        if (vendor.PartNumber is not null) facts.Add($"P/N {vendor.PartNumber}");
+        if (vendor.ModelNumber is not null && (vendor.PartNumber is null || !string.Equals(vendor.ModelNumber, vendor.PartNumber, StringComparison.OrdinalIgnoreCase)))
+            facts.Add($"model {vendor.ModelNumber}");
+        if (vendor.SupersededNumbers.Count > 0) facts.Add($"replaces {string.Join(", ", vendor.SupersededNumbers)}");
+        if (vendor.Remarks is not null) facts.Add(vendor.Remarks);
+        var who = vendor.Country is null ? vendor.Maker : $"{vendor.Maker} ({vendor.Country})";
+        if (vendor.Vendor is not null) who += $" via {vendor.Vendor}";
+        return facts.Count == 0 ? who : $"{who}: {string.Join(", ", facts)}";
+    }
+
     private static void ReadManufacturingPartText(CanonicalRfqLineItem line, RfqSpreadsheetRow row)
     {
         if (line.ExtraFields is null) return;
@@ -533,7 +547,9 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         // from 45 and 50 lines. The full text stays in the retained document.
         var ordered = new Dictionary<string, string>(StringComparer.Ordinal);
         if (reading.Manufacturers.Count > 1)
-            ordered["Approved manufacturers"] = string.Join("; ", reading.Manufacturers);
+            ordered["Approved manufacturers"] = reading.Vendors.Count > 0
+                ? string.Join("; ", reading.Vendors.Select(DescribeVendor))
+                : string.Join("; ", reading.Manufacturers);
         if (reading.PartNumbers.Count > 0)
             ordered["Manufacturer part numbers"] = string.Join("; ", reading.PartNumbers);
         if (reading.SupersededNumbers.Count > 0)
@@ -555,6 +571,21 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             line.ManufacturerName.Transformations.Add($"read_from_manufacturing_part_text: \"{source.Key}\" names one approved maker");
             line.ManufacturerName.Evidence.Clear();
             line.ManufacturerName.Evidence.Add(Evidence(row, "row", maker));
+        }
+
+        // Several approved vendors naming the same number: the buyer wants that maker part,
+        // whoever supplies it. The number is certain even though the maker is not one name.
+        if (reading.Manufacturers.Count > 1 && reading.AgreedPartNumber is { } agreed
+            && line.ManufacturerPartNumber.Kind == CanonicalValueKind.Missing)
+        {
+            line.ManufacturerPartNumber.Value = agreed;
+            line.ManufacturerPartNumber.OriginalValue = source.Value;
+            line.ManufacturerPartNumber.Kind = CanonicalValueKind.Derived;
+            line.ManufacturerPartNumber.Confidence = 0.9m;
+            line.ManufacturerPartNumber.ValidationStatus = ValidationStatus.Valid;
+            line.ManufacturerPartNumber.Transformations.Add($"read_from_manufacturing_part_text: every approved vendor in \"{source.Key}\" states this number");
+            line.ManufacturerPartNumber.Evidence.Clear();
+            line.ManufacturerPartNumber.Evidence.Add(Evidence(row, "row", agreed));
         }
 
         // One approved maker and one part number: that IS the part number, not a list to

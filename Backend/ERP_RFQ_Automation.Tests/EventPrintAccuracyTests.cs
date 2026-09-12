@@ -220,7 +220,8 @@ public sealed class EventPrintAccuracyTests
         var line = Assert.Single(document.LineItems);
 
         Assert.Null(line.ManufacturerName.Value);
-        Assert.Equal("SCHNEIDER ELECTRIC THE NETHERLANDS; PEPPERL+FUCHS (AUST) PTY LTD", line.ExtraFields!["Approved manufacturers"]);
+        // Each approved maker with its own number, readable at a glance on the line.
+        Assert.Equal("SCHNEIDER ELECTRIC THE NETHERLANDS (NL): P/N LV429827; PEPPERL+FUCHS (AUST) PTY LTD (AU): P/N NJ2-12GM40-E2", line.ExtraFields!["Approved manufacturers"]);
         Assert.Equal("LV429827; NJ2-12GM40-E2", line.ExtraFields["Manufacturer part numbers"]);
     }
 
