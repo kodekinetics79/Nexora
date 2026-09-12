@@ -484,6 +484,15 @@ const DecidePage: React.FC = () => {
   const primary = (() => {
     if (busy) return { label: busy, disabled: true, onClick: () => undefined };
     if (!canEdit) return { label: 'Create RFQ', disabled: true, onClick: () => undefined };
+    // THE ONE BUTTON DOES THE NEXT THING. A grey "Create RFQ" beside a sentence with a link in
+    // it left a rep stuck: the action was there, but not where a button is expected. Until the
+    // request can be promoted, the button IS the next step — assign, check, choose — and it
+    // becomes "Create RFQ" the moment nothing stands in the way.
+    if (unowned && !locked) return { label: 'Assign an owner', disabled: false, onClick: () => document.querySelector('[data-testid="decide-owner"]')?.scrollIntoView({ block: 'center', behavior: 'smooth' }) };
+    if (next.kind === 'blocked' && next.action) {
+      const action = next.action;
+      return { label: action.label, disabled: false, onClick: () => (action.intent === 'check-document' ? openDocument() : navigate(action.path)) };
+    }
     // Declining is a committed decision, which the server allows only to commercial authority;
     // a rep's skip-everything is saved as a draft for a manager to decline.
     if (next.kind === 'decline' && canPromote) return { label: 'Decline request', disabled: false, onClick: () => setDeclineOpen(true) };
@@ -746,7 +755,7 @@ const DecidePage: React.FC = () => {
               <Button
                 variant="contained"
                 size="large"
-                disabled={primary.disabled || (unowned && !locked)}
+                disabled={primary.disabled}
                 onClick={primary.onClick}
                 sx={{ fontWeight: 800, px: 3 }}
               >

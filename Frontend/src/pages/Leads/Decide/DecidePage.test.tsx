@@ -372,7 +372,9 @@ describe('DecidePage', () => {
     fireEvent.click(within(group).getByRole('button', { name: 'Quote' }));
     fireEvent.click(within(await screen.findByRole('group', { name: 'Quote or skip line 00002' })).getByRole('button', { name: 'Quote' }));
     expect(status()).toHaveTextContent('Check what Nexora read for line 00001 against the document.');
-    expect(screen.getByRole('button', { name: 'Create RFQ' })).toBeDisabled();
+    // The one button IS the next step: it reads "Check the document" until the check is done.
+    expect(screen.queryByRole('button', { name: 'Create RFQ' })).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Check the document' }).length).toBeGreaterThanOrEqual(1);
 
     // From the sentence, from the line, and from the section header: all the same dialog.
     fireEvent.click(within(status()).getByRole('button', { name: 'Check the document' }));
@@ -470,7 +472,8 @@ describe('one decision for the whole request', () => {
     await screen.findByText(/Who's on it — nobody yet/);
     expect(screen.getByText('Owner control')).toBeInTheDocument();
     expect(await screen.findByRole('status', { name: 'Next step' })).toHaveTextContent('Assign an owner first');
-    const buttons = screen.getAllByRole('button', { name: /Create RFQ|Save for a manager|Save for review/ });
-    expect(buttons.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+    // The button itself is the next step, not a grey "Create RFQ".
+    expect(screen.queryByRole('button', { name: /Create RFQ|Save for a manager|Save for review/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Assign an owner' })).toBeEnabled();
   });
 });
