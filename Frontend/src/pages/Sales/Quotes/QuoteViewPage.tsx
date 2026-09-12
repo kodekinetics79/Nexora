@@ -4,7 +4,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, Stack, Button, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Divider, CircularProgress, IconButton, Card, CardContent, Tooltip, Alert, Link
+  Divider, CircularProgress, Card, CardContent, Tooltip, Alert, AlertTitle, Link,
+  Breadcrumbs, Accordion, AccordionSummary, AccordionDetails, Menu, MenuItem, ListItemIcon, ListItemText
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -17,7 +18,9 @@ import {
   MarkEmailRead as RespondedIcon,
   ContentCopy as ReviseIcon,
   EventRepeat as ExtendValidityIcon,
-  NotificationsActive as FollowUpIcon
+  NotificationsActive as FollowUpIcon,
+  ExpandMore as ExpandMoreIcon,
+  NavigateNext as NextIcon
 } from '@mui/icons-material';
 import quoteService, { describeQuoteSendOutcome, type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
@@ -42,6 +45,8 @@ const QuoteViewPage: React.FC = () => {
   const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const businessUnitId = userData?.businessUnitId || 0;
+  const [moreAnchor, setMoreAnchor] = React.useState<null | HTMLElement>(null);
+  const moreMenuId = React.useId();
 
   const { data: quote, isLoading, isError, refetch } = useQuery({
     queryKey: ['quote-detail', id],
@@ -315,93 +320,205 @@ const QuoteViewPage: React.FC = () => {
         }
       : null;
 
+  // Which control is THE next step. Exactly one contained button per state; a contained button
+  // that is also disabled points the rep at a dead end, so a blocked draft promotes Edit instead.
+  const statusUpper = (quote.statusValue || '').toUpperCase();
+  const primaryAction: 'send' | 'edit' | 'outcome' | 'po' | 'pdf' | null =
+    statusUpper === 'ACCEPTED' ? 'po'
+      : quote.statusValue === 'Sent' ? 'outcome'
+        : statusUpper === 'ORDERED' ? 'pdf'
+          : isDraftQuote ? (sendBlockedReason === null ? 'send' : 'edit')
+            : null;
+  const blockerRows = sendReadiness?.blockers?.length
+    ? sendReadiness.blockers.map((blocker) => ({
+        key: blocker.code,
+        text: blocker.message,
+        link: blocker.setupPath && blocker.setupLabel
+          ? { label: `Open ${blocker.setupLabel}`, to: blocker.setupPath }
+          : undefined,
+      }))
+    : sendBlockedReason ? [{ key: 'client', ...sendBlockedReason }] : [];
+  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null;
+  // The sentence that tells the rep what happens next, in every state, derived from facts the
+  // page already holds. The screen drives; the rep never has to work out the next move.
+  const blockerCount = blockerRows.length + (revisionImpactPresentation ? 1 : 0) + (supplierValidityWarnings.length > 0 ? 1 : 0);
+  const nextStepText = revisionInfo?.supersededByQuoteNo
+    ? `A newer revision replaces this quote. Work on ${revisionInfo.supersededByQuoteNo} instead.`
+    : statusUpper === 'ORDERED'
+      ? 'This quote became an order. Export the PDF if the customer needs a copy; nothing else is left to do here.'
+      : quote.outcomeOn && statusUpper !== 'ACCEPTED'
+        ? 'The outcome is recorded. Revise this quote if the customer comes back.'
+        : statusUpper === 'ACCEPTED'
+          ? 'The customer accepted. Capture their purchase order to turn this quote into an order.'
+          : quote.statusValue === 'Sent'
+            ? (quote.respondedOn
+              ? 'The customer replied. Record the outcome: won, lost or expired.'
+              : 'Waiting for the customer. Mark "Customer responded" when they reply, or record the outcome.')
+            : isDraftQuote
+              ? (sendBlockedReason === null
+                ? 'Prices are in and nothing is blocking. Send this quote to the customer.'
+                : `Fix the ${blockerCount === 1 ? 'item' : `${blockerCount} items`} below, then send the quote.`)
+              : null;
+  const moreMenuOpen = Boolean(moreAnchor);
+
   return (
     <Box sx={{ p: { xs: 1.5, md: 3 }, bgcolor: 'background.default', minHeight: '100vh', minWidth: 0, overflowX: 'hidden' }}>
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', md: 'center' }, mb: 3, minWidth: 0 }}>
-        <Box sx={{ minWidth: 0 }}>
-          <Stack direction="row" useFlexGap spacing={1} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>
-            <IconButton onClick={() => navigate('/sales/quotes')} size="small"><BackIcon /></IconButton>
-            <Typography variant="h4" sx={{ fontWeight: 900, overflowWrap: 'anywhere', minWidth: 0, flex: '1 1 220px', lineHeight: 1.15 }}>Quote: {quote.quoteNo}</Typography>
-            {quote.nexoraSerial ? (
-              <Chip label={`Nexora Serial: ${quote.nexoraSerial}`} variant="outlined" sx={{ fontWeight: 900, fontFamily: 'monospace', maxWidth: '100%' }} />
-            ) : (
-              // Shown, never hidden. A quotation with no commercial case cannot be traced from
-              // inquiry to delivery, and an absent chip would read as a rendering gap rather than
-              // the defect it is.
-              <Tooltip title="This quotation states no commercial case, so it cannot be traced to its inquiry or to delivery. It was created outside the RFQ path.">
-                <Chip label="Not linked to a case" color="warning" variant="outlined" sx={{ fontWeight: 900, maxWidth: '100%' }} />
-              </Tooltip>
-            )}
-            <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
-            {revisionInfo && revisionInfo.revisionNo > 1 && revisionInfo.revisionOfQuoteNo && (
-              <Tooltip title={`This quote is revision ${revisionInfo.revisionNo} and replaces ${revisionInfo.revisionOfQuoteNo}`}>
-                <Chip
-                  label={`Rev ${revisionInfo.revisionNo} · replaces ${revisionInfo.revisionOfQuoteNo}`}
-                  color="info"
-                  variant="outlined"
-                  size="small"
-                  onClick={revisionInfo.revisionOfQuoteId ? () => navigate(`/sales/quotes/view/${revisionInfo.revisionOfQuoteId}`) : undefined}
-                  sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
-                />
-              </Tooltip>
-            )}
-            {revisionInfo?.supersededByQuoteNo && (
-              <Tooltip title="A newer revision replaces this quote — open it">
-                <Chip
-                  label={`Superseded by ${revisionInfo.supersededByQuoteNo}`}
-                  color="warning"
-                  variant="outlined"
-                  size="small"
-                  onClick={() => navigate(`/sales/quotes/view/${revisionInfo.supersededByQuoteId}`)}
-                  sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
-                />
-              </Tooltip>
-            )}
-            {quote.outcomeOn && (
-              <Tooltip title={[quote.outcomeReasonName, quote.outcomeNote].filter(Boolean).join(' — ') || 'No reason recorded'}>
-                <Chip
-                  label={(quote.statusCode || '').toUpperCase() === 'ACCEPTED' || (quote.statusCode || '').toUpperCase() === 'ORDERED'
-                    ? 'Won' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'Lost' : 'Expired'}
-                  color={(quote.statusCode || '').toUpperCase() === 'ACCEPTED' || (quote.statusCode || '').toUpperCase() === 'ORDERED'
-                    ? 'success' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'error' : 'default'}
-                  sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
-                />
-              </Tooltip>
-            )}
-            {quote.isStale && !quote.respondedOn && (
+      <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 1.5 }}>
+        <Link component="button" variant="caption" onClick={() => navigate('/sales/quotes')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
+          Quotes
+        </Link>
+        <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>{quote.quoteNo}</Typography>
+      </Breadcrumbs>
+
+      {/* Identity row: number, state, and only the chips that change what the rep does next.
+          The serial and the record facts live in the strip and the folds below. */}
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, gap: 2, flexDirection: { xs: 'column', lg: 'row' }, mb: 2 }}>
+        <Stack direction="row" useFlexGap spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
+          <Typography variant="h4" sx={{ fontWeight: 900, lineHeight: 1.15, whiteSpace: 'nowrap' }}>Quote: {quote.quoteNo}</Typography>
+          <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
+          {!quote.nexoraSerial && (
+            // Shown, never hidden. A quotation with no commercial case cannot be traced from
+            // inquiry to delivery, and an absent chip would read as a rendering gap rather than
+            // the defect it is.
+            <Tooltip title="This quotation states no commercial case, so it cannot be traced to its inquiry or to delivery. It was created outside the RFQ path.">
+              <Chip label="Not linked to a case" color="warning" variant="outlined" sx={{ fontWeight: 900, maxWidth: '100%' }} />
+            </Tooltip>
+          )}
+          {revisionInfo?.supersededByQuoteNo && (
+            <Tooltip title="A newer revision replaces this quote — open it">
               <Chip
-                label={`Stale · no reply for ${quote.daysSinceSent ?? '?'} days`}
+                label={`Superseded by ${revisionInfo.supersededByQuoteNo}`}
                 color="warning"
                 variant="outlined"
+                size="small"
+                onClick={() => navigate(`/sales/quotes/view/${revisionInfo.supersededByQuoteId}`)}
                 sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
               />
-            )}
-          </Stack>
-          <Typography variant="body2" color="text.secondary">Created on {dayjs(quote.createdDate).format('DD MMM YYYY')} by {quote.createdBy}</Typography>
-          <Stack direction="row" useFlexGap spacing={1} sx={{ mt: 1, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>
-            {quote.rfqId && <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>Open Source RFQ</Button>}
-            {quote.rfqId && <Button size="small" variant="text" onClick={() => navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>RFQ {quote.rfqNo}</Button>}
-          </Stack>
-        </Box>
-        <Stack direction={{ xs: 'column', sm: 'row' }} useFlexGap spacing={1} sx={{ flexWrap: 'wrap', width: { xs: '100%', md: 'auto' }, minWidth: 0, '& > button': { maxWidth: '100%' } }}>
+            </Tooltip>
+          )}
+          {quote.outcomeOn && (
+            <Tooltip title={[quote.outcomeReasonName, quote.outcomeNote].filter(Boolean).join(' — ') || 'No reason recorded'}>
+              <Chip
+                label={(quote.statusCode || '').toUpperCase() === 'ACCEPTED' || (quote.statusCode || '').toUpperCase() === 'ORDERED'
+                  ? 'Won' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'Lost' : 'Expired'}
+                color={(quote.statusCode || '').toUpperCase() === 'ACCEPTED' || (quote.statusCode || '').toUpperCase() === 'ORDERED'
+                  ? 'success' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'error' : 'default'}
+                sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+              />
+            </Tooltip>
+          )}
+          {quote.isStale && !quote.respondedOn && (
+            <Chip
+              label={`Stale · no reply for ${quote.daysSinceSent ?? '?'} days`}
+              color="warning"
+              variant="outlined"
+              sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+            />
+          )}
+          {revisionInfo && revisionInfo.revisionNo > 1 && revisionInfo.revisionOfQuoteNo && (
+            <Tooltip title={`This quote is revision ${revisionInfo.revisionNo} and replaces ${revisionInfo.revisionOfQuoteNo}`}>
+              <Chip
+                label={`Rev ${revisionInfo.revisionNo} · replaces ${revisionInfo.revisionOfQuoteNo}`}
+                color="info"
+                variant="outlined"
+                size="small"
+                onClick={revisionInfo.revisionOfQuoteId ? () => navigate(`/sales/quotes/view/${revisionInfo.revisionOfQuoteId}`) : undefined}
+                sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+              />
+            </Tooltip>
+          )}
+        </Stack>
+
+        {/* One action rail: Back first, the rarely used actions behind "More", and exactly one
+            contained button — the next step for this quote's state — last. */}
+        <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', alignItems: 'center', position: { lg: 'sticky' }, top: 8, zIndex: 2, '& > button, & > span > button': { whiteSpace: 'nowrap' } }}>
+          <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate('/sales/quotes')} sx={{ borderRadius: 2, borderColor: 'divider', color: 'text.secondary' }}>
+            Back
+          </Button>
           {hasPermission('Quotations', 'edit') && <Button
-            variant="outlined" 
-            startIcon={<EditIcon />} 
-            onClick={() => navigate(`/sales/quotes/edit/${id}`)} 
+            variant={primaryAction === 'edit' ? 'contained' : 'outlined'}
+            startIcon={<EditIcon />}
+            onClick={() => navigate(`/sales/quotes/edit/${id}`)}
             disabled={quote.statusValue?.toUpperCase() === 'ORDERED'}
-            sx={{ borderRadius: 2 }}
+            sx={{ borderRadius: 2, fontWeight: primaryAction === 'edit' ? 800 : undefined }}
           >
             Edit
           </Button>}
-          <Button 
-            variant="outlined" 
-            startIcon={<PdfIcon />} 
+          <Button
+            variant={primaryAction === 'pdf' ? 'contained' : 'outlined'}
+            startIcon={<PdfIcon />}
             onClick={() => pdfMutation.mutate()}
             disabled={pdfMutation.isPending || isUnpricedDraft}
             sx={{ borderRadius: 2 }}
           >
             Export PDF
           </Button>
+          {hasPermission('Quotations', 'edit') && (
+            <>
+              <Button
+                variant="outlined"
+                endIcon={<ExpandMoreIcon />}
+                aria-haspopup="menu"
+                aria-expanded={moreMenuOpen ? 'true' : undefined}
+                aria-controls={moreMenuOpen ? moreMenuId : undefined}
+                onClick={(event) => setMoreAnchor(event.currentTarget)}
+                sx={{ borderRadius: 2 }}
+              >
+                More
+              </Button>
+              <Menu id={moreMenuId} anchorEl={moreAnchor} open={moreMenuOpen} onClose={() => setMoreAnchor(null)}>
+                {/* A follow-up the rep sets by hand. Delivery creates one automatically when a quote is
+                    sent; anything promised in a phone call afterwards had nowhere to go. */}
+                <MenuItem onClick={() => { setMoreAnchor(null); setFollowUpOpen(true); }}>
+                  <ListItemIcon><FollowUpIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText primary="Follow up on this quote" secondary="Set a reminder for yourself about this quote. It appears on your Follow-ups list." />
+                </MenuItem>
+                {/*
+                  R7: the buyer's most common request — "can you hold your price for another two
+                  weeks". Offered only while the quote is live with the customer and has not been
+                  superseded; extending records a reason and does NOT create a revision, so the
+                  customer keeps looking at the same commercial offer.
+                */}
+                {quote.canExtendValidity && !revisionInfo?.supersededByQuoteId && (
+                  <MenuItem onClick={() => { setMoreAnchor(null); setExtendValidityOpen(true); }}>
+                    <ListItemIcon><ExtendValidityIcon fontSize="small" /></ListItemIcon>
+                    <ListItemText primary="Extend validity" secondary="Hold this quote's price open until a later date. Records a reason; does not create a revision." />
+                  </MenuItem>
+                )}
+                {revisionInfo?.canRevise && (
+                  <MenuItem disabled={reviseMutation.isPending} onClick={() => { setMoreAnchor(null); reviseMutation.mutate(); }}>
+                    <ListItemIcon>{reviseMutation.isPending ? <CircularProgress size={18} /> : <ReviseIcon fontSize="small" />}</ListItemIcon>
+                    <ListItemText primary="Revise" secondary="Create a new draft revision of this quote (the original stays untouched)" />
+                  </MenuItem>
+                )}
+                {quote.rfqId && (
+                  <MenuItem onClick={() => { setMoreAnchor(null); navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`); }}>
+                    <ListItemIcon><OutcomeIcon fontSize="small" /></ListItemIcon>
+                    <ListItemText primary="Sourcing & offers" />
+                  </MenuItem>
+                )}
+                {quote.rfqId && (
+                  <MenuItem onClick={() => { setMoreAnchor(null); navigate(`/procurement/rfqs/view/${quote.rfqId}`); }}>
+                    <ListItemIcon><NextIcon fontSize="small" /></ListItemIcon>
+                    <ListItemText primary="Open Source RFQ" secondary={`RFQ ${quote.rfqNo}`} />
+                  </MenuItem>
+                )}
+              </Menu>
+            </>
+          )}
+
+          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && !quote.respondedOn && (
+            <Button
+              variant="outlined"
+              startIcon={respondedMutation.isPending ? <CircularProgress size={18} /> : <RespondedIcon />}
+              onClick={() => respondedMutation.mutate()}
+              disabled={respondedMutation.isPending}
+              sx={{ borderRadius: 2 }}
+            >
+              Customer responded
+            </Button>
+          )}
+
           {/*
             The ONE control that puts this quote in front of the customer.
 
@@ -414,172 +531,147 @@ const QuoteViewPage: React.FC = () => {
             The server owns the real transition: FinalizeQuoteDeliveryAsync stamps SentOn, moves the
             lifecycle to SENT and creates the follow-up task when the mail is actually delivered. So
             this button never touches status. It opens the recipient -> price-confirmation chain and
-            lets delivery report itself.
+            lets delivery report itself. Why it is disabled is printed in full in the panel below.
           */}
           {hasPermission('Quotations', 'edit')
             && quote.statusValue?.toUpperCase() !== 'ORDERED'
             && (isDraftQuote || quote.statusValue === 'Sent') && (
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, minWidth: 0, maxWidth: '100%' }}>
-              <Button
-                variant={isDraftQuote ? 'contained' : 'outlined'}
-                startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
-                disabled={sendBlockedReason !== null}
-                title={sendBlockedReason?.text}
-                onClick={() => setEmailOpen(true)}
-                sx={{ borderRadius: 2 }}
+            <Tooltip title={sendBlockedReason ? `${blockerRows.length || 1} thing${(blockerRows.length || 1) === 1 ? '' : 's'} must be fixed first — see the list below` : ''}>
+              <Box
+                component="span"
+                role={sendBlockedReason ? 'button' : undefined}
+                aria-disabled={sendBlockedReason ? 'true' : undefined}
+                tabIndex={sendBlockedReason ? 0 : -1}
+                sx={{ display: 'inline-flex', borderRadius: 2, '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 } }}
               >
-                {isDraftQuote ? 'Send to customer' : 'Send again'}
-              </Button>
-              {/* A disabled control that will not say why becomes a support call.
-
-                  Every blocker is listed, not just the first. A rep who fixes one, comes back,
-                  and is stopped by the next has made a round trip for nothing — and an
-                  incomplete draft usually has more than one thing missing. */}
-              {(sendReadiness?.blockers?.length ? sendReadiness.blockers.map((blocker) => ({
-                key: blocker.code,
-                text: blocker.message,
-                link: blocker.setupPath && blocker.setupLabel
-                  ? { label: `Open ${blocker.setupLabel}`, to: blocker.setupPath }
-                  : undefined,
-              })) : sendBlockedReason ? [{ key: 'client', ...sendBlockedReason }] : []).map((reason) => (
-                <Typography key={reason.key} variant="caption" color="text.secondary" sx={{ maxWidth: 260 }}>
-                  {reason.text}
-                  {reason.link && (
-                    <>
-                      {' '}
-                      <Link component={RouterLink} to={reason.link.to} underline="hover" sx={{ fontWeight: 700 }}>
-                        {reason.link.label}
-                      </Link>
-                    </>
-                  )}
-                </Typography>
-              ))}
-            </Box>
-          )}
-
-          {/*
-            R7: the buyer's most common request — "can you hold your price for another two
-            weeks". Offered only while the quote is live with the customer and has not been
-            superseded; extending records a reason and does NOT create a revision, so the
-            customer keeps looking at the same commercial offer.
-          */}
-          {hasPermission('Quotations', 'edit') && quote.canExtendValidity && !revisionInfo?.supersededByQuoteId && (
-            <Tooltip title="Hold this quote's price open until a later date. Records a reason; does not create a revision.">
-              <span>
                 <Button
-                  variant="outlined"
-                  startIcon={<ExtendValidityIcon />}
-                  onClick={() => setExtendValidityOpen(true)}
-                  sx={{ borderRadius: 2 }}
+                  variant={primaryAction === 'send' ? 'contained' : 'outlined'}
+                  startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
+                  disabled={sendBlockedReason !== null}
+                  title={sendBlockedReason?.text}
+                  onClick={() => setEmailOpen(true)}
+                  sx={{ borderRadius: 2, fontWeight: primaryAction === 'send' ? 800 : undefined }}
                 >
-                  Extend validity
+                  {isDraftQuote ? 'Send to customer' : 'Send again'}
                 </Button>
-              </span>
+              </Box>
             </Tooltip>
           )}
-
-          {/* A follow-up the rep sets by hand. Delivery creates one automatically when a quote is
-              sent; anything promised in a phone call afterwards had nowhere to go. */}
-          {hasPermission('Quotations', 'edit') && (
-            // describeChild: the title is a description, not the button's name.
-            <Tooltip title="Set a reminder for yourself about this quote. It appears on your Follow-ups list." describeChild>
-              <Button
-                variant="outlined"
-                startIcon={<FollowUpIcon />}
-                onClick={() => setFollowUpOpen(true)}
-                sx={{ borderRadius: 2 }}
-              >
-                Follow up on this quote
-              </Button>
-            </Tooltip>
-          )}
-
-          {hasPermission('Quotations', 'edit') && revisionInfo?.canRevise && (
-            <Tooltip title="Create a new draft revision of this quote (the original stays untouched)">
-              <Button
-                variant="outlined"
-                color="info"
-                startIcon={reviseMutation.isPending ? <CircularProgress size={18} /> : <ReviseIcon />}
-                onClick={() => reviseMutation.mutate()}
-                disabled={reviseMutation.isPending}
-                sx={{ borderRadius: 2, fontWeight: 800 }}
-              >
-                Revise
-              </Button>
-            </Tooltip>
-          )}
-
-          {quote.rfqId && <Button variant="outlined" startIcon={<OutcomeIcon />} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>Sourcing & offers</Button>}
 
           {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && (
-            <>
-              {!quote.respondedOn && (
-                <Button
-                  variant="outlined"
-                  startIcon={respondedMutation.isPending ? <CircularProgress size={18} /> : <RespondedIcon />}
-                  onClick={() => respondedMutation.mutate()}
-                  disabled={respondedMutation.isPending}
-                  sx={{ borderRadius: 2 }}
-                >
-                  Customer responded
-                </Button>
-              )}
-              <Button
-                variant="contained"
-                color="warning"
-                startIcon={<OutcomeIcon />}
-                onClick={() => setOutcomeOpen(true)}
-                sx={{ borderRadius: 2, fontWeight: 800 }}
-              >
-                Record outcome
-              </Button>
-            </>
+            <Button
+              variant="contained"
+              color="warning"
+              startIcon={<OutcomeIcon />}
+              onClick={() => setOutcomeOpen(true)}
+              sx={{ borderRadius: 2, fontWeight: 800 }}
+            >
+              Record outcome
+            </Button>
           )}
 
           {hasPermission('Orders', 'create') && quote.statusValue === 'Accepted' && (
-            <Button 
-                variant="contained" 
-                color="primary" 
-                startIcon={<OrderIcon />}
-                onClick={() => setAwardOpen(true)}
-                disabled={!awardQuote || quote.statusValue?.toUpperCase() === 'ORDERED'}
-                sx={{ borderRadius: 2, fontWeight: 800 }}
-            >
-              Capture Client PO
-            </Button>
+            <Tooltip title={!awardQuote ? 'This quote needs a linked commercial case, a customer and a currency before a client PO can be captured.' : ''}>
+              <Box component="span" sx={{ display: 'inline-flex' }}>
+                <Button
+                    variant="contained"
+                    color="primary"
+                    startIcon={<OrderIcon />}
+                    onClick={() => setAwardOpen(true)}
+                    disabled={!awardQuote || quote.statusValue?.toUpperCase() === 'ORDERED'}
+                    sx={{ borderRadius: 2, fontWeight: 800 }}
+                >
+                  Capture Client PO
+                </Button>
+              </Box>
+            </Tooltip>
           )}
         </Stack>
-      </Stack>
+      </Box>
 
-      {isUnpricedDraft && (
-        <Alert severity="warning" sx={{ mb: 3 }}>
-          <Typography sx={{ fontWeight: 800 }}>Commercial Review Required</Typography>
-          Pricing Pending · Inventory Pending · Lead Time Pending · Tax, freight and commercial validity are not yet set.
-        </Alert>
-      )}
-      {supplierValidityWarnings.length > 0 && (
-        <Alert severity="error" sx={{ mb: 3 }}>
-          <Typography sx={{ fontWeight: 800 }}>Supplier validity does not support this Customer Quote</Typography>
-          {supplierValidityWarnings.length} priced line{supplierValidityWarnings.length === 1 ? '' : 's'} use an expired, unstated, or shorter Supplier Quote validity. Review the source offer before sending.
-        </Alert>
-      )}
-      {revisionImpactPresentation && (
+      {/* Who, how to reach them, how long the offer stands. The four facts a rep opens a quote for. */}
+      <Paper sx={{ p: 2, mb: 2, borderRadius: 1, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+        <Grid container spacing={2} sx={{ alignItems: 'center' }}>
+          <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Customer Name</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerName || 'Customer unresolved'}</Typography></Grid>
+          <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Contact</Typography><Typography sx={{ fontWeight: 700 }}>{quote.contactName || quote.customerEmail || 'Contact unresolved'}</Typography></Grid>
+          <Grid size={{ xs: 12, sm: 6, md: 2 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Email</Typography><Typography sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{quote.customerEmail || 'N/A'}</Typography></Grid>
+          <Grid size={{ xs: 12, sm: 6, md: 2 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography>
+            <Typography sx={{ fontWeight: 700 }}>{quote.validUntil ? `Until ${dayjs(quote.validUntil).format('DD MMM YYYY')}` : 'Commercial validity pending'}</Typography>
+            {quote.validityExtendedOn && (
+              <Typography variant="caption" color="text.secondary">
+                Extended on {dayjs(quote.validityExtendedOn).format('DD MMM YYYY')} — open “Extend validity” to read why.
+              </Typography>
+            )}
+          </Grid>
+          <Grid size={{ xs: 12, md: 2 }} sx={{ display: 'flex', justifyContent: { md: 'flex-end' } }}>
+            {quote.nexoraSerial && (
+              <Chip label={`Nexora Serial: ${quote.nexoraSerial}`} variant="outlined" size="small" sx={{ fontWeight: 900, fontFamily: 'monospace', maxWidth: '100%' }} />
+            )}
+          </Grid>
+        </Grid>
+      </Paper>
+
+      {/* Everything that stops this quote, said once, in full, each with its own way to act on it.
+          This list used to be split between grey captions under the Send button, three banners and a
+          warning inside the totals card, and the same fact was worded differently in each. */}
+      {(showBlockerPanel || nextStepText) && (
         <Alert
-          severity="error"
-          sx={{ mb: 3 }}
-          action={hasPermission('Quotations', 'edit') ? (
-            <Button
-              color="inherit"
-              size="small"
-              disabled={resolveImpactMutation.isPending}
-              onClick={() => resolveImpactMutation.mutate()}
-            >
-              {revisionImpactPresentation.action}
-            </Button>
-          ) : undefined}
+          severity={revisionImpactPresentation || supplierValidityWarnings.length > 0 ? 'error' : showBlockerPanel ? 'warning' : 'info'}
+          sx={{ mb: 2, '& .MuiAlert-message': { width: '100%' } }}
         >
-          <Typography sx={{ fontWeight: 800 }}>{revisionImpactPresentation.title}</Typography>
-          {revisionImpactPresentation.detail}
+          <AlertTitle sx={{ fontWeight: 800 }}>{isUnpricedDraft ? 'Commercial Review Required' : showBlockerPanel ? 'Before this quote can be sent' : 'Next step'}</AlertTitle>
+          {nextStepText && <Typography variant="body2" sx={{ fontWeight: 700, mb: showBlockerPanel ? 1 : 0 }}>{nextStepText}</Typography>}
+          {isUnpricedDraft && (
+            <Typography variant="body2" sx={{ mb: 1 }}>Pricing Pending · Inventory Pending · Lead Time Pending · Tax, freight and commercial validity are not yet set.</Typography>
+          )}
+          <Stack component="ol" spacing={1} sx={{ m: 0, pl: 2.5 }}>
+            {revisionImpactPresentation && (
+              <Stack component="li" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
+                <Box>
+                  <Typography sx={{ fontWeight: 800 }}>{revisionImpactPresentation.title}</Typography>
+                  <Typography variant="body2">{revisionImpactPresentation.detail}</Typography>
+                </Box>
+                {hasPermission('Quotations', 'edit') && (
+                  <Button
+                    color="inherit"
+                    size="small"
+                    variant="outlined"
+                    disabled={resolveImpactMutation.isPending}
+                    onClick={() => resolveImpactMutation.mutate()}
+                    sx={{ whiteSpace: 'nowrap' }}
+                  >
+                    {revisionImpactPresentation.action}
+                  </Button>
+                )}
+              </Stack>
+            )}
+            {/* Every blocker is listed, not just the first. A rep who fixes one, comes back,
+                and is stopped by the next has made a round trip for nothing — and an
+                incomplete draft usually has more than one thing missing. */}
+            {blockerRows.map((reason) => (
+              <Typography key={reason.key} component="li" variant="body2">
+                {reason.text}
+                {reason.link && (
+                  <>
+                    {' '}
+                    <Link component={RouterLink} to={reason.link.to} underline="hover" sx={{ fontWeight: 700 }}>
+                      {reason.link.label}
+                    </Link>
+                  </>
+                )}
+              </Typography>
+            ))}
+            {supplierValidityWarnings.length > 0 && (
+              <Stack component="li" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
+                <Box>
+                  <Typography sx={{ fontWeight: 800 }}>Supplier validity does not support this Customer Quote</Typography>
+                  <Typography variant="body2">{supplierValidityWarnings.length} priced line{supplierValidityWarnings.length === 1 ? '' : 's'} use an expired, unstated, or shorter Supplier Quote validity. Review the source offer before sending.</Typography>
+                </Box>
+                {quote.rfqId && <Button color="inherit" size="small" variant="outlined" startIcon={<OutcomeIcon />} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)} sx={{ whiteSpace: 'nowrap' }}>Sourcing & offers</Button>}
+              </Stack>
+            )}
+          </Stack>
         </Alert>
       )}
 
@@ -599,44 +691,11 @@ const QuoteViewPage: React.FC = () => {
         </Alert>
       )}
 
-      <Grid container spacing={3}>
-        <Grid size={{ xs: 12, md: 8 }}>
-          <Paper sx={{ p: 3, borderRadius: 2, mb: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 2 }}>Customer & Quote Details</Typography>
-            <Grid container spacing={2}>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Customer Name</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerName || 'Customer unresolved'}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Contact</Typography><Typography sx={{ fontWeight: 700 }}>{quote.contactName || quote.customerEmail || 'Contact unresolved'}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Email</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerEmail || 'N/A'}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source RFQ</Typography><Button size="small" sx={{ px: 0 }} onClick={() => quote.rfqId && navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>{quote.rfqNo || 'None'}</Button></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}>
-                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography>
-                <Typography sx={{ fontWeight: 700 }}>{quote.validUntil ? `Until ${dayjs(quote.validUntil).format('DD MMM YYYY')}` : 'Commercial validity pending'}</Typography>
-                {quote.validityExtendedOn && (
-                  <Typography variant="caption" color="text.secondary">
-                    Extended on {dayjs(quote.validityExtendedOn).format('DD MMM YYYY')} — open “Extend validity” to read why.
-                  </Typography>
-                )}
-              </Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Opportunity Owner</Typography><Typography sx={{ fontWeight: 700 }}>{quote.createdBy}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Lineage</Typography><Typography sx={{ fontWeight: 700, color: quote.nexoraSerial ? 'text.primary' : 'warning.main' }}>{quote.nexoraSerial || 'Not linked to a commercial case'}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source Revisions</Typography><Typography sx={{ fontWeight: 700 }}>{quote.sourceLeadRevision > 0 && quote.sourceRfqRevision > 0 ? `Lead Rev ${quote.sourceLeadRevision} · RFQ Rev ${quote.sourceRfqRevision}` : 'Legacy source revision unverified'}</Typography></Grid>
-              {quote.leadId && <Grid size={{ xs: 12, sm: 6 }}><Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${quote.leadId}`)}>Open Canonical Lead</Button></Grid>}
-              {(quote.discountValue || 0) > 0 && (
-                <Grid size={{ xs: 12, sm: 6 }}>
-                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Header Discount</Typography>
-                  <Typography sx={{ fontWeight: 700, color: 'error.main' }}>
-                    {quote.discountTypeName}: {quote.discountValue}
-                  </Typography>
-                </Grid>
-              )}
-            </Grid>
-            {quote.headerRemarks && <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
-          </Paper>
-
-          <CommercialLineIntelligence stage="quote" recordId={quote.id} />
-
-          <Paper sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflowX: 'auto', maxWidth: '100%' }}>
-            <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
+      <Stack spacing={3}>
+        {/* The work: the lines and, directly under them, the totals they add up to. */}
+        <Paper sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', maxWidth: '100%', overflow: 'hidden' }}>
+          <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
+          <Box sx={{ overflowX: 'auto' }}>
             <Table size="small">
               <TableHead><TableRow sx={{ bgcolor: 'grey.50' }}><TableCell sx={{ fontWeight: 800 }}>Ref</TableCell><TableCell sx={{ fontWeight: 800 }}>Description</TableCell><TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell><TableCell sx={{ fontWeight: 800 }}>UOM</TableCell><TableCell sx={{ fontWeight: 800 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell></TableRow></TableHead>
               <TableBody>
@@ -672,35 +731,83 @@ const QuoteViewPage: React.FC = () => {
                 ))}
               </TableBody>
             </Table>
-          </Paper>
-        </Grid>
+          </Box>
+          <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'grey.50', display: 'flex', justifyContent: 'flex-end' }}>
+            <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'primary.main', boxShadow: 'none', width: '100%', maxWidth: 440 }}>
+              <CardContent sx={{ p: 3 }}>
+                <Typography variant="h6" sx={{ fontWeight: 800, mb: 3 }}>Financial Summary</Typography>
+                <Stack spacing={2}>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(itemsSubtotal, quote.currencyCode)}</Typography></Box>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- ${formatMoney(itemsDiscounts, quote.currencyCode)}`}</Typography></Box>
+                  {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- {formatMoney(headerDiscount, quote.currencyCode)}</Typography></Box>}
+                  {/* The two rows the panel had no way to show, and without which the numbers on it
+                      could not be added up: the base the tax is charged on, and the tax. Same three
+                      lines, same order, as the printed quote. */}
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Total excluding VAT</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pending' : totals.hasUnderivedTax ? '—' : formatMoney(totals.netExcludingTax, quote.currencyCode)}</Typography></Box>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                    <Typography color={totals.hasUnderivedTax ? 'warning.main' : 'text.secondary'}>{vatLabel}</Typography>
+                    <Typography sx={{ fontWeight: 700 }} color={totals.hasUnderivedTax ? 'warning.main' : undefined}>
+                      {totals.hasUnderivedTax ? 'Not derived' : formatMoney(totals.totalTax, quote.currencyCode)}
+                    </Typography>
+                  </Box>
+                  {totals.hasUnderivedTax && <Alert severity="warning" sx={{ py: 0 }}>No output tax rate is configured, so this quote cannot be sent.</Alert>}
+                  <Divider />
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(quote.totalAmount, quote.currencyCode)}</Typography></Box>
+                </Stack>
+              </CardContent>
+            </Card>
+          </Box>
+        </Paper>
 
-        <Grid size={{ xs: 12, md: 4 }}>
-          <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'primary.main', boxShadow: 'none' }}>
-            <CardContent sx={{ p: 3 }}>
-              <Typography variant="h6" sx={{ fontWeight: 800, mb: 3 }}>Financial Summary</Typography>
-              <Stack spacing={2}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(itemsSubtotal, quote.currencyCode)}</Typography></Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- ${formatMoney(itemsDiscounts, quote.currencyCode)}`}</Typography></Box>
-                {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- {formatMoney(headerDiscount, quote.currencyCode)}</Typography></Box>}
-                {/* The two rows the panel had no way to show, and without which the numbers on it
-                    could not be added up: the base the tax is charged on, and the tax. Same three
-                    lines, same order, as the printed quote. */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Total excluding VAT</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pending' : totals.hasUnderivedTax ? '—' : formatMoney(totals.netExcludingTax, quote.currencyCode)}</Typography></Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
-                  <Typography color={totals.hasUnderivedTax ? 'warning.main' : 'text.secondary'}>{vatLabel}</Typography>
-                  <Typography sx={{ fontWeight: 700 }} color={totals.hasUnderivedTax ? 'warning.main' : undefined}>
-                    {totals.hasUnderivedTax ? 'Not derived' : formatMoney(totals.totalTax, quote.currencyCode)}
+        {quote.headerRemarks && <Box sx={{ p: 2, bgcolor: 'grey.50', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
+
+        {/* Evidence and record, folded. Nothing is removed; it is simply not in the rep's way. */}
+        <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1 }}>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Box>
+              <Typography sx={{ fontWeight: 900 }}>Where the prices come from</Typography>
+              <Typography variant="body2" color="text.secondary">Stock, shortage and supplier evidence behind each line.</Typography>
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Stack spacing={2} sx={{ alignItems: 'flex-start' }}>
+              <Box sx={{ width: '100%' }}><CommercialLineIntelligence stage="quote" recordId={quote.id} /></Box>
+              {quote.rfqId && <Button variant="outlined" startIcon={<OutcomeIcon />} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>Sourcing & offers</Button>}
+            </Stack>
+          </AccordionDetails>
+        </Accordion>
+
+        <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1 }}>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Box>
+              <Typography sx={{ fontWeight: 900 }}>Quote record and lineage</Typography>
+              <Typography variant="body2" color="text.secondary">Created on {dayjs(quote.createdDate).format('DD MMM YYYY')} by {quote.createdBy} · from {quote.rfqNo ? `RFQ ${quote.rfqNo}` : 'no RFQ'}</Typography>
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Grid container spacing={2}>
+              <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source RFQ</Typography><Button size="small" sx={{ px: 0 }} onClick={() => quote.rfqId && navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>{quote.rfqNo || 'None'}</Button></Grid>
+              <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Opportunity Owner</Typography><Typography sx={{ fontWeight: 700 }}>{quote.createdBy}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Lineage</Typography><Typography sx={{ fontWeight: 700, color: quote.nexoraSerial ? 'text.primary' : 'warning.main' }}>{quote.nexoraSerial || 'Not linked to a commercial case'}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6, md: 3 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source Revisions</Typography><Typography sx={{ fontWeight: 700 }}>{quote.sourceLeadRevision > 0 && quote.sourceRfqRevision > 0 ? `Lead Rev ${quote.sourceLeadRevision} · RFQ Rev ${quote.sourceRfqRevision}` : 'Legacy source revision unverified'}</Typography></Grid>
+              {(quote.discountValue || 0) > 0 && (
+                <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Header Discount</Typography>
+                  <Typography sx={{ fontWeight: 700, color: 'error.main' }}>
+                    {quote.discountTypeName}: {quote.discountValue}
                   </Typography>
-                </Box>
-                {totals.hasUnderivedTax && <Alert severity="warning" sx={{ py: 0 }}>No output tax rate is configured, so this quote cannot be sent.</Alert>}
-                <Divider />
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(quote.totalAmount, quote.currencyCode)}</Typography></Box>
-              </Stack>
-            </CardContent>
-          </Card>
-        </Grid>
-      </Grid>
+                </Grid>
+              )}
+              <Grid size={{ xs: 12 }}>
+                <Stack direction="row" useFlexGap spacing={1} sx={{ flexWrap: 'wrap' }}>
+                  {quote.rfqId && <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>Open Source RFQ</Button>}
+                  {quote.leadId && <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${quote.leadId}`)}>Open Canonical Lead</Button>}
+                </Stack>
+              </Grid>
+            </Grid>
+          </AccordionDetails>
+        </Accordion>
+      </Stack>
 
       <QuoteOutcomeDialog
         open={outcomeOpen}

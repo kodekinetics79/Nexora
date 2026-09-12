@@ -72,7 +72,9 @@ beforeEach(() => {
 describe('Follow up on this quote', () => {
   it('opens a small dialog and posts the due date and reason for this quote', async () => {
     renderQuote();
-    fireEvent.click(await screen.findByRole('button', { name: /follow up on this quote/i }));
+    // Follow-up lives behind the rail's "More" menu with the other occasional actions.
+    fireEvent.click(await screen.findByRole('button', { name: /^more$/i }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /follow up on this quote/i }));
 
     const dialog = await screen.findByRole('dialog', { name: /follow up on qt-2026-0009/i });
     expect(dialog).toBeInTheDocument();
@@ -95,7 +97,9 @@ describe('Follow up on this quote', () => {
 
   it('refuses a reason longer than the 80 characters the Follow-ups list can show', async () => {
     renderQuote();
-    fireEvent.click(await screen.findByRole('button', { name: /follow up on this quote/i }));
+    // Follow-up lives behind the rail's "More" menu with the other occasional actions.
+    fireEvent.click(await screen.findByRole('button', { name: /^more$/i }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /follow up on this quote/i }));
     await screen.findByRole('dialog');
 
     fireEvent.change(screen.getByLabelText(/what for/i), { target: { value: 'x'.repeat(81) } });
