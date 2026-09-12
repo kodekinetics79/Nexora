@@ -265,7 +265,7 @@ const LeadDetailPage: React.FC = () => {
             onClick={() => navigate(`/procurement/leads/${lead.id}/workbench`)}
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
-            {decisionClosed ? 'View decision record' : 'Open decision workbench'}
+            {decisionClosed ? 'View decision' : 'Decide: quote or skip'}
           </Button>}
         </Stack>
       </Box>

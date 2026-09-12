@@ -207,7 +207,7 @@ describe('LeadsPage — assigning a lead from the list', () => {
   it('showsWhoOwnsEveryRow_withoutOpeningTheLead', async () => {
     renderPage();
 
-    expect(await screen.findByRole('columnheader', { name: /owner/i })).toBeInTheDocument();
+    expect(await screen.findByRole('columnheader', { name: /who's on it|owner/i })).toBeInTheDocument();
     // The owner's name is on the wire for every row and used to be rendered by nothing.
     expect(await screen.findByText('Tariq Al-Harbi')).toBeInTheDocument();
   });

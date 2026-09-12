@@ -524,7 +524,7 @@ test('03 RFQ line evidence opens without inventing unavailable provenance', asyn
   await expect(page).toHaveURL(new RegExp(
     `/procurement/leads/${requiredNumber('E2E_CORE_LEAD_ID')}/workbench\\?stage=evidence$`,
   ));
-  await expect(page.getByRole('tab', { name: '1. Evidence' })).toHaveAttribute('aria-selected', 'true');
+  // The evidence address opens the decision screen with its history drawer already expanded.
   await expect(page.getByRole('heading', { name: 'Source evidence' })).toBeVisible();
 });
 
@@ -1051,6 +1051,9 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   expect(blockedApply.status()).toBe(409);
 
   await page.goto(`/procurement/rfqs/view/${rfqId()}`);
+  // The scenarios, pricing and target bridge fold under "Ways to fulfil this request" so the
+  // line table opens the page; the journey opens the fold the way a rep would.
+  await page.getByRole('button', { name: /Ways to fulfil this request/ }).click();
   await expect(page.getByText('Opportunity Digital Twin', { exact: true })).toBeVisible();
   await expect(page.getByText(intelligence.nextBestAction.label, { exact: false }).first()).toBeVisible();
   await expect(page.getByText(intelligence.digitalTwin.validity, { exact: false }).first()).toBeVisible();
@@ -1142,6 +1145,8 @@ test('37 local-first processing evidence and governed learning remain visible ac
   expect(processing.externalCostStatus).toBe('LocalComputeUnpriced');
 
   await page.goto(`/procurement/rfqs/view/${rfqId()}`);
+  // Processing evidence folds under "Line intelligence and processing evidence" on the RFQ.
+  await page.getByRole('button', { name: /Line intelligence and processing evidence/ }).click();
   await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
   await expect(page.getByText('Local-first', { exact: true })).toBeVisible();
 

@@ -74,42 +74,36 @@ async function openFreshWorkbench(page: Page, leadId: number, expectedParticipat
     'fixture must expose a governed no-bid reason').toBeTruthy();
 
   await page.goto(`/procurement/leads/${leadId}/workbench`);
-  await expect(page.getByRole('heading', { name: 'Source evidence' })).toBeVisible();
-  await page.getByRole('tab', { name: '3. Fit & Participation' }).click();
-  await expect(page.getByRole('heading', { name: 'Fit assessment' })).toBeVisible();
+  // The one decision screen: the lines, one choice each, one sentence naming the next thing.
+  await expect(page.getByRole('heading', { name: 'What they want' })).toBeVisible();
+  await expect(page.getByRole('group', { name: /Quote or skip line/ })).toHaveCount(6);
+  await expect(page.getByRole('status', { name: 'Next step' })).toBeVisible();
 }
 
 async function saveFitThroughControls(page: Page) {
-  const panel = page.locator('section[aria-labelledby="fit-assessment-heading"]');
-  const choices = panel.getByRole('combobox');
-  const count = await choices.count();
-  expect(count, 'five governed criteria plus one overall decision').toBe(6);
-  for (let index = 0; index < count - 1; index += 1)
-    await selectOption(page, choices.nth(index), 'Pass');
-  await selectOption(page, choices.nth(count - 1), 'Fit to bid');
-  await panel.getByLabel('Assessment rationale').fill(
-    'Commercial reviewer confirmed eligibility, capability, delivery, compliance, and commercials.');
-  await panel.getByRole('button', { name: 'Save fit assessment' }).click();
-  await expect(page.getByText('Fit assessment saved against this Lead revision.')).toBeVisible();
+  // The governed fit assessment is recorded by the one button, from the concern question. The
+  // question defaults to "No concerns", which records every governed criterion as passed with a
+  // human rationale; these fixtures raise none.
+  await expect(page.getByRole('button', { name: 'No concerns' })).toHaveAttribute('aria-pressed', 'true');
 }
 
 async function markAllBidThroughControls(page: Page) {
+  const groups = page.getByRole('group', { name: /Quote or skip line/ });
+  const count = await groups.count();
+  for (let index = 0; index < count; index += 1)
+    await groups.nth(index).getByRole('button', { name: 'Quote' }).click();
   await page.getByRole('spinbutton', { name: 'Quantity for line 00010' }).fill('25');
-  await page.getByRole('checkbox', { name: 'Select all rows' }).check();
-  await page.getByRole('button', { name: 'Mark Bid' }).click();
-  const warning = page.getByRole('dialog', { name: 'Acknowledge line warning' });
-  if (await warning.isVisible()) {
-    await warning.getByLabel('Human review note').fill(
-      'Reviewer checked source evidence and confirmed the corrected commercial values.');
-    await warning.getByRole('button', { name: 'Acknowledge and mark Bid' }).click();
-  }
-  await page.getByRole('button', { name: 'Clear selection' }).click();
+  // A line carrying a catalogue warning asks, inline, how the reviewer handled it.
+  const notes = page.getByRole('textbox', { name: /^How you handled it/ });
+  const noteCount = await notes.count();
+  for (let index = 0; index < noteCount; index += 1)
+    await notes.nth(index).fill('Reviewer checked source evidence and confirmed the corrected commercial values.');
 }
 
-async function chooseNoBidReason(page: Page, dialog: Locator, note: string) {
-  await selectOption(page, dialog.getByRole('combobox', { name: 'Governed reason' }), /.+/);
-  await dialog.getByLabel('Decision note (optional)').fill(note);
-  await dialog.getByRole('button', { name: 'Apply decision' }).click();
+async function skipLineThroughControls(page: Page, group: Locator) {
+  const label = (await group.getAttribute('aria-label'))!.replace('Quote or skip line ', '');
+  await group.getByRole('button', { name: 'Skip' }).click();
+  await selectOption(page, page.getByRole('combobox', { name: `Why skip line ${label}` }), /.+/);
 }
 
 async function uploadAndWaitForReconciliation(page: Page, file: string): Promise<string> {
@@ -127,50 +121,45 @@ async function uploadAndWaitForReconciliation(page: Page, file: string): Promise
 async function markPartNoBidThroughControls(page: Page, part: string) {
   const row = page.getByRole('row').filter({ hasText: part });
   await expect(row).toHaveCount(1);
-  await row.getByRole('checkbox').check();
-  await page.getByRole('button', { name: 'Mark No-bid…' }).click();
-  await chooseNoBidReason(page, page.getByRole('dialog', { name: /No-bid for 1 line/ }),
-    'This obsolete part is outside the approved commercial scope.');
+  await skipLineThroughControls(page, row.getByRole('group', { name: /Quote or skip line/ }));
 }
 
 async function markAllNoBidThroughControls(page: Page) {
-  await page.getByRole('checkbox', { name: 'Select all rows' }).check();
-  await page.getByRole('button', { name: 'Mark No-bid…' }).click();
-  await chooseNoBidReason(page, page.getByRole('dialog', { name: /No-bid for 6 lines/ }),
-    'Customer request is outside the approved commercial scope for this bid cycle.');
+  const groups = page.getByRole('group', { name: /Quote or skip line/ });
+  const count = await groups.count();
+  for (let index = 0; index < count; index += 1)
+    await skipLineThroughControls(page, groups.nth(index));
 }
 
 async function commitBidScopeAndPromote(page: Page, leadId: number, approved: number): Promise<number> {
-  await page.getByRole('button', { name: 'Commit participation' }).click();
-  const review = page.getByRole('dialog', { name: 'Commit participation scope' });
-  await expect(review.getByText(new RegExp(`committing ${approved} line`))).toBeVisible();
+  // One button. Behind it: the committed participation decision, then the RFQ promotion, each a
+  // governed write the boundary below still sees separately.
+  const create = page.getByRole('button', { name: 'Create RFQ' });
+  await expect(create).toBeEnabled();
   const commitResponsePromise = page.waitForResponse((response) =>
     response.request().method() === 'PUT'
     && response.url().endsWith(`/api/leads/${leadId}/participation`));
-  await review.getByRole('button', { name: 'Commit exact scope' }).click();
-  const commitResponse = await commitResponsePromise;
-  expect(commitResponse.ok(), await commitResponse.text()).toBeTruthy();
-  await expect(page.getByRole('heading', { name: 'RFQ promotion' })).toBeVisible();
   const promotionResponsePromise = page.waitForResponse((response) =>
     response.request().method() === 'POST'
     && response.url().endsWith(`/api/leads/${leadId}/promote-to-rfq`));
-  await page.getByRole('button', { name: `Promote ${approved} lines to RFQ` }).click();
+  await create.click();
+  const commitResponse = await commitResponsePromise;
+  expect(commitResponse.ok(), await commitResponse.text()).toBeTruthy();
   const promotionResponse = await promotionResponsePromise;
   expect(promotionResponse.ok(), await promotionResponse.text()).toBeTruthy();
   await expect(page).toHaveURL(/\/procurement\/rfqs\/view\/\d+$/);
   const rfqId = Number(page.url().split('/').at(-1));
   expect(rfqId).toBeGreaterThan(0);
-  await expect(page.getByText(`${approved} approved lines promoted to one RFQ.`)).toBeVisible();
+  await expect(page.getByText(new RegExp(`created with ${approved} lines\\.`))).toBeVisible();
   expect(await rfqCountForLead(page, await token(page), leadId)).toBe(1);
 
   // Re-enter through the operator route. The durable receipt replaces the creation action, and
   // the read-only RFQ count proves this visible replay cannot create a second formal RFQ.
   await page.goto(`/procurement/leads/${leadId}/workbench`);
-  await expect(page.getByText('Already promoted', { exact: true })).toBeVisible();
-  await expect(page.getByText(new RegExp(`promoted ${approved} approved line`))).toBeVisible();
-  await page.getByRole('tab', { name: '4. Promote' }).click();
-  await expect(page.getByRole('heading', { name: 'RFQ promotion' })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Promote .* to RFQ/ })).toHaveCount(0);
+  await expect(page.getByText(/^RFQ .+ created$/)).toBeVisible();
+  await expect(page.getByText(new RegExp(`${approved} of 6 lines carried over`))).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create RFQ' })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: /Quote or skip line/ })).toHaveCount(0);
   expect(await rfqCountForLead(page, await token(page), leadId)).toBe(1);
   return rfqId;
 }
@@ -202,12 +191,14 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     const draftResponsePromise = page.waitForResponse((response) =>
       response.request().method() === 'PUT'
       && response.url().endsWith(`/api/leads/${leadId}/participation`));
-    await page.getByRole('button', { name: 'Save draft for manager review' }).click();
+    await expect(page.getByRole('button', { name: 'Create RFQ' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Save for a manager' }).click();
     const draftRequest = await draftRequestPromise;
     const draftResponse = await draftResponsePromise;
     expect(draftResponse.ok(), await draftResponse.text()).toBeTruthy();
-    await expect(page.getByText('Stage 3 of 4 · Participation draft')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Commit participation' })).toBeDisabled();
+    await expect(page.getByText('Saved. A manager can create the RFQ from here.')).toBeVisible();
+    await expect(page.getByText(/^Saved as a draft/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create RFQ' })).toHaveCount(0);
 
     const draftPayload = draftRequest.postDataJSON() as Record<string, unknown>;
     const commitAttempt = await page.request.put(draftRequest.url(), {
@@ -243,7 +234,7 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await openFreshWorkbench(page, leadId);
     await saveFitThroughControls(page);
     await markAllNoBidThroughControls(page);
-    await page.getByRole('button', { name: 'Commit full no-bid' }).click();
+    await page.getByRole('button', { name: 'Decline request' }).click();
     const dialog = page.getByRole('dialog', { name: 'Commit full no-bid' });
     await selectOption(page, dialog.getByRole('combobox', { name: 'Full no-bid reason' }), /.+/);
     await dialog.getByLabel('Decision note (optional)').fill(
@@ -254,9 +245,10 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await dialog.getByRole('button', { name: 'Commit full no-bid' }).click();
     const commitResponse = await commitResponsePromise;
     expect(commitResponse.ok(), await commitResponse.text()).toBeTruthy();
-    await expect(page.getByText('Participation decision committed.')).toBeVisible();
-    await expect(page.getByText('Full no-bid committed', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Promote .* to RFQ/ })).toHaveCount(0);
+    await expect(page.getByText('Request declined and recorded.')).toBeVisible();
+    await expect(page.getByText('Request declined', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create RFQ' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Decline request' })).toHaveCount(0);
     expect(await rfqCountForLead(page, await token(page), leadId)).toBe(0);
   });
 
@@ -390,7 +382,7 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
       `/api/leads/${Number(values.E2E_GOLDEN_PARTIAL_BID_LEAD_ID)}/decision-workbench`);
     expect(assigned.ok(), await assigned.text()).toBeTruthy();
     await page.goto(`/procurement/leads/${values.E2E_GOLDEN_PARTIAL_BID_LEAD_ID}/workbench`);
-    await expect(page.getByText('Already promoted', { exact: true })).toBeVisible();
+    await expect(page.getByText(/^RFQ .+ created$/)).toBeVisible();
   });
 
   test('same-tenant restricted role is denied Quote Draft and PDF boundaries', async ({ page }) => {

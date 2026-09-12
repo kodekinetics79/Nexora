@@ -142,7 +142,7 @@ const OutstandingLeadsPage: React.FC = () => {
   // render would hand it a new type each time and remount the overlay for no reason.
   const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
     title: unassignedOnly ? 'Every accepted lead has an owner' : 'No outstanding leads',
-    message: 'Accepted Leads appear here until assigned. Fit and participation then happen in the Decision Workbench; only approved Bid lines are promoted into a formal RFQ.',
+    message: 'Accepted Leads appear here until assigned. The owner then chooses which lines to quote on the Decide screen; only quoted lines become the RFQ.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
     action: (
       <Button variant="contained" onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700 }}>

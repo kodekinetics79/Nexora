@@ -1,8 +1,12 @@
+import { alpha } from '@mui/material/styles';
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box, Typography, Paper, Button, Grid, Stack, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
   CircularProgress, Divider, Breadcrumbs, Link, Alert, ButtonBase,
@@ -17,6 +21,7 @@ import {
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
   OpenInNew as WorkspaceIcon,
+  ExpandMore as ExpandMoreIcon,
   TravelExplore as SourcingIcon,
   Close as CloseIcon,
   Inventory2 as InventoryIcon,
@@ -36,6 +41,7 @@ import lifecycleService from '../../../api/services/commercialLifecycleService';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 import procurementService from '../../../api/services/procurementService';
 import commercialLearningService from '../../../api/services/commercialLearningService';
+import NextStepPanel from '../../../components/common/NextStepPanel';
 import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
 import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
 import { formatMoney } from '../../../utils/currency';
@@ -241,8 +247,8 @@ const ViewRFQPage: React.FC = () => {
   // is advisory, and blocking a rep because advice failed to load is the same defect in a
   // different costume.
   const canPrepareQuote = intelligence?.commercialDecision !== 'NO_QUOTE_REVIEW';
-  const canOpenRecommendedAction = Boolean(intelligence?.nextBestAction.userOverrideAllowed &&
-    intelligence.nextBestAction.overrideAction.startsWith('/') && hasPermission('RFQ Management'));
+  const canOpenRecommendedAction = Boolean(intelligence?.nextBestAction?.userOverrideAllowed &&
+    intelligence.nextBestAction?.overrideAction?.startsWith('/') && hasPermission('RFQ Management'));
   const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));
   const offersByLine = new Map<number, number>();
   for (const offer of sourcingQuery.data?.offers ?? []) {
@@ -293,7 +299,7 @@ const ViewRFQPage: React.FC = () => {
   // The score is a heuristic rounded to two decimals by the server. Rendering "62.75%" claims a
   // precision the model does not have.
   const readinessPercent = intelligence ? Math.round(intelligence.readinessScore) : 0;
-  const primaryBlocker = intelligence?.nextBestAction.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
+  const primaryBlocker = intelligence?.nextBestAction?.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
   const readinessNarrative = intelligence && canPrepareQuote && intelligence.commercialDecision !== 'VIABLE_READY'
     ? 'Draft can start now. Resolve the highlighted commercial blockers before releasing it to the customer.'
     : primaryBlocker;
@@ -309,16 +315,84 @@ const ViewRFQPage: React.FC = () => {
     // distributor. Saying "every line has an evidence-backed fulfilment route" there would be
     // false, so the enabled-with-blockers case gets its own sentence: supply coverage is a
     // condition of quote RELEASE, not of starting one, and the reason now says exactly that.
-    : !canPrepareQuote ? intelligence.nextBestAction.explanation
+    : !canPrepareQuote ? (intelligence.nextBestAction?.explanation ?? 'A commercial review is outstanding.')
     : intelligence.commercialDecision === 'VIABLE_READY'
       ? 'Every line being quoted has an evidence-backed fulfilment route.'
-      : `You can start the quote now. ${intelligence.nextBestAction.explanation}`;
+      : `You can start the quote now. ${intelligence.nextBestAction?.explanation ?? ''}`.trim();
   // A deadline is overdue only if it is a real date. `new Date('0001-01-01') < new Date()` is
   // perfectly true, which is how a sentinel used to be coloured and presented as a passed
   // customer deadline — the leak utils/dates.ts exists to close.
   const deadline = parseDateSafe(rfq.bidClosingDate);
   const overdue = deadline !== null && deadline < new Date();
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
+  // What this RFQ is waiting for, in one sentence, from facts the page already holds.
+  // Order is the order a rep works: match the catalogue, cover the shortages, then quote.
+  // A failed or missing check is said as such; it is never read as "nothing is short".
+  const awards = sourcingQuery.data?.awards ?? [];
+  const solicitations = sourcingQuery.data?.solicitations ?? [];
+  const quoteDraft = sourcingQuery.data?.customerQuoteDraft ?? null;
+  const unresolvedCount = rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length;
+  const isAwarded = (lineId: number) => awards.some((a) => a.rfqItemId === lineId && ['APPROVED', 'SPLITAPPROVED'].includes((a.status ?? '').replaceAll('_', '').toUpperCase()));
+  const isAsked = (lineId: number) => solicitations.some((sol) => (sol.requestedRfqItemIds ?? []).includes(lineId));
+  const shortLines = [...sourcingLines.values()].filter((line) => line.shortfallQuantity > 0 && line.resolution !== 'INCOMING' && !isAwarded(line.id));
+  const shortNotAsked = shortLines.filter((line) => !line.sourcingCaseId || !isAsked(line.id));
+  const shortWithSuppliers = shortLines.filter((line) => line.sourcingCaseId && isAsked(line.id));
+  const canCreateQuote = hasPermission('Quotations', 'create');
+  const nextStep: { tone: 'info' | 'warning' | 'error' | 'success'; title: string; sentence: string; action?: React.ReactNode } | null =
+    sourcingQuery.isLoading || intelligenceQuery.isLoading
+      ? null
+      : sourcingQuery.isError
+        ? {
+            tone: 'error', title: 'Coverage is unknown',
+            sentence: 'Stock and supplier coverage could not be loaded, so this screen cannot say what is left to do. Try again before quoting.',
+            action: <Button variant="outlined" color="error" onClick={() => sourcingQuery.refetch()} sx={{ borderRadius: 2 }}>Try again</Button>,
+          }
+        : !sourcingQuery.isSuccess
+          ? null
+          : unresolvedCount > 0
+            ? {
+                tone: 'warning', title: 'Next step',
+                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} could not be matched to your catalogue. Use the product button on each line ("Resolve catalogue product" or "Change product") so stock and suppliers can be checked.${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
+                action: <Button variant="outlined" onClick={() => setLineFilter('unresolved')} sx={{ borderRadius: 2 }}>Show unmatched lines</Button>,
+              }
+            : shortNotAsked.length > 0
+              ? {
+                  tone: 'warning', title: 'Next step',
+                  sentence: `${shortNotAsked.length} of ${shortLines.length} short line${shortLines.length === 1 ? '' : 's'} ${shortNotAsked.length === 1 ? 'has' : 'have'} not been put to a supplier yet. Create a sourcing case on each to ask for a price.`,
+                  action: <Button variant="outlined" onClick={() => setLineFilter('sourcing')} sx={{ borderRadius: 2 }}>Show lines to source</Button>,
+                }
+              : shortWithSuppliers.length > 0
+                ? {
+                    tone: 'info', title: 'Next step',
+                    sentence: `${shortWithSuppliers.length} line${shortWithSuppliers.length === 1 ? ' is' : 's are'} with suppliers. Capture their replies and approve the best offer in the Sourcing workbench.`,
+                    action: hasPermission('Supplier History') ? <Button variant="outlined" startIcon={<WorkbenchIcon />} onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)} sx={{ borderRadius: 2 }}>Open Sourcing workbench</Button> : undefined,
+                  }
+                : quoteDraft
+                  ? {
+                      tone: 'success', title: 'Next step',
+                      sentence: `Quote ${quoteDraft.quoteNumber} exists for this RFQ. Open it to see where it stands and what it still needs.`,
+                      action: <Button variant="contained" startIcon={<QuoteDraftIcon />} onClick={() => navigate(`/sales/quotes/view/${quoteDraft.quoteId}`)} sx={{ fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap' }}>Open quote {quoteDraft.quoteNumber}</Button>,
+                    }
+                  : !canPrepareQuote
+                    ? {
+                        tone: 'error', title: 'This RFQ cannot be quoted yet',
+                        sentence: intelligence?.nextBestAction?.explanation ?? prepareQuoteReason ?? 'A commercial review is outstanding.',
+                      }
+                    : !intelligence
+                      ? {
+                          tone: 'info', title: 'Next step',
+                          sentence: canCreateQuote
+                            ? 'Every line is covered from stock or an approved offer. Commercial readiness could not be checked; you can start the draft and the server rechecks every gate before release.'
+                            : 'Every line is covered. Ask someone with quoting rights to prepare the quote draft.',
+                        }
+                      : {
+                          tone: 'info', title: 'Next step',
+                          sentence: canCreateQuote
+                            ? (intelligence.commercialDecision === 'VIABLE_READY'
+                              ? 'Every line has a route: stock or an approved supplier offer. Prepare the quote draft.'
+                              : `Every line is covered. Prepare the quote draft; the remaining commercial checks happen on the quote. ${intelligence.nextBestAction?.explanation ?? ''}`.trim())
+                            : 'Every line is covered. Ask someone with quoting rights to prepare the quote draft.',
+                        };
 
   return (
     <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
@@ -335,7 +409,7 @@ const ViewRFQPage: React.FC = () => {
 
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, gap: 2, flexDirection: { xs: 'column', lg: 'row' } }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', minWidth: 0 }}>
-            <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: 0, whiteSpace: 'nowrap' }}>
+            <Typography variant="h4" sx={{ fontWeight: 800, color: 'text.primary', letterSpacing: 0, whiteSpace: 'nowrap' }}>
               {rfq.rfqno}
             </Typography>
             {rfq.nexoraSerial ? (
@@ -363,44 +437,7 @@ const ViewRFQPage: React.FC = () => {
               sx={{ fontWeight: 900, fontSize: '0.65rem', textTransform: 'uppercase' }}
             />
           </Box>
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { lg: 'sticky' }, top: 8, zIndex: 2 }}>
-            {rfq.commercialCaseId && (
-              <Button
-                variant="outlined"
-                startIcon={<WorkspaceIcon />}
-                onClick={() => navigate(`/commercial-cases/${rfq.commercialCaseId}`)}
-                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-              >
-                Workspace
-              </Button>
-            )}
-            {/*
-              The sourcing workbench for THIS RFQ had no door on this page. It was reachable only
-              by creating a sourcing case from one line, or through a server-supplied
-              "Open recommended action" whose label never said where it went — so the sourcing step
-              of the journey was, in navigation terms, undiscoverable from the RFQ it belongs to.
-            */}
-            {hasPermission('Supplier History') && (
-              <Button
-                variant="outlined"
-                startIcon={<WorkbenchIcon />}
-                onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)}
-                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-              >
-                Sourcing
-              </Button>
-            )}
-            {hasPermission('Quotations') && (
-              <Button
-                variant="outlined"
-                startIcon={<PricingIcon />}
-                onClick={() => navigate(`/procurement/rfqs/${rfq.id}/pricing`)}
-                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-              >
-                Smart Pricing
-              </Button>
-            )}
-            {hasPermission('RFQ Management', 'edit') && <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />}
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { lg: 'sticky' }, top: 8, zIndex: 2, p: 0.75, borderRadius: 2, bgcolor: (t) => alpha(t.palette.background.default, 0.72), backdropFilter: 'blur(10px)' }}>
             <Button
               variant="outlined"
               startIcon={<BackIcon />}
@@ -409,6 +446,49 @@ const ViewRFQPage: React.FC = () => {
             >
               Back
             </Button>
+            {rfq.commercialCaseId && (
+              <Tooltip title="The whole case for this customer request: lead, RFQ, quote and order in one place." describeChild>
+                <Button
+                  variant="outlined"
+                  startIcon={<WorkspaceIcon />}
+                  onClick={() => navigate(`/commercial-cases/${rfq.commercialCaseId}`)}
+                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+                >
+                  Workspace
+                </Button>
+              </Tooltip>
+            )}
+            {/*
+              The sourcing workbench for THIS RFQ had no door on this page. It was reachable only
+              by creating a sourcing case from one line, or through a server-supplied
+              "Open recommended action" whose label never said where it went — so the sourcing step
+              of the journey was, in navigation terms, undiscoverable from the RFQ it belongs to.
+            */}
+            {hasPermission('Supplier History') && (
+              <Tooltip title="Ask suppliers for prices on the short lines, capture their replies and approve the best offer." describeChild>
+                <Button
+                  variant="outlined"
+                  startIcon={<WorkbenchIcon />}
+                  onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)}
+                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+                >
+                  Sourcing
+                </Button>
+              </Tooltip>
+            )}
+            {hasPermission('Quotations') && (
+              <Tooltip title="Suggested sell prices from your history and the customer's targets." describeChild>
+                <Button
+                  variant="outlined"
+                  startIcon={<PricingIcon />}
+                  onClick={() => navigate(`/procurement/rfqs/${rfq.id}/pricing`)}
+                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+                >
+                  Smart Pricing
+                </Button>
+              </Tooltip>
+            )}
+            {hasPermission('RFQ Management', 'edit') && <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />}
             {hasPermission('Quotations', 'create') && (
               // A disabled button wrapped in a Tooltip needs a focusable element between them,
               // otherwise the reason is unreachable by pointer and by keyboard alike.
@@ -435,7 +515,7 @@ const ViewRFQPage: React.FC = () => {
             )}
           </Stack>
         </Box>
-        <Paper sx={{ mt: 2, p: 2, borderRadius: 1, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
+        <Paper sx={{ mt: 2, p: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
           <Grid container spacing={2} sx={{ alignItems: 'center' }}>
             <Grid size={{ xs: 12, md: 3 }}><DataField label="Customer / contact" value={`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`} /></Grid>
             <Grid size={{ xs: 6, md: 2 }}><DataField label="Account Owner" value={rfq.accountOwnerName || 'Unassigned'} /></Grid>
@@ -450,156 +530,60 @@ const ViewRFQPage: React.FC = () => {
             </Grid>
           </Grid>
         </Paper>
-      </Box>
-
-      <CommercialProcessingEvidence resource="rfqs" id={rfq.id} />
-
-      <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center', flexWrap: 'wrap' }}>
-        {/* Clicking a tile silently swapped the table contents with no indication of which filter
-            was applied and no labelled way back. The live region announces the change for a
-            screen reader; the same sentence is the visible half, with a labelled reset beside
-            it — the Total tile was the only way back and is not labelled as one. */}
-        <Typography variant="caption" role="status" aria-live="polite" sx={{ fontWeight: 700, color: 'text.secondary' }}>
-          {lineFilter === 'all'
-            ? `Showing all ${rfq.rfqitems.length} line${rfq.rfqitems.length === 1 ? '' : 's'}`
-            : `Showing ${visibleItems.length} of ${rfq.rfqitems.length} lines · ${summary.find((tile) => tile.key === lineFilter)?.label ?? statusLabel(lineFilter)}`}
-        </Typography>
-        {lineFilter !== 'all' && (
-          <Button size="small" variant="text" onClick={() => setLineFilter('all')} sx={{ fontWeight: 700 }}>
-            Show all lines
-          </Button>
+        {nextStep && (
+          <Box sx={{ mt: 2 }}>
+            <NextStepPanel tone={nextStep.tone} title={nextStep.title} sentence={nextStep.sentence} action={nextStep.action} testId="rfq-next-step" />
+          </Box>
         )}
-      </Stack>
-
-      <Grid container spacing={1.5} sx={{ mb: 3 }}>
-        {summary.map((item) => (
-          <Grid key={item.key} size={{ xs: 6, sm: 4, md: 3, xl: 1.5 }}>
-            <ButtonBase onClick={() => setLineFilter(item.key)} sx={{ width: '100%', textAlign: 'left', borderRadius: 1 }} aria-pressed={lineFilter === item.key}>
-              <Paper sx={{ width: '100%', minHeight: 88, p: 1.5, borderRadius: 1, border: '1px solid', borderColor: lineFilter === item.key ? 'primary.main' : 'divider', bgcolor: lineFilter === item.key ? 'action.selected' : 'background.paper' }}>
-                <Stack direction="row" sx={{ justifyContent: 'space-between', color: 'text.secondary' }}>{item.icon}<Typography variant="h6" sx={{ fontWeight: 900, fontVariantNumeric: 'tabular-nums' }}>{item.value}</Typography></Stack>
-                <Typography variant="caption" sx={{ fontWeight: 700 }}>{item.label}</Typography>
-              </Paper>
-            </ButtonBase>
-          </Grid>
-        ))}
-      </Grid>
+      </Box>
 
       <Grid container spacing={3}>
         {/* RFQ Details */}
-        <Grid size={{ xs: 12, lg: 9 }}>
+        <Grid size={{ xs: 12 }}>
           <Stack spacing={3}>
-            {/* General Info */}
-            <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
-                <Typography sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em' }}>
-                  General Information
-                </Typography>
-              </Box>
-              <Grid container spacing={2}>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Current Lead revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}>
-                  {rfq.leadId && commercialAccess.canViewLeadEvidence ? (
-                    <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>
-                      Open Canonical Lead
-                    </Button>
-                  ) : null}
-                </Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName || 'N/A'} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
-                
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDateSafe(rfq.recDate)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDateSafe(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ Type" value={rfq.rfqtype || 'Agreement'} /></Grid>
-
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Created On" value={formatDateSafe(rfq.createdDate)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName || null} /></Grid>
-              </Grid>
-
-              {rfq.headerRemarks && (
-                <Box sx={{ mt: 2 }}>
-                  <Divider sx={{ mb: 2 }} />
-                  <DataField label="Header Remarks" value={rfq.headerRemarks} bold={false} />
-                </Box>
+            {/* THE WORK FIRST. A rep opens an RFQ to act on its lines; the tiles are the
+                table's filter, so they sit with it. Everything explanatory folds below. */}
+            <Box>
+            <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+              {/* Clicking a tile silently swapped the table contents with no indication of which filter
+                  was applied and no labelled way back. The live region announces the change for a
+                  screen reader; the same sentence is the visible half, with a labelled reset beside
+                  it — the Total tile was the only way back and is not labelled as one. */}
+              <Typography variant="caption" role="status" aria-live="polite" sx={{ fontWeight: 700, color: 'text.secondary' }}>
+                {lineFilter === 'all'
+                  ? `Showing all ${rfq.rfqitems.length} line${rfq.rfqitems.length === 1 ? '' : 's'}`
+                  : `Showing ${visibleItems.length} of ${rfq.rfqitems.length} lines · ${summary.find((tile) => tile.key === lineFilter)?.label ?? statusLabel(lineFilter)}`}
+              </Typography>
+              {lineFilter !== 'all' && (
+                <Button size="small" variant="text" onClick={() => setLineFilter('all')} sx={{ fontWeight: 700 }}>
+                  Show all lines
+                </Button>
               )}
-            </Paper>
+            </Stack>
 
-            <Paper component="section" aria-labelledby="customer-request-terms-heading" sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
-              <Typography id="customer-request-terms-heading" component="h2" sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em', mb: 0.5 }}>
-                Customer request terms
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
-                Read-only values preserved from the immutable Lead revision used to create this RFQ.
-              </Typography>
-              <Grid container spacing={2}>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer RFQ reference" value={rfq.customerRfqReference ?? null} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Required delivery date" value={formatDateSafe(rfq.requiredDeliveryDate ?? null)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Delivery location" value={rfq.deliveryLocation ?? null} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Agreement reference" value={rfq.agreementReference ?? null} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Closing date (Hijri)" value={rfq.bidClosingDateHijri ?? null} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Inquiry type" value={rfq.inquiryType ?? null} /></Grid>
-              </Grid>
-            </Paper>
+            <Grid container spacing={1.5} sx={{ mb: 3 }}>
+              {summary.map((item) => (
+                <Grid key={item.key} size={{ xs: 6, sm: 4, md: 3, xl: 1.5 }}>
+                  <ButtonBase onClick={() => setLineFilter(item.key)} sx={{ width: '100%', textAlign: 'left', borderRadius: 1 }} aria-pressed={lineFilter === item.key}>
+                    <Paper sx={{ width: '100%', minHeight: 88, p: 1.5, borderRadius: 1, border: '1px solid', borderColor: lineFilter === item.key ? 'primary.main' : 'divider', bgcolor: lineFilter === item.key ? 'action.selected' : 'background.paper' }}>
+                      <Stack direction="row" sx={{ justifyContent: 'space-between', color: 'text.secondary' }}>{item.icon}<Typography variant="h6" sx={{ fontWeight: 900, fontVariantNumeric: 'tabular-nums' }}>{item.value}</Typography></Stack>
+                      <Typography variant="caption" sx={{ fontWeight: 700 }}>{item.label}</Typography>
+                    </Paper>
+                  </ButtonBase>
+                </Grid>
+              ))}
+            </Grid>
 
-            <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="rfq" recordId={rfq.id} /></Box>
-
-            {intelligenceQuery.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => intelligenceQuery.refetch()}>Retry</Button>}>Commercial intelligence could not be reconciled.</Alert>}
-            {intelligence && <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 1 }}>
-              <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', mb: 2 }}>
-                <Box>
-                  <Typography sx={{ fontWeight: 900 }}>Opportunity Digital Twin</Typography>
-                  <Typography variant="body2" color="text.secondary">{intelligence.nextBestAction.label}</Typography>
-                  <Typography variant="caption" color="text.secondary">Confidence {Math.round(intelligence.nextBestAction.confidence * 100)}% · {intelligence.digitalTwin.validity}</Typography>
-                </Box>
-                {canOpenRecommendedAction && <Button variant="outlined" onClick={() => navigate(intelligence.nextBestAction.overrideAction)}>Open recommended action</Button>}
-              </Stack>
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(4, 1fr)' }, gap: 1.5 }}>
-                {intelligence.digitalTwin.scenarios.map((scenario) => <Box key={scenario.code} sx={{ border: '1px solid', borderColor: 'divider', p: 1.5, minHeight: 132 }}>
-                  <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'center' }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{scenario.label}</Typography><Chip size="small" icon={scenario.eligible ? <ApproveIcon /> : <BlockerIcon />} color={scenario.eligible ? 'success' : 'default'} label={scenario.eligible ? 'Eligible' : 'Evidence needed'} /></Stack>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{scenario.explanation}</Typography>
-                  {scenario.estimatedLandedCost != null && <Typography variant="body2" sx={{ mt: 1, fontWeight: 800 }}>Landed total {formatScenarioMoney(scenario.estimatedLandedCost, scenario.currencyCode)} · {scenario.estimatedLeadTimeDays ?? '—'} days</Typography>}
-                  <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 700 }}>Risk {statusLabel(scenario.riskBand)} · Confidence {Math.round(scenario.confidence * 100)}%</Typography>
-                  {scenario.validUntil && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Valid to {formatDateSafe(scenario.validUntil)}</Typography>}
-                  {scenario.quantities.length > 0 && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Stock {scenario.quantities.reduce((sum, line) => sum + line.immediateStockQuantity, 0)} · Supplier {scenario.quantities.reduce((sum, line) => sum + line.supplierQuantity, 0)}</Typography>}
-                  <Box component="details" sx={{ mt: 1 }}>
-                    <Typography component="summary" variant="caption" sx={{ fontWeight: 800, cursor: 'pointer' }}>Evidence and assumptions</Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>{scenario.riskExplanation}</Typography>
-                    {scenario.costSources.map((source, index) => <Typography key={`${source.sourceType}-${index}`} variant="caption" sx={{ display: 'block' }}>{source.label}: {source.amount != null ? formatScenarioMoney(source.amount, scenario.currencyCode) : statusLabel(source.status)}</Typography>)}
-                    {scenario.assumptions.map((assumption) => <Typography key={assumption} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Assumption: {assumption}</Typography>)}
-                    {scenario.approvalRequirements.map((approval) => <Typography key={approval} variant="caption" color="warning.main" sx={{ display: 'block' }}>Approval: {approval}</Typography>)}
-                    {scenario.evidence.map((item) => <Typography key={`${item.recordType}-${item.recordId}-${item.role}`} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Evidence: {item.reference}</Typography>)}
-                  </Box>
-                </Box>)}
-              </Box>
-              <Divider sx={{ my: 2 }} />
-              <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} sx={{ justifyContent: 'space-between' }}>
-                <Box>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Predictive pricing · shadow mode</Typography>
-                  <Typography variant="caption" color="text.secondary">{intelligence.digitalTwin.backtest.cohort}</Typography>
-                  <Typography variant="body2" sx={{ mt: 0.5 }}>{intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').length} of {intelligence.digitalTwin.predictivePricing.length} lines have sufficient order-backed evidence.</Typography>
-                  {intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').map((line) => <Box key={line.rfqItemId} sx={{ mt: 1 }}>
-                    <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }}>Line {line.rfqItemId}: {line.recommendedUnitPrice != null ? formatScenarioMoney(line.recommendedUnitPrice, line.currencyCode) : 'withheld'} · {line.customerOrderSampleSize} order outcomes</Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Winning range {line.winningRangeLow != null && line.winningRangeHigh != null ? `${formatScenarioMoney(line.winningRangeLow, line.currencyCode)} to ${formatScenarioMoney(line.winningRangeHigh, line.currencyCode)}` : 'insufficient'} · walk-forward MAPE {line.backtestMeanAbsolutePercentError != null ? `${line.backtestMeanAbsolutePercentError}% (${line.backtestHoldoutCount} holdouts)` : 'not measured'} · decided-cohort conversion baseline {line.cohortConversionBaseline != null ? `${Math.round(line.cohortConversionBaseline * 100)}%` : 'withheld'}</Typography>
-                  </Box>)}
-                </Box>
-                <Box>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Customer target bridge</Typography>
-                  <Typography variant="body2">{intelligence.digitalTwin.customerTargetBridges.filter(bridge => bridge.status === 'VERIFIED_SOURCING_DECISION').length} verified · {intelligence.digitalTwin.customerTargetBridges.filter(bridge => bridge.status !== 'VERIFIED_SOURCING_DECISION').length} need attention</Typography>
-                  <Typography variant="caption" color="text.secondary">Margins and maximum Supplier costs are never inferred without a persisted decision.</Typography>
-                </Box>
-              </Stack>
-            </Paper>}
-
+            </Box>
             {/* Line Items */}
             <Paper sx={{ borderRadius: 1, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-              <Box sx={{ p: 2.5, bgcolor: '#fafafa', borderBottom: '1px solid', borderColor: 'divider' }}>
-                <Typography sx={{ fontWeight: 950, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
+              <Box sx={{ p: 2.5, bgcolor: 'action.hover', borderBottom: '1px solid', borderColor: 'divider' }}>
+                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
                   RFQ Lines ({rfq.rfqitems.length})
                 </Typography>
               </Box>
               <Box sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 1100 }}>
-                <TableHead sx={{ bgcolor: '#fcfcfc' }}>
+                <TableHead sx={{ bgcolor: 'action.hover' }}>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>#</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Product / Description</TableCell>
@@ -693,7 +677,7 @@ const ViewRFQPage: React.FC = () => {
                       </TableCell>
                       <TableCell>
                         <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id) ? statusLabel(sourcingLines.get(item.id)!.resolution) : 'Checking'}</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>ATP {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Available {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
                       </TableCell>
                       <TableCell><Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}><Chip size="small" icon={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? <ApproveIcon /> : <UndecidedIcon />} label={`${intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0}/${offersByLine.get(item.id) ?? 0} eligible`} color={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? 'success' : 'default'} />{(intelligenceLines.get(item.id)?.bidQualityFlags.length ?? 0) > 0 && <Typography variant="caption" color="warning.main">{intelligenceLines.get(item.id)?.bidQualityFlags.length} quality finding(s)</Typography>}</Stack></TableCell>
                       <TableCell>
@@ -715,7 +699,27 @@ const ViewRFQPage: React.FC = () => {
                           if (sourcingQuery.isError || !sourcingLine) {
                             return <Typography variant="caption" color="error.main">Inventory check unavailable</Typography>;
                           }
+                          // "Use company inventory" was printed for every covered line, including one whose
+                          // shortfall a supplier award now covers. A rep reading that on a line with 52 units
+                          // coming from a supplier would ship from stock they do not have. Awarded units are
+                          // named, and the case that holds them stays one click away.
+                          const awardedQuantity = (sourcingQuery.data?.awards ?? [])
+                            .filter((award) => award.rfqItemId === item.id && ['APPROVED', 'SPLIT_APPROVED'].includes(award.status))
+                            .reduce((sum, award) => sum + award.quantity, 0);
                           if (sourcingLine.shortfallQuantity <= 0 || sourcingLine.resolution === 'IN_STOCK') {
+                            if (awardedQuantity > 0) {
+                              return (
+                                <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
+                                  <Chip size="small" icon={<ApproveIcon />} color="success" variant="outlined"
+                                    label={`Covered: ${Math.max(0, sourcingLine.requestedQuantity - awardedQuantity)} from stock + ${awardedQuantity} awarded to a supplier`} />
+                                  {sourcingLine.sourcingCaseId && (
+                                    <Button size="small" variant="text" startIcon={<SourcingIcon />} onClick={() => navigate(`/procurement/sourcing-cases/${sourcingLine.sourcingCaseId}`)}>
+                                      Open Sourcing Case
+                                    </Button>
+                                  )}
+                                </Stack>
+                              );
+                            }
                             return <Chip size="small" icon={<InventoryIcon />} color="success" variant="outlined" label="Use company inventory" />;
                           }
                           return (
@@ -729,7 +733,12 @@ const ViewRFQPage: React.FC = () => {
                                   variant="contained"
                                   startIcon={<SourcingIcon />}
                                   disabled={sourcingCaseMutation.isPending}
-                                  onClick={() => sourcingCaseMutation.mutate(item.id)}
+                                  // A button labelled "Open" used to call create-or-open, which the server
+                                  // refuses once the line is covered — so "Open" could fail on a case that
+                                  // exists. An existing case is opened directly; only a missing one is created.
+                                  onClick={() => sourcingLine.sourcingCaseId
+                                    ? navigate(`/procurement/sourcing-cases/${sourcingLine.sourcingCaseId}`)
+                                    : sourcingCaseMutation.mutate(item.id)}
                                 >
                                   {sourcingLine.sourcingCaseId ? 'Open Sourcing Case' : 'Create / Open Sourcing Case'}
                                 </Button>
@@ -756,7 +765,7 @@ const ViewRFQPage: React.FC = () => {
                   )}
                 </TableBody>
               </Table></Box>
-              <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', bgcolor: '#fafafa' }}>
+              <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', bgcolor: 'action.hover' }}>
                 <Stack direction="row" spacing={4}>
                    <Box sx={{ textAlign: 'right' }}>
                       <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total lines</Typography>
@@ -769,14 +778,160 @@ const ViewRFQPage: React.FC = () => {
                 </Stack>
               </Box>
             </Paper>
+
+            {/* Explanations and details keep every field and control they had; they are
+                folded so the page reads top-down: lines, then how to fulfil them, then the
+                record behind them. Nothing here is a different screen. */}
+            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                <Box>
+                  <Typography sx={{ fontWeight: 900 }}>Ways to fulfil this request</Typography>
+                  <Typography variant="body2" color="text.secondary">{intelligence?.nextBestAction.label ?? 'Stock, supplier and split options with their evidence.'}</Typography>
+                </Box>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Stack spacing={2}>
+                {intelligenceQuery.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => intelligenceQuery.refetch()}>Retry</Button>}>Commercial intelligence could not be reconciled.</Alert>}
+                {intelligence && <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 1 }}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', mb: 2 }}>
+                    <Box>
+                      <Typography sx={{ fontWeight: 900 }}>Opportunity Digital Twin</Typography>
+                      <Typography variant="body2" color="text.secondary">{intelligence.nextBestAction.label}</Typography>
+                      <Typography variant="caption" color="text.secondary">Confidence {Math.round(intelligence.nextBestAction.confidence * 100)}% · {intelligence.digitalTwin.validity}</Typography>
+                    </Box>
+                    {canOpenRecommendedAction && <Button variant="outlined" onClick={() => navigate(intelligence.nextBestAction.overrideAction)}>Open recommended action</Button>}
+                  </Stack>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(4, 1fr)' }, gap: 1.5 }}>
+                    {intelligence.digitalTwin.scenarios.map((scenario) => <Box key={scenario.code} sx={{ border: '1px solid', borderColor: 'divider', p: 1.5, minHeight: 132 }}>
+                      <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'center' }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{scenario.label}</Typography><Chip size="small" icon={scenario.eligible ? <ApproveIcon /> : <BlockerIcon />} color={scenario.eligible ? 'success' : 'default'} label={scenario.eligible ? 'Eligible' : 'Evidence needed'} /></Stack>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{scenario.explanation}</Typography>
+                      {scenario.estimatedLandedCost != null && <Typography variant="body2" sx={{ mt: 1, fontWeight: 800 }}>Landed total {formatScenarioMoney(scenario.estimatedLandedCost, scenario.currencyCode)} · {scenario.estimatedLeadTimeDays ?? '—'} days</Typography>}
+                      <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 700 }}>Risk {statusLabel(scenario.riskBand)} · Confidence {Math.round(scenario.confidence * 100)}%</Typography>
+                      {scenario.validUntil && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Valid to {formatDateSafe(scenario.validUntil)}</Typography>}
+                      {scenario.quantities.length > 0 && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Stock {scenario.quantities.reduce((sum, line) => sum + line.immediateStockQuantity, 0)} · Supplier {scenario.quantities.reduce((sum, line) => sum + line.supplierQuantity, 0)}</Typography>}
+                      <Box component="details" sx={{ mt: 1 }}>
+                        <Typography component="summary" variant="caption" sx={{ fontWeight: 800, cursor: 'pointer' }}>Evidence and assumptions</Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>{scenario.riskExplanation}</Typography>
+                        {scenario.costSources.map((source, index) => <Typography key={`${source.sourceType}-${index}`} variant="caption" sx={{ display: 'block' }}>{source.label}: {source.amount != null ? formatScenarioMoney(source.amount, scenario.currencyCode) : statusLabel(source.status)}</Typography>)}
+                        {scenario.assumptions.map((assumption) => <Typography key={assumption} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Assumption: {assumption}</Typography>)}
+                        {scenario.approvalRequirements.map((approval) => <Typography key={approval} variant="caption" color="warning.main" sx={{ display: 'block' }}>Approval: {approval}</Typography>)}
+                        {scenario.evidence.map((item) => <Typography key={`${item.recordType}-${item.recordId}-${item.role}`} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Evidence: {item.reference}</Typography>)}
+                      </Box>
+                    </Box>)}
+                  </Box>
+                  <Divider sx={{ my: 2 }} />
+                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} sx={{ justifyContent: 'space-between' }}>
+                    <Box>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Predictive pricing · shadow mode</Typography>
+                      <Typography variant="caption" color="text.secondary">{intelligence.digitalTwin.backtest.cohort}</Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>{intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').length} of {intelligence.digitalTwin.predictivePricing.length} lines have sufficient order-backed evidence.</Typography>
+                      {intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').map((line) => <Box key={line.rfqItemId} sx={{ mt: 1 }}>
+                        <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }}>Line {line.rfqItemId}: {line.recommendedUnitPrice != null ? formatScenarioMoney(line.recommendedUnitPrice, line.currencyCode) : 'withheld'} · {line.customerOrderSampleSize} order outcomes</Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Winning range {line.winningRangeLow != null && line.winningRangeHigh != null ? `${formatScenarioMoney(line.winningRangeLow, line.currencyCode)} to ${formatScenarioMoney(line.winningRangeHigh, line.currencyCode)}` : 'insufficient'} · walk-forward MAPE {line.backtestMeanAbsolutePercentError != null ? `${line.backtestMeanAbsolutePercentError}% (${line.backtestHoldoutCount} holdouts)` : 'not measured'} · decided-cohort conversion baseline {line.cohortConversionBaseline != null ? `${Math.round(line.cohortConversionBaseline * 100)}%` : 'withheld'}</Typography>
+                      </Box>)}
+                    </Box>
+                    <Box>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Customer target bridge</Typography>
+                      <Typography variant="body2">{intelligence.digitalTwin.customerTargetBridges.filter(bridge => bridge.status === 'VERIFIED_SOURCING_DECISION').length} verified · {intelligence.digitalTwin.customerTargetBridges.filter(bridge => bridge.status !== 'VERIFIED_SOURCING_DECISION').length} need attention</Typography>
+                      <Typography variant="caption" color="text.secondary">Margins and maximum Supplier costs are never inferred without a persisted decision.</Typography>
+                    </Box>
+                  </Stack>
+                </Paper>}
+
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
+            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                <Box>
+                  <Typography sx={{ fontWeight: 900 }}>Line intelligence and processing evidence</Typography>
+                  <Typography variant="body2" color="text.secondary">What was checked in stock and sourcing for each line, and how the request was read.</Typography>
+                </Box>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Stack spacing={2}>
+                <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="rfq" recordId={rfq.id} /></Box>
+
+                  <CommercialProcessingEvidence resource="rfqs" id={rfq.id} />
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
+            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                <Box>
+                  <Typography sx={{ fontWeight: 900 }}>Request details</Typography>
+                  <Typography variant="body2" color="text.secondary">Who asked, when, and the terms preserved from their document.</Typography>
+                </Box>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Stack spacing={3}>
+                {/* General Info */}
+                <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
+                    <Typography sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em' }}>
+                      General Information
+                    </Typography>
+                  </Box>
+                  <Grid container spacing={2}>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Current Lead revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}>
+                      {rfq.leadId && commercialAccess.canViewLeadEvidence ? (
+                        <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>
+                          Open Canonical Lead
+                        </Button>
+                      ) : null}
+                    </Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName || 'N/A'} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
+                
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDateSafe(rfq.recDate)} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDateSafe(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ Type" value={rfq.rfqtype || 'Agreement'} /></Grid>
+
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Created On" value={formatDateSafe(rfq.createdDate)} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName || null} /></Grid>
+                  </Grid>
+
+                  {rfq.headerRemarks && (
+                    <Box sx={{ mt: 2 }}>
+                      <Divider sx={{ mb: 2 }} />
+                      <DataField label="Header Remarks" value={rfq.headerRemarks} bold={false} />
+                    </Box>
+                  )}
+                </Paper>
+
+                <Paper component="section" aria-labelledby="customer-request-terms-heading" sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
+                  <Typography id="customer-request-terms-heading" component="h2" sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em', mb: 0.5 }}>
+                    Customer request terms
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
+                    Read-only values preserved from the immutable Lead revision used to create this RFQ.
+                  </Typography>
+                  <Grid container spacing={2}>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer RFQ reference" value={rfq.customerRfqReference ?? null} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Required delivery date" value={formatDateSafe(rfq.requiredDeliveryDate ?? null)} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Delivery location" value={rfq.deliveryLocation ?? null} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Agreement reference" value={rfq.agreementReference ?? null} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Closing date (Hijri)" value={rfq.bidClosingDateHijri ?? null} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Inquiry type" value={rfq.inquiryType ?? null} /></Grid>
+                  </Grid>
+                </Paper>
+
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
           </Stack>
         </Grid>
 
-        {/* Sidebar */}
-        <Grid size={{ xs: 12, lg: 3 }}>
-          <Stack spacing={3}>
+        {/* Record lineage and history: kept whole, placed after the work rather than beside it
+            so the line table has the full width a nine-column table needs. */}
+        <Grid size={{ xs: 12 }}>
+          <Grid container spacing={3}>
+            <Grid size={{ xs: 12, md: 6 }}>
             {/* Immutable Lead-to-RFQ lineage; no participation is editable after promotion. */}
-            <Paper component="section" aria-labelledby="promotion-lineage-heading" sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'primary.lighter' }}>
+            <Paper component="section" aria-labelledby="promotion-lineage-heading" sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: (t) => alpha(t.palette.primary.main, t.palette.mode === 'dark' ? 0.14 : 0.06) }}>
                 <Typography variant="caption" sx={{ fontWeight: 900, color: 'primary.main', textTransform: 'uppercase', mb: 1, display: 'block' }}>
                   RFQ promotion lineage
                 </Typography>
@@ -813,7 +968,8 @@ const ViewRFQPage: React.FC = () => {
                   </Button>
                 ) : null}
             </Paper>
-
+            </Grid>
+            <Grid size={{ xs: 12, md: 6 }}>
             {/* Audit / Timeline */}
             <Paper sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
@@ -838,7 +994,8 @@ const ViewRFQPage: React.FC = () => {
                   ))}
                </Stack>
             </Paper>
-          </Stack>
+            </Grid>
+          </Grid>
         </Grid>
       </Grid>
 

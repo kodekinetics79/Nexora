@@ -356,8 +356,8 @@ test('S3 unknown part numbers produce a Lead whose lines are UnknownProduct and 
 
   await page.goto(`/procurement/leads/view/${leadId}`);
   await expect(page.getByText('Unknown product').first()).toBeVisible();
-  // The workbench opens on its Evidence stage; the line grid (with the part numbers) is the
-  // Validate stage.
+  // The decision screen lists every line, part number included, on its one page; the old
+  // `stage=validate` address still lands there.
   await page.goto(`/procurement/leads/${leadId}/workbench?stage=validate`);
   const partOnScreen = page.getByText(`SCN-UNK-${nonce}-1`).first();
   if (!(await partOnScreen.isVisible().catch(() => false))) {

@@ -32,6 +32,7 @@ import { toast } from "react-hot-toast";
 import procurementService, {
   type SourcingCaseCandidate,
 } from "../../../api/services/procurementService";
+import NextStepPanel from "../../../components/common/NextStepPanel";
 import { useAuth } from "../../../context/AuthContext";
 import { statusLabel } from "../../../utils/statusLabels";
 
@@ -109,6 +110,13 @@ function SourcingCasePage() {
   // Same wording pattern as the "cannot prepare Supplier RFQs" notice below: a disabled control
   // says which of its two gates is shut, so the reader knows whether to ask for a permission or
   // simply that the step has passed.
+  const whyNoPrepare = !(hasPermission("RFQ Management", "edit") && hasPermission("Supplier History", "create"))
+    ? "Your role can review candidates but cannot prepare Supplier RFQs."
+    : outreachAlreadySent
+      ? "Supplier RFQs have already been sent for this case. Capture the replies in the sourcing workbench."
+      : selectedSupplierIds.length === 0
+        ? "Tick the suppliers you want to ask."
+        : null;
   const whyNoRefresh = !hasPermission("Supplier History", "edit")
     ? "Your role can review candidates but cannot refresh them."
     : candidatesFrozen
@@ -210,8 +218,8 @@ function SourcingCasePage() {
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: "auto" }}>
       <Stack direction={{ xs: "column", md: "row" }} spacing={2} sx={{ justifyContent: "space-between", mb: 3 }}>
         <Stack direction="row" spacing={1.5} sx={{ alignItems: "flex-start" }}>
-          <Button variant="outlined" aria-label="Back to Customer RFQs" onClick={() => navigate("/procurement/rfqs/all?state=requires-sourcing")} sx={{ minWidth: 40, px: 1 }}>
-            <ArrowBack />
+          <Button variant="outlined" startIcon={<ArrowBack />} aria-label="Back to this RFQ" onClick={() => navigate(`/procurement/rfqs/view/${sourcingCase.rfqId}`)} sx={{ borderRadius: 2, borderColor: "divider", color: "text.secondary", whiteSpace: "nowrap" }}>
+            Back to RFQ
           </Button>
           <Box>
             <Typography variant="h5" component="h1" sx={{ fontWeight: 800 }}>Sourcing Case</Typography>
@@ -249,9 +257,15 @@ function SourcingCasePage() {
         </Stack>
       </Paper>
 
-      <Alert severity={sourcingCase.status === "OUTREACH_SENT" ? "success" : "info"} sx={{ mb: 2 }}>
-        <strong>Next action:</strong> {sourcingCase.nextAction}
-      </Alert>
+      <NextStepPanel
+        tone={sourcingCase.status === "OUTREACH_SENT" ? "success" : "info"}
+        title="Next step"
+        sentence={sourcingCase.nextAction}
+        testId="sourcing-case-next-step"
+        action={outreachAlreadySent
+          ? <Button variant="contained" onClick={() => navigate(`/procurement/rfqs/${sourcingCase.rfqId}/sourcing`)}>Open sourcing workbench</Button>
+          : undefined}
+      />
 
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between", mb: 2 }}>
         <Box>
@@ -354,17 +368,21 @@ function SourcingCasePage() {
         <Typography variant="body2" color="text.secondary">
           {eligibleCandidates.length} of {candidates.length} candidates are ready · {selectedSupplierIds.length} selected
         </Typography>
-        <Button
-          variant="contained"
-          startIcon={<Send />}
-          disabled={!canPrepare || selectedSupplierIds.length === 0}
-          onClick={() => setPreviewOpen(true)}
-        >
-          Prepare and Queue Supplier RFQ
-        </Button>
+        <Tooltip title={whyNoPrepare ?? "Prepare one numbered Supplier RFQ for each ticked supplier and queue it for email delivery."} describeChild>
+          <span>
+            <Button
+              variant="contained"
+              startIcon={<Send />}
+              disabled={!canPrepare || selectedSupplierIds.length === 0}
+              onClick={() => setPreviewOpen(true)}
+            >
+              Prepare and Queue Supplier RFQ
+            </Button>
+          </span>
+        </Tooltip>
       </Stack>
-      {!canPrepare && (
-        <Alert severity="info" sx={{ mt: 2 }}>Your role can review candidates but cannot prepare Supplier RFQs.</Alert>
+      {!canPrepare && whyNoPrepare && (
+        <Alert severity="info" sx={{ mt: 2 }}>{whyNoPrepare}</Alert>
       )}
 
       <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} maxWidth="sm" fullWidth>

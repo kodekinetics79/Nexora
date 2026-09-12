@@ -12,6 +12,7 @@ const submitReview = vi.fn();
 const getAll = vi.fn();
 const createCustomer = vi.fn();
 const getByCustomer = vi.fn();
+const createContact = vi.fn();
 const testAccess = vi.hoisted(() => ({ denied: new Set<string>(), check: vi.fn() }));
 
 vi.mock('../../context/AuthContext', () => ({
@@ -40,7 +41,10 @@ vi.mock('../../api/services/customerService', () => ({
   },
 }));
 vi.mock('../../api/services/contactService', () => ({
-  default: { getByCustomer: (...args: unknown[]) => getByCustomer(...args) },
+  default: {
+    getByCustomer: (...args: unknown[]) => getByCustomer(...args),
+    create: (...args: unknown[]) => createContact(...args),
+  },
 }));
 
 const lead = (over: Partial<LeadResponseDTO> = {}): LeadResponseDTO => ({
@@ -90,6 +94,7 @@ beforeEach(() => {
   getByCustomer.mockResolvedValue([]);
   linkClient.mockResolvedValue(lead({ customerId: 42 }));
   createCustomer.mockResolvedValue({ id: 77, name: 'Fulton County Government' });
+  createContact.mockResolvedValue({ id: 910, customerId: 42, firstName: 'Abdulmohsen', lastName: 'AL-Mar', concurrencyToken: 't' });
 });
 
 describe('ResolveClientDialog', () => {
@@ -112,6 +117,39 @@ describe('ResolveClientDialog', () => {
     expect(screen.getByText('The company name on the document is a close match')).toBeInTheDocument();
     expect(screen.getByText('95% confident')).toBeInTheDocument();
     expect(screen.getByText('74% confident')).toBeInTheDocument();
+  });
+
+  it('lists only the chosen client\'s buyers and can add one under that client', async () => {
+    getByCustomer.mockResolvedValue([
+      { id: 901, customerId: 42, firstName: 'Turki', lastName: 'Alahmari', concurrencyToken: 't' },
+    ]);
+    render(
+      <ResolveClientDialog open leadId={501} lead={lead()} onClose={() => {}}
+        prefill={{ contactName: 'Abdulmohsen AL-Mar', email: '57322@se.com.sa' }} />,
+      { wrapper },
+    );
+
+    // Choose Saudi Electricity Company (rank 1). Its people, and only its people, are fetched.
+    (await screen.findAllByRole('radio'))[0].click();
+    await waitFor(() => expect(getByCustomer).toHaveBeenCalledWith(42));
+    expect(await screen.findByText(/Only people at Saudi Electricity Company are listed/)).toBeInTheDocument();
+
+    // Add the buyer the enquiry named, under that same client.
+    fireEvent.click(await screen.findByRole('button', { name: /Add a buyer at Saudi Electricity Company/i }));
+    expect((screen.getByLabelText(/First name/i) as HTMLInputElement).value).toBe('Abdulmohsen');
+    expect((screen.getByLabelText(/Last name/i) as HTMLInputElement).value).toBe('AL-Mar');
+    expect((screen.getByLabelText(/^Email/i) as HTMLInputElement).value).toBe('57322@se.com.sa');
+    fireEvent.click(screen.getByRole('button', { name: /Save buyer/i }));
+
+    await waitFor(() => expect(createContact).toHaveBeenCalledTimes(1));
+    expect(createContact.mock.calls[0][0]).toMatchObject({
+      customerId: 42, firstName: 'Abdulmohsen', lastName: 'AL-Mar', email: '57322@se.com.sa', isActive: true,
+    });
+
+    // The new buyer is selected, and Confirm links client AND buyer.
+    (await screen.findByRole('button', { name: /Confirm client/i })).click();
+    await waitFor(() => expect(linkClient).toHaveBeenCalledTimes(1));
+    expect(linkClient.mock.calls[0][1]).toEqual({ customerId: 42, contactId: 910 });
   });
 
   it('offers an explicit "leave unresolved" escape that writes nothing', async () => {

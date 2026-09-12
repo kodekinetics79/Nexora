@@ -38,6 +38,12 @@ export interface LeadDecisionLineDTO {
   description?: string | null;
   manufacturerName?: string | null;
   manufacturerPartNumber?: string | null;
+  /** The buyer's own number for the line (SAP material, stock code) — not the maker's part number. */
+  itemMaterialCode?: string | null;
+  /** The buyer's long text for the line, standing instructions removed. */
+  specification?: string | null;
+  /** The buyer's own columns kept beside the line: approved makers, standing instructions, material type… */
+  extras?: Record<string, string> | null;
   quantity?: number | null;
   unitOfMeasure?: string | null;
   currency?: string | null;

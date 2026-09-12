@@ -103,7 +103,7 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
     renderPage();
     await screen.findByText(/no inquiries yet/i);
 
-    const source = screen.getByLabelText(/lead source/i);
+    const source = screen.getByLabelText(/where it came from/i);
     fireEvent.mouseDown(source);
     const listbox = await screen.findByRole('listbox');
     fireEvent.click(within(listbox).getByRole('option', { name: /^email$/i }));

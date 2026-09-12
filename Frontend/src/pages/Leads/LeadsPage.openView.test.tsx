@@ -70,11 +70,11 @@ describe('LeadsPage — All inquiries asks for the open pipeline', () => {
     await waitFor(() => expect(lastGridView()).toBe('open'));
   });
 
-  it('offers "Untriaged only" for the old behaviour and clears it with the other filters', async () => {
+  it('offers "Not opened yet" for the old behaviour and clears it with the other filters', async () => {
     renderPage();
     await waitFor(() => expect(lastGridView()).toBe('open'));
 
-    const toggle = screen.getByRole('button', { name: /untriaged only/i });
+    const toggle = screen.getByRole('button', { name: /not opened yet/i });
     fireEvent.click(toggle);
     await waitFor(() => expect(lastGridView()).toBeUndefined());
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
@@ -88,6 +88,6 @@ describe('LeadsPage — All inquiries asks for the open pipeline', () => {
   it('leaves a queue named on the URL alone and hides the toggle there', async () => {
     renderPage('/procurement/leads/all?view=revisions');
     await waitFor(() => expect(lastGridView()).toBe('revisions'));
-    expect(screen.queryByRole('button', { name: /untriaged only/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /not opened yet/i })).not.toBeInTheDocument();
   });
 });

@@ -5,7 +5,7 @@ import {
   DialogTitle, Divider, FormControl, FormControlLabel, FormLabel, MenuItem, Radio,
   RadioGroup, Stack, TextField, Typography,
 } from '@mui/material';
-import { AddBusiness as AddBusinessIcon } from '@mui/icons-material';
+import { AddBusiness as AddBusinessIcon, PersonAdd as PersonAddIcon } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
 import leadService, { type ClientCandidateDTO } from '../../api/services/leadService';
 import customerService from '../../api/services/customerService';
@@ -139,6 +139,10 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
   const [creating, setCreating] = React.useState(false);
   const [newName, setNewName] = React.useState('');
   const [newEmail, setNewEmail] = React.useState('');
+  // Adding a buyer AT the chosen client — the person the enquiry came from. Only ever for
+  // the client selected above, so a buyer can never be filed under the wrong company.
+  const [addingContact, setAddingContact] = React.useState(false);
+  const [newContact, setNewContact] = React.useState({ firstName: '', lastName: '', email: '', phoneNo: '', position: '' });
   const [newDetails, setNewDetails] = React.useState({
     billingAddressLine1: '', billingCity: '', billingState: '', billingCountry: '',
     billingPostalCode: '', commercialRegistrationNumber: '', taxRegistrationNumber: '', sector: '',
@@ -292,6 +296,52 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
     },
     onError: (error) => toast.error(presentableErrorMessage(error, 'The client could not be created.')),
   });
+
+  /**
+   * Creates the buyer under the SELECTED client and selects them; linking still happens on
+   * Confirm. The customer id comes from the selection, never from the form, so the contact
+   * lands on the company the operator is looking at.
+   */
+  const createContact = useMutation({
+    mutationFn: async () => {
+      if (selectedCustomerId == null) throw new Error('Choose the client first.');
+      if (!hasPermission('Leads', 'edit') || !hasPermission('Customers', 'create')) {
+        throw new Error('Current Customer create permission is required. The buyer was not added.');
+      }
+      return contactService.create({
+        customerId: selectedCustomerId,
+        firstName: newContact.firstName.trim(),
+        lastName: newContact.lastName.trim() || undefined,
+        email: newContact.email.trim() || undefined,
+        phoneNo: newContact.phoneNo.trim() || undefined,
+        position: newContact.position.trim() || undefined,
+        isActive: true,
+        isPrimary: false,
+      });
+    },
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: ['client-customer-contacts', selectedCustomerId] });
+      const id = Number((created as { id?: number | string }).id);
+      if (Number.isFinite(id) && id > 0) setSelectedContactId(id);
+      setAddingContact(false);
+      toast.success(`Buyer “${newContact.firstName.trim()}” added at ${selectedCustomerName ?? 'this client'}.`);
+    },
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The buyer could not be added.')),
+  });
+
+  const openAddContact = () => {
+    // Pre-filled from the enquiry when it named a person; corrected before saving.
+    const named = (prefill?.contactName ?? '').trim();
+    const space = named.indexOf(' ');
+    setNewContact({
+      firstName: space > 0 ? named.slice(0, space) : named,
+      lastName: space > 0 ? named.slice(space + 1) : '',
+      email: (prefill?.email ?? '').trim(),
+      phoneNo: '',
+      position: '',
+    });
+    setAddingContact(true);
+  };
 
   const handleConfirm = () => {
     if (selectedCustomerId == null) return;
@@ -505,7 +555,7 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
               value={selectedContactId === '' ? '' : String(selectedContactId)}
               onChange={(e) => setSelectedContactId(e.target.value === '' ? '' : Number(e.target.value))}
               disabled={mutation.isPending || contactsQuery.isPending}
-              helperText="Leave blank if you are not sure who the buyer is — the client link still counts."
+              helperText={`Only people at ${selectedCustomerName ?? 'this client'} are listed. Leave blank if you are not sure who the buyer is — the client link still counts.`}
             >
               <MenuItem value="">Not sure yet</MenuItem>
               {contacts
@@ -517,6 +567,55 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
                   </MenuItem>
                 ))}
             </TextField>
+            {!addingContact && hasPermission('Leads', 'edit') && hasPermission('Customers', 'create') && (
+              <Button
+                size="small"
+                startIcon={<PersonAddIcon />}
+                onClick={openAddContact}
+                disabled={mutation.isPending}
+                sx={{ mt: 1, fontWeight: 700 }}
+              >
+                Add a buyer at {selectedCustomerName ?? 'this client'}
+              </Button>
+            )}
+            {addingContact && (
+              <Box sx={{ mt: 1.5, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>
+                  New buyer at {selectedCustomerName ?? 'this client'}
+                </Typography>
+                <Stack spacing={1.5}>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+                    <TextField size="small" fullWidth required label="First name" value={newContact.firstName}
+                      onChange={(e) => setNewContact((c) => ({ ...c, firstName: e.target.value }))} />
+                    <TextField size="small" fullWidth label="Last name" value={newContact.lastName}
+                      onChange={(e) => setNewContact((c) => ({ ...c, lastName: e.target.value }))} />
+                  </Stack>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+                    <TextField size="small" fullWidth label="Email" type="email" value={newContact.email}
+                      onChange={(e) => setNewContact((c) => ({ ...c, email: e.target.value }))} />
+                    <TextField size="small" fullWidth label="Phone" value={newContact.phoneNo}
+                      onChange={(e) => setNewContact((c) => ({ ...c, phoneNo: e.target.value }))} />
+                  </Stack>
+                  <TextField size="small" fullWidth label="Role or department (optional)" value={newContact.position}
+                    onChange={(e) => setNewContact((c) => ({ ...c, position: e.target.value }))} />
+                  <Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}>
+                    <Button size="small" color="inherit" onClick={() => setAddingContact(false)} disabled={createContact.isPending}>
+                      Cancel
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      disabled={!newContact.firstName.trim() || createContact.isPending}
+                      startIcon={createContact.isPending ? <CircularProgress size={14} color="inherit" /> : undefined}
+                      onClick={() => createContact.mutate()}
+                      sx={{ fontWeight: 800 }}
+                    >
+                      Save buyer
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Box>
+            )}
           </Box>
         )}
       </DialogContent>
