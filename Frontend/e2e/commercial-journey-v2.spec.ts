@@ -1145,6 +1145,8 @@ test('37 local-first processing evidence and governed learning remain visible ac
   expect(processing.externalCostStatus).toBe('LocalComputeUnpriced');
 
   await page.goto(`/procurement/rfqs/view/${rfqId()}`);
+  // Processing evidence folds under "Line intelligence and processing evidence" on the RFQ.
+  await page.getByRole('button', { name: /Line intelligence and processing evidence/ }).click();
   await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
   await expect(page.getByText('Local-first', { exact: true })).toBeVisible();
 
