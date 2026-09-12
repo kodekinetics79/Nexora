@@ -618,7 +618,27 @@ const ViewRFQPage: React.FC = () => {
                           if (sourcingQuery.isError || !sourcingLine) {
                             return <Typography variant="caption" color="error.main">Inventory check unavailable</Typography>;
                           }
+                          // "Use company inventory" was printed for every covered line, including one whose
+                          // shortfall a supplier award now covers. A rep reading that on a line with 52 units
+                          // coming from a supplier would ship from stock they do not have. Awarded units are
+                          // named, and the case that holds them stays one click away.
+                          const awardedQuantity = (sourcingQuery.data?.awards ?? [])
+                            .filter((award) => award.rfqItemId === item.id && ['APPROVED', 'SPLIT_APPROVED'].includes(award.status))
+                            .reduce((sum, award) => sum + award.quantity, 0);
                           if (sourcingLine.shortfallQuantity <= 0 || sourcingLine.resolution === 'IN_STOCK') {
+                            if (awardedQuantity > 0) {
+                              return (
+                                <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
+                                  <Chip size="small" icon={<ApproveIcon />} color="success" variant="outlined"
+                                    label={`Covered: ${Math.max(0, sourcingLine.requestedQuantity - awardedQuantity)} from stock + ${awardedQuantity} awarded to a supplier`} />
+                                  {sourcingLine.sourcingCaseId && (
+                                    <Button size="small" variant="text" startIcon={<SourcingIcon />} onClick={() => navigate(`/procurement/sourcing-cases/${sourcingLine.sourcingCaseId}`)}>
+                                      Open Sourcing Case
+                                    </Button>
+                                  )}
+                                </Stack>
+                              );
+                            }
                             return <Chip size="small" icon={<InventoryIcon />} color="success" variant="outlined" label="Use company inventory" />;
                           }
                           return (
@@ -632,7 +652,12 @@ const ViewRFQPage: React.FC = () => {
                                   variant="contained"
                                   startIcon={<SourcingIcon />}
                                   disabled={sourcingCaseMutation.isPending}
-                                  onClick={() => sourcingCaseMutation.mutate(item.id)}
+                                  // A button labelled "Open" used to call create-or-open, which the server
+                                  // refuses once the line is covered — so "Open" could fail on a case that
+                                  // exists. An existing case is opened directly; only a missing one is created.
+                                  onClick={() => sourcingLine.sourcingCaseId
+                                    ? navigate(`/procurement/sourcing-cases/${sourcingLine.sourcingCaseId}`)
+                                    : sourcingCaseMutation.mutate(item.id)}
                                 >
                                   {sourcingLine.sourcingCaseId ? 'Open Sourcing Case' : 'Create / Open Sourcing Case'}
                                 </Button>
