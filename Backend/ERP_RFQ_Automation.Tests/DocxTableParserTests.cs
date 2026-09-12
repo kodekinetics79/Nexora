@@ -180,6 +180,59 @@ public sealed class DocxTableParserTests
         Assert.All(parsed, r => Assert.Null(r.UnitPrice));
     }
 
+    [Fact]
+    public void Portal_export_metadata_tables_and_the_file_name_fill_the_header_block()
+    {
+        // An Ariba "print version" states its metadata as small two-column tables above the line
+        // grid and no paragraph at all; the event number lives only in the file name.
+        var bytes = BuildDocument(body =>
+        {
+            var overview = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            overview.AppendChild(Row(new[] { "Overview" }));
+            overview.AppendChild(Row(new[] { "Owner", "Saad Almuteb" }));
+            overview.AppendChild(Row(new[] { "Currency", "US Dollar" }));
+            body.AppendChild(overview);
+            var timing = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            timing.AppendChild(Row(new[] { "Timing Rules" }));
+            timing.AppendChild(Row(new[] { "Due date", "10/8/2026 3:00 PM" }));
+            body.AppendChild(timing);
+            var lines = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            lines.AppendChild(Row(new[] { "Item", "Description", "Quantity", "Unit" }));
+            lines.AppendChild(Row(new[] { "1", "MODULE, 16 CHANNEL RELAY", "4", "EA" }));
+            lines.AppendChild(Row(new[] { "2", "MODULE, DISPLAY", "1", "EA" }));
+            body.AppendChild(lines);
+        });
+
+        var parsed = new DocxTableParser(new NativeSpreadsheetParser())
+            .Parse(bytes, "RFP - 60000010028 - Switchgear Package 2026 - 1 of 3.docx");
+
+        Assert.Equal(2, parsed.Count);
+        Assert.All(parsed, row => Assert.Equal("60000010028", row.RfqNo));
+        Assert.All(parsed, row => Assert.Equal("10/8/2026 3:00 PM", row.BidClosingDate));
+    }
+
+    [Theory]
+    [InlineData("RFP - 60000010028 - Switchgear.docx", "60000010028")]
+    [InlineData("quote-20260910.docx", null)]
+    [InlineData("RFQ 2026.docx", null)]
+    [InlineData(null, null)]
+    public void Rfq_number_is_taken_from_a_file_name_only_when_it_is_unmistakably_one(string? name, string? expected)
+    {
+        Assert.Equal(expected, DocxTableParser.RfqNumberFromFileName(name));
+    }
+
+    [Fact]
+    public void A_stated_rfq_number_beats_the_file_name()
+    {
+        var bytes = BuildDocxWithTable(
+            new[] { "Item", "Description", "Quantity", "Unit" },
+            new[] { "1", "MODULE, DISPLAY", "1", "EA" },
+            headerBlock: "RFQ Number: RFQ-260011");
+
+        var parsed = new DocxTableParser(new NativeSpreadsheetParser()).Parse(bytes, "RFP - 60000010028.docx");
+        Assert.Equal("RFQ-260011", Assert.Single(parsed).RfqNo);
+    }
+
     private static byte[] BuildDocxWithRows(IReadOnlyList<string[]> rows)
         => BuildDocument(body =>
         {
