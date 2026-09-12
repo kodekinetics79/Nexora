@@ -24,7 +24,7 @@ describe('commercial cross-module link contracts', () => {
 
   it('clears and suppresses obsolete browser drafts once promotion makes the revision terminal', () => {
     expect(decideSource).toContain('guard.markSaved({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) });');
-    expect(decideSource).toContain('guard.recoveredDraft && !locked');
+    expect(decideSource).toContain('decisionRecordIsLocked(workbench, decisions)) return;');
   });
 
   it('uses the shared Owner-or-manager authority rule for participation and promotion', () => {

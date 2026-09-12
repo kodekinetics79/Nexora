@@ -44,6 +44,11 @@ vi.mock('../../../api/services/leadDecisionService', () => ({
     resolveRfqRevisionImpact: (...args: unknown[]) => api.resolveRfqRevisionImpact(...args),
   },
 }));
+const getLead = vi.fn();
+vi.mock('../../../api/services/leadService', () => ({
+  default: { getById: (...args: unknown[]) => getLead(...args) },
+}));
+vi.mock('../LeadOwnerControl', () => ({ default: () => <div>Owner control</div> }));
 vi.mock('../../../api/services/decisionService', () => ({
   default: { getDecisionBrief: (...args: unknown[]) => api.getDecisionBrief(...args) },
 }));
@@ -152,6 +157,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   auth.user = { id: 7, isManager: true, isSuperAdmin: false, businessUnitId: 1 };
   record = baseWorkbench();
+  getLead.mockResolvedValue({ id: 501, assignedToId: 7, assignedToFullName: 'Golden Salesperson', assignmentMethod: 'MANUAL', assignmentVersion: 1 });
   api.getWorkbench.mockImplementation(async () => structuredClone(record));
   api.getDecisionBrief.mockResolvedValue({
     recommendation: 'bid', coveragePct: 100, estimatedValue: 186400, daysLeft: 9, urgency: 'soon',
@@ -453,5 +459,18 @@ describe('one decision for the whole request', () => {
 
     expect(within(group).getByRole('button', { name: 'Skip' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText(/lines to quote/).textContent).toMatch(/^2 of 3/);
+  });
+
+  it('holds the decision until the request has an owner, and says so', async () => {
+    // Upload, assign, decide — in that order. A request nobody owns shows its lines but takes no
+    // decision, and the one sentence next to the button says what to do instead.
+    getLead.mockResolvedValue({ id: 501, assignedToId: null, assignedToFullName: null, assignmentVersion: 1 });
+    renderPage();
+
+    await screen.findByText(/Who's on it — nobody yet/);
+    expect(screen.getByText('Owner control')).toBeInTheDocument();
+    expect(await screen.findByRole('status', { name: 'Next step' })).toHaveTextContent('Assign an owner first');
+    const buttons = screen.getAllByRole('button', { name: /Create RFQ|Save for a manager|Save for review/ });
+    expect(buttons.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
   });
 });

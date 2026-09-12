@@ -12,7 +12,6 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
-  Divider,
   FormControlLabel,
   FormGroup,
   Link,
@@ -31,6 +30,8 @@ import leadDecisionService, {
   type LeadDecisionWorkbenchDTO,
 } from '../../../api/services/leadDecisionService';
 import decisionService from '../../../api/services/decisionService';
+import leadService from '../../../api/services/leadService';
+import LeadOwnerControl from '../LeadOwnerControl';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
@@ -162,6 +163,15 @@ const DecidePage: React.FC = () => {
     retry: false,
   });
 
+  // Who owns the request. The same record the lead page reads, so Take it / Give to… here and
+  // there are one control over one fact; the owner control refreshes it after every change.
+  const leadQuery = useQuery({
+    queryKey: ['lead-detail', leadId],
+    queryFn: () => leadService.getById(leadId),
+    enabled: Number.isFinite(leadId) && leadId > 0,
+    retry: false,
+  });
+
   const workbench = workbenchQuery.data;
 
   React.useEffect(() => {
@@ -279,6 +289,18 @@ const DecidePage: React.FC = () => {
       concern,
     };
   }, [workbench, decisions, concern]);
+
+  // Choices a rep had not saved when the page went away (a reload, a closed tab) come back on
+  // their own. Asking "Restore or Discard?" was one more thing to read and click; the rep can
+  // change any restored choice, and what is saved on the server is untouched until they save.
+  React.useEffect(() => {
+    const draft = guard.recoveredDraft;
+    if (!draft || !workbench || decisionRecordIsLocked(workbench, decisions)) return;
+    setDecisions(draft.value.decisions);
+    setConcern(draft.value.concern);
+    guard.acceptRecovered();
+    enqueueSnackbar(`Restored the choices you had not saved yet (from ${formatDateSafe(draft.savedAt)}).`, { variant: 'info' });
+  }, [guard, workbench, decisions, enqueueSnackbar]);
 
   const openDocument = React.useCallback((line?: { revisionLineId: number }) => {
     setCheckFocus(line?.revisionLineId ?? null);
@@ -445,7 +467,11 @@ const DecidePage: React.FC = () => {
   const inconsistentBlocker = terminal.find((blocker) => blocker.code === 'INCONSISTENT_CONVERTED_STATE');
   // Locked records and view-only roles read as text. A save in flight keeps the controls on
   // screen and only the button changes, so the page does not flicker mid-click.
-  const readOnly = locked || !canEdit;
+  // The order is upload, assign, decide. Until somebody owns the request nothing on it can be
+  // decided — the lines are shown, not editable, and the owner control says what to do.
+  const ownerKnown = leadQuery.data != null;
+  const unowned = ownerKnown && leadQuery.data!.assignedToId == null;
+  const readOnly = locked || !canEdit || unowned;
   const next = nextThing({ workbench, decisions, concern, lifecycle: lifecycleQuery.data, leadId });
   const days = daysUntil(workbench.bidClosingDate);
   const dueTone = days == null ? 'default' : days < 0 ? 'late' : days <= 3 ? 'due' : 'default';
@@ -488,21 +514,6 @@ const DecidePage: React.FC = () => {
           {reference}
         </Link>
       </Stack>
-
-      {guard.recoveredDraft && !locked ? (
-        <Alert
-          severity="info"
-          sx={{ mb: 1.5 }}
-          action={(
-            <Stack direction="row" spacing={0.5}>
-              <Button color="inherit" onClick={() => { setDecisions(guard.recoveredDraft!.value.decisions); setConcern(guard.recoveredDraft!.value.concern); guard.acceptRecovered(); }}>Restore</Button>
-              <Button color="inherit" onClick={guard.discardRecovered}>Discard</Button>
-            </Stack>
-          )}
-        >
-          You left unsaved choices here on {formatDateSafe(guard.recoveredDraft.savedAt)}. Restore them, or keep what is saved.
-        </Alert>
-      ) : null}
 
       {workbench.promotion ? (
         <Alert
@@ -581,8 +592,22 @@ const DecidePage: React.FC = () => {
             />
             <Fact label="Deliver to" value={workbench.deliveryLocation || 'Not stated'} />
             <Fact label="Needed by" value={workbench.requiredDeliveryDate ? formatDateSafe(workbench.requiredDeliveryDate) : 'Not stated'} />
-            {workbench.assignedToName ? <Fact label="Owner" value={workbench.assignedToName} /> : null}
           </Stack>
+          {ownerKnown ? (
+            <Box sx={{ mt: 2 }} data-testid="decide-owner">
+              <Typography variant="overline" sx={{ color: unowned && !locked ? 'warning.dark' : 'text.secondary', fontWeight: 700, letterSpacing: '0.08em' }}>
+                {unowned ? "Who's on it — nobody yet" : "Who's on it"}
+              </Typography>
+              <LeadOwnerControl
+                leadId={leadId}
+                assignedToId={leadQuery.data!.assignedToId}
+                assignedToName={leadQuery.data!.assignedToFullName}
+                assignmentMethod={leadQuery.data!.assignmentMethod}
+                assignmentVersion={leadQuery.data!.assignmentVersion ?? 1}
+                canEdit={canEdit && !locked}
+              />
+            </Box>
+          ) : null}
         </Box>
 
         {/* WHAT THEY WANT */}
@@ -714,12 +739,14 @@ const DecidePage: React.FC = () => {
               </Paper>
             ) : null}
 
-            <Divider sx={{ my: 2 }} />
+            {/* Pinned to the bottom of the window: a 32-line request must not hide its one
+                button under a scroll. The bar is part of the page, so it ends where the page ends. */}
+            <Box sx={{ position: 'sticky', bottom: 0, zIndex: 2, bgcolor: 'background.paper', borderTop: 1, borderColor: 'divider', mt: 2, pt: 1.5, pb: 0.5, mx: { xs: -2, sm: -3 }, px: { xs: 2, sm: 3 } }}>
             <Stack direction="row" spacing={2} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}>
               <Button
                 variant="contained"
                 size="large"
-                disabled={primary.disabled}
+                disabled={primary.disabled || (unowned && !locked)}
                 onClick={primary.onClick}
                 sx={{ fontWeight: 800, px: 3 }}
               >
@@ -731,8 +758,8 @@ const DecidePage: React.FC = () => {
                 variant="body2"
                 sx={{ color: next.kind === 'ready' || next.kind === 'decline' || busy ? 'text.secondary' : 'warning.dark', fontWeight: next.kind === 'blocked' ? 600 : 400 }}
               >
-                {footerSentence}
-                {next.kind === 'blocked' && next.action ? (
+                {unowned && !locked ? 'Assign an owner first: take it, or give it to someone, at the top of this request.' : footerSentence}
+                {!unowned && next.kind === 'blocked' && next.action ? (
                   <>
                     {' '}
                     <Link
@@ -752,6 +779,7 @@ const DecidePage: React.FC = () => {
                 Saved as a draft{workbench.assignedToName ? ` for ${workbench.assignedToName}` : ''}. A manager creates the RFQ from here.
               </Typography>
             ) : null}
+            </Box>
           </Box>
         ) : null}
       </Paper>
