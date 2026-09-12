@@ -251,16 +251,23 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
   // ── Suggested (includes AMBIGUOUS, which simply has ≥2 candidates) ────────
   const top = candidates[0];
   if (state === 'suggested' && top) {
-    const pct = confidencePercent(top.confidence ?? lead.customerMatchConfidence);
+    const confidence = top.confidence ?? lead.customerMatchConfidence;
+    const pct = confidencePercent(confidence);
     const why = matchExplanation({ customerMatchReasonCode: top.reasonCode ?? lead.customerMatchReasonCode });
     const others = candidates.length - 1;
+    // A numbering pattern, an earlier sender or a contact's name is a hint, not a read of the
+    // document. Printed as "Nexora thinks this is Saudi Aramco" with a gold Confirm button, a
+    // 55% hint read as the product not knowing who wrote the page it had just read. Below the
+    // strong-suggestion line the sentence says "might be", the explanation says it is weak, and
+    // choosing the client is the primary control.
+    const weak = confidence != null && Number(confidence) < 0.70;
     return shell(
       <Box>
         <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', fontSize: '0.65rem' }}>
           Client — not confirmed
         </Typography>
         <Typography sx={{ fontSize: '1rem', mt: 0.25 }}>
-          Nexora thinks this is{' '}
+          {weak ? 'This might be' : 'Nexora thinks this is'}{' '}
           <Box component="strong" sx={{ fontWeight: 900 }}>
             {top.customerName?.trim() || `Customer #${top.customerId}`}
           </Box>
@@ -268,7 +275,7 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
         </Typography>
         {why && (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
-            {why}
+            {weak ? `Only a weak hint: ${why.charAt(0).toLowerCase()}${why.slice(1)} Check the document before confirming.` : why}
           </Typography>
         )}
         {others > 0 && (
@@ -278,8 +285,13 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
         )}
         {canResolveClient && (
           <Stack direction="row" spacing={1} sx={{ mt: 1.25, flexWrap: 'wrap', gap: 1 }}>
+            {weak && (
+              <Button variant="contained" size="small" startIcon={<ClientIcon />} onClick={openDialog} disabled={confirmMutation.isPending} sx={{ fontWeight: 800, textTransform: 'none' }}>
+                Choose the client
+              </Button>
+            )}
             <Button
-              variant="contained"
+              variant={weak ? 'outlined' : 'contained'}
               size="small"
               startIcon={confirmMutation.isPending ? <CircularProgress size={15} color="inherit" /> : <ConfirmIcon />}
               disabled={confirmMutation.isPending}
@@ -288,9 +300,11 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
             >
               {`Confirm ${top.customerName?.trim() || 'this client'}`}
             </Button>
-            <Button size="small" onClick={openDialog} disabled={confirmMutation.isPending} sx={{ fontWeight: 800, textTransform: 'none' }}>
-              Choose another
-            </Button>
+            {!weak && (
+              <Button size="small" onClick={openDialog} disabled={confirmMutation.isPending} sx={{ fontWeight: 800, textTransform: 'none' }}>
+                Choose another
+              </Button>
+            )}
           </Stack>
         )}
       </Box>,
