@@ -115,6 +115,10 @@ public class UserDropdownDTO
     /// anyone can give Ana a profile — but each name now carries the verdict the server will
     /// reach.</para>
     /// </summary>
+    /// <remarks>
+    /// The hand-assignment verdict: an active, routing-eligible Sales Rep profile. Workload
+    /// capacity governs automatic routing only, so a rep over the ceiling is still pickable here.
+    /// </remarks>
     public bool IsEligibleForAssignment { get; set; }
 
     /// <summary>The routing engine's own sentence explaining <see cref="IsEligibleForAssignment"/>.</summary>

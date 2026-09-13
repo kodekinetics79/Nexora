@@ -77,7 +77,9 @@ const LeadOwnerControl: React.FC<Props> = ({
   const hasAnyOwnerAction = Boolean(userData?.id && authority.canTakeIt)
     || authority.canGiveItToSomeoneElse
     || authority.canReturnItToThePool;
-  const iCanTakeIt = myOption?.isAvailable === true;
+  // The hand-assignment verdict, not the automatic one: being over the workload ceiling does
+  // not stop a manager (or the reader) taking a lead on purpose.
+  const iCanTakeIt = myOption?.acceptsManualAssignment === true;
   const whyICannotTakeIt = myOption?.eligibilityReason?.trim()
     || 'You do not have a Sales Rep profile yet, so leads cannot be routed to you. Ask an administrator to add one under Sales > Rep directory.';
 

@@ -42,8 +42,8 @@ vi.mock('../../context/AuthContext', () => ({
 }));
 
 const OWNERS = [
-  { userId: ME, name: 'Sara Bin Ali', email: 'sara@nexora.test', roleName: 'Sales Rep', isAvailable: true, capacityPercent: 40, eligibilityReason: '' },
-  { userId: COLLEAGUE, name: 'Tariq Al-Harbi', email: 'tariq@nexora.test', roleName: 'Sales Rep', isAvailable: true, capacityPercent: 60, eligibilityReason: '' },
+  { userId: ME, name: 'Sara Bin Ali', email: 'sara@nexora.test', roleName: 'Sales Rep', isAvailable: true, acceptsManualAssignment: true, capacityPercent: 40, eligibilityReason: '' },
+  { userId: COLLEAGUE, name: 'Tariq Al-Harbi', email: 'tariq@nexora.test', roleName: 'Sales Rep', isAvailable: true, acceptsManualAssignment: true, capacityPercent: 60, eligibilityReason: '' },
 ];
 
 const renderControl = (props: Partial<React.ComponentProps<typeof LeadOwnerControl>> = {}) => {
@@ -116,6 +116,21 @@ describe('LeadOwnerControl', () => {
     // Blocked, and it says why — rather than 409-ing after the click.
     expect(within(assignToMe).getByText(/sales rep profile/i)).toBeInTheDocument();
     expect(changeLeadOwner).not.toHaveBeenCalled();
+  });
+
+  it('offersAssignToMe_whenTheReaderIsOverCapacityButStillHasAnEligibleProfile', async () => {
+    // Capacity is the engine's distribution rule. Over the workload ceiling the reader is
+    // `isAvailable: false` for automatic routing and still allowed to take a lead on purpose.
+    getOwnerOptions.mockResolvedValue([
+      { ...OWNERS[0], isAvailable: false, acceptsManualAssignment: true, capacityPercent: 0, eligibilityReason: 'Configured or measured capacity is exhausted' },
+      OWNERS[1],
+    ]);
+    renderControl();
+
+    openOwnerMenu();
+    fireEvent.click(await enabledAssignToMe());
+
+    await waitFor(() => expect(changeLeadOwner).toHaveBeenCalledWith(101, expect.objectContaining({ assignedToUserId: ME })));
   });
 
   it('explainsItselfInsteadOfOpeningAnEmptyMenu_whenARepMayDoNoneOfIt', async () => {

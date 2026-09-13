@@ -495,6 +495,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 var current = availability[user.Id];
                 return new RoutingOwnerOptionResponse(
                     user.Id, user.Name, user.Email, user.RoleName, current.IsAvailable,
+                    current.AcceptsManualAssignment,
                     current.CapacityPercent, current.Workload!, current.HasGovernedProfile,
                     current.EligibilityReason, measuredAt, _policy.Version);
             })
@@ -827,8 +828,16 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         if (!assigneeExists) throw new RoutingConflictException("Assignee must be an active user in the same tenant.");
         var ownerOption = (await GetOwnerOptionsAsync(businessUnitId, ct))
             .SingleOrDefault(option => option.UserId == command.AssignedToUserId);
-        if (ownerOption == null || !ownerOption.IsAvailable)
-            throw new RoutingConflictException("Assignee is not currently eligible for governed routing.");
+        // Capacity is a DISTRIBUTION rule: it stops the engine piling automatic work on one
+        // person. A manager assigning by hand has looked at that person's load and decided, so
+        // the hand path asks only for an active, routing-eligible profile. Gating it on capacity
+        // too let a tenant whose only user carried two old-dated journeys lock itself out: every
+        // upload parked on the queue and every "Assign to me" answered 409, with no override
+        // anywhere. Automatic routing still honours capacity exactly as before.
+        if (ownerOption == null || !ownerOption.AcceptsManualAssignment)
+            throw new RoutingConflictException(
+                "Assignee needs an active Sales Rep profile that is eligible for routing. "
+                + "Give them one in Sales > Rep directory.");
 
         var now = DateTime.UtcNow;
         // The header command fences on AssignmentVersion.  Legacy queue callers still fence on
@@ -1148,7 +1157,9 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     : profile == null ? RoutingEligibilityReasons.ProfileRequired
                     : !profileEligible ? RoutingEligibilityReasons.ProfileNotEligible
                     : capacity <= 0 ? RoutingEligibilityReasons.CapacityExhausted
-                    : RoutingEligibilityReasons.Eligible);
+                    : RoutingEligibilityReasons.Eligible,
+                // Same profile tests as IsAvailable, minus the workload ceiling.
+                AcceptsManualAssignment: user.IsActive && profileEligible);
         }).ToList();
     }
 

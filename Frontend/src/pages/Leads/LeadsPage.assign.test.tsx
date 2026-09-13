@@ -124,9 +124,11 @@ const SECOND_UNOWNED = {
 };
 
 const OWNERS = [
-  { userId: ME, name: 'Sara Bin Ali', email: 'sara@nexora.test', roleName: 'Sales Rep', isAvailable: true, capacityPercent: 40, eligibilityReason: '' },
-  { userId: COLLEAGUE, name: 'Tariq Al-Harbi', email: 'tariq@nexora.test', roleName: 'Sales Rep', isAvailable: true, capacityPercent: 60, eligibilityReason: '' },
-  { userId: 9, name: 'Noura Idle', email: 'noura@nexora.test', roleName: 'Sales Rep', isAvailable: false, capacityPercent: 100, eligibilityReason: 'At 100% capacity — no room for another lead.' },
+  { userId: ME, name: 'Sara Bin Ali', email: 'sara@nexora.test', roleName: 'Sales Rep', isAvailable: true, acceptsManualAssignment: true, capacityPercent: 40, eligibilityReason: '' },
+  { userId: COLLEAGUE, name: 'Tariq Al-Harbi', email: 'tariq@nexora.test', roleName: 'Sales Rep', isAvailable: true, acceptsManualAssignment: true, capacityPercent: 60, eligibilityReason: '' },
+  { userId: 9, name: 'Noura Idle', email: 'noura@nexora.test', roleName: 'Sales Rep', isAvailable: false, acceptsManualAssignment: false, capacityPercent: 100, eligibilityReason: 'Governed Sales Rep profile is not routing eligible' },
+  // Over the workload ceiling: automatic routing skips her, a manager may still pick her by hand.
+  { userId: 10, name: 'Huda Busy', email: 'huda@nexora.test', roleName: 'Sales Rep', isAvailable: false, acceptsManualAssignment: true, capacityPercent: 0, eligibilityReason: 'Configured or measured capacity is exhausted' },
 ];
 
 const page = (items: unknown[]) => ({ items, totalCount: items.length, pageNumber: 1, pageSize: 10 });
@@ -262,8 +264,12 @@ describe('LeadsPage — assigning a lead from the list', () => {
     click(screen.getByRole('button', { name: /someone else/i }));
 
     const menu = await screen.findByRole('menu', { name: /eligible lead owners/i });
-    expect(within(menu).getByText(/at 100% capacity/i)).toBeInTheDocument();
+    expect(within(menu).getByText(/not routing eligible/i)).toBeInTheDocument();
     expect(within(menu).getByRole('menuitem', { name: /noura idle/i })).toHaveAttribute('aria-disabled', 'true');
+    // Capacity is the engine's rule, not the manager's: the name over the ceiling stays pickable
+    // and says so, instead of reading as blocked.
+    expect(within(menu).getByText(/at capacity for automatic routing/i)).toBeInTheDocument();
+    expect(within(menu).getByRole('menuitem', { name: /huda busy/i })).not.toHaveAttribute('aria-disabled', 'true');
   });
 
   // -------------------------------------------------------------------------

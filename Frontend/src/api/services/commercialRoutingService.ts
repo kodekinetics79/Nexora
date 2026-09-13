@@ -135,7 +135,13 @@ export interface RoutingOwnerOption {
   name: string;
   email: string;
   roleName?: string | null;
+  /** What automatic routing will do today: profile, eligibility and capacity together. */
   isAvailable: boolean;
+  /**
+   * What a manager may do by hand: profile and eligibility only. A rep over the workload
+   * ceiling is `isAvailable: false` and `acceptsManualAssignment: true` at the same time.
+   */
+  acceptsManualAssignment: boolean;
   capacityPercent: number;
   eligibilityReason: string;
 }

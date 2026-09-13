@@ -95,7 +95,7 @@ const OutstandingLeadsPage: React.FC = () => {
     () => (ownerOptions.data ?? []).find((option) => option.userId === userData?.id) ?? null,
     [ownerOptions.data, userData?.id],
   );
-  const iCanTakeLeads = myOwnerOption?.isAvailable === true;
+  const iCanTakeLeads = myOwnerOption?.acceptsManualAssignment === true;
   /** Stated only once we actually know — never inferred from a list that has not loaded. */
   const whyICannotTakeLeads = canEditLeads && !ownerOptions.isLoading && !ownerOptions.isError && !iCanTakeLeads
     ? (myOwnerOption?.eligibilityReason?.trim()

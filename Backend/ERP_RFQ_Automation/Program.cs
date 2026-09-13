@@ -453,7 +453,13 @@ builder.Services.AddScoped<ICustomFieldBagService, CustomFieldBagService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.ListViews.IListViewPreferenceService,
     ERP_RFQ_Automation.ListViews.ListViewPreferenceService>();
 builder.Services.AddSingleton<DeterministicRoutingEngine>();
-builder.Services.AddSingleton(new RoutingPolicy());
+// The routing policy (workload weights, the 100-point ceiling, match thresholds) was constructed
+// with its defaults and never bound, so nothing about it could be tuned without a deploy. Bind
+// the "CommercialRouting:Policy" section when one is present; every default stays as it was.
+var routingPolicy = builder.Configuration.GetSection("CommercialRouting:Policy").Get<RoutingPolicy>()
+    ?? new RoutingPolicy();
+routingPolicy.Validate();
+builder.Services.AddSingleton(routingPolicy);
 // CLIENT ORGANISATION IDENTITY. The policy is a singleton so the thresholds behind every
 // auto-link are one edit away from being retuned; the resolver and the learner are scoped
 // because they write through the SAME request-scoped DbContext (and, for learning, the same

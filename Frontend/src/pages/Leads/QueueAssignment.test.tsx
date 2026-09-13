@@ -63,7 +63,7 @@ const colleaguesLead = { ...unownedLead, id: 502, assignedToId: COLLEAGUE, assig
 
 const eligibleMe = {
   userId: ME, name: 'Sara Bin Ali', email: 's@n.test', roleName: 'Sales Rep',
-  isAvailable: true, capacityPercent: 40, eligibilityReason: '',
+  isAvailable: true, acceptsManualAssignment: true, capacityPercent: 40, eligibilityReason: '',
 };
 
 function renderPage(page: 'outstanding' | 'assigned') {
@@ -102,12 +102,24 @@ describe('Outstanding inquiries — a rep can pick up unowned work', () => {
 
   it('says why when routing will not accept the reader, instead of hiding the control silently', async () => {
     getOwnerOptions.mockResolvedValue([
-      { ...eligibleMe, isAvailable: false, eligibilityReason: 'Your workload is at 100% of capacity.' },
+      { ...eligibleMe, isAvailable: false, acceptsManualAssignment: false, eligibilityReason: 'Governed Sales Rep profile is not routing eligible' },
     ]);
     renderPage('outstanding');
 
-    expect(await screen.findByText(/your workload is at 100% of capacity/i)).toBeInTheDocument();
+    expect(await screen.findByText(/not routing eligible/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /assign to me/i })).not.toBeInTheDocument();
+  });
+
+  it('still lets the reader take a lead by hand when only the workload ceiling is against them', async () => {
+    // Capacity is the engine's distribution rule; picking up work on purpose is not distribution.
+    getOwnerOptions.mockResolvedValue([
+      { ...eligibleMe, isAvailable: false, acceptsManualAssignment: true, capacityPercent: 0, eligibilityReason: 'Configured or measured capacity is exhausted' },
+    ]);
+    renderPage('outstanding');
+
+    fireEvent.click(await screen.findByRole('button', { name: /assign to me/i }));
+
+    await waitFor(() => expect(changeLeadOwner).toHaveBeenCalledWith(501, expect.objectContaining({ assignedToUserId: ME })));
   });
 
   it('does not report an owner-list outage as "nobody can take it"', async () => {
@@ -131,7 +143,7 @@ describe('Assigned inquiries — moving somebody else’s work', () => {
     authUser = { id: ME, businessUnitId: 1, isManager: true, isSuperAdmin: false };
     getOwnerOptions.mockResolvedValue([eligibleMe, {
       userId: COLLEAGUE, name: 'Tariq Al-Harbi', email: 't@n.test', roleName: 'Sales Rep',
-      isAvailable: true, capacityPercent: 20, eligibilityReason: '',
+      isAvailable: true, acceptsManualAssignment: true, capacityPercent: 20, eligibilityReason: '',
     }]);
     renderPage('assigned');
 

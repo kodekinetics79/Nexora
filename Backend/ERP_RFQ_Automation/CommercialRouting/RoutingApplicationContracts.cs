@@ -118,7 +118,13 @@ public sealed record RoutingOwnerOptionResponse(
     string Name,
     string Email,
     string? RoleName,
+    /// <summary>What automatic routing will do today: profile, eligibility AND capacity.</summary>
     bool IsAvailable,
+    /// <summary>
+    /// What a manager may do by hand: profile and eligibility only. A rep over the workload
+    /// ceiling is <c>IsAvailable == false</c> yet <c>AcceptsManualAssignment == true</c>.
+    /// </summary>
+    bool AcceptsManualAssignment,
     int CapacityPercent,
     RoutingWorkloadSnapshot Workload,
     bool HasGovernedProfile,

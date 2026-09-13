@@ -30,14 +30,21 @@ import commercialRoutingService, { type RoutingOwnerOption } from '../../api/ser
  */
 export const NO_ELIGIBLE_OWNER_TITLE = 'Nobody in this business unit can currently receive a lead.';
 export const NO_ELIGIBLE_OWNER_DETAIL =
-  'Governed routing only accepts a user who has an effective Sales Rep profile with capacity left, '
+  'Governed routing only accepts a user who has an effective, routing-eligible Sales Rep profile, '
   + 'and there is no such user right now. Give someone a profile in Sales > Rep directory.';
 
-/** The justification printed under a name, so a greyed-out row is never a mystery. */
+/**
+ * The justification printed under a name, so a greyed-out row is never a mystery.
+ *
+ * Capacity is a rule for AUTOMATIC routing. A name over the ceiling is still pickable by hand,
+ * so it says so instead of reading as blocked.
+ */
 export const ownerAvailabilityNote = (option: RoutingOwnerOption): string =>
   option.isAvailable
     ? `${option.capacityPercent}% capacity`
-    : option.eligibilityReason || 'Not currently eligible to receive a lead.';
+    : option.acceptsManualAssignment
+      ? `At capacity for automatic routing (${option.capacityPercent}%). You can still assign by hand.`
+      : option.eligibilityReason || 'Not currently eligible to receive a lead.';
 
 /**
  * Whether this change of owner has to carry a reason.
@@ -140,7 +147,7 @@ export const OwnerPickerMenu: React.FC<OwnerPickerMenuProps> = ({
         return (
           <MenuItem
             key={owner.userId}
-            disabled={busy || !owner.isAvailable || isCurrent}
+            disabled={busy || !owner.acceptsManualAssignment || isCurrent}
             onClick={() => onPick(owner)}
             sx={{ display: 'block', py: 1 }}
           >

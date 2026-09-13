@@ -154,7 +154,7 @@ async function ensureLeadAccess(page: Page, token: string, leadId: number): Prom
 }
 
 /** The fixture's account owner (Sarah) has exhausted capacity and is refused by governed routing
- *  ("Assignee is not currently eligible for governed routing"); ask the product who IS eligible. */
+ *  ("Assignee needs an active Sales Rep profile that is eligible for routing"); ask the product who IS eligible. */
 async function eligibleOwnerUserId(page: Page, token: string): Promise<number> {
   const options = await jsonOk<Array<Record<string, any>>>(await api(page, token, 'get', '/api/commercial-intelligence/routing-owner-options'));
   const eligible = options.find((o) => o.isAvailable === true);

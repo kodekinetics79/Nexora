@@ -88,7 +88,7 @@ const AssignedLeadsPage: React.FC = () => {
     () => (ownerOptions.data ?? []).find((option) => option.userId === userData?.id) ?? null,
     [ownerOptions.data, userData?.id],
   );
-  const iCanTakeLeads = myOwnerOption?.isAvailable === true;
+  const iCanTakeLeads = myOwnerOption?.acceptsManualAssignment === true;
   const whyICannotTakeLeads = canEditLeads && !ownerOptions.isLoading && !ownerOptions.isError && !iCanTakeLeads
     ? (myOwnerOption?.eligibilityReason?.trim()
       || 'You do not have a Sales Rep profile yet, so inquiries cannot be routed to you. Ask an administrator to add one under Sales > Rep directory.')
