@@ -264,5 +264,8 @@ describe('the unit in the check', () => {
 
     fireEvent.click(screen.getByRole('button', { name: `Show line 000${count}` }));
     expect(await screen.findByRole('combobox', { name: `Unit, line 000${count}` })).toBeInTheDocument();
-  });
+    // Paging can only be proven with more lines than one page holds, and every line draws its own
+    // inputs. That took 8.3 s on a CI runner against the 5 s default and failed shard 7 of PR #209
+    // while asserting nothing wrong. The time allowance moves; every assertion above stays.
+  }, 30_000);
 });
