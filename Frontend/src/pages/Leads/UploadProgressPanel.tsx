@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Button, LinearProgress, Paper, Stack, Typography, CircularProgress, Tooltip } from '@mui/material';
+import { Box, Button, LinearProgress, Stack, Typography, CircularProgress, Tooltip } from '@mui/material';
 import {
   CheckCircle as DoneIcon,
   RadioButtonUnchecked as PendingIcon,
@@ -74,19 +74,19 @@ export const documentProgress = (item: BatchReconciliationItemDTO): DocumentProg
 };
 
 const StageDots: React.FC<{ stages: StageState[] }> = ({ stages }) => (
-  <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 0.5 }}>
+  <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 0.25 }}>
     {stages.map((state, i) => {
       const label = STAGES[i];
-      const icon = state === 'done' ? <DoneIcon sx={{ fontSize: 16, color: 'success.main' }} />
-        : state === 'active' ? <CircularProgress size={12} thickness={6} />
-          : state === 'failed' ? <FailedIcon sx={{ fontSize: 16, color: 'error.main' }} />
-            : state === 'held' ? <HeldIcon sx={{ fontSize: 16, color: 'warning.main' }} />
-              : <PendingIcon sx={{ fontSize: 14, color: 'text.disabled' }} />;
+      const icon = state === 'done' ? <DoneIcon sx={{ fontSize: 14, color: 'success.main' }} />
+        : state === 'active' ? <CircularProgress size={11} thickness={6} />
+          : state === 'failed' ? <FailedIcon sx={{ fontSize: 14, color: 'error.main' }} />
+            : state === 'held' ? <HeldIcon sx={{ fontSize: 14, color: 'warning.main' }} />
+              : <PendingIcon sx={{ fontSize: 12, color: 'text.disabled' }} />;
       return (
         <Tooltip key={label} title={`${label}: ${state}`} describeChild>
-          <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }} aria-label={`${label} ${state}`}>
+          <Stack direction="row" spacing={0.4} sx={{ alignItems: 'center', pr: 0.5 }} aria-label={`${label} ${state}`}>
             {icon}
-            <Typography variant="caption" sx={{ color: state === 'pending' ? 'text.disabled' : 'text.secondary', fontWeight: state === 'active' ? 800 : 500 }}>
+            <Typography sx={{ fontSize: '0.68rem', lineHeight: 1.2, whiteSpace: 'nowrap', color: state === 'pending' ? 'text.disabled' : 'text.secondary', fontWeight: state === 'active' ? 700 : 500 }}>
               {label}
             </Typography>
           </Stack>
@@ -134,39 +134,47 @@ const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDeci
         sentence: `${finished} of ${total} finished. Usually under a minute; a bid list with hundreds of lines takes a few. You can stay here, this page updates itself.` };
 
   return (
-    <Box sx={{ mb: 3 }} data-testid="upload-progress">
+    <Box sx={{ mb: 2 }} data-testid="upload-progress">
       <NextStepPanel tone={nextStep.tone} title={nextStep.title} sentence={nextStep.sentence} action={nextStep.action} testId="upload-next-step">
         <LinearProgress
           variant={complete ? 'determinate' : (progress.length === 0 ? 'indeterminate' : 'determinate')}
           value={complete ? 100 : percent}
           aria-label="Upload progress"
-          sx={{ height: 8, borderRadius: 1, mb: progress.length + notYetRecorded > 0 ? 1.5 : 0 }}
+          sx={{ height: 4, borderRadius: 2, mb: progress.length + notYetRecorded > 0 ? 1 : 0 }}
         />
-        <Stack spacing={1}>
+        {/* One hairline-separated row per document, not a stack of nested cards. On a ten-file
+            upload the card version pushed the counts and the file list off the screen entirely. */}
+        <Box sx={{ '& > *': { borderTop: '1px solid', borderColor: 'divider' }, '& > *:first-of-type': { borderTop: 0 } }}>
           {progress.map(({ item, progress: p }) => (
-            <Paper key={item.sourceDocumentOccurrenceId ?? item.occurrenceId} variant="outlined" sx={{ p: 1.5, borderRadius: 2, bgcolor: 'background.paper' }}>
-              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{ justifyContent: 'space-between', alignItems: { md: 'center' } }}>
-                <Box sx={{ minWidth: 0, flex: 1 }}>
-                  <Typography sx={{ fontWeight: 800, overflowWrap: 'anywhere' }}>{item.fileName || `Document ${item.occurrenceId}`}</Typography>
-                  <Typography variant="body2" color={p.state === 'failed' ? 'error.main' : p.state === 'held' ? 'warning.main' : 'text.secondary'}>
-                    {p.sentence}
-                  </Typography>
-                </Box>
-                <Box sx={{ flexShrink: 0 }}><StageDots stages={p.stages} /></Box>
-              </Stack>
-            </Paper>
+            <Stack
+              key={item.sourceDocumentOccurrenceId ?? item.occurrenceId}
+              direction={{ xs: 'column', md: 'row' }}
+              spacing={{ xs: 0.5, md: 2 }}
+              sx={{ py: 0.85, justifyContent: 'space-between', alignItems: { md: 'center' } }}
+            >
+              <Box sx={{ minWidth: 0, flex: 1 }}>
+                <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', lineHeight: 1.35, overflowWrap: 'anywhere' }}>
+                  {item.fileName || `Document ${item.occurrenceId}`}
+                </Typography>
+                <Typography
+                  sx={{ fontSize: '0.78rem', lineHeight: 1.4 }}
+                  color={p.state === 'failed' ? 'error.main' : p.state === 'held' ? 'warning.main' : 'text.secondary'}
+                >
+                  {p.sentence}
+                </Typography>
+              </Box>
+              <Box sx={{ flexShrink: 0 }}><StageDots stages={p.stages} /></Box>
+            </Stack>
           ))}
           {Array.from({ length: notYetRecorded }, (_, i) => (
-            <Paper key={`waiting-${i}`} variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
-              <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
-                <CircularProgress size={14} thickness={6} />
-                <Typography variant="body2" color="text.secondary">
-                  {`Document ${batch.items.length + i + 1} of ${total}: received, waiting to be recorded.`}
-                </Typography>
-              </Stack>
-            </Paper>
+            <Stack key={`waiting-${i}`} direction="row" spacing={1} sx={{ py: 0.85, alignItems: 'center' }}>
+              <CircularProgress size={11} thickness={6} />
+              <Typography sx={{ fontSize: '0.78rem' }} color="text.secondary">
+                {`Document ${batch.items.length + i + 1} of ${total}: received, waiting to be recorded.`}
+              </Typography>
+            </Stack>
           ))}
-        </Stack>
+        </Box>
       </NextStepPanel>
     </Box>
   );

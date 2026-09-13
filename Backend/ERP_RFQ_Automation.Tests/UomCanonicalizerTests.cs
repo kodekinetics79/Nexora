@@ -36,6 +36,43 @@ public sealed class UomCanonicalizerTests
         Assert.Equal("EA", result.CanonicalCode);
     }
 
+    /// <summary>
+    /// The spellings the pilot owner's customers write in the unit column, each onto the one
+    /// code a rep quotes in. A spelling that folds to a code is pre-selected on the decision
+    /// screen and labelled with the customer's own word; one that does not is asked for.
+    /// </summary>
+    [Theory]
+    [InlineData("NOS", "EA")]
+    [InlineData("Nos.", "EA")]
+    [InlineData("No.", "EA")]
+    [InlineData("No's", "EA")]
+    [InlineData("PCS", "EA")]
+    [InlineData("Pcs.", "EA")]
+    [InlineData("Each", "EA")]
+    [InlineData("Sets", "SET")]
+    [InlineData("Set(s)", "SET")]
+    [InlineData("Mtr", "M")]
+    [InlineData("Mtrs.", "M")]
+    [InlineData("Rmt", "M")]
+    [InlineData("Lmt", "M")]
+    [InlineData("Running meters", "M")]
+    [InlineData("Ltr", "L")]
+    [InlineData("Kgs", "KG")]
+    [InlineData("Pair", "PR")]
+    [InlineData("Lump Sum", "LOT")]
+    [InlineData("L.S.", "LOT")]
+    [InlineData("Sq.Mtrs", "M2")]
+    [InlineData("Sq. Meter", "M2")]
+    [InlineData("Square metres", "M2")]
+    [InlineData("Cu.Mtr", "M3")]
+    [InlineData("Cubic meters", "M3")]
+    public void The_spellings_customers_write_fold_onto_the_code_a_rep_quotes_in(string raw, string code)
+    {
+        var result = UomCanonicalizer.Canonicalize(raw);
+        Assert.Equal(UomResolution.Canonical, result.Resolution);
+        Assert.Equal(code, result.Value);
+    }
+
     [Theory]
     [InlineData("Set")]   // 3 rows
     [InlineData("Kit")]   // 9 rows — a kit is priced as one assembly, exactly like a set

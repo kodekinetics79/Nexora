@@ -15,6 +15,7 @@ import LeadOutcomeDialog, { type LeadOutcomeCapture } from '../../components/com
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { useAuth } from '../../context/AuthContext';
 import statusLabel from '../../utils/statusLabels';
+import { leadStatusWords } from '../../utils/leadStatusWords';
 
 interface Props {
   leadId: number;
@@ -53,6 +54,57 @@ export const reopenBlockedReason = (
       + 'forward the customer\u2019s new message and it will come in as a fresh inquiry.';
   }
   return null;
+};
+
+/** Where a request stands, as far as the three verbs' call-outs need to know. */
+export interface LeadStandingView {
+  currentStatusCode: string;
+  isTerminal?: boolean;
+}
+
+const CHECKING_STANDING = 'Checking where this request stands…';
+/** A customer quote already exists or was decided: past both qualifying and passing on. */
+const MOVED_ON_CODES = new Set(['QUOTED', 'NEGOTIATION', 'AWARDED', 'PARTIALLY_AWARDED']);
+const codeOf = (standing: LeadStandingView) => (standing.currentStatusCode ?? '').trim().toUpperCase();
+/** "(Quote sent)" after a sentence, or nothing when the status has no words of its own. */
+const inBrackets = (standing: LeadStandingView) => {
+  const words = leadStatusWords(standing.currentStatusCode);
+  return words ? ` (${words})` : '';
+};
+const fromWords = (standing: LeadStandingView) => leadStatusWords(standing.currentStatusCode) ?? 'its current status';
+
+/**
+ * The Qualify Lead call-out. Each sentence is true for the status it is shown on: a request that
+ * already became an RFQ is not "not allowed a transition", it is past that step.
+ */
+export const qualifyCallout = (standing: LeadStandingView | undefined, canQualify: boolean): string => {
+  if (!standing) return CHECKING_STANDING;
+  if (canQualify) return 'Marks this request as worth quoting. It does not create an RFQ; that happens on the Decide screen.';
+  const code = codeOf(standing);
+  if (code === 'QUALIFIED') return 'This request is already qualified.';
+  if (code === 'CONVERTED_TO_RFQ') return 'This request already became an RFQ.';
+  if (MOVED_ON_CODES.has(code) || code === 'COMPLETED') return `This request has moved past qualifying${inBrackets(standing)}.`;
+  if (standing.isTerminal) return `This request is closed${inBrackets(standing)}, so it can't be qualified.`;
+  return `This request can't be qualified from ${fromWords(standing)}. Ask an administrator to check the lead statuses under Setup.`;
+};
+
+/** The Request clarification call-out. */
+export const clarifyCallout = (standing: LeadStandingView | undefined, closed: boolean): string => {
+  if (!standing || !closed) return 'Record the missing information needed from the customer.';
+  if (codeOf(standing) === 'CONVERTED_TO_RFQ') return 'This request already became an RFQ, so there is nothing to clarify here.';
+  return `This request is closed${inBrackets(standing)}, so there is nothing to clarify here.`;
+};
+
+/** The Pass call-out. "Completed" is said only of a request that is completed. */
+export const passCallout = (standing: LeadStandingView | undefined, canPass: boolean): string => {
+  if (!standing) return CHECKING_STANDING;
+  if (canPass) return 'Closes this request without an RFQ. You choose the reason.';
+  const code = codeOf(standing);
+  if (code === 'CONVERTED_TO_RFQ') return "This request already became an RFQ, so it can't be passed on here.";
+  if (code === 'DISQUALIFIED') return 'This request was already declined.';
+  if (standing.isTerminal) return `This request is already closed${inBrackets(standing)}.`;
+  if (MOVED_ON_CODES.has(code)) return `This request is past the point of passing on${inBrackets(standing)}.`;
+  return `Passing on isn't available from ${fromWords(standing)}. Ask an administrator to check the lead statuses under Setup.`;
 };
 
 const LeadDecisionActions: React.FC<Props> = ({ leadId, reviewVersion, canEdit, onChanged }) => {
@@ -164,7 +216,7 @@ const LeadDecisionActions: React.FC<Props> = ({ leadId, reviewVersion, canEdit, 
   return (
     <>
       <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
-        <Tooltip title={!state ? 'Loading lead decision…' : availableQualify ? 'Advance this Lead to Qualified through the governed lifecycle. Commercial facts must already be approved when review is required.' : state.currentStatusCode === 'QUALIFIED' ? 'This Lead is already qualified.' : 'Qualification is not an allowed transition from the current lifecycle state.'}>
+        <Tooltip describeChild title={qualifyCallout(state, Boolean(availableQualify))}>
           <span>
             <Button
               size="small"
@@ -179,7 +231,7 @@ const LeadDecisionActions: React.FC<Props> = ({ leadId, reviewVersion, canEdit, 
             </Button>
           </span>
         </Tooltip>
-        <Tooltip title={closed ? 'This lead decision is already complete.' : 'Record the missing information needed from the customer.'}>
+        <Tooltip describeChild title={clarifyCallout(state, closed)}>
           <span>
             <Button
               size="small"
@@ -193,7 +245,7 @@ const LeadDecisionActions: React.FC<Props> = ({ leadId, reviewVersion, canEdit, 
             </Button>
           </span>
         </Tooltip>
-        <Tooltip title={!state ? 'Loading lead decision…' : availablePass ? 'Close this inquiry with a governed outcome reason.' : 'Pass is not available for this completed lead.'}>
+        <Tooltip describeChild title={passCallout(state, Boolean(availablePass))}>
           <span>
             <Button
               size="small"
@@ -250,7 +302,7 @@ const LeadDecisionActions: React.FC<Props> = ({ leadId, reviewVersion, canEdit, 
         <DialogTitle sx={{ fontWeight: 800 }}>Qualify this Lead?</DialogTitle>
         <DialogContent dividers>
           <DialogContentText>
-            This records a governed lifecycle transition to Qualified. It does not create an RFQ; the lines are still quoted or skipped, and the RFQ created, on the Decide screen.
+            This marks the request qualified. It does not create an RFQ: lines are marked Quote or Skip, and the RFQ is created, on the Decide screen.
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>

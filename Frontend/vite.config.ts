@@ -29,6 +29,13 @@ export default defineConfig({
           ) {
             return 'react-vendor';
           }
+          // The data grid and its internals are left to ordinary route splitting. Grouped with @mui/
+          // they were part of mui-vendor, which every screen preloads, so the login page downloaded
+          // the whole grid. Naming them a group of their own does not help: the bundler then pulls
+          // the Material modules the grid imports into that group and preloads it anyway.
+          if (id.includes('node_modules/@mui/x-')) {
+            return undefined;
+          }
           if (id.includes('node_modules/@mui/') || id.includes('node_modules/@emotion/')) {
             return 'mui-vendor';
           }

@@ -13,11 +13,14 @@ import {
   DialogTitle,
   FormControl,
   FormControlLabel,
+  FormHelperText,
   IconButton,
+  Link,
   MenuItem,
   Select,
   Stack,
   Switch,
+  TablePagination,
   TextField,
   Typography,
   useMediaQuery,
@@ -31,7 +34,9 @@ import type { LeadDecisionEvidenceDTO, LeadDecisionLineDTO, LeadDecisionWorkbenc
 import { downloadAuthenticatedFile, fetchAuthenticatedObjectUrl, openAuthenticatedFile } from '../../../utils/authenticatedFile';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { inspectableEvidenceUrl } from '../Workbench/evidenceRules';
+import type { DecisionMap, EditableLineDecision } from '../Workbench/workbenchRules';
 import { lineLabel } from './decideRules';
+import { readUnit, tenantUnitCode, unitCaption, type UnitOption } from './unitRules';
 
 export interface ConfirmedLine {
   lineItemNo: string;
@@ -49,9 +54,14 @@ export interface CheckDocumentDialogProps {
   onClose: () => void;
   /** Fired after the server accepted the check, with the values the rep confirmed per line. */
   onConfirmed: (confirmed: ConfirmedLine[]) => void;
+  /**
+   * What the rep already chose on the lines. A line whose record has no quantity, no unit the
+   * tenant quotes in, or no currency opens with that choice, so nothing is typed twice.
+   */
+  decisions?: DecisionMap;
 }
 
-interface LineEdit {
+export interface LineEdit {
   productShortName: string;
   itemMaterialCode: string;
   manufacturerPartNumber: string;
@@ -61,6 +71,9 @@ interface LineEdit {
 }
 
 export const DEFAULT_CHECK_REASON = 'Checked against the source document on the decision screen.';
+
+/** Lines drawn at once in the check. A 641-line list with no units must not draw 641 forms. */
+export const CHECK_LINES_PER_PAGE = 50;
 
 const toDateInput = (iso: string | null | undefined): string => {
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(iso ?? '');
@@ -83,14 +96,31 @@ export const matchLeadItem = (
   return items[index];
 };
 
-const editFrom = (line: LeadDecisionLineDTO, item: LeadItemResponseDTO | undefined): LineEdit => ({
-  productShortName: item?.productShortName ?? line.productName ?? line.description ?? '',
-  itemMaterialCode: item?.itemMaterialCode ?? line.itemMaterialCode ?? '',
-  manufacturerPartNumber: item?.manufacturerPartNumber ?? line.manufacturerPartNumber ?? '',
-  quantity: item?.quantity != null ? String(item.quantity) : line.quantity != null ? String(line.quantity) : '',
-  unitOfMeasure: item?.unitOfMeasure ?? line.unitOfMeasure ?? '',
-  currency: item?.currency ?? line.currency ?? '',
-});
+/**
+ * The values a line opens with: what the record says, and — where the record has no quantity,
+ * no unit the tenant quotes in, or no currency — what the rep already chose for it on the lines.
+ * A unit the tenant does not quote in (Roll, Pack) is never a value here; it is shown as written
+ * beside the picker instead, because confirming it would approve a unit no line can be quoted in.
+ */
+export const editFrom = (
+  line: LeadDecisionLineDTO,
+  item: LeadItemResponseDTO | undefined,
+  decision?: EditableLineDecision,
+  unitOptions: UnitOption[] = [],
+): LineEdit => {
+  const recordUnit = item?.unitOfMeasure ?? line.unitOfMeasure ?? '';
+  const recordQuantity = item?.quantity ?? line.quantity;
+  return {
+    productShortName: item?.productShortName ?? line.productName ?? line.description ?? '',
+    itemMaterialCode: item?.itemMaterialCode ?? line.itemMaterialCode ?? '',
+    manufacturerPartNumber: item?.manufacturerPartNumber ?? line.manufacturerPartNumber ?? '',
+    quantity: recordQuantity != null ? String(recordQuantity) : decision?.quantity != null ? String(decision.quantity) : '',
+    unitOfMeasure: unitOptions.length > 0
+      ? tenantUnitCode(recordUnit, unitOptions) ?? tenantUnitCode(decision?.unitOfMeasure, unitOptions) ?? ''
+      : recordUnit || decision?.unitOfMeasure || '',
+    currency: item?.currency ?? line.currency ?? decision?.currency ?? '',
+  };
+};
 
 /** Every current line goes back to the server: a line left out of a review is a line deleted. */
 export const buildReviewItems = (
@@ -229,7 +259,7 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = (
  * version. The server then treats the lines as verified and this dialog closes.
  */
 const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
-  open, leadId, workbench, focusLineId, onClose, onConfirmed,
+  open, leadId, workbench, focusLineId, onClose, onConfirmed, decisions,
 }) => {
   const theme = useTheme();
   const fullScreen = useMediaQuery(theme.breakpoints.down('md'));
@@ -243,6 +273,8 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
   const [evidenceIndex, setEvidenceIndex] = React.useState(0);
   const [refusal, setRefusal] = React.useState<string | null>(null);
   const seeded = React.useRef<number | null>(null);
+  const [page, setPage] = React.useState(0);
+  const [scrollTarget, setScrollTarget] = React.useState<number | null>(null);
 
   const leadQuery = useQuery({
     queryKey: ['lead-detail', leadId],
@@ -274,21 +306,18 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
     if (!open) { seeded.current = null; return; }
     if (!lead || seeded.current === lead.reviewVersion) return;
     const next = new Map<number, LineEdit>();
-    for (const { line, item } of rows) if (item) next.set(item.id, editFrom(line, item));
+    for (const { line, item } of rows) {
+      if (item) next.set(item.id, editFrom(line, item, decisions?.[line.revisionLineId], workbench.unitOptions ?? []));
+    }
     setEdits(next);
     setDueDate(toDateInput(lead.bidClosingDate));
     setNote('');
     setShowAll(false);
+    setPage(0);
     setEvidenceIndex(0);
     setRefusal(null);
     seeded.current = lead.reviewVersion;
-  }, [open, lead, rows]);
-
-  React.useEffect(() => {
-    if (!open || focusLineId == null) return;
-    const node = document.getElementById(`check-line-${focusLineId}`);
-    node?.scrollIntoView({ block: 'center' });
-  }, [open, focusLineId, leadQuery.data]);
+  }, [open, lead, rows, decisions, workbench.unitOptions]);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -342,13 +371,68 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
 
   const unitOptions = workbench.unitOptions ?? [];
   const currencyOptions = workbench.currencyOptions ?? [];
-  const incomplete = visibleRows.some(({ item }) => {
+  const unitCodes = new Set(unitOptions.map((option) => option.code.toUpperCase()));
+
+  /** What still stops a line being confirmed, in words for the sentence beside the button. */
+  const rowGap = ({ item }: { item?: LeadItemResponseDTO }): string | null => {
     const edit = item ? edits.get(item.id) : undefined;
-    if (!edit) return true;
-    const quantity = Number(edit.quantity);
+    if (!item || !edit) return 'has no record that can be corrected here';
     // The review refuses a line with no product name or material code; a part number alone
     // does not satisfy it, so the name stays required here rather than failing on confirm.
-    return !edit.productShortName.trim() || edit.quantity === '' || !Number.isFinite(quantity) || quantity <= 0 || !edit.unitOfMeasure.trim();
+    if (!edit.productShortName.trim()) return 'needs what they asked for';
+    const quantity = Number(edit.quantity);
+    if (edit.quantity === '' || !Number.isFinite(quantity) || quantity <= 0) return 'needs a quantity';
+    // A unit the tenant does not quote in cannot be confirmed: the approval would record it, and
+    // a line carrying it could never be quoted afterwards.
+    if (!edit.unitOfMeasure.trim() || (unitOptions.length > 0 && !tenantUnitCode(edit.unitOfMeasure, unitOptions))) return 'needs a unit';
+    return null;
+  };
+  const firstGap = (() => {
+    for (const row of visibleRows) {
+      const gap = rowGap(row);
+      if (gap) return { line: row.line, gap };
+    }
+    return null;
+  })();
+  const incomplete = firstGap != null;
+
+  // A page of lines at a time; completeness above still covers every line to check.
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / CHECK_LINES_PER_PAGE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const drawnRows = visibleRows.length > CHECK_LINES_PER_PAGE
+    ? visibleRows.slice(currentPage * CHECK_LINES_PER_PAGE, (currentPage + 1) * CHECK_LINES_PER_PAGE)
+    : visibleRows;
+  const goToLine = (revisionLineId: number) => {
+    const index = visibleRows.findIndex(({ line }) => line.revisionLineId === revisionLineId);
+    if (index >= 0) setPage(Math.floor(index / CHECK_LINES_PER_PAGE));
+    setScrollTarget(revisionLineId);
+  };
+
+  React.useEffect(() => {
+    if (!open || focusLineId == null) return;
+    goToLine(focusLineId);
+    // Re-run once the record has loaded, so the rows exist to scroll to.
+  }, [open, focusLineId, leadQuery.data]);
+
+  React.useEffect(() => {
+    if (scrollTarget == null) return;
+    document.getElementById(`check-line-${scrollTarget}`)?.scrollIntoView?.({ block: 'center' });
+    setScrollTarget(null);
+  }, [scrollTarget, currentPage]);
+
+  // Forty lines with no unit are one choice, not forty. Fills only lines still without a unit
+  // the tenant quotes in; a unit already on a line stays.
+  const unitlessRows = unitOptions.length === 0 ? [] : visibleRows.filter(({ item }) => {
+    const edit = item ? edits.get(item.id) : undefined;
+    return Boolean(item && edit && !tenantUnitCode(edit.unitOfMeasure, unitOptions));
+  });
+  const setUnitOnUnitless = (code: string) => setEdits((current) => {
+    const next = new Map(current);
+    for (const { item } of unitlessRows) {
+      const edit = item ? current.get(item.id) : undefined;
+      if (item && edit && !tenantUnitCode(edit.unitOfMeasure, unitOptions)) next.set(item.id, { ...edit, unitOfMeasure: code });
+    }
+    return next;
   });
 
   return (
@@ -389,12 +473,16 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
           <Box component="section" aria-label="Lines to check" sx={{ flex: '1 1 42%', minWidth: 0 }}>
             {leadQuery.isLoading ? (
               <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 200 }}><CircularProgress size={28} /></Box>
-            ) : leadQuery.isError || !lead ? (
+            ) : !lead ? (
               <Alert severity="error" action={<Button color="inherit" onClick={() => leadQuery.refetch()}>Retry</Button>}>
                 The request could not be loaded. Nothing was changed.
               </Alert>
             ) : (
               <Stack spacing={1.5}>
+                {/* A background re-read that fails keeps the form and what was corrected on it. */}
+                {leadQuery.isRefetchError ? (
+                  <Alert severity="warning">Couldn&apos;t refresh this request just now. Your corrections here are kept.</Alert>
+                ) : null}
                 {refusal ? (
                   <Alert
                     severity="error"
@@ -416,7 +504,7 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                   </Typography>
                   {unverified.length > 0 && unverified.length < workbench.lines.length ? (
                     <FormControlLabel
-                      control={<Switch size="small" checked={showAll} onChange={(event) => setShowAll(event.target.checked)} />}
+                      control={<Switch size="small" checked={showAll} onChange={(event) => { setShowAll(event.target.checked); setPage(0); }} />}
                       label={<Typography variant="body2">Show every line</Typography>}
                     />
                   ) : null}
@@ -432,7 +520,41 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                   sx={{ maxWidth: 220 }}
                 />
 
-                {visibleRows.map(({ line, item }) => {
+                {unitlessRows.length >= 2 ? (
+                  <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1, p: 1.25, borderRadius: 2, bgcolor: 'action.hover' }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>{unitlessRows.length} lines to check have no unit.</Typography>
+                    <FormControl size="small" error sx={{ minWidth: 160 }}>
+                      <Select
+                        value=""
+                        displayEmpty
+                        renderValue={() => <em>Unit for all {unitlessRows.length}</em>}
+                        inputProps={{ 'aria-label': `Unit for the ${unitlessRows.length} lines to check without one` }}
+                        onChange={(event) => { if (event.target.value) setUnitOnUnitless(String(event.target.value)); }}
+                      >
+                        {unitOptions.map((option) => (
+                          <MenuItem key={option.code} value={option.code}>
+                            {option.label && option.label !== option.code ? `${option.code} · ${option.label}` : option.code}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Stack>
+                ) : null}
+
+                {visibleRows.length > CHECK_LINES_PER_PAGE ? (
+                  <TablePagination
+                    component="div"
+                    count={visibleRows.length}
+                    page={currentPage}
+                    onPageChange={(_event, next) => setPage(next)}
+                    rowsPerPage={CHECK_LINES_PER_PAGE}
+                    rowsPerPageOptions={[]}
+                    labelDisplayedRows={({ from, to, count }) => `Lines ${from}–${to} of ${count} to check`}
+                    getItemAriaLabel={(type) => `${type} page of lines to check`}
+                  />
+                ) : null}
+
+                {drawnRows.map(({ line, item }) => {
                   const label = lineLabel(line);
                   const edit = item ? edits.get(item.id) : undefined;
                   if (!item || !edit) {
@@ -443,6 +565,14 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                     );
                   }
                   const missingSource = line.verificationStatus === 'MISSING_SOURCE';
+                  // Said under the unit picker: the customer's own word, that they gave none, or
+                  // that the unit came from the rep's choice on the lines.
+                  const unitReading = readUnit(line, unitCodes);
+                  const chosenOnLines = unitOptions.length > 0 && unitReading.kind !== 'mapped' && Boolean(edit.unitOfMeasure)
+                    && tenantUnitCode(decisions?.[line.revisionLineId]?.unitOfMeasure, unitOptions) === edit.unitOfMeasure;
+                  const unitHint = chosenOnLines
+                    ? `you chose ${edit.unitOfMeasure} on the lines${unitReading.kind === 'unrecognised' ? ` · as written: ${unitReading.asWritten}` : ''}`
+                    : unitCaption(unitReading, edit.unitOfMeasure);
                   return (
                     <Box
                       key={line.revisionLineId}
@@ -506,9 +636,9 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                             sx={{ width: 120 }}
                           />
                           {unitOptions.length > 0 ? (
-                            <FormControl size="small" error={!edit.unitOfMeasure} sx={{ minWidth: 110 }}>
+                            <FormControl size="small" error={!tenantUnitCode(edit.unitOfMeasure, unitOptions)} sx={{ minWidth: 110 }}>
                               <Select
-                                value={edit.unitOfMeasure}
+                                value={tenantUnitCode(edit.unitOfMeasure, unitOptions) ?? ''}
                                 displayEmpty
                                 renderValue={(value: string) => value || <em>Unit</em>}
                                 inputProps={{ 'aria-label': `Unit, line ${label}` }}
@@ -516,6 +646,7 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                               >
                                 {unitOptions.map((option) => <MenuItem key={option.code} value={option.code}>{option.code}</MenuItem>)}
                               </Select>
+                              {unitHint ? <FormHelperText sx={{ mx: 0, maxWidth: 240 }}>{unitHint}</FormHelperText> : null}
                             </FormControl>
                           ) : (
                             <TextField
@@ -564,9 +695,20 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
         </Stack>
       </DialogContent>
       <DialogActions sx={{ px: 2.5, py: 1.5, gap: 1 }}>
-        <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
-          Confirming records that a person checked these lines against the document.
-        </Typography>
+        {firstGap && lead && items.length > 0 ? (
+          // The disabled button says why, and takes the rep to the line — which may be on
+          // another page of the check.
+          <Typography variant="body2" sx={{ flex: 1, color: 'warning.dark', fontWeight: 600 }}>
+            Line {lineLabel(firstGap.line)} {firstGap.gap}.{' '}
+            <Link component="button" type="button" onClick={() => goToLine(firstGap.line.revisionLineId)} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
+              Show line {lineLabel(firstGap.line)}
+            </Link>
+          </Typography>
+        ) : (
+          <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+            Confirming records that a person checked these lines against the document.
+          </Typography>
+        )}
         <Button color="inherit" onClick={onClose} disabled={mutation.isPending}>Cancel</Button>
         <Button
           variant="contained"

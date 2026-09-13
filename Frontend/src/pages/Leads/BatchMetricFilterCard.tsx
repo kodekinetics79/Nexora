@@ -1,17 +1,19 @@
 import type { ReactNode } from 'react';
-import { ButtonBase, Stack, Typography } from '@mui/material';
+import { ButtonBase, Box, Typography } from '@mui/material';
 
 interface BatchMetricFilterCardProps {
   label: string;
-  value: number;
+  value: number | string;
   icon: ReactNode;
   selected: boolean;
   onSelect: () => void;
 }
 
 /**
- * A reconciliation metric is also a filter. Keeping the entire card as a native
- * button preserves its large target while giving Enter/Space activation for free.
+ * A reconciliation count is also a filter. Eight of these used to be 104px-tall cards with a
+ * centred number, which spent a whole band of the page on eight digits. They are now dense rows:
+ * label left, number right, lining figures, one hairline, the brass accent only on the one that
+ * is on. Still a native button, so the target, Enter/Space and the accessible name are unchanged.
  */
 export const BatchMetricFilterCard = ({
   label, value, icon, selected, onSelect,
@@ -22,30 +24,43 @@ export const BatchMetricFilterCard = ({
     aria-label={`Filter batch by ${label} (${value})`}
     aria-pressed={selected}
     sx={{
-      p: 2,
-      borderRadius: 2,
-      minHeight: 104,
+      px: 1.5,
+      py: 1,
+      minHeight: 40,
       width: '100%',
-      display: 'block',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 1,
       boxSizing: 'border-box',
       textAlign: 'left',
       cursor: 'pointer',
       color: 'text.primary',
       font: 'inherit',
+      borderRadius: 1,
       border: '1px solid',
-      borderColor: 'divider',
-      bgcolor: selected ? 'action.selected' : 'background.paper',
+      borderColor: selected ? 'primary.main' : 'divider',
+      bgcolor: selected ? 'action.selected' : 'transparent',
+      transition: 'background-color 120ms, border-color 120ms',
+      '&:hover': { bgcolor: 'action.hover' },
       '&:focus-visible': {
-        outline: '3px solid',
+        outline: '2px solid',
         outlineColor: 'primary.main',
-        outlineOffset: 2,
+        outlineOffset: 1,
       },
     }}
   >
-    <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
-      <Typography variant="h5" sx={{ fontWeight: 900 }}>{value}</Typography>
-      {icon}
-    </Stack>
-    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{label}</Typography>
+    <Box sx={{ display: 'flex', flexShrink: 0, '& svg': { fontSize: 16 } }}>{icon}</Box>
+    <Typography
+      component="span"
+      sx={{ flex: 1, minWidth: 0, fontSize: '0.8rem', lineHeight: 1.3, color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+    >
+      {label}
+    </Typography>
+    <Typography
+      component="span"
+      sx={{ fontSize: '1rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
+    >
+      {value}
+    </Typography>
   </ButtonBase>
 );

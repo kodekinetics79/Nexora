@@ -56,6 +56,44 @@ describe('client identity vocabulary', () => {
       .toBe("Matched because the sender's email domain belongs to this client.");
   });
 
+  /**
+   * Lead 680 in production: an SEC portal print with no sender, no company-name field and
+   * no portal block — only a delivery address. The resolver auto-linked it at 0.88 and
+   * wrote the sentence below, quoting the line it read. The screens printed "Matched
+   * because this customer's name is printed on the document" instead, so the rep could see
+   * that a decision had been made but not what it rested on.
+   */
+  it("shows the engine's own sentence, quoting the document, in preference to the category phrase", () => {
+    expect(matchExplanation({
+      customerMatchReasonCode: 'NAME_IN_DOCUMENT',
+      customerMatchExplanation:
+        '"Saudi Electricity Company" appears in the delivery address: "Saudi Electricity Company-DAMMAM".',
+    })).toBe('"Saudi Electricity Company" appears in the delivery address: "Saudi Electricity Company-DAMMAM".');
+
+    // Verbatim: the resolver punctuates its own sentence, and re-casing it would wreck the
+    // company names it quotes.
+    expect(matchExplanation({
+      customerMatchReasonCode: 'SENDER_DOMAIN',
+      customerMatchExplanation: 'Shares the corporate sender domain se.com.sa.',
+    })).toBe('Shares the corporate sender domain se.com.sa.');
+
+    // A blank sentence is not a sentence — fall back rather than render an empty "Why".
+    expect(matchExplanation({ customerMatchReasonCode: 'SENDER_DOMAIN', customerMatchExplanation: '   ' }))
+      .toBe("Matched because the sender's email domain belongs to this client.");
+  });
+
+  /**
+   * Both of these used to fall to `default` and render NOTHING, leaving a name, a
+   * percentage and silence — NAME_IN_DOCUMENT on lead 682 (a Marafiq RFQ naming MARAFIQ in
+   * its own text) and HUMAN_RESOLVED on every lead a colleague had already decided.
+   */
+  it('explains the two reason codes that used to render nothing at all', () => {
+    expect(matchExplanation({ customerMatchReasonCode: 'NAME_IN_DOCUMENT' }))
+      .toBe("Matched because this customer's name is printed on the document.");
+    expect(matchExplanation({ customerMatchReasonCode: 'HUMAN_RESOLVED' }))
+      .toBe('Matched because a colleague already chose this customer.');
+  });
+
   it('has no explanation for an unknown reason code rather than inventing one', () => {
     expect(matchExplanation({ customerMatchReasonCode: 'WHAT_IS_THIS' })).toBeNull();
     expect(matchExplanation({})).toBeNull();

@@ -231,13 +231,13 @@ describe('the rail exposes the complete commercial spine', () => {
       ]);
 
     expect(appSource).toContain(
-      '<Route path="/sales/orders" element={<MainLayout><PermissionGuard moduleName="Orders"><OrderListPage /></PermissionGuard></MainLayout>} />',
+      '<Route path="/sales/orders" element={<TenantShell><PermissionGuard moduleName="Orders"><OrderListPage /></PermissionGuard></TenantShell>} />',
     );
     expect(appSource).toContain(
-      '<Route path="/sales/shipments" element={<MainLayout><PermissionGuard moduleName="Shipments"><ShipmentListPage /></PermissionGuard></MainLayout>} />',
+      '<Route path="/sales/shipments" element={<TenantShell><PermissionGuard moduleName="Shipments"><ShipmentListPage /></PermissionGuard></TenantShell>} />',
     );
     expect(appSource).toContain(
-      '<Route path="/sales/finance" element={<MainLayout><PermissionGuard moduleName="Accounts Receivable"><AccountsReceivablePage /></PermissionGuard></MainLayout>} />',
+      '<Route path="/sales/finance" element={<TenantShell><PermissionGuard moduleName="Accounts Receivable"><AccountsReceivablePage /></PermissionGuard></TenantShell>} />',
     );
   });
 
@@ -285,7 +285,7 @@ describe('catalog permissions match route authority', () => {
       managerOnly: true,
     });
     expect(appSource).toContain(
-      '<Route path="/sales/team" element={<MainLayout><RequireManager><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></RequireManager></MainLayout>} />',
+      '<Route path="/sales/team" element={<TenantShell><RequireManager><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></RequireManager></TenantShell>} />',
     );
   });
 
@@ -298,10 +298,10 @@ describe('catalog permissions match route authority', () => {
       managerOnly: true,
     });
     expect(appSource).toContain(
-      '<Route path="/sales/reps" element={<MainLayout><RequireManager><PermissionGuard moduleName="Users"><RepDirectoryPage /></PermissionGuard></RequireManager></MainLayout>} />',
+      '<Route path="/sales/reps" element={<TenantShell><RequireManager><PermissionGuard moduleName="Users"><RepDirectoryPage /></PermissionGuard></RequireManager></TenantShell>} />',
     );
     expect(appSource).toContain(
-      '<Route path="/sales/reps/:userId" element={<MainLayout><RequireManager><PermissionGuard moduleName="Users"><RepProfilePage /></PermissionGuard></RequireManager></MainLayout>} />',
+      '<Route path="/sales/reps/:userId" element={<TenantShell><RequireManager><PermissionGuard moduleName="Users"><RepProfilePage /></PermissionGuard></RequireManager></TenantShell>} />',
     );
   });
 });

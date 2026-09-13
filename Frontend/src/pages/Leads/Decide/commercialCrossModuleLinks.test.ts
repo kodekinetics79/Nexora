@@ -23,7 +23,9 @@ describe('commercial cross-module link contracts', () => {
   });
 
   it('clears and suppresses obsolete browser drafts once promotion makes the revision terminal', () => {
-    expect(decideSource).toContain('guard.markSaved({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) });');
+    // The saved form is keyed by line number (so a draft survives a new revision); promotion
+    // still re-baselines it, which clears the stored draft.
+    expect(decideSource).toContain('guard.markSaved(formOf(workbench, decisions, concern));');
     expect(decideSource).toContain('decisionRecordIsLocked(workbench, decisions)) return;');
   });
 

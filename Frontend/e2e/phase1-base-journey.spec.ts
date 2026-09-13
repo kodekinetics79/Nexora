@@ -132,8 +132,8 @@ async function markAllNoBidThroughControls(page: Page) {
 }
 
 async function commitBidScopeAndPromote(page: Page, leadId: number, approved: number): Promise<number> {
-  // One button. Behind it: the committed participation decision, then the RFQ promotion, each a
-  // governed write the boundary below still sees separately.
+  // One button, then one question. Behind "Yes": the committed participation decision, then the
+  // RFQ promotion, each a governed write the boundary below still sees separately.
   const create = page.getByRole('button', { name: 'Create RFQ' });
   await expect(create).toBeEnabled();
   const commitResponsePromise = page.waitForResponse((response) =>
@@ -143,6 +143,10 @@ async function commitBidScopeAndPromote(page: Page, leadId: number, approved: nu
     response.request().method() === 'POST'
     && response.url().endsWith(`/api/leads/${leadId}/promote-to-rfq`));
   await create.click();
+  // Create RFQ asks before anything is written; the confirmation says how many lines go in.
+  const confirm = page.getByRole('dialog', { name: /^Create an RFQ for / });
+  await expect(confirm).toContainText(`${approved} of 6 lines go into the RFQ.`);
+  await confirm.getByRole('button', { name: 'Yes, create the RFQ' }).click();
   const commitResponse = await commitResponsePromise;
   expect(commitResponse.ok(), await commitResponse.text()).toBeTruthy();
   const promotionResponse = await promotionResponsePromise;
@@ -156,8 +160,8 @@ async function commitBidScopeAndPromote(page: Page, leadId: number, approved: nu
   // Re-enter through the operator route. The durable receipt replaces the creation action, and
   // the read-only RFQ count proves this visible replay cannot create a second formal RFQ.
   await page.goto(`/procurement/leads/${leadId}/workbench`);
-  await expect(page.getByText(/^RFQ .+ created$/)).toBeVisible();
-  await expect(page.getByText(new RegExp(`${approved} of 6 lines carried over`))).toBeVisible();
+  await expect(page.getByText(/^Became an RFQ: .+$/)).toBeVisible();
+  await expect(page.getByText(new RegExp(`${approved} of 6 lines went into the RFQ`))).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create RFQ' })).toHaveCount(0);
   await expect(page.getByRole('group', { name: /Quote or skip line/ })).toHaveCount(0);
   expect(await rfqCountForLead(page, await token(page), leadId)).toBe(1);
@@ -382,7 +386,7 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
       `/api/leads/${Number(values.E2E_GOLDEN_PARTIAL_BID_LEAD_ID)}/decision-workbench`);
     expect(assigned.ok(), await assigned.text()).toBeTruthy();
     await page.goto(`/procurement/leads/${values.E2E_GOLDEN_PARTIAL_BID_LEAD_ID}/workbench`);
-    await expect(page.getByText(/^RFQ .+ created$/)).toBeVisible();
+    await expect(page.getByText(/^Became an RFQ: .+$/)).toBeVisible();
   });
 
   test('same-tenant restricted role is denied Quote Draft and PDF boundaries', async ({ page }) => {

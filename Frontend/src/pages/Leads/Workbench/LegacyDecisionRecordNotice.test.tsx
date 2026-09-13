@@ -19,6 +19,13 @@ describe('LegacyDecisionRecordNotice', () => {
     expect(openRfq).toHaveBeenCalledOnce();
   });
 
+  it('takes a heading in job words where the screen gives one', () => {
+    render(<LegacyDecisionRecordNotice title="Became an RFQ before this screen recorded decisions" message="The lines below may not match what went into the RFQ." />);
+
+    expect(screen.getByText('Became an RFQ before this screen recorded decisions')).toBeInTheDocument();
+    expect(screen.queryByText('Historical RFQ decision record')).not.toBeInTheDocument();
+  });
+
   it('does not offer an RFQ action when the viewer lacks permission', () => {
     render(<LegacyDecisionRecordNotice message="This historical decision record is read-only." />);
 

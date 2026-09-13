@@ -8,6 +8,16 @@ describe('stale deployment chunk recovery', () => {
     expect(isStaleDeploymentChunkError(new Error('ordinary render failure'))).toBe(false);
   });
 
+  it('recognises the Safari, Firefox and stylesheet-preload wordings of the same failure', () => {
+    // Only Chrome's wording used to match, so Safari and Firefox users got the full-screen crash
+    // card with no recovery after every deploy.
+    expect(isStaleDeploymentChunkError(new TypeError('Importing a module script failed.'))).toBe(true);
+    expect(isStaleDeploymentChunkError(new TypeError('error loading dynamically imported module: https://nexora1-ai.vercel.app/assets/Quotes-1a2b.js'))).toBe(true);
+    expect(isStaleDeploymentChunkError(new Error('Unable to preload CSS for /assets/DecidePage-9f8e.css'))).toBe(true);
+    expect(isStaleDeploymentChunkError(new TypeError("Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of \"text/html\"."))).toBe(true);
+    expect(isStaleDeploymentChunkError(new TypeError('Cannot read properties of undefined'))).toBe(false);
+  });
+
   it('allows one automatic reload per route during the cooldown', () => {
     const values = new Map<string, string>();
     const storage = {
