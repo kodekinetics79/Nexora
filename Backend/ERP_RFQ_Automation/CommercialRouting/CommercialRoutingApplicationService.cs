@@ -35,18 +35,27 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     private readonly INotificationService? _notifications;
     private readonly ILogger<CommercialRoutingApplicationService>? _logger;
 
+    /// <summary>
+    /// The resolver's own policy, read here for the one rule routing must share with it: how long an
+    /// account number must be before it names a customer. The singleton the resolver uses when it is
+    /// registered; the shipped defaults otherwise, which are what that singleton holds.
+    /// </summary>
+    private readonly CustomerResolution.CustomerResolutionPolicy _identityPolicy;
+
     public CommercialRoutingApplicationService(
         ErpRfqAutomationContext db,
         DeterministicRoutingEngine engine,
         RoutingPolicy policy,
         INotificationService? notifications = null,
-        ILogger<CommercialRoutingApplicationService>? logger = null)
+        ILogger<CommercialRoutingApplicationService>? logger = null,
+        CustomerResolution.CustomerResolutionPolicy? identityPolicy = null)
     {
         _db = db;
         _engine = engine;
         _policy = policy;
         _notifications = notifications;
         _logger = logger;
+        _identityPolicy = identityPolicy ?? new CustomerResolution.CustomerResolutionPolicy();
     }
 
     public async Task<RoutingDecisionResponse> RouteLeadAsync(
@@ -58,6 +67,22 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
 
         var existing = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, requestHash, ct);
         if (existing != null) return existing;
+
+        // What "us" means for a sender address, from the same loader the resolver and the learner
+        // use, so routing can never treat a colleague's forward as a customer's mail when they
+        // would not. Read BEFORE the serializable transaction on purpose: it is tenant setup
+        // (mailboxes and staff), not part of the decision's consistency, and putting the tenant's
+        // whole user list into a serializable read set only buys spurious retries when someone
+        // edits a user while a lead is being routed.
+        var selfDomains = await CustomerResolution.TenantSelfIdentity.LoadSelfDomainsAsync(_db, businessUnitId, ct);
+        // The tenant's own name, for the second test of "ours": a domain that spells it. The learner
+        // and the resolver both refuse such a domain, so routing must too, or a colleague with no
+        // Nexora login forwarding from it is routed on a legacy row the other two ignore. Tenant setup,
+        // read before the transaction for the same reason as the domains above.
+        var tenantName = await _db.BusinessUnits.AsNoTracking()
+            .Where(unit => unit.Id == businessUnitId)
+            .Select(unit => unit.BusinessUnitName)
+            .SingleOrDefaultAsync(ct);
 
         try
         {
@@ -73,8 +98,10 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 if (lead.AssignTo.HasValue)
                     throw new RoutingConflictException("Lead already has an owner. Use an explicit reassignment command.");
 
-                var evidence = BuildEvidence(lead);
-                var identifiers = await LoadMatchingIdentifiersAsync(businessUnitId, evidence, ct);
+                // Our names: the tenant's, and the vendor block this document prints (which names us).
+                string?[] selfNames = [tenantName, lead.SupplierNameOnDocument];
+                var evidence = BuildEvidence(lead, selfDomains, selfNames, _identityPolicy.MinimumErpAccountLength);
+                var identifiers = await LoadMatchingIdentifiersAsync(businessUnitId, evidence, selfDomains, selfNames, ct);
 
                 // A customer a HUMAN has already confirmed on this lead is the strongest evidence
                 // that exists — stronger than any inferred email/domain identifier. It was being
@@ -1254,18 +1281,67 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         ];
     }
 
-    private static Dictionary<CustomerIdentifierType, HashSet<string>> BuildEvidence(Lead lead)
+    /// <summary>
+    /// What this lead says about who sent it, as routing lookup keys.
+    ///
+    /// <para>THE SENDER IS GUARDED EXACTLY AS THE RESOLVER GUARDS IT. This method used to add
+    /// the sender's domain with no check at all, and that quietly undid the relay fix. The
+    /// resolver refuses bidnet.com as a Domain because every buyer's RFQ arrives from it, but a
+    /// Domain row bidnet.com → Saudi Aramco that was learned before that fix is still in the
+    /// store. Routing looked it up, the engine called it a verified 0.95 match, and
+    /// <see cref="WriteCustomerThroughToLead"/> linked the lead to Aramco. The extraction worker
+    /// routes straight after resolution, so a lead the resolver had rightly left without a
+    /// customer got one anyway, and Aramco's owner got another buyer's inquiry.</para>
+    ///
+    /// <para>The rules, which are the resolver's rules:</para>
+    /// <list type="bullet">
+    /// <item>An address on Nexora's own placeholder domains (extraction@pipeline.local), or on
+    /// the tenant's own domains, says nothing about a customer. It is dropped as an Email and as a
+    /// Domain. A salesman forwarding a bid from ahmed@alquraishi.com.sa is us, not SEC.</item>
+    /// <item>A free-mail or portal-relay address is still an exact Email. One gmail mailbox is
+    /// one person, and an administrator can register it on a customer. Its DOMAIN is dropped,
+    /// because gmail.com and bidnet.com are shared by everybody.</item>
+    /// </list>
+    /// </summary>
+    private static Dictionary<CustomerIdentifierType, HashSet<string>> BuildEvidence(
+        Lead lead, IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames,
+        int minimumErpAccountLength)
     {
         var evidence = new Dictionary<CustomerIdentifierType, HashSet<string>>();
-        Add(CustomerIdentifierType.Email, lead.Clientemail);
-        Add(CustomerIdentifierType.Domain, RoutingValueNormalizer.DomainFromEmail(lead.Clientemail));
+        if (IsSenderAddressEvidence(lead.Clientemail, selfDomains, selfNames))
+        {
+            Add(CustomerIdentifierType.Email, lead.Clientemail);
+            var senderDomain = RoutingValueNormalizer.DomainFromEmail(lead.Clientemail);
+            if (IsSenderDomainEvidence(senderDomain, selfDomains, selfNames))
+                Add(CustomerIdentifierType.Domain, senderDomain);
+        }
         Add(CustomerIdentifierType.CustomerName, lead.BuyersName);
+        // AN ACCOUNT NUMBER NAMES A CUSTOMER ONLY BY THE RESOLVER'S RULE. ERP account is routing's
+        // strongest identifier, and every line's CompanyRef was read as one. On an SAP print that
+        // field is the company code, 1000 or SA01, shared by every affiliate of a group, and the
+        // migration backfill stored every customer's DocId as an ERP account: a customer numbered
+        // 1000 outranked SEC's own registered address on SEC's own print, took the lead's owner and,
+        // where resolution had not linked it, was written onto the lead. The resolver has refused
+        // such a code since it was found, and refuses OUR vendor code at the customer too (2004414
+        // is us at SEC, never SEC). Routing refused neither, so it undid both one step later.
+        var ourVendorCode = string.IsNullOrWhiteSpace(lead.SupplierAccountRefOnDocument)
+            ? null
+            : RoutingValueNormalizer.Normalize(CustomerIdentifierType.ErpAccount, lead.SupplierAccountRefOnDocument);
         foreach (var item in lead.LeadItems)
         {
-            Add(CustomerIdentifierType.ErpAccount, item.CustomerAccountPortalId);
-            Add(CustomerIdentifierType.ErpAccount, item.CompanyRef);
+            AddAccount(item.CustomerAccountPortalId);
+            AddAccount(item.CompanyRef);
         }
         return evidence;
+
+        void AddAccount(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return;
+            var normalized = RoutingValueNormalizer.Normalize(CustomerIdentifierType.ErpAccount, value);
+            if (normalized.Length < minimumErpAccountLength) return;
+            if (ourVendorCode is not null && string.Equals(normalized, ourVendorCode, StringComparison.Ordinal)) return;
+            Add(CustomerIdentifierType.ErpAccount, value);
+        }
 
         void Add(CustomerIdentifierType type, string? value)
         {
@@ -1276,21 +1352,77 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         }
     }
 
+    /// <summary>
+    /// True when a sender address may be looked up at all: it has a domain, the domain is not one
+    /// of Nexora's placeholders, and it is not ours: one of the tenant's domains, a host under one,
+    /// or a domain whose name spells the tenant's (<see cref="CustomerResolution.TenantSelfIdentity.IsOurs(string?, IEnumerable{string}?, IEnumerable{string?}?)"/>).
+    /// </summary>
+    private static bool IsSenderAddressEvidence(
+        string? address, IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames) =>
+        !string.IsNullOrWhiteSpace(RoutingValueNormalizer.DomainFromEmail(address))
+        // DomainOf, not DomainFromEmail: it also reads "Extraction <extraction@pipeline.local>",
+        // where DomainFromEmail keeps the closing bracket and the placeholder check says no.
+        && !CustomerResolution.SyntheticIdentityGuard.IsSyntheticDomain(
+            CustomerResolution.IdentityDomainGuard.DomainOf(address))
+        && !CustomerResolution.TenantSelfIdentity.IsOurs(address, selfDomains, selfNames);
+
+    /// <summary>
+    /// True when a sender domain can belong to one organisation that is not us: the Foundations
+    /// guard and the shared "ours" test, so routing and the resolver cannot disagree about which
+    /// domains name a customer.
+    /// </summary>
+    private static bool IsSenderDomainEvidence(
+        string? domain, IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames) =>
+        CustomerResolution.IdentityDomainGuard.IsOrganisationDomain(domain, selfDomains)
+        && !CustomerResolution.TenantSelfIdentity.IsOurs(domain, selfDomains, selfNames);
+
+    /// <summary>
+    /// The live identifier rows the evidence points at.
+    ///
+    /// <para>The sender guard is applied again here rather than trusted to the caller. This is the
+    /// query that turns a value into a customer, so it is the one place a value that names nobody
+    /// must not get through, whoever built the evidence.</para>
+    ///
+    /// <para>A row a reviewer confirmed but the learner would not trust
+    /// (<see cref="CustomerResolution.CustomerIdentifierSources.LeadReviewUnverified"/>) is never
+    /// loaded. It exists so a person can look at it. The engine drops unverified rows, but it reads
+    /// only the IsVerified flag, and the flag and the source are separate columns that do drift
+    /// apart: when a later confirmation re-proposes the same value, the learner's reinforcement
+    /// path sets IsVerified to true and leaves Source alone. Such a row would otherwise route the
+    /// lead to that customer's owner and write the customer through at identifier grade.</para>
+    /// </summary>
     private async Task<List<CustomerIdentifier>> LoadMatchingIdentifiersAsync(
-        long businessUnitId, Dictionary<CustomerIdentifierType, HashSet<string>> evidence, CancellationToken ct)
+        long businessUnitId, Dictionary<CustomerIdentifierType, HashSet<string>> evidence,
+        IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames, CancellationToken ct)
     {
-        var emails = Values(CustomerIdentifierType.Email);
-        var domains = Values(CustomerIdentifierType.Domain);
-        var accounts = Values(CustomerIdentifierType.ErpAccount);
+        var emails = Values(CustomerIdentifierType.Email)
+            .Where(email => IsSenderAddressEvidence(email, selfDomains, selfNames)).ToArray();
+        var domains = Values(CustomerIdentifierType.Domain)
+            .Where(domain => IsSenderDomainEvidence(domain, selfDomains, selfNames)).ToArray();
+        // The length rule again, for the same reason the sender guards are re-applied above.
+        var accounts = Values(CustomerIdentifierType.ErpAccount)
+            .Where(account => account.Length >= _identityPolicy.MinimumErpAccountLength).ToArray();
         var names = Values(CustomerIdentifierType.CustomerName);
-        return await _db.Set<CustomerIdentifier>().AsNoTracking()
+        var unverifiedSource = CustomerResolution.CustomerIdentifierSources.LeadReviewUnverified;
+        var rows = await _db.Set<CustomerIdentifier>().AsNoTracking()
             .Where(i => i.BusinessUnitId == businessUnitId && i.EffectiveTo == null &&
+                i.Source != unverifiedSource &&
                 _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false) &&
                 ((i.IdentifierType == CustomerIdentifierType.Email && emails.Contains(i.NormalizedValue)) ||
                  (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)) ||
                  (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
                  ((i.IdentifierType == CustomerIdentifierType.CustomerName || i.IdentifierType == CustomerIdentifierType.Alias) && names.Contains(i.NormalizedValue))))
             .ToListAsync(ct);
+
+        // A RELAY'S OWN SENDING ADDRESS NAMES A BUYER ONLY WHERE A PERSON SAID SO. A relay address is
+        // still let through as exact evidence above, because one mailbox a person registered is one
+        // buyer. But the old learner minted ordersender-prod@ansmtp.ariba.com as Saudi Aramco's Email
+        // from one confirmation, and with that row in the store every Ariba buyer's RFQ went to Aramco's
+        // owner and had Aramco written onto the lead. The resolver's exact tier asks the same predicate.
+        return rows
+            .Where(i => i.IdentifierType != CustomerIdentifierType.Email
+                        || CustomerResolution.IdentityDomainGuard.MayMatchExactAddress(i.NormalizedValue, i.Source))
+            .ToList();
 
         string[] Values(CustomerIdentifierType type) => evidence.TryGetValue(type, out var values) ? values.ToArray() : [];
     }

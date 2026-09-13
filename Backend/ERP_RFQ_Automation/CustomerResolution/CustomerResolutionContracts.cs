@@ -43,6 +43,21 @@ public static class CustomerIdentifierSources
     public const string MasterData = "MasterData";
 
     /// <summary>
+    /// What a reviewer confirmed that the sanity gates would not trust: a printed name that does
+    /// not resemble the chosen customer, a mailbox on a domain nobody tied to that customer. The
+    /// row is kept so a person can look at it; it is NOT a fact. It is deliberately absent from
+    /// <see cref="TrustedForAutoLink"/> and from <c>CustomerIdentityMaintenance.ManagedSources</c>.
+    ///
+    /// It lives here, beside the trusted sources, because three readers must skip it and they
+    /// were about to spell it three times: the learner writes it, the resolver's exact tiers
+    /// (S1 e-mail, S2 domain) and routing must refuse it. Those two tiers never looked at Source
+    /// at all, so a demoted row still linked at 1.00 or 0.95, and a misspelt copy of this string
+    /// in any one reader would quietly reopen that hole. <c>CustomerAliasLearner.UnverifiedAliasSource</c>
+    /// must stay equal to this value; a contract test pins it.
+    /// </summary>
+    public const string LeadReviewUnverified = "LeadReviewUnverified";
+
+    /// <summary>
     /// Sources trusted enough for the learned-alias auto-link tier (S3). An administrator's own
     /// entry on the setup screen belongs here: a portal vendor code or an "also known as" typed
     /// in deliberately is at least as reliable as a reviewer's confirmation — and until it was
@@ -50,6 +65,15 @@ public static class CustomerIdentifierSources
     /// </summary>
     public static readonly string[] TrustedForAutoLink =
         [LeadReviewLearned, "CustomerProfile", "CustomerImport", MasterData];
+
+    /// <summary>
+    /// Sources a PERSON typed or imported on purpose: the setup screen, the customer profile and its
+    /// contacts, a customer import. What the platform inferred is not here: a reviewer's confirmation
+    /// the learner turned into a row, or the migration backfill. Read where a value is trusted only if
+    /// somebody said so, which today is a procurement relay's own sending address
+    /// (<see cref="IdentityDomainGuard.MayMatchExactAddress"/>).
+    /// </summary>
+    public static readonly string[] EnteredByAPerson = [MasterData, "CustomerProfile", "CustomerContact", "CustomerImport"];
 }
 
 /// <summary>
@@ -72,12 +96,49 @@ public static class SyntheticIdentityGuard
     /// Consumer mailbox providers. A shared free-mail domain is evidence about a PERSON,
     /// never about an organisation, so it may still match as an exact ADDRESS (A1) but must
     /// never be learned or matched as a Domain identifier (B1).
+    ///
+    /// Compared on the FIRST label, so "yahoo.com.sa" and "hotmail.co.uk" are caught without
+    /// listing every country. The list was closed at twenty-one names, and a provider missing
+    /// from it counted as an organisation: one confirmation on one bid a freight agent forwarded
+    /// from agent@fastmail.com minted fastmail.com as that customer's Domain at 0.95, and every
+    /// later fastmail sender, for any buyer at all, linked to the same customer.
+    ///
+    /// KNOWN QUIRK, deliberately not widened: "mail" is here for mail.com and mail.ru, and a
+    /// first-label rule cannot tell those from a company's own mail host, so
+    /// "mail.alquraishi.com.sa" also reads as free mail. That errs towards refusing: such a host
+    /// is never learned or matched as a Domain, which costs a suggestion, never a wrong link. It
+    /// is also why the ordinary words below sit on the whole-domain list instead of this one.
     /// </summary>
     private static readonly HashSet<string> FreeMailFirstLabels = new(StringComparer.OrdinalIgnoreCase)
     {
         "gmail", "googlemail", "hotmail", "outlook", "yahoo", "ymail", "icloud", "me",
         "aol", "protonmail", "proton", "live", "msn", "qq", "163", "126", "gmx",
-        "mail", "yandex", "zoho", "rediffmail"
+        "mail", "yandex", "zoho", "rediffmail",
+        "fastmail", "rocketmail", "windowslive", "tutanota", "tutamail", "zohomail",
+        "mailfence", "hushmail", "posteo", "runbox", "btinternet"
+    };
+
+    /// <summary>
+    /// Consumer providers whose name is too ordinary a word to compare as a first label. "hey",
+    /// "mac", "pm", "web" and "post" begin real company hosts, and as first labels they would
+    /// quietly stop those companies' registered Domain rows from ever linking again — the same
+    /// harm sap.com did on the relay list. So these match the WHOLE domain only.
+    /// </summary>
+    private static readonly HashSet<string> FreeMailDomains = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hey.com", "tuta.io", "tuta.com", "pm.me", "mac.com", "aim.com",
+        "email.com", "usa.com", "post.com", "consultant.com", "engineer.com", "inbox.com",
+        "web.de", "t-online.de", "freenet.de", "list.ru", "bk.ru", "inbox.ru", "rambler.ru",
+        "att.net", "sbcglobal.net", "comcast.net", "verizon.net",
+        "emirates.net.ae", "eim.ae", "naver.com", "hanmail.net", "daum.net", "sina.com", "sohu.com",
+        // Still missing on 2026-09-12, and each an "organisation" to the learner until then: DuckDuckGo's
+        // address relay, Saudi Telecom's consumer ISP, and national webmail elsewhere. This list will
+        // never be complete, which is why an unlisted provider is stopped by P10 in CustomerAliasLearner
+        // (the envelope never vouches for its own domain), not by this list.
+        "duck.com", "awalnet.net.sa", "mail2world.com", "sina.cn", "inbox.lv", "seznam.cz", "wp.pl",
+        "o2.pl", "interia.pl", "onet.pl", "libero.it", "virgilio.it", "orange.fr", "wanadoo.fr",
+        "laposte.net", "bigpond.com", "optonline.net", "cox.net", "charter.net", "earthlink.net",
+        "juno.com", "rediff.com"
     };
 
     public static bool IsSyntheticDomain(string? domain)
@@ -91,18 +152,33 @@ public static class SyntheticIdentityGuard
     /// auto-link the NEXT portal-delivered RFQ — from a completely different buyer — to
     /// whichever customer was taught first, and it would do it at S2's 0.95 domain
     /// confidence, which links without asking anyone.
+    ///
+    /// ONLY hosts that send on behalf of many buyers belong here. sap.com was listed, and it is
+    /// SAP's own company domain: SAP Arabia buys from trading houses like any other customer and
+    /// mails from sap.com. Because the resolver drops every relay domain before the domain tier,
+    /// a customer an administrator had registered with Domain sap.com stopped linking at 0.95
+    /// and came back NO_MATCH, with nothing else on the page to catch it. SAP Ariba's relay mail
+    /// comes from ariba.com's sending hosts and sapariba.com, which stay listed. A software
+    /// vendor's company domain is a buyer's domain like any other.
     /// </summary>
     private static readonly HashSet<string> PortalRelayDomains = new(StringComparer.OrdinalIgnoreCase)
     {
-        "ariba.com", "ansmtp.ariba.com", "eusmtp.ariba.com", "sap.com", "sapariba.com",
+        "ariba.com", "ansmtp.ariba.com", "eusmtp.ariba.com", "sapariba.com",
         "etimad.sa", "tenders.gov.sa", "jaggaer.com", "coupahost.com", "tejari.com",
         "bidnet.com", "bidnetdirect.com", "demandstar.com", "bonfirehub.com"
     };
 
+    /// <summary>
+    /// True for a consumer mailbox provider. Accepts a bare domain or a whole address, like
+    /// <see cref="IsPortalRelayDomain"/>: callers hold both shapes, and a guard that silently
+    /// answers false for one of them is a hole.
+    /// </summary>
     public static bool IsFreeMailDomain(string? domain)
     {
-        if (string.IsNullOrWhiteSpace(domain)) return false;
-        var first = domain.Trim().Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        var value = IdentityDomainGuard.DomainOf(domain);
+        if (value is null) return false;
+        if (FreeMailDomains.Contains(value)) return true;
+        var first = value.Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
         return first is not null && FreeMailFirstLabels.Contains(first);
     }
 
@@ -163,36 +239,108 @@ public static class SyntheticIdentityGuard
 public static class SharedSupplierNetworks
 {
     /// <summary>
-    /// The portal names as a person writes them. Public so a test can state the whole list,
-    /// and so the reason any one portal sits on it can be argued about in review.
+    /// The network's own mark: the word, or the run of words, that no spelling of that
+    /// network's name leaves out. Public so a test can state the whole list, and so the reason
+    /// any one portal sits on it can be argued about in review. The Arabic entry is Etimad as
+    /// the Saudi government writes it ("منصة اعتماد").
     /// </summary>
     public static readonly IReadOnlyList<string> Names =
     [
-        "ARIBA", "SAP ARIBA", "SAP ARIBA NETWORK", "SAP BUSINESS NETWORK", "ARIBA NETWORK",
-        "ETIMAD", "JAGGAER", "COUPA", "TENDERBOARD", "TEJARI", "ORACLE SUPPLIER NETWORK",
-        "PROCUREPORT"
+        "ARIBA", "SAP BUSINESS NETWORK", "ORACLE SUPPLIER NETWORK",
+        "ETIMAD", "ETIMAAD", "ITIMAD", "اعتماد",
+        "COUPA", "JAGGAER", "TEJARI", "TENDERBOARD", "PROCUREPORT"
     ];
 
     /// <summary>
-    /// Compared on <see cref="CustomerNameNormalizer.LooseKey"/> — the same key the portal
-    /// name is matched under everywhere else — so "SAP Ariba", "sap ariba network" and
-    /// "ARIBA" all land on the same entry and no amount of punctuation, casing or a stray
-    /// legal-form token can smuggle one past.
+    /// Each mark as <see cref="CustomerNameNormalizer.LooseKey"/> words — the same key the
+    /// portal name is matched under everywhere else, so punctuation, casing and diacritics
+    /// (the hamza in "إعتماد") cannot smuggle a spelling past.
     /// </summary>
-    private static readonly HashSet<string> Keys =
+    private static readonly string[][] Marks =
         Names.Select(CustomerNameNormalizer.LooseKey)
              .Where(key => key.Length > 0)
-             .ToHashSet(StringComparer.Ordinal);
+             .Select(key => key.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+             .ToArray();
 
     /// <summary>
     /// True when a supplier number on this portal was issued by the network rather than by
     /// the buyer, so the "portal|our-vendor-code" pair identifies NOBODY and must neither be
     /// learned nor matched.
+    ///
+    /// A mark matches as WHOLE WORDS anywhere in the name, not as the whole name. The list was
+    /// compared by exact key, and the extractor does not write a portal's name one way:
+    /// "SAP Ariba Sourcing", "Ariba Discovery", "Coupa Supplier Portal", "Etimad Portal" each
+    /// missed it, so the learner wrote the pair as a verified 0.92 fact for the first buyer and
+    /// the next Ariba RFQ from any buyer linked to that customer. Whole words, not letters:
+    /// "SARIBA" is not ARIBA and "COUPANG" is not COUPA. Erring towards "shared" costs a
+    /// buyer-operated portal one learnable pair; erring the other way costs wrong links.
     /// </summary>
     public static bool IsShared(string? portalName)
     {
         var key = CustomerNameNormalizer.LooseKey(portalName);
-        return key.Length > 0 && Keys.Contains(key);
+        if (key.Length == 0) return false;
+        var words = key.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var mark in Marks)
+            if (ContainsRun(words, mark)) return true;
+
+        // GLUED OR SPLIT. Whole words still let "SAPAriba", "AribaNetwork", "CoupaHost",
+        // "SAP BusinessNetwork", "Tender Board", "e-Timad" and the Arabic "الاعتماد" through, and each
+        // was learned as a verified 0.92 pair for the first buyer confirmed on it. So neighbouring
+        // words are joined back up and compared with the mark written solid, allowing only the few
+        // things that are glued to a network's name in practice (<see cref="GluedPrefixes"/>,
+        // <see cref="GluedSuffixes"/>). Anything else glued on is a different word: "SARIBA" and
+        // "COUPANG" stay buyers' own portals.
+        for (var start = 0; start < words.Length; start++)
+        {
+            var joined = string.Empty;
+            for (var end = start; end < words.Length && end < start + MaximumJoinedWords; end++)
+            {
+                joined += words[end];
+                if (IsMarkWithAffixes(joined)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>How many neighbouring words are joined back up when looking for a split mark.</summary>
+    private const int MaximumJoinedWords = 4;
+
+    /// <summary>What may stand in front of a mark inside one word: nothing, SAP, or the Arabic article.</summary>
+    private static readonly string[] GluedPrefixes = ["", "SAP", CustomerNameNormalizer.LooseKey("ال")];
+
+    /// <summary>What may follow a mark inside one word: the words a network's own sites and products add.</summary>
+    private static readonly string[] GluedSuffixes =
+        ["", "NETWORK", "NET", "HOST", "PORTAL", "SOURCING", "DISCOVERY", "SUPPLIER", "SUPPLIERS", "PLATFORM"];
+
+    private static readonly string[] GluedMarks =
+        Marks.Select(mark => string.Concat(mark)).Distinct(StringComparer.Ordinal).ToArray();
+
+    private static bool IsMarkWithAffixes(string joined)
+    {
+        foreach (var mark in GluedMarks)
+        {
+            for (var at = joined.IndexOf(mark, StringComparison.Ordinal);
+                 at >= 0;
+                 at = joined.IndexOf(mark, at + 1, StringComparison.Ordinal))
+            {
+                if (GluedPrefixes.Contains(joined[..at], StringComparer.Ordinal)
+                    && GluedSuffixes.Contains(joined[(at + mark.Length)..], StringComparer.Ordinal))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool ContainsRun(string[] words, string[] run)
+    {
+        for (var start = 0; start + run.Length <= words.Length; start++)
+        {
+            var matched = true;
+            for (var offset = 0; offset < run.Length && matched; offset++)
+                matched = string.Equals(words[start + offset], run[offset], StringComparison.Ordinal);
+            if (matched) return true;
+        }
+        return false;
     }
 }
 
@@ -252,6 +400,206 @@ public static class SelfIdentityGuard
 }
 
 /// <summary>
+/// Which words of a company name actually say WHICH company. Shared by the learner's alias
+/// gate and the resolver's taught-alias scan, so the two can never disagree about whether
+/// "SAUDI ARABIA" is a name.
+///
+/// Two defects from one missing test. The learner accepted a printed name as a trusted alias
+/// when Jaro-Winkler on the joined letters scored 0.75, and the first four letters carry a
+/// bonus: every pair of names that both open with SAUDI, ARABIAN or NATIONAL clears it
+/// ("SAUDI ELECTRICITY" against "Saudi Aramco" scores 0.79), so a reviewer's mis-click became
+/// a verified alias for the wrong company. And a company-name field that held only the country
+/// line ("SAUDI ARABIA") was taught as an alias, after which the passage scan linked every
+/// document mentioning Saudi Arabia to that customer at 0.88. Both are the same question —
+/// does this name have a word in it that belongs to one company — and it is answered here once.
+/// </summary>
+public static class CustomerNameDistinctiveness
+{
+    /// <summary>Words shorter than this are initials fragments or articles, not a name.</summary>
+    public const int MinimumTokenLength = 3;
+
+    /// <summary>
+    /// Words that half the buyers in the Kingdom carry. Geography, the words every national or
+    /// international company adds, and articles and conjunctions. Deliberately NOT sector words
+    /// such as ELECTRICITY or WATER: then "Saudi Electricity Company" would have no distinctive
+    /// word at all, and any caller that asks this before scanning would lose lead 680. City
+    /// names are not here either; the list of them has no end, and a customer called "Al Dammam
+    /// Trading" really is distinguished by DAMMAM. Arabic entries are folded through LooseKey
+    /// below, exactly like the names they are compared with.
+    /// </summary>
+    private static readonly HashSet<string> GenericTokens = new[]
+    {
+        "SAUDI", "ARABIA", "ARABIAN", "ARAB", "ARABIC", "KSA", "KINGDOM", "NATIONAL",
+        "GULF", "MIDDLE", "EAST", "WEST", "NORTH", "SOUTH", "EASTERN", "WESTERN", "NORTHERN",
+        "SOUTHERN", "CENTRAL", "PROVINCE", "REGION", "REGIONAL", "GCC", "MENA", "EMIRATES",
+        "INTERNATIONAL", "GLOBAL", "GENERAL", "UNITED", "WORLDWIDE", "OVERSEAS",
+        "AL", "EL", "THE", "AND", "OF", "FOR",
+        "شركة", "الشركة", "مؤسسة", "المؤسسة", "السعودية", "السعودي", "العربية", "العربي",
+        "المملكة", "الوطنية", "الوطني", "الخليج", "المحدودة", "ذات", "مسؤولية", "المسؤولية",
+        "للتجارة"
+    }
+    .Select(CustomerNameNormalizer.LooseKey)
+    .Where(key => key.Length > 0)
+    .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// A word <see cref="CustomerNameNormalizer.LooseKey"/> never strips. Prefixed to a key, it
+    /// makes LooseKey report whether the key was made of nothing but legal-form words: LooseKey
+    /// keeps "TRADING COMPANY" whole only because nothing else survives, and with the sentinel
+    /// in front it strips them and returns the sentinel alone. That answers the question without
+    /// a second copy of the private noise list, which would drift the first time either changed.
+    /// </summary>
+    private const string Sentinel = "Q";
+
+    /// <summary>
+    /// The words of the name that name one company, in order, without repeats: the LooseKey
+    /// words minus legal-form words, generic geography and business words, words shorter than
+    /// <see cref="MinimumTokenLength"/>, and words with no letter in them. Accepts a raw name
+    /// or a key already produced by LooseKey.
+    /// </summary>
+    public static IReadOnlyList<string> DistinctiveTokens(string? name)
+    {
+        var key = CustomerNameNormalizer.LooseKey(name);
+        if (key.Length == 0) return [];
+        if (string.Equals(CustomerNameNormalizer.LooseKey($"{Sentinel} {key}"), Sentinel, StringComparison.Ordinal))
+            return [];
+
+        var tokens = new List<string>();
+        foreach (var token in key.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (token.Length < MinimumTokenLength) continue;
+            if (!token.Any(char.IsLetter)) continue;
+            if (GenericTokens.Contains(token)) continue;
+            if (!tokens.Contains(token, StringComparer.Ordinal)) tokens.Add(token);
+        }
+        return tokens;
+    }
+
+    /// <summary>True when at least one word of the name belongs to one company rather than to half the country.</summary>
+    public static bool HasDistinctiveToken(string? name) => DistinctiveTokens(name).Count > 0;
+
+    /// <summary>
+    /// True when the two names share a distinctive word. "SAUDI ELECTRICITY" and "Saudi Aramco"
+    /// share only SAUDI, so false. An article glued to the word counts as the same word
+    /// ("ALRAJHI" and "Al Rajhi"), because that is how the same family name is printed both
+    /// ways, and LooseKey drops a leading article from one spelling but not the other.
+    ///
+    /// This is a necessary condition for calling a printed name a resemblance of a customer, not
+    /// a sufficient one: two customers can share a distinctive word too, and a caller that must
+    /// know which customer a name is closer to has to ask that as well.
+    /// </summary>
+    public static bool SharesDistinctiveToken(string? left, string? right)
+    {
+        var leftTokens = DistinctiveTokens(left);
+        if (leftTokens.Count == 0) return false;
+        var rightTokens = DistinctiveTokens(right);
+        foreach (var a in leftTokens)
+            foreach (var b in rightTokens)
+                if (SameWord(a, b)) return true;
+        return false;
+    }
+
+    private static bool SameWord(string a, string b)
+    {
+        if (string.Equals(a, b, StringComparison.Ordinal)) return true;
+        return GluedArticle(a, b) || GluedArticle(b, a);
+
+        static bool GluedArticle(string glued, string bare) =>
+            glued.Length == bare.Length + 2
+            && (glued.StartsWith("AL", StringComparison.Ordinal) || glued.StartsWith("EL", StringComparison.Ordinal))
+            && glued.EndsWith(bare, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// Whether an e-mail domain may stand for an ORGANISATION in identity work: learned as a
+/// customer's Domain, matched by the domain tier, or read by routing. One predicate, because
+/// the learner, the resolver and routing each carried their own subset of the checks, and the
+/// gap between them was the defect: routing had none of them, so a legacy bidnet.com Domain row
+/// the resolver refused still wrote a customer onto the lead through routing.
+/// </summary>
+public static class IdentityDomainGuard
+{
+    /// <summary>
+    /// The bare, lower-case domain of a domain or an address, in any shape callers hold:
+    /// "se.com.sa", "57322@se.com.sa", "Ali Nasser &lt;ali@se.com.sa&gt;", "SE.COM.SA.". Null when
+    /// there is no domain. Normalised by <see cref="RoutingValueNormalizer"/>, the rule the stored
+    /// Domain rows were written with, so a lookup and a stored value cannot differ by a trailing
+    /// dot or a "www.".
+    /// </summary>
+    public static string? DomainOf(string? domainOrAddress)
+    {
+        if (string.IsNullOrWhiteSpace(domainOrAddress)) return null;
+        var value = domainOrAddress.Trim();
+        var at = value.LastIndexOf('@');
+        if (at >= 0) value = value[(at + 1)..];
+        value = value.Trim().TrimEnd('>').Trim();
+        if (value.Length == 0) return null;
+        var domain = RoutingValueNormalizer.Normalize(CustomerIdentifierType.Domain, value);
+        return domain.Length == 0 || domain.Any(char.IsWhiteSpace) ? null : domain;
+    }
+
+    /// <summary>
+    /// True when the domain is one of the tenant's own, or a host under one of them
+    /// ("sales.alquraishi.com.sa" under "alquraishi.com.sa"). The boundary is a real label
+    /// separator, so "notalquraishi.com.sa" is somebody else. Entries may be domains or whole
+    /// addresses, because the evidence carries mailbox addresses.
+    /// </summary>
+    public static bool IsSelfDomain(string? domainOrAddress, IEnumerable<string>? selfDomains)
+    {
+        var domain = DomainOf(domainOrAddress);
+        if (domain is null || selfDomains is null) return false;
+        foreach (var entry in selfDomains)
+        {
+            var own = DomainOf(entry);
+            // A dotless entry would make every host under that label "ours".
+            if (own is null || !own.Contains('.')) continue;
+            if (string.Equals(domain, own, StringComparison.Ordinal)) return true;
+            if (domain.Length > own.Length + 1
+                && domain[domain.Length - own.Length - 1] == '.'
+                && domain.EndsWith(own, StringComparison.Ordinal))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True only for a domain that can belong to one organisation that is not us. False for:
+    /// nothing at all or a dotless or letterless host; Nexora's own ingestion placeholders
+    /// (pipeline.local, system.com); a consumer mailbox provider (gmail.com, fastmail.com); a
+    /// procurement network's relay (ariba.com, etimad.sa); and the tenant's own domains, passed
+    /// as <paramref name="selfDomains"/> (domains or addresses; see
+    /// <see cref="TenantSelfIdentity.LoadSelfDomainsAsync"/>).
+    ///
+    /// True does NOT mean the domain belongs to the customer a reviewer picked. An EPC
+    /// contractor's hdec.com is an organisation domain and is not Saudi Aramco's; whether a
+    /// domain is tied to a particular customer is a separate question the caller must ask.
+    /// </summary>
+    /// <summary>
+    /// Whether an Email identifier may match an address exactly. Always, except on a procurement
+    /// network's relay. ordersender-prod@ansmtp.ariba.com delivers every Ariba buyer's RFQ, and the old
+    /// learner minted it as the Email of whichever buyer was confirmed first: a SABIC RFQ then linked to
+    /// Saudi Aramco at 1.00 in the resolver, and routing handed it to Aramco's owner, however plainly the
+    /// page named SABIC. On a relay the only row that names one buyer is one a person put there
+    /// (<see cref="CustomerIdentifierSources.EnteredByAPerson"/>). Rows the learner or the backfill wrote
+    /// on relay hosts become inert with no data job. One predicate for the resolver and routing.
+    /// </summary>
+    public static bool MayMatchExactAddress(string? address, string? source)
+        => !SyntheticIdentityGuard.IsPortalRelayDomain(DomainOf(address))
+           || CustomerIdentifierSources.EnteredByAPerson.Contains(source ?? string.Empty, StringComparer.Ordinal);
+
+    public static bool IsOrganisationDomain(string? domainOrAddress, IEnumerable<string>? selfDomains = null)
+    {
+        var domain = DomainOf(domainOrAddress);
+        if (domain is null || !domain.Contains('.') || !domain.Any(char.IsLetter)) return false;
+        if (SyntheticIdentityGuard.IsSyntheticDomain(domain)) return false;
+        if (SyntheticIdentityGuard.IsFreeMailDomain(domain)) return false;
+        if (SyntheticIdentityGuard.IsPortalRelayDomain(domain)) return false;
+        return !IsSelfDomain(domain, selfDomains);
+    }
+}
+
+/// <summary>
 /// Everything the platform knows about WHO sent this lead, as raw values. The resolver —
 /// not the caller — applies the direction-of-trade and synthetic guards, so those guards
 /// are unit-testable without a database.
@@ -294,6 +642,14 @@ public sealed record LeadClientEvidence
 
     /// <summary>The buyer PERSON (Leads.BuyersName). Never an organisation.</summary>
     public string? BuyerPersonName { get; init; }
+
+    /// <summary>
+    /// The organisation the sender's own mailbox is signed with, with the buying-function words
+    /// taken off ("Hyundai E&amp;C" out of "Hyundai E&amp;C Procurement &lt;procurement@hdec.com&gt;").
+    /// Set only for an organisation's own domain, never for a person's name, a consumer mailbox, a
+    /// relay or our own mail. See <c>LeadCustomerResolutionService.SenderOrganisationName</c>.
+    /// </summary>
+    public string? SenderOrganisationName { get; init; }
 
     /// <summary>
     /// Text the document states that may carry the buyer's own name — the delivery address,

@@ -59,6 +59,145 @@ public sealed class LeadCustomerResolutionCorpusPostgreSqlTests(PostgreSqlTestDa
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task Above_the_name_scan_cap_a_print_that_names_the_buyer_only_by_its_initials_still_links()
+    {
+        // #11. The name-bucket filter compared the first two letters of each word on the page with
+        // the first two letters of each customer's name. "SEC Materials West Plant-West Operating
+        // Area" yields SE, MA, WE, PL, OP, AR, and "Saudi Electricity Company" is filed under SA,
+        // so above the cap SEC was never loaded and a print that links at 0.85 on SEC's initials in
+        // a smaller tenant resolved to nothing. The cap is lowered instead of seeding 2,000 rows.
+        var suffix = Random.Shared.Next(300_000, 339_999);
+        var tenant = 9_410_000L + suffix;
+        var decoyA = 9_420_000L + suffix;
+        var decoyB = 9_421_000L + suffix;
+        var target = 9_422_000L + suffix;
+        var leadId = 9_430_000L + suffix;
+
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenant);
+            Seed.Customer(seed, decoyA, tenant, "Zulu Freight Holdings");
+            Seed.Customer(seed, decoyB, tenant, "Yankee Marine Supplies");
+            Seed.Customer(seed, target, tenant, "Saudi Electricity Company");
+            var item = Seed.LeadItem(9_440_000L + suffix, "10", 1, "BALL VALVE");
+            item.StorageLocation = "SEC Materials West Plant-West Operating Area";
+            var lead = Seed.Lead(seed, leadId, tenant, buyersName: "Buyer", items: [item]);
+            lead.EmailIngestsId = null;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(tenant);
+        var outcome = await new LeadCustomerResolutionService(
+                context, new CustomerResolutionPolicy { MaximumNameScanRows = 2 })
+            .ResolveAsync(tenant, leadId);
+
+        Assert.Equal(target, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(0.85m, outcome.Confidence);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Above_the_name_scan_cap_a_name_written_with_its_article_is_still_in_the_scan()
+    {
+        // #11. "Al-Rashid Trading Est" is filed under AL, the page writes "Rashid Trading", and a
+        // two-letter "Al" on the page is skipped as noise, so the bucket could never meet the name.
+        // The same for "El Seif" and "The Arabian Pipes". The name's bucket is now also taken after
+        // its article. The decoys prove the filter still narrows.
+        var suffix = Random.Shared.Next(340_000, 379_999);
+        var tenant = 9_410_000L + suffix;
+        var rashid = 9_420_000L + suffix;
+        var seif = 9_421_000L + suffix;
+        var pipes = 9_422_000L + suffix;
+
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenant);
+            Seed.Customer(seed, 9_423_000L + suffix, tenant, "Zulu Freight Holdings");
+            Seed.Customer(seed, 9_424_000L + suffix, tenant, "Yankee Marine Supplies");
+            Seed.Customer(seed, 9_425_000L + suffix, tenant, "Quartz Holdings Group");
+            Seed.Customer(seed, rashid, tenant, "Al-Rashid Trading Est");
+            Seed.Customer(seed, seif, tenant, "El Seif Engineering");
+            Seed.Customer(seed, pipes, tenant, "The Arabian Pipes Company");
+            await seed.SaveChangesAsync();
+        }
+
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = tenant,
+            Passages =
+            [
+                new DocumentPassage("delivery address",
+                    "Rashid Trading warehouse, c/o Seif Engineering, Arabian Pipes store", true)
+            ]
+        };
+
+        await using var context = database.ContextFor(tenant);
+        var corpus = await new LeadCustomerResolutionService(
+                context, new CustomerResolutionPolicy { MaximumNameScanRows = 4 })
+            .LoadCorpusAsync(tenant, evidence, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { rashid, seif, pipes }.Order(),
+            corpus.Customers.Select(c => c.CustomerId).Order());
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Above_the_name_scan_cap_initials_two_customers_share_link_neither()
+    {
+        // #12. "Saudi Cable Company" (bucket SA) and "Sudair Ceramics Company" (bucket SU) both
+        // derive SCC. The page "SCC Store, Sudair Industrial City" buckets only Sudair Ceramics, so
+        // the capped list saw SCC as unique and the lead auto-linked to Sudair Ceramics at 0.85 —
+        // where, below the cap, the same page linked nobody. Every owner of initials the page
+        // prints is now read, and the tenant-wide collision set is computed from every customer.
+        var suffix = Random.Shared.Next(380_000, 419_999);
+        var tenant = 9_410_000L + suffix;
+        var cable = 9_420_000L + suffix;
+        var ceramics = 9_421_000L + suffix;
+        var leadId = 9_430_000L + suffix;
+        const string address = "SCC Store, Sudair Industrial City";
+
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenant);
+            Seed.Customer(seed, 9_423_000L + suffix, tenant, "Zulu Freight Holdings");
+            Seed.Customer(seed, 9_424_000L + suffix, tenant, "Yankee Marine Supplies");
+            Seed.Customer(seed, 9_425_000L + suffix, tenant, "Quartz Holdings Group");
+            Seed.Customer(seed, cable, tenant, "Saudi Cable Company");
+            Seed.Customer(seed, ceramics, tenant, "Sudair Ceramics Company");
+            var lead = Seed.Lead(seed, leadId, tenant, buyersName: "Buyer");
+            lead.DeliveryLocation = address;
+            lead.EmailIngestsId = null;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(tenant);
+        var capped = new LeadCustomerResolutionService(context, new CustomerResolutionPolicy { MaximumNameScanRows = 3 });
+        var outcome = await capped.ResolveAsync(tenant, leadId);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.False(outcome.Status.StartsWith(LeadCustomerMatchStatuses.AutoMatched, StringComparison.Ordinal));
+
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = tenant,
+            Passages = [new DocumentPassage("delivery address", address, true)]
+        };
+        var above = await capped.LoadCustomerNamesAsync(tenant, evidence, [], CancellationToken.None);
+        Assert.Contains(cable, above.Customers.Select(c => c.CustomerId));
+        Assert.Contains(ceramics, above.Customers.Select(c => c.CustomerId));
+        Assert.Contains("SCC", above.TenantAcronymCollisions);
+
+        // Below the cap the loaded list IS the tenant, and says the same thing.
+        var below = await new LeadCustomerResolutionService(context)
+            .LoadCustomerNamesAsync(tenant, evidence, [], CancellationToken.None);
+        Assert.Contains("SCC", below.TenantAcronymCollisions);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task An_sec_print_carrying_the_buyers_own_mail_address_still_links_on_its_delivery_address()
     {
         // THE DEFECT: the consignee rule treated every sender domain not registered to the
@@ -271,5 +410,107 @@ public sealed class LeadCustomerResolutionCorpusPostgreSqlTests(PostgreSqlTestDa
         Assert.Equal(first.CustomerId, second.CustomerId);
         Assert.Equal(first.Confidence, second.Confidence);
         Assert.Equal(first.Explanation, second.Explanation);
+    }
+
+    [Theory]
+    [Trait("Category", "PostgreSQL")]
+    [InlineData("contact")]
+    [InlineData("email identifier")]
+    [InlineData("earlier human decision")]
+    public async Task An_epc_contractors_other_mailbox_on_record_demotes_the_site_owner_end_to_end(string record)
+    {
+        // THE SEAM: the resolver lets a delivery address link only while nothing on the page names
+        // somebody else, and a mail domain another customer's own records write from does. Its unit
+        // tests hand it Hyundai's k.lee@hdec.com directly. This loader read only the EXACT sender
+        // address, so procurement@hdec.com brought nothing about hdec.com with it and Aramco, who is
+        // buying nothing on this job, linked at 0.88. Each row is one kind of record a person set:
+        // a contact typed in (with no identifier sync behind it), an address registered on the
+        // customer with no Domain row beside it, and an earlier lead from hdec.com a person linked.
+        var suffix = Random.Shared.Next(420_000, 459_999);
+        var tenant = 9_410_000L + suffix;
+        var aramco = 9_420_000L + suffix;
+        var hyundai = 9_421_000L + suffix;
+        var leadId = 9_430_000L + suffix;
+
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenant);
+            Seed.Customer(seed, aramco, tenant, "Saudi Aramco");
+            Seed.Customer(seed, hyundai, tenant, "Hyundai Engineering & Construction");
+            // Not "Buyer": the contact tier's surname read would load the contact on its own and the
+            // test would pass without the domain read it exists to prove.
+            var lead = Seed.Lead(seed, leadId, tenant, buyersName: "Park Jihoon");
+            lead.Clientemail = "procurement@hdec.com";
+            lead.EmailIngestsId = null;
+            lead.DeliveryLocation = "Saudi Aramco Ras Tanura Refinery";
+            switch (record)
+            {
+                case "contact":
+                    Seed.Contact(seed, 9_440_000L + suffix, tenant, hyundai, email: "k.lee@hdec.com");
+                    break;
+                case "email identifier":
+                    seed.Set<CustomerIdentifier>().Add(new CustomerIdentifier
+                    {
+                        BusinessUnitId = tenant, CustomerId = hyundai,
+                        IdentifierType = CustomerIdentifierType.Email,
+                        NormalizedValue = "k.lee@hdec.com", DisplayValue = "k.lee@hdec.com",
+                        IsVerified = true, Confidence = 1m, Source = "CustomerImport",
+                        EffectiveFrom = DateTime.UtcNow.AddDays(-1)
+                    });
+                    break;
+                case "earlier human decision":
+                    var earlier = Seed.Lead(seed, 9_450_000L + suffix, tenant, buyersName: "Kim Lee");
+                    earlier.Clientemail = "Kim Lee <k.lee@hdec.com>";
+                    earlier.EmailIngestsId = null;
+                    earlier.ResolveCommercialIdentity(hyundai, null,
+                        LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+                    break;
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(tenant);
+        var outcome = await new LeadCustomerResolutionService(context).ResolveAsync(tenant, leadId);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Equal(hyundai, outcome.Candidates[0].CustomerId);
+        var site = Assert.Single(outcome.Candidates, c => c.CustomerId == aramco);
+        Assert.True(site.Confidence < 0.85m, $"Aramco was offered at {site.Confidence}, which is link strength.");
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_colleague_of_the_buyer_on_record_does_not_demote_the_buyers_own_address()
+    {
+        // What the domain read must not take away: lead 680's shape with a sender. SEC's own contact
+        // at se.com.sa ties the domain to SEC, so it speaks FOR the address, not against it.
+        var suffix = Random.Shared.Next(460_000, 499_999);
+        var tenant = 9_410_000L + suffix;
+        var sec = 9_420_000L + suffix;
+        var aramco = 9_421_000L + suffix;
+        var leadId = 9_430_000L + suffix;
+
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenant);
+            Seed.Customer(seed, sec, tenant, "Saudi Electricity Company");
+            Seed.Customer(seed, aramco, tenant, "Saudi Aramco");
+            Seed.Contact(seed, 9_440_000L + suffix, tenant, sec, email: "ali.nasser@se.com.sa");
+            Seed.Contact(seed, 9_441_000L + suffix, tenant, aramco, email: "buyer@aramco.com");
+            var lead = Seed.Lead(seed, leadId, tenant, buyersName: "Park Jihoon");
+            lead.Clientemail = "57322@se.com.sa";
+            lead.EmailIngestsId = null;
+            lead.DeliveryLocation = "Saudi Electricity Company-DAMMAM";
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(tenant);
+        var outcome = await new LeadCustomerResolutionService(context).ResolveAsync(tenant, leadId);
+
+        Assert.Equal(sec, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(0.88m, outcome.Confidence);
     }
 }

@@ -185,8 +185,11 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                 lead.CustomerMatchExplanation ?? "This lead is already linked to a client.", []);
 
         var evidence = await BuildEvidenceAsync(businessUnitId, lead, ct);
-        var corpus = await LoadCorpusAsync(businessUnitId, evidence, ct);
-        var outcome = CustomerIdentityResolver.Resolve(evidence, corpus, _policy);
+        var (corpus, tenantSharedAcronyms) = await LoadCorpusAndSharedAcronymsAsync(businessUnitId, evidence, ct);
+        // The tenant-wide shared initials go in beside the corpus: above the name-scan cap the
+        // corpus is a filtered slice, and initials that look unique in a slice can belong to two
+        // customers in the tenant.
+        var outcome = CustomerIdentityResolver.Resolve(evidence, corpus, _policy, tenantSharedAcronyms);
 
         switch (outcome.Status)
         {
@@ -250,25 +253,31 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .Where(b => b.Id == businessUnitId)
             .Select(b => b.BusinessUnitName)
             .SingleOrDefaultAsync(ct);
-        var tenantMailboxes = await _db.EmailConfigurations.AsNoTracking().IgnoreQueryFilters()
-            .Where(c => c.BusinessUnitId == businessUnitId && c.EmailAddress != null)
-            .Select(c => c.EmailAddress!)
-            .Distinct()
-            .Take(50)
-            .ToListAsync(ct);
+        // WHAT "US" MEANS FOR AN ADDRESS: the ingestion mailboxes AND the domains the tenant's
+        // own staff write from. This read was the mailboxes alone, and the people who forward
+        // bids are not mailboxes: rfq@alquraishi.com is the mailbox, ahmed@alquraishi.com.sa is
+        // the salesman. His forward of an SEC bid then arrived from a domain that was not "us",
+        // so a Domain row somebody once taught against alquraishi.com.sa linked every later
+        // forward from any colleague to that customer at 0.95, whatever the attachment said, and
+        // his own name on the envelope became evidence about the buyer. One loader, shared with
+        // the learner and routing, so the three can never disagree about who we are.
+        var tenantSelfDomains = (await TenantSelfIdentity.LoadSelfDomainsAsync(_db, businessUnitId, ct))
+            // Ordered so the evidence handed to the resolver is the same on every pass.
+            .OrderBy(domain => domain, StringComparer.Ordinal)
+            .ToList();
 
         // THE NAME ON THE MAILBOX, WHICH WAS PARSED AND THROWN AWAY. EmailService stores the
-        // sender as the mail client wrote it — "SEC Procurement <noreply@portal.se.com.sa>" —
-        // and this method kept the address and discarded the words in front of it. It is kept
+        // sender as the mail client wrote it — "Saudi Aramco <ordersender-prod@ansmtp.ariba.com>"
+        // — and this method kept the address and discarded the words in front of it. It is kept
         // now, and SenderDisplayName decides what it is allowed to say: read after the tenant's
-        // own mailboxes are known, because a rep forwarding a bid puts OUR name on it.
-        var envelope = SenderDisplayName(ingestFrom, tenantMailboxes);
-        if (envelope.Name is null) envelope = SenderDisplayName(lead.Clientemail, tenantMailboxes);
-        var senderDisplayName = envelope.Name;
-
+        // own domains are known, because a rep forwarding a bid puts OUR name on it.
         var selfNames = new List<string>();
         if (!string.IsNullOrWhiteSpace(businessUnitName)) selfNames.Add(businessUnitName!);
         if (!string.IsNullOrWhiteSpace(lead.SupplierNameOnDocument)) selfNames.Add(lead.SupplierNameOnDocument!);
+
+        var envelope = SenderDisplayName(ingestFrom, tenantSelfDomains, selfNames);
+        if (envelope.Name is null) envelope = SenderDisplayName(lead.Clientemail, tenantSelfDomains, selfNames);
+        var senderDisplayName = envelope.Name;
 
         // The direction-of-trade firewall, applied to the two passages that come off the
         // ENVELOPE rather than off the document. A forwarded or replied-to message carries OUR
@@ -284,6 +293,12 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             senderDisplayName = null;
         if (SelfIdentityGuard.IsSelfName(CustomerNameNormalizer.LooseKey(ingestSubject), selfNameKeys))
             ingestSubject = null;
+
+        // The organisation the mailbox is signed with, read by the same rules as the display name.
+        var senderOrganisation = SenderOrganisationName(ingestFrom, tenantSelfDomains, selfNames)
+                                 ?? SenderOrganisationName(lead.Clientemail, tenantSelfDomains, selfNames);
+        if (SelfIdentityGuard.IsSelfName(CustomerNameNormalizer.LooseKey(senderOrganisation), selfNameKeys))
+            senderOrganisation = null;
 
         return new LeadClientEvidence
         {
@@ -305,58 +320,146 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             SupplierNameOnDocument = lead.SupplierNameOnDocument,
             RfqNumber = lead.Rfqno,
             BuyerPersonName = lead.BuyersName,
+            SenderOrganisationName = senderOrganisation,
             Passages = Passages(lead, senderDisplayName, ingestSubject, envelope.Role),
             TenantSelfNameKeys = selfNames,
-            TenantSelfDomains = tenantMailboxes
+            TenantSelfDomains = tenantSelfDomains
         };
     }
 
     /// <summary>
-    /// Labels an extracted column can carry that state WHO IS BUYING. An SAP or portal print
-    /// puts the strongest name on the page behind one of these — "Sold-to party",
+    /// Labels an extracted column can carry that state WHICH ORGANISATION IS BUYING. An SAP or
+    /// portal print puts the strongest name on the page behind one of these — "Sold-to party",
     /// "Ordering party", "Purchaser" — and until now every one of them fell through to item
     /// text and was worth 0.70, while "Storage location" linked the lead at 0.88. The weakest
     /// label on the page outranked the strongest, which is exactly backwards.
+    ///
+    /// "buyer" is here only for the organisation forms ("Buyer organisation", "Buyer company");
+    /// a bare "Buyer" column is a person and is caught by <see cref="PersonRoleLabelWords"/>
+    /// first.
+    ///
+    /// ONLY LABELS THAT NAME THE PAYING PARTY BY DEFINITION. "Company", "Organisation" and "Account
+    /// name" were here too, and so was every label that merely contains them ("Owner company", "Make /
+    /// Company", "Brand company"). Those columns name whoever the spreadsheet was about: the cable maker
+    /// on a BOQ, the site owner on an EPC requisition (in Saudi Aramco contract documents COMPANY is
+    /// Aramco and CONTRACTOR the EPC), the account a rep keeps. A header links and speaks against the
+    /// delivery address, so "Make / Company: Saudi Cable Company" took lead 680's own shape from SEC to
+    /// Saudi Cable at 0.88, and "Company: Saudi Aramco" on a Hyundai requisition linked Aramco while
+    /// Hyundai sat on the books with a contact at the sending domain. They are item text again, which is
+    /// what they were before labels were read at all.
     /// </summary>
     private static readonly string[] BuyerHeaderLabelWords =
     [
-        "sold to", "soldto", "bill to", "billto", "buyer", "purchaser", "customer", "client",
-        "ordering party", "company", "organisation", "organization", "account name", "end user",
-        "requisitioner", "purchasing organisation", "purchasing organization", "purchasing group"
+        "sold to", "soldto", "bill to", "billto", "buyer", "purchaser", "ordering party",
+        "purchasing organisation", "purchasing organization"
     ];
 
     /// <summary>
-    /// Labels that state WHERE THE GOODS GO. Usually the buyer's own site, but a consignee is a
-    /// fact about delivery and not about who is paying — see <see cref="PassageRole.ShipTo"/>.
+    /// Labels whose column is filled with PEOPLE. CanonicalRfqNormalizer copies raw spreadsheet
+    /// headings into ExtraFields, so a "Requisitioner" column of "Ahmed Al-Ghamdi" was read as a
+    /// header — link strength, and a header skips the consignee check. The resolver scans one-word
+    /// trade names, and in this market those are family names: "Al-Ghamdi Trading Est" keys to
+    /// GHAMDI, so that one cell joined Saudi Electricity Company in the linking set and an SEC
+    /// print that linked on its delivery address went AMBIGUOUS and asked a person. A name in a
+    /// person's column is a mention, offered and never decided.
+    /// </summary>
+    private static readonly string[] PersonRoleLabelWords =
+    [
+        "requisitioner", "requisitioned by", "requestor", "requester", "requested by", "buyer",
+        "purchasing group", "contact", "attention", "attn", "prepared by", "approved by",
+        "created by", "raised by", "originator", "planner", "expeditor", "person", "focal point"
+    ];
+
+    /// <summary>
+    /// A person label that also names an organisation ("Buyer organisation", "Buyer company") is
+    /// about the organisation. Checked before the person words, so the qualifier wins.
+    /// </summary>
+    private static readonly string[] OrganisationQualifierWords =
+    [
+        "organisation", "organization", "company", "party", "entity", "firm"
+    ];
+
+    /// <summary>
+    /// Labels for parties who are by definition NOT the buyer: us, the maker of the goods. A
+    /// "Manufacturer company" column of Siemens is a statement about who made a valve, and read
+    /// as a header it linked the lead to a Siemens customer record at 0.88.
+    /// </summary>
+    private static readonly string[] NotTheBuyerLabelWords =
+    [
+        "vendor", "supplier", "manufacturer", "maker", "bidder"
+    ];
+
+    /// <summary>
+    /// The same parties, by words that are only safe to compare whole: "make" sits inside "makeup" and
+    /// "oem" inside "phoenix"-style product names. "Make / Company" and "Brand company" name the maker.
+    /// </summary>
+    private static readonly HashSet<string> NotTheBuyerWholeWords = new(StringComparer.Ordinal)
+    {
+        "make", "brand", "oem", "mfr", "mfg"
+    };
+
+    /// <summary>
+    /// Labels whose value is a code, a number or a date, never an organisation's name: "Customer
+    /// material number", "Sold-to party no.". Whole words only, because "no" is inside every
+    /// other word. Without this a customer part number printed "SEC-4411002233" under a customer
+    /// label carried SEC's initials into a linking passage.
+    /// </summary>
+    private static readonly HashSet<string> CodeValueLabelWords = new(StringComparer.Ordinal)
+    {
+        "number", "no", "nr", "num", "code", "id", "ref", "date", "qty", "quantity", "price"
+    };
+
+    /// <summary>
+    /// Labels that state WHERE THE GOODS GO, or FOR WHOM THE JOB IS DONE. Usually the buyer's own
+    /// site, but a consignee is a fact about delivery and not about who is paying — see
+    /// <see cref="PassageRole.ShipTo"/>.
+    ///
+    /// "End user", "Client", "Customer" and "Project owner" live here and not among the headers.
+    /// On an EPC contractor's requisition those columns name the project owner: Hyundai E&amp;C
+    /// mails from hdec.com and prints "End User: Saudi Aramco" on every line. As a header that
+    /// cell skipped the consignee check and linked the lead to Aramco at 0.88; the same page
+    /// without the column was correctly offered at 0.70 with "this document is from hdec.com".
+    /// As a ship-to it is still link strength on the buyer's own print, where nothing on the page
+    /// names anybody else.
     /// </summary>
     private static readonly string[] ShipToLabelWords =
     [
         "location", "deliver", "ship", "site", "plant", "consignee", "receiving", "warehouse",
-        "depot", "substation", "works", "area", "region"
+        "depot", "substation", "works", "area", "region",
+        "end user", "enduser", "client", "customer", "project owner"
     ];
 
     /// <summary>
     /// What an extracted column label says its value IS. Separators are printing, not meaning,
     /// so "Sold-to party", "SOLD_TO PARTY" and "soldto party" are one label.
     ///
-    /// A label that speaks BOTH vocabularies ("Ship-to customer", "Customer plant", "Delivery
-    /// site of the buyer") is read as a ship-to, deliberately. Reading a consignee as the buyer
-    /// is the expensive mistake this module exists to avoid — an EPC contractor buying for
-    /// Saudi Aramco prints "Deliver to: Saudi Aramco" and is not Aramco — and a header now
-    /// outranks the address, so a misread ship-to would not merely add a wrong name, it would
-    /// suppress the right one.
+    /// Read in order, most cautious first: a party that is not the buyer, a code, a person, a
+    /// ship-to, and only then a header. A header is link strength and skips the consignee check,
+    /// so every doubt about a label resolves toward the role that asks a person.
+    ///
+    /// A label that speaks BOTH the ship-to and header vocabularies ("Ship-to customer", "Customer
+    /// plant", "Delivery site of the buyer") is read as a ship-to, deliberately. Reading a
+    /// consignee as the buyer is the expensive mistake this module exists to avoid — an EPC
+    /// contractor buying for Saudi Aramco prints "Deliver to: Saudi Aramco" and is not Aramco —
+    /// and a header now outranks the address, so a misread ship-to would not merely add a wrong
+    /// name, it would suppress the right one.
     /// </summary>
     internal static PassageRole RoleForLabel(string? label)
     {
         if (string.IsNullOrWhiteSpace(label)) return PassageRole.ItemText;
         var folded = new string(label.Select(c => char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : ' ').ToArray());
-        var normalized = string.Join(' ', folded.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        var words = folded.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var normalized = string.Join(' ', words);
         if (normalized.Length == 0) return PassageRole.ItemText;
 
-        foreach (var word in ShipToLabelWords)
-            if (normalized.Contains(word, StringComparison.Ordinal)) return PassageRole.ShipTo;
-        foreach (var word in BuyerHeaderLabelWords)
-            if (normalized.Contains(word, StringComparison.Ordinal)) return PassageRole.BuyerHeader;
+        bool Mentions(IEnumerable<string> vocabulary) =>
+            vocabulary.Any(word => normalized.Contains(word, StringComparison.Ordinal));
+
+        if (Mentions(NotTheBuyerLabelWords) || words.Any(NotTheBuyerWholeWords.Contains)) return PassageRole.ItemText;
+        if (words.Any(CodeValueLabelWords.Contains)) return PassageRole.ItemText;
+        if (Mentions(PersonRoleLabelWords) && !Mentions(OrganisationQualifierWords)) return PassageRole.ItemText;
+        if (Mentions(ShipToLabelWords)) return PassageRole.ShipTo;
+        if (Mentions(BuyerHeaderLabelWords)) return PassageRole.BuyerHeader;
         return PassageRole.ItemText;
     }
 
@@ -486,15 +589,38 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     /// asked nobody. <see cref="PassageRole.BuyerHeader"/> is what a document states about who is
     /// buying; a person's own name on their own mailbox is not that.
     ///
-    /// So the name is a header on the two kinds of mailbox no person answers: a portal relay,
-    /// which writes the buyer organisation into the display name because its own domain names
-    /// only the postman, and a no-reply mailbox. Anywhere else it is a mention — offered to a
-    /// rep, never decided for them. A mailbox the resolver refuses as evidence at all (Nexora's
-    /// own ingestion labels, or the tenant's own domain when a rep forwards a bid) contributes no
-    /// name, because the name on it is ours. That mirrors the resolver's Guard exactly.
+    /// So the name is a header in one place only: on a PORTAL RELAY, which writes the buyer
+    /// organisation into the display name because its own domain names only the postman — and
+    /// even there, only when the name does not look like a person's (see
+    /// <see cref="LooksLikeAPersonsName"/>). Anywhere else it is a mention — offered to a rep,
+    /// never decided for them.
+    ///
+    /// A NO-REPLY MAILBOX IS NOT ENOUGH. It was the second place a name became a header, on the
+    /// reasoning that nobody answers a no-reply mailbox so the name on it cannot be a person's.
+    /// It very often is: SharePoint and OneDrive send "Rashid Al-Otaibi
+    /// &lt;no-reply@sharepointonline.com&gt;" when a buyer shares an RFQ file, and that linked the
+    /// SEC enquiry to Al-Rashid Trading at 0.88 — the exact hazard this method was written to
+    /// close, reopened through a different mailbox. And where it is not a person it is the
+    /// software's brand ("Microsoft Teams &lt;noreply@teams.microsoft.com&gt;"), which is nobody's
+    /// buyer either. The organisation's own no-reply mailbox loses nothing that matters: its
+    /// domain is evidence on its own tier, and its name is still offered as a mention.
+    ///
+    /// A mailbox the resolver refuses as evidence at all (Nexora's own ingestion labels, or the
+    /// tenant's own domain or a host under it when a rep forwards a bid) contributes no name,
+    /// because the name on it is ours. That mirrors the resolver's Guard exactly.
     /// </summary>
+    /// <param name="tenantSelfDomains">
+    /// The tenant's own domains or mailbox addresses, in either shape
+    /// (<see cref="TenantSelfIdentity.LoadSelfDomainsAsync"/>).
+    /// </param>
+    /// <param name="tenantSelfNames">
+    /// The tenant's own names (business unit, the document's vendor block). A domain whose name spells
+    /// one of them is ours too (<see cref="TenantSelfIdentity.IsOurs(string?, IEnumerable{string}?, IEnumerable{string?}?)"/>),
+    /// which is how the resolver's Guard now reads it; without them this answered from the domain list
+    /// alone and a colleague with no Nexora login still put his name on the page.
+    /// </param>
     internal static (string? Name, PassageRole Role) SenderDisplayName(
-        string? from, IReadOnlyCollection<string> tenantMailboxes)
+        string? from, IEnumerable<string> tenantSelfDomains, IEnumerable<string?>? tenantSelfNames = null)
     {
         var name = ParseDisplayName(from);
         var address = ParseAddress(from);
@@ -503,25 +629,123 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             || SyntheticIdentityGuard.IsSyntheticDomain(domain))
             return (null, PassageRole.ItemText);
 
-        foreach (var mailbox in tenantMailboxes)
-        {
-            if (string.IsNullOrWhiteSpace(mailbox)) continue;
-            var own = mailbox.Contains('@')
-                ? RoutingValueNormalizer.DomainFromEmail(mailbox)
-                : mailbox.Trim().ToLowerInvariant();
-            if (string.Equals(own, domain, StringComparison.OrdinalIgnoreCase))
-                return (null, PassageRole.ItemText);
-        }
+        if (TenantSelfIdentity.IsOurs(domain, tenantSelfDomains, tenantSelfNames))
+            return (null, PassageRole.ItemText);
 
-        // "noreply", "no-reply", "no_reply", "do-not-reply", "donotreply-sourcing": separators
-        // are printing, so only the letters are compared.
-        var local = new string(address[..address.LastIndexOf('@')].Where(char.IsLetter).ToArray());
-        var noReply = local.StartsWith("noreply", StringComparison.Ordinal)
-                      || local.StartsWith("donotreply", StringComparison.Ordinal);
-
-        return SyntheticIdentityGuard.IsPortalRelayDomain(domain) || noReply
+        return SyntheticIdentityGuard.IsPortalRelayDomain(domain) && !LooksLikeAPersonsName(name)
             ? (name, PassageRole.BuyerHeader)
             : (name, PassageRole.ItemText);
+    }
+
+    /// <summary>
+    /// The organisation the sender's own mailbox is signed with, the buying-function words taken off:
+    /// "Hyundai E&amp;C" out of "Hyundai E&amp;C Procurement &lt;procurement@hdec.com&gt;". Null wherever the
+    /// name cannot speak for an organisation: no display name, a person's name
+    /// (<see cref="LooksLikeAPersonsName"/>), a relay (its name is already a header, see
+    /// <see cref="SenderDisplayName"/>), a consumer mailbox, our own mail or Nexora's placeholders, or
+    /// nothing left once the function words are gone.
+    ///
+    /// WHY IT IS READ (#14). Hyundai E&amp;C mails from hdec.com about an Aramco site. With Hyundai on the
+    /// books but no contact or Domain row at hdec.com, nothing on the page was a claim for Hyundai, so
+    /// Aramco linked on its site address at 0.88 and Hyundai was never offered. The display name was on
+    /// the page all along, as a mention that named nobody. The resolver now reads it as a claim for the
+    /// one customer it reads as, which can only demote a consignee and offer the writer; it never links
+    /// anybody by itself.
+    /// </summary>
+    internal static string? SenderOrganisationName(
+        string? from, IEnumerable<string> tenantSelfDomains, IEnumerable<string?>? tenantSelfNames = null)
+    {
+        var selfDomains = tenantSelfDomains as IReadOnlyCollection<string> ?? tenantSelfDomains.ToList();
+        var (name, role) = SenderDisplayName(from, selfDomains, tenantSelfNames);
+        if (name is null || role != PassageRole.ItemText) return null;
+        var domain = RoutingValueNormalizer.DomainFromEmail(ParseAddress(from));
+        if (!IdentityDomainGuard.IsOrganisationDomain(domain, selfDomains)) return null;
+        if (LooksLikeAPersonsName(name)) return null;
+
+        var kept = name
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => !SignatureFunctionWords.Contains(token.Trim('.', ',', '"', '\'', '(', ')').ToUpperInvariant()));
+        var signed = string.Join(' ', kept).Trim().Trim('-', ',', '/', '|', ':').Trim();
+        return CustomerNameNormalizer.LooseKey(signed).Length == 0 ? null : signed;
+    }
+
+    /// <summary>
+    /// What a buying function calls itself on its mailbox, taken off a signature so the organisation's
+    /// own name is left. Narrower than <see cref="OrganisationNameWords"/> on purpose: SERVICES, SUPPLY,
+    /// SYSTEM or NETWORK are part of many company names ("Aramco Services Company") and stay on.
+    /// </summary>
+    private static readonly HashSet<string> SignatureFunctionWords = new(StringComparer.Ordinal)
+    {
+        "PROCUREMENT", "PURCHASING", "PURCHASE", "TENDER", "TENDERS", "TENDERING", "SOURCING",
+        "CONTRACTS", "CONTRACTING", "BIDS", "BIDDING", "RFQ", "RFP", "NOTIFICATION", "NOTIFICATIONS",
+        "TEAM", "OFFICE", "DEPARTMENT", "DEPT", "DIVISION", "DESK", "ADMIN", "ADMINISTRATION",
+        "MATERIALS", "ORDERS", "BUYING", "المشتريات"
+    };
+
+    /// <summary>
+    /// Words that make a display name an organisation's rather than a person's: what a buying
+    /// function calls itself ("Procurement", "Tenders"), legal form, sector, and the geography
+    /// every national company carries ("Saudi Aramco" is two capitalised words and is not a
+    /// person). A closed list, so it errs one way only: a relay name it does not recognise
+    /// ("Petro Rabigh") is read as a person and offered as a mention at 0.70 instead of linking,
+    /// which costs a rep one click; the other error links a lead to the wrong customer.
+    /// </summary>
+    private static readonly HashSet<string> OrganisationNameWords = new(StringComparer.Ordinal)
+    {
+        // What a buying function or a system calls itself.
+        "PROCUREMENT", "PURCHASING", "PURCHASE", "TENDER", "TENDERS", "TENDERING", "SOURCING",
+        "SUPPLY", "SUPPLIES", "CHAIN", "CONTRACTS", "CONTRACTING", "BIDS", "BIDDING", "RFQ", "RFP",
+        "NOTIFICATION", "NOTIFICATIONS", "PORTAL", "SYSTEM", "NETWORK", "TEAM", "OFFICE",
+        "DEPARTMENT", "DEPT", "DIVISION", "SERVICES", "SERVICE", "DESK", "CENTER", "CENTRE",
+        "ADMIN", "ADMINISTRATION", "MATERIALS", "MANAGEMENT", "OPERATIONS", "ORDERS", "BUYING",
+        // Legal form.
+        "CO", "COMPANY", "CORP", "CORPORATION", "INC", "LTD", "LIMITED", "LLC", "PLC", "WLL",
+        "EST", "ESTABLISHMENT", "GROUP", "HOLDING", "HOLDINGS", "GMBH", "AG", "JSC",
+        // Sector.
+        "ELECTRICITY", "ELECTRIC", "WATER", "POWER", "ENERGY", "OIL", "GAS", "PETROLEUM",
+        "PETROCHEMICAL", "PETROCHEMICALS", "CHEMICAL", "CHEMICALS", "REFINERY", "REFINING",
+        "CEMENT", "STEEL", "MINING", "INDUSTRIES", "INDUSTRIAL", "ENGINEERING", "CONSTRUCTION",
+        "TRADING", "AUTHORITY", "MINISTRY", "MUNICIPALITY", "COMMISSION", "AGENCY", "UNIVERSITY",
+        "HOSPITAL", "AIRLINES", "UTILITIES", "TELECOM", "BANK", "PORTS",
+        // Geography every national or international company carries.
+        "SAUDI", "ARABIA", "ARABIAN", "ARAB", "KSA", "KINGDOM", "NATIONAL", "GULF", "MIDDLE",
+        "EAST", "INTERNATIONAL", "GLOBAL", "GENERAL", "UNITED", "EMIRATES",
+        // Arabic: company, establishment, procurement, administration, group.
+        "شركة", "الشركة", "مؤسسة", "المؤسسة", "المشتريات", "إدارة", "ادارة", "مجموعة"
+    };
+
+    /// <summary>
+    /// Whether a mailbox display name reads as a person rather than an organisation.
+    ///
+    /// Two shapes are a person. "Rashid Al-Otaibi via Coupa" — a portal names the individual who
+    /// acted through it. And a Firstname Lastname shape: two to four words made only of letters
+    /// (hyphen, apostrophe and dot allowed inside), none of them an organisation word and none an
+    /// acronym written in capitals inside a mixed-case name ("SEC Procurement"). A single word
+    /// ("SABIC"), anything with a digit or an ampersand ("Hyundai E&amp;C"), and five words or
+    /// more are not a person's name.
+    /// </summary>
+    internal static bool LooksLikeAPersonsName(string? displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName)) return false;
+        var tokens = displayName.Trim().Trim('"', '\'').Split(
+            (char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Any(token => string.Equals(token, "via", StringComparison.OrdinalIgnoreCase)))
+            return true;
+        if (tokens.Length is < 2 or > 4) return false;
+
+        var writtenInCapitals = displayName.Where(char.IsLetter).All(char.IsUpper);
+        foreach (var raw in tokens)
+        {
+            var token = raw.Trim('.', ',', '(', ')', '"', '\'');
+            if (token.Length == 0) return false;
+            if (!token.All(c => char.IsLetter(c) || c is '-' or '\'' or '.' or '’')) return false;
+            foreach (var part in token.Split(['-', '\'', '.', '’'], StringSplitOptions.RemoveEmptyEntries))
+                if (OrganisationNameWords.Contains(part.ToUpperInvariant())) return false;
+            var letters = token.Where(char.IsLetter).ToArray();
+            if (!writtenInCapitals && letters.Length is >= 2 and <= 6 && letters.All(char.IsUpper))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -543,18 +767,21 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
 
     // ── corpus ────────────────────────────────────────────────────────────────
 
-    private async Task<ClientResolutionCorpus> LoadCorpusAsync(
+    internal async Task<ClientResolutionCorpus> LoadCorpusAsync(
         long businessUnitId, LeadClientEvidence evidence, CancellationToken ct)
+        => (await LoadCorpusAndSharedAcronymsAsync(businessUnitId, evidence, ct)).Corpus;
+
+    private async Task<(ClientResolutionCorpus Corpus, IReadOnlySet<string> TenantSharedAcronyms)>
+        LoadCorpusAndSharedAcronymsAsync(long businessUnitId, LeadClientEvidence evidence, CancellationToken ct)
     {
         var addresses = new[] { evidence.SenderEmail, evidence.DocumentBuyerEmail }
             .Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).Distinct().ToArray();
         var domains = addresses
             .Select(RoutingValueNormalizer.DomainFromEmail)
-            // The same domains the resolver's Guard keeps: a relay's Domain row can never match
-            // there, so it is not worth a read here.
-            .Where(d => !string.IsNullOrWhiteSpace(d) && !SyntheticIdentityGuard.IsSyntheticDomain(d)
-                        && !SyntheticIdentityGuard.IsFreeMailDomain(d)
-                        && !SyntheticIdentityGuard.IsPortalRelayDomain(d))
+            // The same domains the resolver's Guard keeps: a relay's, a free-mail provider's or
+            // our own Domain row can never match there, so it is not worth a read here.
+            .Where(d => IdentityDomainGuard.IsOrganisationDomain(d, evidence.TenantSelfDomains)
+                        && !TenantSelfIdentity.IsOurs(d, evidence))
             .Select(d => d!).Distinct().ToArray();
         var accounts = evidence.AccountReferences
             .Select(x => RoutingValueNormalizer.Normalize(CustomerIdentifierType.ErpAccount, x))
@@ -630,6 +857,33 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                     (i.IdentifierType == CustomerIdentifierType.TaxRegistration && taxRegistrations.Contains(i.NormalizedValue))),
                 maxAuthoritativeIdentifiers);
 
+        // WHO ELSE WRITES FROM THIS DOMAIN. The resolver lets a delivery address link only while
+        // nothing on the page names somebody else, and one thing that does is a mail domain another
+        // customer's records write from: Hyundai E&C mails procurement@hdec.com about Aramco's Ras
+        // Tanura site, and Hyundai's contact k.lee@hdec.com says whose domain that is. This loader only
+        // ever read the EXACT sender address, so the rule was proven in unit tests that hand the
+        // resolver k.lee's row directly and could never fire on a real lead: Aramco linked at 0.88.
+        // So the page's organisation domains are read too, for verified Email rows (here), contacts
+        // and earlier human decisions (below). Only when there are passages, because the rule only
+        // speaks about a name found in one. Our own and shared domains were removed above.
+        //
+        // THE COST: an unindexed suffix match ("LIKE '%@hdec.com'") over this tenant's rows, per
+        // organisation domain on the page (at most two), each read ordered and capped at the
+        // learner's own bound. Human-paced for the learner; per ingested lead here, which a tenant's
+        // row counts keep in the milliseconds. A stored domain column would make it an index lookup.
+        var domainEvidence = evidence.Passages.Count > 0 ? domains : [];
+        foreach (var domain in domainEvidence)
+        {
+            var atDomain = "@" + domain;
+            await LoadIdentifiersAsync(
+                LiveIdentifiers().Where(i =>
+                    i.IdentifierType == CustomerIdentifierType.Email
+                    && i.IsVerified
+                    && i.Source != CustomerIdentifierSources.LeadReviewUnverified
+                    && i.NormalizedValue.EndsWith(atDomain)),
+                CustomerAliasLearner.MaximumDomainEvidenceRead);
+        }
+
         // The name the document states, matched exactly. Loaded ahead of the open-ended scan
         // below and on its own budget: it is the one name row that is ABOUT this document, and
         // it is the row the old single cap was most likely to throw away.
@@ -663,61 +917,195 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                 LiveIdentifiers().Where(i => i.IdentifierType == CustomerIdentifierType.RfqNumberPattern),
                 maxRfqPatternIdentifiers);
 
-        var customers = await LoadCustomerNamesAsync(businessUnitId, evidence, identifiers, ct);
-        var contacts = await LoadContactsAsync(businessUnitId, addresses, evidence.BuyerPersonName, identifiers, ct);
-        var priorSenders = await LoadPriorSenderResolutionsAsync(businessUnitId, evidence.LeadId, addresses, ct);
+        var names = await LoadCustomerNamesAsync(businessUnitId, evidence, identifiers, ct);
+        var contacts = await LoadContactsAsync(businessUnitId, addresses, domainEvidence, evidence.BuyerPersonName, identifiers, ct);
+        var priorSenders = await LoadPriorSenderResolutionsAsync(businessUnitId, evidence.LeadId, addresses, domainEvidence, ct);
 
-        return new ClientResolutionCorpus
+        return (new ClientResolutionCorpus
         {
             Identifiers = identifiers,
-            Customers = customers,
+            Customers = names.Customers,
             Contacts = contacts,
             PriorSenderResolutions = priorSenders
-        };
+        }, names.TenantAcronymCollisions);
     }
 
-    private async Task<List<CustomerNameSnapshot>> LoadCustomerNamesAsync(
-        long businessUnitId, LeadClientEvidence evidence, List<CustomerIdentifierSnapshot> identifiers, CancellationToken ct)
-    {
-        var matchedIds = identifiers.Select(i => i.CustomerId).Distinct().ToArray();
+    /// <summary>The customers handed to the resolver, and the initials two or more of the
+    /// tenant's active customers share (computed over the WHOLE tenant, not over
+    /// <paramref name="Customers"/>).</summary>
+    internal sealed record CustomerNameScan(
+        IReadOnlyList<CustomerNameSnapshot> Customers, IReadOnlySet<string> TenantAcronymCollisions);
 
-        // The name scan is read-only and capped. Above the cap we pre-filter in SQL on a
-        // leading-character bucket (no pg_trgm, no new Postgres extension). The filter is
-        // deliberately WIDER than the comparison it feeds: LooseKey/TightKey cannot run in
-        // SQL without a stored normalised column, so SQL narrows on the RAW leading
-        // characters and the exact/fuzzy comparison still happens on the normalised keys in
-        // C#. Customers already matched by an identifier are always included.
-        //
-        // The buckets come from the PASSAGES, not from the company-name field. The field was
-        // the only source, and on the document this fallback exists for — a portal print with
-        // no company-name field at all — it is null, so the filter collapsed to
-        // already-matched-only and the passage tier, the one tier that reads a print like lead
-        // 680, was handed an empty customer list and could match nothing. The comment here
-        // used to claim no auto-link tier could be degraded by the fallback. One was, to zero.
+    /// <summary>
+    /// A bound on the tenant-wide Id+Name read above the name-scan cap. Far past any customer
+    /// list this product will hold; a tenant past it needs the stored acronym column (see
+    /// <see cref="LoadCustomerNamesAsync"/>), because a customer beyond the bound can share
+    /// initials with one inside it and the collision would go unseen.
+    /// </summary>
+    internal const int MaximumAcronymIndexRows = 100_000;
+
+    /// <summary>A bound on how many customers the initials on a page may pin into the corpus.</summary>
+    internal const int MaximumAcronymPinnedCustomers = 500;
+
+    internal async Task<CustomerNameScan> LoadCustomerNamesAsync(
+        long businessUnitId, LeadClientEvidence evidence, IReadOnlyList<CustomerIdentifierSnapshot> identifiers,
+        CancellationToken ct)
+    {
         var query = _db.Customers.AsNoTracking().IgnoreQueryFilters()
             .Where(c => c.Buid == businessUnitId && c.IsActive != false);
 
+        // At or under the cap every active customer is loaded, so initials the loaded list
+        // shares are exactly the initials the tenant shares, and no second read is needed.
         var total = await query.CountAsync(ct);
-        if (total > _policy.MaximumNameScanRows)
+        if (total <= _policy.MaximumNameScanRows)
         {
-            var prefixes = NameScanPrefixes(evidence).ToArray();
-            query = prefixes.Length > 0
-                ? query.Where(c => matchedIds.Contains(c.Id) || prefixes.Contains(c.Name.ToUpper().Substring(0, 2)))
-                : query.Where(c => matchedIds.Contains(c.Id));
+            var everyone = await query
+                .OrderBy(c => c.Id)
+                .Select(c => new CustomerNameSnapshot(c.Id, c.Name))
+                .Take(_policy.MaximumNameScanRows)
+                .ToListAsync(ct);
+            return new CustomerNameScan(everyone, AcronymIndex.Build(everyone).Collisions);
         }
 
-        return await query
-            .OrderBy(c => c.Id)
+        // ABOVE THE CAP. The name scan is read-only and capped, so SQL pre-filters on a
+        // leading-character bucket (no pg_trgm, no new Postgres extension). The filter is
+        // deliberately WIDER than the comparison it feeds: LooseKey/TightKey cannot run in SQL
+        // without a stored normalised column, so SQL narrows on the RAW leading characters and
+        // the exact/fuzzy comparison still happens on the normalised keys in C#.
+        //
+        // The buckets come from the PASSAGES, not from the company-name field. The field was the
+        // only source, and on the document this fallback exists for — a portal print with no
+        // company-name field at all — it is null, so the filter collapsed to already-matched-only
+        // and the passage tier, the one tier that reads a print like lead 680, was handed an
+        // empty customer list and could match nothing.
+        //
+        // TWO SHAPES A BUCKET CAN NEVER SEE, and both lost the lead outright above the cap while
+        // the same document linked below it:
+        //
+        //   * INITIALS. "SEC Materials West Plant-West Operating Area" yields SE, MA, WE, PL, OP,
+        //     AR, and "Saudi Electricity Company" is filed under SA. The print that links at 0.85
+        //     on SEC's initials in a 1,900-customer tenant resolved to nothing in a 2,100-customer
+        //     one. Initials cannot be bucketed at all, so the customers whose initials are written
+        //     on the page are found by name in C# (below) and pinned into the read.
+        //   * THE ARTICLE. "Al-Rashid Trading" is filed under AL, the passage "Rashid Trading
+        //     warehouse" yields RA, and a two-letter "Al" on the page is skipped as noise. The
+        //     name's bucket is now also taken after a leading Al-/Al /El-/El /The.
+        //
+        // Customers already matched by an identifier, and customers whose initials are on the
+        // page, are read FIRST, so a wide bucket can never push them past the cap.
+        var pinned = identifiers.Select(i => i.CustomerId).ToHashSet();
+        IReadOnlySet<string> collisions = new HashSet<string>(StringComparer.Ordinal);
+        if (evidence.Passages.Count > 0)
+        {
+            // THE COST, stated plainly: one Id+Name read of every active customer in the tenant,
+            // per resolution above the cap, and AcronymKey over each of them in C# — about a
+            // megabyte and some tens of milliseconds at 20,000 customers, and a backfill pays it
+            // once per lead. It buys two things the capped list cannot give. The customers whose
+            // initials the page prints (above). And initials that two customers share, which
+            // identify neither: "Saudi Cable Company" (bucket SA) and "Sudair Ceramics Company"
+            // (bucket SU) both derive SCC, the page "SCC Store, Sudair Industrial City" buckets
+            // only Sudair Ceramics, the capped list saw SCC as unique, and the lead auto-linked to
+            // Sudair Ceramics at 0.85 — where, below the cap, the same page linked nobody. Whether
+            // a lead links must not depend on how many customers the tenant has.
+            //
+            // OWNER DECISION: the durable fix is a stored, indexed acronym (and loose-key) column
+            // on Customers, maintained on write, which turns both of these into an indexed lookup.
+            // That is a schema change and was out of scope for this round.
+            var index = AcronymIndex.Build(await query
+                .OrderBy(c => c.Id)
+                .Select(c => new CustomerNameSnapshot(c.Id, c.Name))
+                .Take(MaximumAcronymIndexRows)
+                .ToListAsync(ct));
+            collisions = index.Collisions;
+            var namedByInitials = new HashSet<long>();
+            foreach (var word in PassageWords(evidence))
+            {
+                if (namedByInitials.Count >= MaximumAcronymPinnedCustomers) break;
+                // EVERY owner of the initials, not the first: a customer left out here is a
+                // collision the resolver cannot see, which is the defect this read exists to close.
+                if (index.CustomersByAcronym.TryGetValue(word, out var owners)) namedByInitials.UnionWith(owners);
+            }
+            pinned.UnionWith(namedByInitials);
+        }
+
+        var pinnedIds = pinned.ToArray();
+        var prefixes = NameScanPrefixes(evidence).ToArray();
+        var filtered = prefixes.Length > 0
+            ? query.Where(c => pinnedIds.Contains(c.Id)
+                               || prefixes.Contains(c.Name.ToUpper().Substring(0, 2))
+                               || ((c.Name.ToUpper().StartsWith("AL-") || c.Name.ToUpper().StartsWith("AL ")
+                                    || c.Name.ToUpper().StartsWith("EL-") || c.Name.ToUpper().StartsWith("EL "))
+                                   && prefixes.Contains(c.Name.ToUpper().Substring(3, 2)))
+                               || (c.Name.ToUpper().StartsWith("THE ")
+                                   && prefixes.Contains(c.Name.ToUpper().Substring(4, 2))))
+            : query.Where(c => pinnedIds.Contains(c.Id));
+
+        var customers = await filtered
+            .OrderBy(c => pinnedIds.Contains(c.Id) ? 0 : 1)
+            .ThenBy(c => c.Id)
             .Select(c => new CustomerNameSnapshot(c.Id, c.Name))
             .Take(_policy.MaximumNameScanRows)
             .ToListAsync(ct);
+        return new CustomerNameScan(customers, collisions);
+    }
+
+    /// <summary>
+    /// Every customer's derived initials (<see cref="CustomerNameNormalizer.AcronymKey"/>), and
+    /// which of them two or more customers share. Built in C# because AcronymKey cannot run in
+    /// SQL. "Shared" is the resolver's own rule (<see cref="CustomerIdentityResolver.SharedDerivedAcronyms"/>),
+    /// not a second copy of it, so the loader and the resolver can never disagree about it.
+    /// </summary>
+    internal sealed record AcronymIndex(
+        IReadOnlyDictionary<string, long[]> CustomersByAcronym, IReadOnlySet<string> Collisions)
+    {
+        public static AcronymIndex Build(IEnumerable<CustomerNameSnapshot> customers)
+        {
+            var list = customers as IReadOnlyList<CustomerNameSnapshot> ?? customers.ToList();
+            var byAcronym = new Dictionary<string, HashSet<long>>(StringComparer.Ordinal);
+            foreach (var customer in list)
+            {
+                var acronym = CustomerNameNormalizer.AcronymKey(customer.Name);
+                if (acronym.Length == 0) continue;
+                if (!byAcronym.TryGetValue(acronym, out var owners))
+                    byAcronym[acronym] = owners = [];
+                owners.Add(customer.CustomerId);
+            }
+            return new AcronymIndex(
+                byAcronym.ToDictionary(pair => pair.Key, pair => pair.Value.Order().ToArray(), StringComparer.Ordinal),
+                CustomerIdentityResolver.SharedDerivedAcronyms(list));
+        }
+    }
+
+    /// <summary>
+    /// The words the resolver will search the page for initials in, exactly as it will see them:
+    /// each passage's <see cref="CustomerNameNormalizer.LooseKey"/>, split on the spaces
+    /// <see cref="CustomerIdentityResolver.ContainsWholeWords"/> matches between. Three to six
+    /// letters, the only lengths AcronymKey produces. Every role, item text included, because the
+    /// resolver scans initials in item text too (as a suggestion); a page read differently here
+    /// would hand the resolver a customer list on which a shared acronym looks unique again. In
+    /// role order, so the page's headers and addresses pin their customers before its item text.
+    /// </summary>
+    internal static IEnumerable<string> PassageWords(LeadClientEvidence evidence)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var passage in evidence.Passages
+                     .OrderBy(p => p.Role switch { PassageRole.BuyerHeader => 0, PassageRole.ShipTo => 1, _ => 2 }))
+        {
+            foreach (var word in CustomerNameNormalizer.LooseKey(passage.Text).Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (word.Length is < 3 or > 6 || !word.All(c => c is >= 'A' and <= 'Z')) continue;
+                if (seen.Add(word)) yield return word;
+            }
+        }
     }
 
     /// <summary>
     /// The leading two characters of every word a passage about the buyer states, which is the
-    /// widest SQL-expressible net that still narrows a very large customer list. "SEC Materials
-    /// West Plant-West Operating Area" yields SE, MA, WE, PL, OP, AR — and SE is what finds
-    /// "Saudi Electricity Company".
+    /// widest SQL-expressible net that still narrows a very large customer list. "Saudi
+    /// Electricity Company-DAMMAM" yields SA, EL, CO, DA — and SA is what finds "Saudi Electricity
+    /// Company". (This comment used to say SE from "SEC Materials West Plant" found it. It never
+    /// did: that name is filed under SA. Initials are found by name instead — see
+    /// <see cref="PassageWords"/>.)
     ///
     /// Words shorter than three characters are skipped: they are articles and unit codes, and
     /// two of them would pull back most of the table for nothing.
@@ -758,7 +1146,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     }
 
     private async Task<List<CustomerContactSnapshot>> LoadContactsAsync(
-        long businessUnitId, string[] addresses, string? buyerPersonName,
+        long businessUnitId, string[] addresses, string[] organisationDomains, string? buyerPersonName,
         List<CustomerIdentifierSnapshot> identifiers, CancellationToken ct)
     {
         var matchedIds = identifiers.Select(i => i.CustomerId).Distinct().ToArray();
@@ -794,6 +1182,18 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                                 || (c.Email != null && addresses.Contains(c.Email.ToLower()))),
                 200);
 
+        // Contacts at the page's organisation domains, so the resolver can see whose domain the
+        // sender's is when the sender is not a contact himself (see LoadCorpusAndSharedAcronymsAsync).
+        // Active customers only: a rival offered to a rep must be a customer the rep can pick.
+        foreach (var domain in organisationDomains)
+        {
+            var atDomain = "@" + domain;
+            await LoadContactRowsAsync(
+                live.Where(c => c.Email != null && c.Email.ToLower().EndsWith(atDomain))
+                    .Where(c => _db.Customers.Any(x => x.Buid == businessUnitId && x.Id == c.CustomerId && x.IsActive != false)),
+                CustomerAliasLearner.MaximumDomainEvidenceRead);
+        }
+
         // THE SURNAME PREFILTER MISSED EVERY HYPHENATED SAUDI SURNAME, which is most of them.
         // The buyer is printed "3C2-AMER AL-DOSSARY", the last token of the normalised key is
         // DOSSARY, and the stored contact is "Al-Dossary": an equality test on LastName never
@@ -812,9 +1212,51 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     }
 
     private async Task<List<PriorSenderResolution>> LoadPriorSenderResolutionsAsync(
-        long businessUnitId, long leadId, string[] addresses, CancellationToken ct)
+        long businessUnitId, long leadId, string[] addresses, string[] organisationDomains, CancellationToken ct)
     {
         if (addresses.Length == 0) return [];
+
+        var exact = await LoadExactPriorSenderResolutionsAsync(businessUnitId, leadId, addresses, ct);
+
+        // Earlier leads a PERSON linked, from any address on the page's organisation domains: the
+        // third fact that says whose domain it is (see LoadCorpusAndSharedAcronymsAsync). The same
+        // two columns the learner reads for its own domain test, the sender and the buyer address the
+        // document printed, because a folder-ingested print carries its buyer's domain only there.
+        // The address is parsed out of "Name <a@b>" shapes, which the resolver compares by domain.
+        var onDomains = new List<PriorSenderResolution>();
+        foreach (var domain in organisationDomains)
+        {
+            var atDomain = "@" + domain;
+            var bracketed = atDomain + ">";
+            var rows = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
+                .Where(l => l.BusinessUnitId == businessUnitId && l.Id != leadId && l.CustomerId != null
+                            && ((l.Clientemail != null
+                                 && (l.Clientemail.ToLower().EndsWith(atDomain) || l.Clientemail.ToLower().EndsWith(bracketed)))
+                                || (l.CustomerBuyerEmailExtracted != null
+                                    && (l.CustomerBuyerEmailExtracted.ToLower().EndsWith(atDomain)
+                                        || l.CustomerBuyerEmailExtracted.ToLower().EndsWith(bracketed)))))
+                .OrderByDescending(l => l.Id)
+                .Select(l => new { l.Clientemail, l.CustomerBuyerEmailExtracted, CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus })
+                .Take(CustomerAliasLearner.MaximumDomainEvidenceRead)
+                .ToListAsync(ct);
+            foreach (var row in rows.Where(row => LeadCustomerMatchStatuses.IsHumanDecided(row.CustomerMatchStatus)))
+            {
+                foreach (var raw in new[] { row.Clientemail, row.CustomerBuyerEmailExtracted })
+                {
+                    var address = ParseAddress(raw);
+                    if (address is not null
+                        && string.Equals(RoutingValueNormalizer.DomainFromEmail(address), domain, StringComparison.Ordinal))
+                        onDomains.Add(new PriorSenderResolution(address, row.CustomerId));
+                }
+            }
+        }
+
+        return exact.Concat(onDomains).Distinct().ToList();
+    }
+
+    private async Task<List<PriorSenderResolution>> LoadExactPriorSenderResolutionsAsync(
+        long businessUnitId, long leadId, string[] addresses, CancellationToken ct)
+    {
 
         var rows = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
             .Where(l => l.BusinessUnitId == businessUnitId && l.Id != leadId
