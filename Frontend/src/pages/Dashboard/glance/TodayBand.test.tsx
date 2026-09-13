@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -72,6 +72,34 @@ beforeEach(() => {
   navigate.mockReset();
   getSalesToday.mockReset();
   permissions.granted = true;
+});
+
+describe('TodayBand background refresh', () => {
+  // The band re-reads every 60 s. A failed re-read used to replace five good rows with
+  // "We could not load this" until the next minute — on the landing screen of every manager.
+  it('keeps its rows when a re-read fails, and says how old they are', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    getSalesToday
+      .mockResolvedValueOnce(payload([item()]))
+      .mockRejectedValue({ isAxiosError: true, message: 'Request failed with status code 502', response: { status: 502, data: {} } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <TodayBand />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await screen.findByText('NX-QUO-000041');
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['commercial-intelligence', 'sales-today'] });
+    });
+
+    expect(getSalesToday.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(await screen.findByText(/Couldn't refresh just now/)).toBeInTheDocument();
+    expect(screen.getByText('NX-QUO-000041')).toBeInTheDocument();
+    expect(screen.queryByText('We could not load this')).not.toBeInTheDocument();
+  });
 });
 
 describe('TodayBand rows', () => {

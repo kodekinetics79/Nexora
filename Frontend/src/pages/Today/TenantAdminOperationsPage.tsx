@@ -32,6 +32,8 @@ export default function TenantAdminOperationsPage() {
     queryKey: ['tenant-operational-readiness', userData.businessUnitId],
     queryFn: operationalReadinessService.get,
     refetchInterval: 30_000,
+    // Self-refreshing, and QueryState renders its own failure: no toast for a background re-read.
+    meta: { silenceGlobalError: true },
   });
   const deadLetters = useQuery({
     queryKey: ['extraction-dead-letters', userData.businessUnitId],
@@ -75,7 +77,7 @@ export default function TenantAdminOperationsPage() {
     <MetricGrid metrics={metrics} />
     <Stack spacing={1.5} sx={{ mb: 2.5 }}>
       <Typography variant="h6" sx={{ fontWeight: 800 }}>Production readiness</Typography>
-      <QueryState loading={readiness.isLoading} error={readiness.isError} empty={!readiness.data} onRetry={() => void readiness.refetch()} emptyText="No readiness evidence is available.">
+      <QueryState loading={readiness.isLoading} error={readiness.isError} hasData={readiness.data !== undefined} updatedAt={readiness.dataUpdatedAt} empty={!readiness.data} onRetry={() => void readiness.refetch()} emptyText="No readiness evidence is available.">
         {readiness.data && <>
           <Alert severity={readiness.data.deploymentReadiness === 'Healthy' ? 'success' : 'warning'}>
             Runtime readiness is {readiness.data.deploymentReadiness}. Last checked {new Date(readiness.data.checkedAt).toLocaleString()}.

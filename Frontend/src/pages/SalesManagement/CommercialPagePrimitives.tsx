@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Alert, Box, Button, Chip, CircularProgress, Paper, Stack, Typography } from '@mui/material';
 import { Refresh as RefreshIcon } from '@mui/icons-material';
+import RefreshFailedNotice from '../../components/common/RefreshFailedNotice';
 import type { CurrencyAmountGroupDTO, CurrencyPipelineGroupDTO, IntelligenceMetric } from '../../api/services/commercialIntelligenceService';
 
 export const formatMetric = (metric: IntelligenceMetric) => {
@@ -62,11 +63,32 @@ export function MetricGrid({ metrics }: { metrics: IntelligenceMetric[] }) {
   );
 }
 
-export function QueryState({ loading, error, empty, onRetry, emptyText, children }: { loading: boolean; error: boolean; empty: boolean; onRetry: () => void; emptyText: string; children: ReactNode }) {
+/**
+ * Loading, failed, empty or content — for one read.
+ *
+ * `hasData` separates "this read never succeeded" from "a later refresh failed". Only the first
+ * replaces the content with an error. TanStack Query keeps the last good answer when a background
+ * refetch fails, and the self-refreshing screens used to throw it away: every backend deploy swapped
+ * a live table for "could not be loaded" until the next minute's poll.
+ */
+export function QueryState({ loading, error, empty, onRetry, emptyText, children, hasData = false, updatedAt = 0 }: {
+  loading: boolean;
+  error: boolean;
+  empty: boolean;
+  onRetry: () => void;
+  emptyText: string;
+  children: ReactNode;
+  /** The read still holds its last good answer. Pass `query.data !== undefined`. */
+  hasData?: boolean;
+  /** `query.dataUpdatedAt`, so the notice can say how old the shown answer is. */
+  updatedAt?: number;
+}) {
   if (loading) return <Box sx={{ minHeight: 240, display: 'grid', placeItems: 'center' }}><CircularProgress aria-label="Loading" /></Box>;
-  if (error) return <Alert severity="error" action={<Button color="inherit" startIcon={<RefreshIcon />} onClick={onRetry}>Retry</Button>}>This persisted view could not be loaded. No empty result has been assumed.</Alert>;
-  if (empty) return <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}><Typography color="text.secondary">{emptyText}</Typography></Paper>;
-  return <>{children}</>;
+  const refreshFailed = error && hasData;
+  if (error && !refreshFailed) return <Alert severity="error" action={<Button color="inherit" startIcon={<RefreshIcon />} onClick={onRetry}>Retry</Button>}>This persisted view could not be loaded. No empty result has been assumed.</Alert>;
+  const notice = refreshFailed ? <RefreshFailedNotice updatedAt={updatedAt} /> : null;
+  if (empty) return <>{notice}<Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}><Typography color="text.secondary">{emptyText}</Typography></Paper></>;
+  return <>{notice}{children}</>;
 }
 
 export function ResponsiveTable({ label, children }: { label: string; children: ReactNode }) {

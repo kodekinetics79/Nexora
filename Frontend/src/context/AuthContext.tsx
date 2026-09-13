@@ -2,6 +2,7 @@ import React, {
   createContext,
   useCallback,
   useContext,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -10,7 +11,7 @@ import React, {
 import { jwtDecode } from "jwt-decode";
 import { getImpersonation } from "../api/impersonation";
 import userService from "../api/services/userService";
-import { presentableErrorMessage } from "../utils/apiErrors";
+import { presentableErrorMessage, toPresentableError } from "../utils/apiErrors";
 
 // FE-12: proactively handle JWT expiry instead of waiting for a failed call.
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
@@ -50,6 +51,26 @@ export const PERMISSION_SCHEMA_VERSION = 3;
 
 /** How long a loaded permission set is considered fresh. Mirrors the server's ~60s RBAC cache. */
 export const PERMISSIONS_STALE_MS = 60_000;
+
+/**
+ * How soon to re-read after a failed `/me/permissions` call: 10 s, then 30 s, then every 60 s.
+ *
+ * A failure used to stop revalidation altogether — the 60 s timer was only re-armed by a SUCCESS —
+ * so a single failed read during a backend deploy left create/edit screens blank until the window
+ * happened to regain focus.
+ */
+export const PERMISSIONS_RETRY_DELAYS_MS: readonly number[] = [10_000, 30_000, 60_000];
+
+/**
+ * No answer came back, or the server said "not now" (408/429/5xx). The grants the server confirmed
+ * earlier in this session are still the best knowledge there is; a 401/403 or another 4xx is an
+ * answer and is acted on.
+ */
+const isTransientPermissionsFailure = (error: unknown): boolean => {
+  const { status, isCanceled } = toPresentableError(error);
+  if (isCanceled || status === undefined) return true;
+  return status === 408 || status === 429 || status >= 500;
+};
 
 export const PERMISSIONS_LOAD_FAILED_MESSAGE =
   "Could not load your permissions. Contact your administrator.";
@@ -168,6 +189,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [permissionsError, setPermissionsError] = useState<string | null>(null);
   const [permissionsLoading, setPermissionsLoading] = useState(false);
   const [permissionsStale, setPermissionsStale] = useState(true);
+  /** Mirrors `permissionsStale` for the loader, which must not re-create on every change. */
+  const permissionsStaleRef = useRef(true);
+  permissionsStaleRef.current = permissionsStale;
+  /** Consecutive failed reads; non-zero schedules the next attempt from `PERMISSIONS_RETRY_DELAYS_MS`. */
+  const [failedRefreshes, setFailedRefreshes] = useState(0);
   /** State counterpart to the ref below, used only to schedule expiry from the exact success. */
   const [permissionsLoadedAt, setPermissionsLoadedAt] = useState(0);
   /** Epoch ms of the last successful `/me/permissions` read; 0 means "never loaded". */
@@ -177,14 +203,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const tokenRef = useRef<string | null>(token);
   tokenRef.current = token;
 
-  const setToken = (newToken: string | null) => {
+  const setToken = useCallback((newToken: string | null) => {
     setTokenState(newToken);
     if (newToken) {
       localStorage.setItem("token", newToken);
     } else {
       localStorage.removeItem("token");
     }
-  };
+  }, []);
 
   const setUserData = useCallback((data: UserData) => {
     const stamped: UserData = { ...data, schemaVersion: PERMISSION_SCHEMA_VERSION };
@@ -200,6 +226,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setPermissionsLoadedAt(loadedAt);
       setPermissionsStale(false);
       setPermissionsError(null);
+      setFailedRefreshes(0);
     }
   }, []);
 
@@ -219,7 +246,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (!options?.force && Date.now() - lastLoadedAtRef.current < PERMISSIONS_STALE_MS) return;
 
     const load = (async () => {
-      setPermissionsLoading(true);
+      // Only a read the screen is WAITING on shows as loading. A routine re-check of grants the
+      // server already confirmed changes nothing on screen unless the answer itself changes.
+      const foreground = permissionsStaleRef.current;
+      if (foreground) setPermissionsLoading(true);
       try {
         const me = await userService.getMyPermissions();
         setUserDataState((previous) => {
@@ -238,6 +268,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             entitlements: me.entitlements ?? [],
             schemaVersion: PERMISSION_SCHEMA_VERSION,
           };
+          // An identical answer keeps the SAME object, so nothing that reads the session
+          // re-renders once a minute for a check that changed nothing.
+          if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
           localStorage.setItem("userData", JSON.stringify(next));
           return next;
         });
@@ -246,13 +279,22 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setPermissionsLoadedAt(loadedAt);
         setPermissionsStale(false);
         setPermissionsError(null);
+        setFailedRefreshes(0);
       } catch (error) {
-        // A cached snapshot may remain useful for read-only navigation, but it is no longer safe
-        // to advertise a destructive mutation after the authority refresh itself failed.
-        setPermissionsStale(true);
-        setPermissionsError(presentableErrorMessage(error, PERMISSIONS_LOAD_FAILED_MESSAGE));
+        // Always schedule another attempt; one failure must never end revalidation.
+        setFailedRefreshes((count) => count + 1);
+        // Grants the server confirmed earlier in THIS session survive a read that got no answer
+        // (a deploy swap, a network blip). Withdrawing them unmounted every create/edit screen and
+        // lost what was typed — while protecting nothing, because the server authorises every
+        // mutation itself. A snapshot that was never confirmed this session (read from storage on
+        // load), or a real refusal, still fails closed.
+        const confirmedThisSession = lastLoadedAtRef.current > 0;
+        if (!(confirmedThisSession && isTransientPermissionsFailure(error))) {
+          setPermissionsStale(true);
+          setPermissionsError(presentableErrorMessage(error, PERMISSIONS_LOAD_FAILED_MESSAGE));
+        }
       } finally {
-        setPermissionsLoading(false);
+        if (foreground) setPermissionsLoading(false);
         inFlightRef.current = null;
       }
     })();
@@ -261,24 +303,26 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return load;
   }, []);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     setToken(null);
     setUserData({});
     lastLoadedAtRef.current = 0;
     setPermissionsLoadedAt(0);
     setPermissionsError(null);
     setPermissionsStale(true);
+    setFailedRefreshes(0);
     localStorage.clear();
     window.location.href = "/login";
-  };
+  }, [setToken, setUserData]);
 
   const hasPermission = useCallback((moduleName: string, action: 'view' | 'create' | 'edit' | 'delete' = 'view') => {
     // Impersonating platform operators have no tenant permission rows; let them
     // SEE everything — every mutation is rejected server-side by the read-only
     // impersonation middleware regardless of what the client renders.
     if (getImpersonation()) return true;
-    // Mutation authority must be current. A failed refresh leaves read navigation intact but
-    // suppresses destructive/edit/create controls until the server confirms the snapshot again.
+    // Mutation authority must be confirmed. Until the server has confirmed a snapshot this session,
+    // or after it refused one, read navigation stays intact but create/edit/delete controls are
+    // suppressed. A routine re-check of an already-confirmed snapshot does NOT make it stale.
     if (action !== 'view' && permissionsStale) return false;
     if (userData.isSuperAdmin === true || userData.hasModuleAuthorityByRank === true) return true;
     if (!userData.permissions) return false;
@@ -324,17 +368,28 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   // A tab can remain focused for hours. Focus-only refresh meant its create/edit/delete controls
   // could continue advertising a revoked grant indefinitely even though the documented freshness
   // window is 60 seconds. Expire from the exact successful read and revalidate automatically.
-  // Marking the snapshot stale before the request makes mutations fail closed while it is in
-  // flight; cached read-only navigation remains available by design.
+  //
+  // The snapshot is NOT marked stale before this re-check. It used to be, which made every
+  // create/edit/delete answer false for the ~1 s the request was in flight: once a minute the
+  // upload, quote, order and shipment screens unmounted and came back empty, and the lead decision
+  // screen turned to read-only text under the rep's cursor. The last confirmed grants stay in force
+  // until the server's answer replaces them; a revoked grant still disappears within the window.
+  //
+  // After a failure the next attempt is scheduled with backoff instead of waiting for focus.
   useEffect(() => {
-    if (!token || permissionsLoadedAt <= 0) return;
-    const delay = Math.max(0, permissionsLoadedAt + PERMISSIONS_STALE_MS - Date.now());
+    if (!token) return;
+    let delay: number;
+    if (failedRefreshes > 0) {
+      delay = PERMISSIONS_RETRY_DELAYS_MS[Math.min(failedRefreshes, PERMISSIONS_RETRY_DELAYS_MS.length) - 1];
+    } else {
+      if (permissionsLoadedAt <= 0) return;
+      delay = Math.max(0, permissionsLoadedAt + PERMISSIONS_STALE_MS - Date.now());
+    }
     const timer = window.setTimeout(() => {
-      setPermissionsStale(true);
       void refreshPermissions({ force: true });
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [permissionsLoadedAt, refreshPermissions, token]);
+  }, [failedRefreshes, permissionsLoadedAt, refreshPermissions, token]);
 
   // FE-12: while the app is open, schedule a proactive logout for the moment
   // the current token expires, redirecting to /login with a friendly notice
@@ -370,22 +425,36 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => window.clearTimeout(timer);
   }, [token]);
 
+  // Memoised: an unmemoised object literal handed every consumer a new value on every provider
+  // render, so a background check that changed nothing still re-rendered the whole signed-in app.
+  const value = useMemo<AuthContextType>(() => ({
+    token,
+    userData,
+    setToken,
+    setUserData,
+    logout,
+    hasPermission,
+    hasEntitlement,
+    permissionsError,
+    permissionsLoading,
+    permissionsStale,
+    refreshPermissions,
+  }), [
+    token,
+    userData,
+    setToken,
+    setUserData,
+    logout,
+    hasPermission,
+    hasEntitlement,
+    permissionsError,
+    permissionsLoading,
+    permissionsStale,
+    refreshPermissions,
+  ]);
+
   return (
-    <AuthContext.Provider
-      value={{
-        token,
-        userData,
-        setToken,
-        setUserData,
-        logout,
-        hasPermission,
-        hasEntitlement,
-        permissionsError,
-        permissionsLoading,
-        permissionsStale,
-        refreshPermissions,
-      }}
-    >
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

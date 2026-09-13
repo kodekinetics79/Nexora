@@ -1,32 +1,33 @@
-import { lazy, type LazyExoticComponent, type ComponentType } from 'react';
+import { type LazyExoticComponent, type ComponentType } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 
-const SetupMaster = lazy(() => import('./SetupMaster'));
-const CurrencyPage = lazy(() => import('./Currency/CurrencyPage'));
-const WarehousePage = lazy(() => import('./Warehouse/WarehousePage'));
-const UomPage = lazy(() => import('./UOM/UomPage'));
-const LocationMaster = lazy(() => import('./Location/LocationMaster'));
-const QuoteFormatPage = lazy(() => import('./QuoteFormat/QuoteFormatPage'));
-const BusinessUnitPage = lazy(() => import('./BusinessUnit/BusinessUnitPage'));
-const PriceStructurePage = lazy(() => import('./PriceStructure/PriceStructurePage'));
-const SlaSettingsPage = lazy(() => import('./Sla/SlaSettingsPage'));
-const ScheduledReportsPage = lazy(() => import('./Reporting/ScheduledReportsPage'));
-const CommercialPolicyPage = lazy(() => import('./CommercialPolicy/CommercialPolicyPage'));
-const MailboxPage = lazy(() => import('./Mailbox/MailboxPage'));
-const RoutingRulesPage = lazy(() => import('./RoutingRules/RoutingRulesPage'));
-const CustomFieldsPage = lazy(() => import('./CustomFields/CustomFieldsPage'));
+const SetupMaster = lazyWithRetry(() => import('./SetupMaster'));
+const CurrencyPage = lazyWithRetry(() => import('./Currency/CurrencyPage'));
+const WarehousePage = lazyWithRetry(() => import('./Warehouse/WarehousePage'));
+const UomPage = lazyWithRetry(() => import('./UOM/UomPage'));
+const LocationMaster = lazyWithRetry(() => import('./Location/LocationMaster'));
+const QuoteFormatPage = lazyWithRetry(() => import('./QuoteFormat/QuoteFormatPage'));
+const BusinessUnitPage = lazyWithRetry(() => import('./BusinessUnit/BusinessUnitPage'));
+const PriceStructurePage = lazyWithRetry(() => import('./PriceStructure/PriceStructurePage'));
+const SlaSettingsPage = lazyWithRetry(() => import('./Sla/SlaSettingsPage'));
+const ScheduledReportsPage = lazyWithRetry(() => import('./Reporting/ScheduledReportsPage'));
+const CommercialPolicyPage = lazyWithRetry(() => import('./CommercialPolicy/CommercialPolicyPage'));
+const MailboxPage = lazyWithRetry(() => import('./Mailbox/MailboxPage'));
+const RoutingRulesPage = lazyWithRetry(() => import('./RoutingRules/RoutingRulesPage'));
+const CustomFieldsPage = lazyWithRetry(() => import('./CustomFields/CustomFieldsPage'));
 
 // Screens Setup governs that live outside the `/setup` URL space — the former "User & Access" and
 // "Platform Governance" rails.
-const UsersPage = lazy(() => import('../Security/Users/UsersPage'));
-const RolesPermissionsPage = lazy(() => import('../Security/Roles/RolesPermissionsPage'));
-const TaxonomySkillStudioPage = lazy(() => import('../PlatformGovernance/TaxonomySkillStudioPage'));
-const AiTrustCenterPage = lazy(() => import('../PlatformGovernance/AiTrustCenterPage'));
-const LifecycleStudioPage = lazy(() => import('../PlatformGovernance/LifecycleStudioPage'));
-const IntegrationHubPage = lazy(() => import('../PlatformGovernance/IntegrationHubPage'));
-const ReleaseCenterPage = lazy(() => import('../PlatformGovernance/ReleaseCenterPage'));
-const CommercialDocumentArchivePage = lazy(() => import('../PlatformGovernance/CommercialDocumentArchivePage'));
-const QualityAnalyticsPage = lazy(() => import('../PlatformGovernance/QualityAnalyticsPage'));
-const StorageRetentionPage = lazy(() => import('../PlatformGovernance/StorageRetentionPage'));
+const UsersPage = lazyWithRetry(() => import('../Security/Users/UsersPage'));
+const RolesPermissionsPage = lazyWithRetry(() => import('../Security/Roles/RolesPermissionsPage'));
+const TaxonomySkillStudioPage = lazyWithRetry(() => import('../PlatformGovernance/TaxonomySkillStudioPage'));
+const AiTrustCenterPage = lazyWithRetry(() => import('../PlatformGovernance/AiTrustCenterPage'));
+const LifecycleStudioPage = lazyWithRetry(() => import('../PlatformGovernance/LifecycleStudioPage'));
+const IntegrationHubPage = lazyWithRetry(() => import('../PlatformGovernance/IntegrationHubPage'));
+const ReleaseCenterPage = lazyWithRetry(() => import('../PlatformGovernance/ReleaseCenterPage'));
+const CommercialDocumentArchivePage = lazyWithRetry(() => import('../PlatformGovernance/CommercialDocumentArchivePage'));
+const QualityAnalyticsPage = lazyWithRetry(() => import('../PlatformGovernance/QualityAnalyticsPage'));
+const StorageRetentionPage = lazyWithRetry(() => import('../PlatformGovernance/StorageRetentionPage'));
 
 export interface SetupRoute {
   /** Path relative to `/setup`. */

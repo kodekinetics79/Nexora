@@ -41,6 +41,7 @@ import { clientStatusLabel } from './ClientCell';
 import UploadProgressPanel from './UploadProgressPanel';
 import { useAuth } from '../../context/AuthContext';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import RefreshFailedNotice from '../../components/common/RefreshFailedNotice';
 import { presentableServerText } from '../../utils/apiErrors';
 import {
   explainIntakeItem,
@@ -423,6 +424,8 @@ export default function LeadIngestionBatchPage() {
       return failureCount < 2 && (status === undefined || status === 408 || status === 429 || status >= 500);
     },
     retryDelay: (attempt) => Math.min(1000 * (attempt + 1), 3000),
+    // The page renders its own failure (below), so a 2 s poll that misses once raises no toast.
+    meta: { silenceGlobalError: true },
     refetchInterval: (query) => {
       const batch = query.state.data;
       if (!batch) return 2000;
@@ -444,6 +447,18 @@ export default function LeadIngestionBatchPage() {
       await queryClient.invalidateQueries({ queryKey: ['lead-ingestion-batch', batchId] });
     },
   });
+  // The Refresh button shows busy only for a refresh the reader asked for. It used to follow
+  // `isFetching`, which is also true for every automatic 2 s poll, so the button spun and greyed
+  // out continuously and the page looked as if it kept reloading itself.
+  const [manualRefreshing, setManualRefreshing] = useState(false);
+  const refreshNow = async () => {
+    setManualRefreshing(true);
+    try {
+      await batchQuery.refetch();
+    } finally {
+      setManualRefreshing(false);
+    }
+  };
 
   if (batchQuery.isLoading) {
     return (
@@ -455,7 +470,9 @@ export default function LeadIngestionBatchPage() {
     );
   }
 
-  if (batchQuery.isError || !batchQuery.data) {
+  // Only a batch that never loaded is replaced by the error. A failed background poll keeps the
+  // documents on screen and says so (RefreshFailedNotice below); TanStack keeps the last good data.
+  if (!batchQuery.data) {
     return (
       <Box sx={{ maxWidth: 900, mx: 'auto', p: 3 }}>
         <ApiErrorNotice
@@ -530,13 +547,20 @@ export default function LeadIngestionBatchPage() {
           )}
           <Tooltip title="Check for new results now. This page also updates itself." describeChild>
             <span>
-              <Button size="small" variant="text" startIcon={batchQuery.isFetching ? <CircularProgress size={14} /> : <RefreshIcon />} onClick={() => batchQuery.refetch()} disabled={batchQuery.isFetching} sx={{ textTransform: 'none' }}>
+              <Button size="small" variant="text" startIcon={manualRefreshing ? <CircularProgress size={14} /> : <RefreshIcon />} onClick={() => void refreshNow()} disabled={manualRefreshing} sx={{ textTransform: 'none' }}>
                 Refresh
               </Button>
             </span>
           </Tooltip>
         </Stack>
       </Stack>
+
+      {batchQuery.isError && (
+        <RefreshFailedNotice
+          updatedAt={batchQuery.dataUpdatedAt}
+          retryHint={pendingCount > 0 || heldItems.length > 0 ? 'It will try again on its own.' : 'Press Refresh to try again.'}
+        />
+      )}
 
       {/* What is happening, per document, while the batch polls; and what to press when it is done. */}
       <UploadProgressPanel

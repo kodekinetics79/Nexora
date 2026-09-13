@@ -324,9 +324,22 @@ const ExtractionReviewDetailPage: React.FC = () => {
   // Serialized server copy, used to decide whether there is unsent work.
   const baselineRef = useRef<string>('');
 
+  /** The record and review version the form was last filled from. */
+  const seededFromRef = useRef<{ id: number; reviewVersion: number | undefined } | null>(null);
+  /** Read inside the seeding effect without re-running it on every keystroke. */
+  const isDirtyRef = useRef(false);
+
   // Seed editable state once the lead loads, preferring an unsent draft.
+  //
+  // A re-read of the SAME review version (a reconnect, another screen invalidating the lead) must
+  // not overwrite corrections in progress: it used to reset the header, the lines, the staged
+  // client and the grid selection on any change to the payload. A new record, a new review version
+  // (a save — the server bumps it — or someone else's), or a clean form still re-seeds.
   useEffect(() => {
     if (!lead) return;
+    const seeded = seededFromRef.current;
+    if (seeded && seeded.id === lead.id && seeded.reviewVersion === lead.reviewVersion && isDirtyRef.current) return;
+    seededFromRef.current = { id: lead.id, reviewVersion: lead.reviewVersion };
     const serverHeader: ReviewHeaderState = {
       rfqno: lead.rfqno ?? '',
       buyersName: lead.buyersName ?? '',
@@ -364,6 +377,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
     if (clientSelection) return true;
     return JSON.stringify({ header, items }) !== baselineRef.current;
   }, [header, items, clientSelection]);
+  isDirtyRef.current = isDirty;
 
   // Persist unsent work so a mistaken sidebar click costs nothing. Debounced:
   // the largest pilot document carries ~1,450 lines, and serialising that on
