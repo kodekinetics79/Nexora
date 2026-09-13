@@ -12,6 +12,8 @@ const getWorkbench = vi.fn();
 const getRfqIntelligence = vi.fn();
 const getRfqLineResolutions = vi.fn();
 const resolveLineProduct = vi.fn();
+const createProduct = vi.fn();
+const getProductById = vi.fn();
 const getProducts = vi.fn();
 const testAccess = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -31,7 +33,11 @@ vi.mock('../../../api/services/rfqService', () => ({
   },
 }));
 vi.mock('../../../api/services/productService', () => ({
-  default: { getAll: (...args: unknown[]) => getProducts(...args) },
+  default: {
+    getAll: (...args: unknown[]) => getProducts(...args),
+    create: (...args: unknown[]) => createProduct(...args),
+    getById: (...args: unknown[]) => getProductById(...args),
+  },
 }));
 vi.mock('../../../api/services/procurementService', () => ({
   default: { getWorkbench: (...a: unknown[]) => getWorkbench(...a), createOrOpenSourcingCase: vi.fn() },
@@ -158,6 +164,8 @@ beforeEach(() => {
   getRfqIntelligence.mockResolvedValue(intelligence());
   getRfqLineResolutions.mockResolvedValue([]);
   resolveLineProduct.mockResolvedValue({ lineId: 1, productId: 501, replayed: false });
+  createProduct.mockReset();
+  getProductById.mockReset();
   getProducts.mockResolvedValue({
     items: [{
       id: 501,
@@ -281,6 +289,140 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
         'Customer part number VALVE-A matches the approved tenant catalogue record.',
       );
     });
+  });
+
+  it('always says what Save is waiting for', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
+    expect(await screen.findByText('Pick a product from the list to enable Save.')).toBeInTheDocument();
+
+    const productInput = screen.getByRole('combobox', { name: 'Tenant catalogue product' });
+    fireEvent.change(productInput, { target: { value: 'VALVE' } });
+    fireEvent.click(await screen.findByRole('option', { name: /VALVE-A/ }));
+    expect(screen.getByText('Add a one-line reason to enable Save.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Resolution reason' }), { target: { value: 'Same part.' } });
+    expect(screen.getByText('Ready to save.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save product resolution' })).toBeEnabled();
+  });
+
+  /**
+   * The customer's part is usually one the tenant has never stocked, so the search returns
+   * nothing for the normal case. That was a dead end: leave for Products, create the entry by
+   * hand, come back. It is now the add step, and it binds the line in the same click.
+   */
+  it('offers to add a new part to the catalogue when nothing matches, and binds the line in one step', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1, { manufacturerName: 'ABB', productShortDescription: 'VALVE,SOLN,75 MM PS' })] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
+    createProduct.mockResolvedValue({
+      id: 777, partNo: 'MPN-1', productName: 'VALVE,SOLN,75 MM PS', qtyOnHand: 0, reorderPoint: 0, isActive: true,
+      createdBy: 'qa', createdOn: '2026-09-13T00:00:00Z', images: [], attachments: [],
+    });
+    resolveLineProduct.mockResolvedValue({ lineId: 1, productId: 777, replayed: false });
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
+    expect(await screen.findByText('MPN-1 is not in your catalogue yet.')).toBeInTheDocument();
+    expect(screen.getByText('No catalogue product is chosen. Add the part above, or search for another product.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add to catalogue and use it' }));
+
+    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
+    const form = createProduct.mock.calls[0][0] as FormData;
+    expect(form.get('partNo')).toBe('MPN-1');
+    expect(form.get('productName')).toBe('VALVE,SOLN,75 MM PS');
+    expect(form.get('description')).toBe('Manufacturer: ABB. VALVE,SOLN,75 MM PS');
+    expect(form.get('isCatalogItem')).toBe('true');
+    expect(form.get('buid')).toBe('7');
+
+    await waitFor(() => {
+      expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 777, expect.stringContaining('MPN-1'));
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resolve catalogue product' })).not.toBeInTheDocument());
+  });
+
+  it('does not offer the add step without Products:create, but still says the part is missing', async () => {
+    testAccess.denied.add('Products:create');
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
+    expect(await screen.findByText('MPN-1 is not in your catalogue yet.')).toBeInTheDocument();
+    expect(screen.getByText('Ask someone with Products create rights to add it, then choose it here.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add to catalogue and use it' })).not.toBeInTheDocument();
+    expect(createProduct).not.toHaveBeenCalled();
+  });
+
+  it('keeps the product when it was created but the line could not be bound, so Save is the retry', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
+    createProduct.mockResolvedValue({
+      id: 778, partNo: 'MPN-1', productName: 'Line 1', qtyOnHand: 0, reorderPoint: 0, isActive: true,
+      createdBy: 'qa', createdOn: '2026-09-13T00:00:00Z', images: [], attachments: [],
+    });
+    resolveLineProduct.mockRejectedValueOnce(new Error('network'));
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue and use it' }));
+
+    await waitFor(() => expect(resolveLineProduct).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('Ready to save.')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Resolve catalogue product' })).toBeInTheDocument();
+    expect(createProduct).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save product resolution' }));
+    await waitFor(() => expect(resolveLineProduct).toHaveBeenLastCalledWith(9001, 1, 778, expect.stringContaining('MPN-1')));
+    expect(createProduct).toHaveBeenCalledTimes(1);
+  });
+
+  it('preselects the current product when a bound line is being changed', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1, { productId: 501, productName: 'Control Valve' })] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    getProductById.mockResolvedValue({
+      id: 501, partNo: 'VALVE-A', productName: 'Control Valve', qtyOnHand: 0, reorderPoint: 0, isActive: true,
+      createdBy: 'qa', createdOn: '2026-08-01T00:00:00Z', images: [], attachments: [],
+    });
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
+    expect(await screen.findByText('Add a one-line reason to enable Save.')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Resolution reason' }), { target: { value: 'Confirmed against the drawing.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save product resolution' }));
+    await waitFor(() => expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 501, 'Confirmed against the drawing.'));
+  });
+});
+
+describe('ViewRFQPage — a line without a product says so, and is not offered a step the server refuses', () => {
+  it('reads "Not in catalogue" and "Matched to catalogue" from the line itself, not from the ledger', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1), line(2, { productId: 501, productName: 'Control Valve' })] }));
+    getWorkbench.mockResolvedValue(workbench([line(1), line(2)]));
+    render(<ViewRFQPage />, { wrapper });
+
+    expect(await screen.findByText('Not in catalogue')).toBeInTheDocument();
+    expect(screen.getByText('Matched to catalogue')).toBeInTheDocument();
+    expect(screen.queryByText('Resolution not recorded')).not.toBeInTheDocument();
+  });
+
+  it('offers the catalogue step instead of a Sourcing Case on an UNKNOWN line, and does not print a stock answer', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
+    const bench = workbench([line(1)]);
+    bench.lines[0] = { ...bench.lines[0], availableQuantity: 0, shortfallQuantity: 10, resolution: 'UNKNOWN' as const };
+    getWorkbench.mockResolvedValue(bench);
+    render(<ViewRFQPage />, { wrapper });
+
+    expect(await screen.findByText('10 requested · needs a catalogue product before sourcing')).toBeInTheDocument();
+    expect(screen.getByText('Not checked')).toBeInTheDocument();
+    expect(screen.queryByText(/Available 0 · Short 10/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create / Open Sourcing Case' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Resolve catalogue product' })).toHaveLength(2);
   });
 });
 
