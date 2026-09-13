@@ -894,16 +894,9 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                 if (loadedIdentifierIds.Add(row.Id)) identifiers.Add(row);
         }
 
-        // A domain only a system mailbox on the page reaches is matched only by a Domain row a person entered, the
-        // resolver's S2 rule; the rows it would refuse are not read. See CustomerIdentityResolver's domain tier.
-        var personDomains = addresses
-            .Where(address => !IdentityDomainGuard.IsSystemMailbox(address))
-            .Select(RoutingValueNormalizer.DomainFromEmail)
-            .Where(domain => domain is not null && domains.Contains(domain))
-            .Select(domain => domain!)
-            .Distinct()
-            .ToArray();
-        var systemOnlyDomains = domains.Except(personDomains).ToArray();
+        // A Domain row is read only where a person entered it, whatever mailbox carries the page: the resolver's S2
+        // rule under the owner's policy A (2026-09-13), which never learns a whole domain from confirmations. The
+        // rows S2 would refuse are not read. The array, not IsEnteredByAPerson, because this runs in SQL.
         var enteredByAPerson = CustomerIdentifierSources.EnteredByAPerson;
 
         // The authoritative classes: a value that identifies ONE organisation outright.
@@ -911,8 +904,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             await LoadIdentifiersAsync(
                 LiveIdentifiers().Where(i =>
                     (i.IdentifierType == CustomerIdentifierType.Email && addresses.Contains(i.NormalizedValue)) ||
-                    (i.IdentifierType == CustomerIdentifierType.Domain && personDomains.Contains(i.NormalizedValue)) ||
-                    (i.IdentifierType == CustomerIdentifierType.Domain && systemOnlyDomains.Contains(i.NormalizedValue)
+                    (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)
                      && enteredByAPerson.Contains(i.Source)) ||
                     (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
                     (i.IdentifierType == CustomerIdentifierType.TaxRegistration && taxRegistrations.Contains(i.NormalizedValue))),
@@ -977,6 +969,23 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             await LoadIdentifiersAsync(
                 LiveIdentifiers().Where(i => i.IdentifierType == CustomerIdentifierType.RfqNumberPattern),
                 maxRfqPatternIdentifiers);
+
+        // A LEARNED ADDRESS A PERSON HAS SINCE DECIDED FOR ANOTHER CUSTOMER IS NOBODY'S. OWNER DECISION 2026-09-13, POLICY A:
+        // a buyer's exact address is learned once reps confirm it for the same customer twice, "and never for anyone else".
+        // The learner takes such an address back only when it next runs, and the review screen's Save records a decision
+        // without running it: k.lee@hdec.com, confirmed twice for Hyundai and then saved for Aramco, still linked the next
+        // message to Hyundai at 1.00. Only the taught rows for this page's own addresses are checked (one EXISTS each), and a
+        // row a person entered is never overruled. Routing asks the same question (HumanAddressDecisions).
+        var taughtAddresses = identifiers
+            .Where(i => HumanAddressDecisions.IsTaughtAddress(i.IdentifierType, i.Source)
+                        && addresses.Contains(i.NormalizedValue, StringComparer.Ordinal))
+            .Select(i => (i.Id, i.CustomerId, i.NormalizedValue))
+            .ToList();
+        if (taughtAddresses.Count > 0)
+        {
+            var contradicted = await HumanAddressDecisions.ContradictedAsync(_db, businessUnitId, taughtAddresses, ct);
+            identifiers.RemoveAll(i => contradicted.Contains(i.Id));
+        }
 
         var names = await LoadCustomerNamesAsync(businessUnitId, evidence, identifiers, ct);
         var contacts = await LoadContactsAsync(businessUnitId, addresses, domainEvidence, evidence.BuyerPersonName, identifiers, ct);

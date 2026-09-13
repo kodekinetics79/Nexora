@@ -44,23 +44,33 @@ public sealed record CustomerAliasLearningResult(
 /// deliberately absent from <c>CustomerIdentityMaintenance.ManagedSources</c>, so a later
 /// customer-profile synchronisation cannot expire what a person taught the platform.
 ///
+/// OWNER DECISION 2026-09-13, POLICY A ("learn slowly, never guess"). People's confirmations earn trust for one thing
+/// only: a buyer's exact address, confirmed for one customer and never for anyone else. Every rule that let decisions
+/// vouch for more is deleted, not patched: a domain tied by earlier decisions, a contact or the domain's own spelling;
+/// a printed-address voucher; a demoted row recovering itself; a pick set aside as "against its own page"; a
+/// "withdrawn" decision; an earlier decision vouching for a portal pair. Every repair round found a new wrong 0.95 link
+/// inside them. The cost the owner accepted: a new buyer is recognised by email from their third message, not their
+/// second.
+///
 /// Poisoning safeguards, all enforced here:
 ///   P1 self-identity  — never learn the tenant's own name / domains / the document's vendor block.
 ///                       "Our domains" are the intake mailboxes AND the tenant's active users
 ///                       (<see cref="TenantSelfIdentity"/>), any host under them, and any domain
 ///                       whose own name spells ours
-///   P2 synthetic      — never learn Nexora's ingestion placeholders; never a portal-relay address
-///                       and never a free-mail DOMAIN. A free-mail buyer's exact address becomes an
-///                       Email only once people have linked it to one customer
-///                       <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/> times and to nobody else
+///   P2 address        — a buyer's exact address, on a consumer provider or an organisation's own domain alike, becomes a
+///                       verified Email only once people have linked it to ONE customer
+///                       <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/> times, this decision
+///                       included, whatever customer their pages name. The first decision for another customer makes the
+///                       address nobody's and takes back whatever was learned for it, and the resolver and routing refuse the
+///                       address from the moment that decision stands (<see cref="HumanAddressDecisions"/>). A relay or a
+///                       system mailbox is never learned, and nothing at all is written before the count is reached
 ///   P3 exclusivity    — Email/ErpAccount/TaxRegistration are exclusive; on conflict SKIP, never steal
-///   P4 multi-owner    — Alias/Domain/PortalAccount may point at several customers; the
-///                       resolver then returns AMBIGUOUS, which is an outcome, not an error
-///   P5 reversal       — a later review that CHANGES the customer takes back every learned row for
-///                       the rejected customer that this document's own evidence carries, whichever
-///                       lead first taught it, and writes that through before anything is checked
-///                       against it. A fact other decisions confirmed more than once is demoted to
-///                       unverified instead of expired, so one mis-click cannot wipe it
+///   P4 multi-owner    — Alias/PortalAccount may point at several customers; the resolver then
+///                       returns AMBIGUOUS, which is an outcome, not an error
+///   P5 reversal       — a later review that CHANGES the customer takes back, before anything else is read, every learned
+///                       row of the rejected customer that this lead taught or whose value this document carries: an
+///                       address and a numbering shape are expired; a domain, a name or a portal pair is demoted to
+///                       unverified with its counts kept. Nothing is promoted for the new customer by the relink itself
 ///   P6 approval gate  — only "approve" + an explicitly supplied customer; NEVER a machine
 ///                       AUTO_MATCHED result (that is the path by which one machine mistake
 ///                       would bootstrap itself into an authoritative alias)
@@ -69,55 +79,30 @@ public sealed record CustomerAliasLearningResult(
 ///                       impossible. If customer merge/supersession is ever added, port the
 ///                       `visited` HashSet cycle detector from ProductIdentityResolver
 ///                       (Inventory/Commercial/CommercialInventoryServices.cs:36-56) FIRST.
-///   P8 resemblance    — a printed name is the customer's alias only when it carries a word that
-///                       names ONE company, that word (or the customer's own initials) is the
-///                       customer's, and no other active customer in the tenant owns the name at
-///                       least as closely. Anything else is recorded for review, never trusted
+///   P8 resemblance    — a printed name is trusted as the customer's alias only when it carries a word that names ONE
+///                       company, reads as the customer, no other active customer owns it at least as closely, and the
+///                       document itself names that customer, read with the names a person entered and never a taught
+///                       one. Anything else is recorded for review, never trusted
 ///   P9 shared network — never learn a portal pair whose supplier number was issued by the
 ///                       NETWORK rather than by the buyer (SharedSupplierNetworks)
-///   P10 organisation  — a mailbox's Email and Domain are trusted only when something a person
-///                       did ties that domain to the chosen customer: a contact on the customer
-///                       at that domain, the buyer address printed on an earlier document a person
-///                       linked to that customer (never the envelope sender), or the domain
-///                       spelling the customer's own name. An intermediary's domain is filed
-///                       unverified; a domain another customer already writes from is not filed
-///   P11 portal pair   — a buyer portal's "portal|our-vendor-code" pair is trusted only when the
-///                       document names the chosen customer, or when this document names no other
-///                       customer and an earlier human decision on the same pair, made on a document
-///                       that named no other customer either, ties it; otherwise it is filed
-///                       unverified, and a pair another customer already holds is not filed at all
+///   P10 no domain     — never a Domain row, verified or unverified, from any address. A customer's domain comes only from
+///                       a customer contact or an admin entry (<see cref="CustomerIdentifierSources.EnteredByAPerson"/>),
+///                       and the resolver and routing read no other Domain row
+///   P11 portal pair   — a buyer portal's "portal|our-vendor-code" pair is trusted only when the document names the chosen
+///                       customer; otherwise it is filed unverified, and a pair another customer already holds is not filed
+///                       at all. No earlier decision vouches for a pair
+///   P12 reinforcement — a re-confirmation counts on every matching row but promotes only a row on this class's own
+///                       shelves. A row a person entered keeps its grade, its confidence and its source: a person's "not
+///                       verified" is never overridden by a reviewer's click
+///
+/// ASSUMPTION, stated because the owner did not answer it and this is the recommendation he was given: an Arabic-only
+/// company name is trusted after two confirmations for the same customer with none for another, or at once when the
+/// document's header or address names that customer (<c>ArabicOnlyNameIsTheCustomersAsync</c>).
 /// </summary>
 /// <remarks>
-/// WHAT THIS CLASS STILL DOES NOT DO: corroboration.
-///
-/// Every row written here carries <c>ObservationCount</c>, incremented each time a human
-/// confirms the same evidence again — and NOTHING reads it. CustomerIdentityResolver's
-/// learned-alias tier (S3) asks only IsVerified, Source and Confidence, so ONE sighting is
-/// indistinguishable from fifty, and one mis-click on one document auto-links every later
-/// document that carries the same evidence. That is precisely how the live tenant's "Saudi
-/// Aramco" came to own Saudi Electricity's identifiers.
-///
-/// Requiring a SECOND independent sighting before a learned row may AUTO-LINK is a product
-/// decision the owner has not taken — it deliberately makes the platform slower to learn, and
-/// that trade is theirs to make — so this class does not pretend to it. When it is taken, the
-/// change is three edits and none of them are in this file:
-///   1. carry the count into the read model: add ObservationCount to
-///      <c>CustomerIdentifierSnapshot</c> (CustomerResolutionContracts.cs) and to the
-///      projection in <c>LeadCustomerResolutionService.LoadCorpusAsync</c>, which today
-///      selects Id, CustomerId, IdentifierType, NormalizedValue, IsVerified, Confidence,
-///      Source and stops.
-///   2. add <c>MinimumCorroboratingObservations</c> to <c>CustomerResolutionPolicy</c>, beside
-///      MinimumAutoLinkConfidence, so the rule is one number a person can read.
-///   3. in <c>CustomerIdentityResolver</c>'s S3 loop, beside the existing
-///      <c>if (!identifier.IsVerified) continue;</c>, DEMOTE a row below the threshold to a
-///      suggestion rather than dropping it — a single confirmation is still the best evidence
-///      on the page, it just should not decide by itself.
-/// Until then <c>CustomerAliasLearnerTests.Re_confirmation_increments_the_observation_count</c>
-/// keeps the counter honest, so the day the rule is switched on, the data it needs is real.
-///
-/// P10 is narrower than that rule and is not a substitute for it: it asks for a second sighting
-/// only of a MAILBOX DOMAIN that nothing ties to the customer, which is exactly the shape an
-/// intermediary's mailbox has.
+/// OBSERVATIONCOUNT IS HISTORY ONLY. Reinforcement increments it, a relink's demotion or expiry leaves it alone, and no
+/// rule reads it. Policy A counts the human-decided LEADS that carry a value, never a row's counter: a counter cannot say
+/// who decided, whether that decision still stands, or what the page it was taken on said.
 /// </remarks>
 public sealed class CustomerAliasLearner : ICustomerAliasLearner
 {
@@ -133,9 +118,11 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     public const string SkipAliasUnlikeCustomer = "aliasUnlikeCustomer";
 
     /// <summary>
-    /// The printed company name is written in another script than the customer's name, so it cannot be compared, and
-    /// neither the page nor enough earlier decisions corroborate it yet. It was recorded for review. See LF08 in
-    /// <c>ForeignScriptNameIsTheCustomersAsync</c>.
+    /// The printed company name is written only in Arabic letters and the customer's record in none, so its letters cannot
+    /// be compared, and neither the page nor enough earlier decisions corroborate it yet. It was recorded for review.
+    /// ASSUMPTION: the owner's policy A decision (2026-09-13) left this open, and the recommendation he was given is what is
+    /// built: an Arabic-only company name is trusted after two confirmations for the same customer with none for another,
+    /// or at once when the document's header or address names that customer. See <c>ArabicOnlyNameIsTheCustomersAsync</c>.
     /// </summary>
     public const string SkipAliasInAnotherScriptNotYetCorroborated = "aliasInAnotherScriptNotYetCorroborated";
 
@@ -150,17 +137,26 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     /// <summary>
     /// The printed name resembles the chosen customer, but another active customer in this
     /// tenant owns it at least as closely (the same initials, the other customer's exact name, a
-    /// larger share of its words), so it was recorded for review instead of being trusted. See
-    /// <see cref="NamesAnotherCustomerAtLeastAsClosely"/>.
+    /// larger share of its words), or the tenant's customer book is too large to read, so it was
+    /// recorded for review instead of being trusted. See <see cref="NamesAnotherCustomerAtLeastAsClosely"/>.
     /// </summary>
     public const string SkipAliasNamesAnotherCustomer = "aliasNamesAnotherCustomer";
+
+    /// <summary>
+    /// The printed name resembles the chosen customer and no other, but the document itself does not name that customer:
+    /// read as the resolver reads a page (headers and delivery addresses, the whole customer book, only the names a person
+    /// entered), it links nobody or somebody else. It was recorded for review. Owner decision 2026-09-13, policy A: a company
+    /// name is learned only when the document itself names that customer. An alias the page cannot show ("MARAFIQ" alone
+    /// for Marafiq Power &amp; Water Utility Company) is entered on the customer's profile instead.
+    /// </summary>
+    public const string SkipAliasNotNamedByDocument = "aliasNotNamedByDocument";
 
     /// <summary>The portal issues OUR supplier number itself, so the pair names nobody.</summary>
     public const string SkipSharedSupplierNetwork = "sharedSupplierNetwork";
 
     /// <summary>
-    /// Nothing on the document, and no earlier human decision, ties the portal + vendor-code pair
-    /// to the customer the reviewer picked, so it was filed unverified. See P11.
+    /// The document does not name the chosen customer, so the portal + vendor-code pair was filed unverified. No earlier
+    /// decision vouches for a pair (owner decision 2026-09-13, policy A). See P11.
     /// </summary>
     public const string SkipPortalAccountNotTiedToCustomer = "portalAccountNotTiedToCustomer";
 
@@ -170,32 +166,27 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     /// </summary>
     public const string SkipPortalAccountClaimedByAnotherCustomer = "portalAccountClaimedByAnotherCustomer";
 
-    /// <summary>A consumer mailbox or a procurement portal's relay: evidence about a PERSON or a POSTMAN.</summary>
+    /// <summary>A procurement portal's relay, or a system mailbox nobody reads on any host: evidence about a POSTMAN, never learned.</summary>
     public const string SkipPersonalOrRelayAddress = "personalOrRelayAddress";
 
     /// <summary>
-    /// The mailbox belongs to an organisation nothing ties to the chosen customer, such as an EPC
-    /// contractor writing about the site owner's job. Its Email was not minted and its Domain was
-    /// filed unverified. See P10.
+    /// People have linked this exact address to more than one customer: a freight agent, an EPC contractor's buyer working
+    /// for several site owners, or a wrong pick that still stands. Nothing was learned for it, and every Email row this class
+    /// had learned for it, on any customer, was expired and written through. Owner decision 2026-09-13, policy A: a buyer's
+    /// address is learned "never for anyone else". The remedy for a standing wrong pick is a contact on the right customer.
     /// </summary>
-    public const string SkipDomainNotTiedToCustomer = "domainNotTiedToCustomer";
+    public const string SkipAddressConfirmedForAnotherCustomer = "addressConfirmedForAnotherCustomer";
 
     /// <summary>
-    /// Another active customer already writes from this domain (a contact, or a verified Email or
-    /// Domain identifier), so the domain names neither customer on its own and was not filed.
+    /// Fewer than <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/> human decisions for this
+    /// customer carry the address, this one included. Nothing was written, not even a suggestion: an Email row of any grade
+    /// blocks the address for every other customer, and no approved command removes one.
     /// </summary>
-    public const string SkipDomainClaimedByAnotherCustomer = "domainClaimedByAnotherCustomer";
+    public const string SkipAddressNotYetConfirmed = "addressNotYetConfirmed";
 
     /// <summary>
-    /// A consumer-mailbox address people have linked to more than one customer: a freight agent or a
-    /// personal account forwarding for several buyers. Nothing was learned, and whatever this class had
-    /// learned for the address, for any customer, was expired. See P2.
-    /// </summary>
-    public const string SkipFreeMailAddressConfirmedForAnotherCustomer = "freeMailAddressConfirmedForAnotherCustomer";
-
-    /// <summary>
-    /// A relink contradicted a fact that other human decisions had confirmed more than once, so it was
-    /// demoted to unverified rather than expired. The skip reasons reach the review's correction metric,
+    /// A relink took the trust off a domain, a company name or a portal pair of the previous customer: the row was demoted to
+    /// unverified, its counts and confidence kept, rather than expired. The skip reasons reach the review's correction metric,
     /// which is the only record a learned row's change has (the row carries no reason column). See P5.
     /// </summary>
     public const string SkipContradictedFactDemoted = "contradictedFactDemoted";
@@ -212,25 +203,38 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     public const string UnverifiedAliasSource = CustomerIdentifierSources.LeadReviewUnverified;
 
     /// <summary>
-    /// How many of the tenant's other customers the alias gate reads to find one that owns the
-    /// printed name more closely. A review is human-paced and the read is names only, so it is
-    /// set well above any realistic customer book. A tenant past it cannot be checked, and an
-    /// alias that cannot be checked is recorded for review rather than trusted.
+    /// How many of the tenant's customers, and how many names a person entered on them, a page reading and the alias gate
+    /// read. A review is human-paced and the read is names only, so it is set well above any realistic customer book. A
+    /// tenant past it cannot be checked: a name or a portal pair that cannot be checked is recorded for review, and an
+    /// address is not learned.
     /// </summary>
     public const int MaximumCustomersCompared = 20_000;
 
-    /// <summary>Contacts, identifiers and earlier leads read per mailbox domain when deciding whose domain it is.</summary>
+    /// <summary>
+    /// Rows read by the portal-pair check here, and by the resolution service's own identity-evidence reads. Never a cap on
+    /// the decisions that veto an address or an Arabic-only name: a capped veto is a veto a flood of newer decisions hides.
+    /// </summary>
     public const int MaximumDomainEvidenceRead = 200;
 
-    /// <summary>Earlier documents read in full when asking whether an earlier decision on a portal pair vouches for it (P11).</summary>
-    public const int MaximumPairVouchersRead = 20;
+    /// <summary>
+    /// Earlier decisions for the chosen customer read when counting the confirmations of an address, and earlier documents read
+    /// in full, and again as pages, when counting those of an Arabic-only company name.
+    /// </summary>
+    public const int MaximumEarlierPrintsRead = 20;
 
-    /// <summary>Lines read per earlier document for its storage locations and labelled columns (P11).</summary>
+    /// <summary>
+    /// Human decisions that carry a printed company name, read newest first to find every earlier pick of an Arabic-only name
+    /// by its name key (<see cref="CustomerNameNormalizer.LooseKey"/> cannot run in SQL). A tenant past it cannot be checked,
+    /// and the name is recorded for review. A human-paced read, on the one rare branch of a review that asks it.
+    /// </summary>
+    public const int MaximumPrintedNameDecisionsRead = 20_000;
+
+    /// <summary>Lines read per earlier document for its storage locations and labelled columns.</summary>
     private const int MaximumItemsReadPerEarlierDocument = 300;
 
     /// <summary>
-    /// The confidence every row filed on the unverified shelf is written at. A row on that shelf above it was
-    /// trusted once and demoted by a relink (P5), because re-proposing an unverified value never raises it.
+    /// The confidence every row this class files on the unverified shelf, and every numbering shape, is written at. A relink's
+    /// demotion keeps a row's own confidence, so a demoted row can sit above it.
     /// </summary>
     private const decimal UnverifiedFilingConfidence = 0.50m;
 
@@ -248,7 +252,7 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     /// <summary>A word must be at least this long before one wrong letter is read as a typing slip rather than another word.</summary>
     private const int MinimumSlipWordLength = 6;
 
-    /// <summary>The rows this class writes. Only these may be expired by a reviewer's correction (P5).</summary>
+    /// <summary>The rows this class writes. Only these are taken back by a relink (P5) or promoted by a re-confirmation (P12).</summary>
     private static readonly string[] LearnedSources =
         [CustomerIdentifierSources.LeadReviewLearned, CustomerIdentifierSources.LeadReviewUnverified];
 
@@ -291,8 +295,8 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
 
         // What the document itself says, before any gate decides what may be learned from it.
         // P5 needs the raw evidence, not the filtered proposals: a legacy row pinning a gmail
-        // sender to the wrong client is exactly what a correction must expire, even though
-        // nothing about a gmail sender would be learned today.
+        // sender or a relay to the wrong client is exactly what a correction must take back, even
+        // though nothing about that sender would be learned today.
         var addresses = new List<string>();
         foreach (var raw in new[] { ResolveSender(lead), lead.CustomerBuyerEmailExtracted })
         {
@@ -309,13 +313,14 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         var aliasKey = CustomerNameNormalizer.LooseKey(companyDisplay);
         var portalPair = PortalAccountPair(lead);
 
-        // P5: the reviewer moved this lead to a different client.
+        // P5: the reviewer moved this lead to a different client. What that contradicts is taken back and written
+        // through before anything below reads the store.
         var expiredIds = new HashSet<long>();
-        // Every row this review took away from a customer, expired or demoted. None of them may still
-        // claim a domain or a portal pair below.
+        // Every row this review took away from a customer, expired or demoted. None of them may still claim a portal
+        // pair below.
         var setAside = new HashSet<long>();
         if (previousCustomerId.HasValue && previousCustomerId.Value != customerId
-            && await ExpireContradictedAsync(
+            && await TakeBackWhatARelinkContradictsAsync(
                 businessUnitId, lead.Id, previousCustomerId.Value, addresses, aliasKey, portalPair?.Key,
                 expiredIds, setAside, now, ct) > 0)
             skips.Add(SkipContradictedFactDemoted);
@@ -331,17 +336,15 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
             .Select(c => c.Name)
             .FirstOrDefaultAsync(ct);
 
-        // Whether this document's own company-name field names an organisation other than the one the
-        // reviewer picked: an EPC contractor's letterhead, a consignee, a sister company. Such a
-        // document is still the customer's, but it cannot vouch for a mailbox domain (P10).
-        var documentNamesSomebodyElse = NamesAnOrganisationOtherThan(companyDisplay, customerName, selfNameKeys);
+        // Every rule below that asks what a page says asks it here: the tenant's whole customer book with the names a
+        // person entered, loaded at most once for this review and only when a rule needs it, and each page read once.
+        var pages = new PageReader(this, businessUnitId, selfNameKeys);
 
         var proposals = new List<Proposal>();
 
         // 1. Real sender + the buyer address printed on the document. For a folder-ingested
         //    or scanned bid the printed buyer address is the ONLY place the buying
-        //    organisation's real domain appears, so both are weighed identically.
-        var ties = new Dictionary<string, DomainTie>(StringComparer.Ordinal);
+        //    organisation's real address appears, so both are weighed identically.
         foreach (var address in addresses)
         {
             var domain = RoutingValueNormalizer.DomainFromEmail(address);
@@ -349,145 +352,64 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
 
             // P1. The mailbox list alone missed every colleague who forwards from a staff domain
             // that is not an intake mailbox: rfq@alquraishi.com is the mailbox, the salesman is
-            // ahmed@alquraishi.com.sa, and one confirmed forward taught that domain as SEC's, so
-            // every later forward from any colleague linked to SEC whatever the attachment said.
-            // Active users now count (TenantSelfIdentity), and so does a domain whose own name
-            // spells ours, which covers the colleague who has no Nexora login at all.
-            // One predicate, shared with the resolver and routing: this second test used to live
-            // here alone, so the learner refused a domain the other two still linked on.
-            // The names that make a DOMAIN ours are the tenant's configured names, and the vendor block only where
-            // it spells one of them (TenantSelfIdentity.DomainSelfNames), as the resolver, the corpus loader and
-            // routing ask. The raw vendor block was passed here: a Marafiq print whose vendor field was misread as
-            // "MARAFIQ" made marafiq.com.sa ours to the learner alone, and a person's confirmation taught nothing.
+            // ahmed@alquraishi.com.sa, and one confirmed forward taught that domain as SEC's.
+            // Active users count (TenantSelfIdentity), and so does a domain whose own name spells
+            // ours, which covers the colleague who has no Nexora login at all. One predicate, shared
+            // with the resolver and routing. The names that make a DOMAIN ours are the tenant's
+            // configured names, and the vendor block only where it spells one of them
+            // (TenantSelfIdentity.DomainSelfNames): a Marafiq print whose vendor field was misread as
+            // "MARAFIQ" must not make marafiq.com.sa ours.
             if (TenantSelfIdentity.IsOurs(domain, selfDomains, domainSelfNames))
             {
                 skips.Add(SkipSelfIdentity);
                 continue;
             }
 
-            // P2/P3: an Email identifier is the STRONGEST thing this engine can write — verified,
-            // 1.00, exclusive to one customer for the whole tenant. That is only honest when the
-            // mailbox belongs to the buying organisation.
-            //
-            // On the owner's live tenant "Saudi Aramco" ended up owning personal addresses at
-            // live.com and bidnet.com, each from one confirmation on one document. A freight
-            // agent forwards bids for four different end customers from one gmail account, and a
-            // portal relays every buyer's RFQ from noreply@ariba.com; learning either pins EVERY
-            // later forward to whichever customer happened to be confirmed first, whatever the
-            // attachment says — and it does it at authoritative confidence, so no later evidence
-            // on the page can outvote it.
-            //
-            // The address is not thrown away as evidence: an Email identifier a human entered on
-            // the customer profile still matches exactly (resolver tier A1). What we refuse to do
-            // is MINT one from a single document.
-            //
             // A RELAY'S ADDRESS NAMES NOBODY, however often it is confirmed: noreply@ariba.com carries
-            // every Ariba buyer's RFQ.
+            // every Ariba buyer's RFQ, and learning it pins every later Ariba RFQ to whichever buyer was
+            // confirmed first.
             if (SyntheticIdentityGuard.IsPortalRelayDomain(domain))
             {
                 skips.Add(SkipPersonalOrRelayAddress);
                 continue;
             }
-            // A CONSUMER MAILBOX NAMES A PERSON, and a sole trader on gmail is a buyer like any other. The
-            // fix for the live.com incident refused the address outright, so a gmail buyer that reps linked
-            // to the same customer again and again was only ever offered at 0.65 (the base learner had
-            // written the address on the first confirmation). One confirmation still writes nothing. The
-            // ADDRESS, never the domain, is learned once people have linked it to one customer
-            // FreeMailAddressConfirmationsRequired times and to nobody else; the first decision for a second
-            // customer marks it an agent's, and what was learned for it is taken back.
-            if (SyntheticIdentityGuard.IsFreeMailDomain(domain))
+            // A SYSTEM MAILBOX IS NEVER MINTED, on any host. no-reply@ or ordersender@ on a host nobody listed as a
+            // relay carries every buyer's mail on that system, and the resolver and routing refuse such a row unless a
+            // person entered it (IdentityDomainGuard.MayMatchExactAddress).
+            if (IdentityDomainGuard.IsSystemMailbox(address))
             {
-                var reading = await ReadAddressDecisionsAsync(
-                    businessUnitId, lead.Id, customerId, customerName, address, documentNamesSomebodyElse,
-                    selfNameKeys, expiredIds, setAside, now, takeBackWhatItTaught: true, ct);
-                if (reading == FreeMailAddressReading.Corroborated)
-                {
-                    proposals.Add(new Proposal(CustomerIdentifierType.Email, address, address, true, 1.00m));
-                }
-                else
-                {
-                    skips.Add(SkipPersonalOrRelayAddress);
-                    if (reading == FreeMailAddressReading.ConfirmedForAnotherCustomer)
-                        skips.Add(SkipFreeMailAddressConfirmedForAnotherCustomer);
-                }
+                skips.Add(SkipPersonalOrRelayAddress);
                 continue;
             }
-            if (domain is null || !IdentityDomainGuard.IsOrganisationDomain(domain, selfDomains))
+            if (domain is null || !domain.Contains('.') || !domain.Any(char.IsLetter))
             {
                 skips.Add(SkipSynthetic);
                 continue;
             }
 
-            if (!ties.TryGetValue(domain, out var tie))
-                ties[domain] = tie = await TieDomainToCustomerAsync(
-                    businessUnitId, lead.Id, customerId, customerName, domain, setAside,
-                    documentNamesSomebodyElse, selfNameKeys, ct);
-
-            // P10. Passing every guard above only says the domain belongs to SOME organisation.
-            // Hyundai E&C buying for a Ras Tanura job prints buyer@hdec.com, and the reviewer
-            // rightly says the document is Saudi Aramco's. Minting hdec.com as Aramco's Domain at
-            // 0.95 made every later Hyundai enquiry, for any site owner, link to Aramco at S2 —
-            // which decides before the passage tier's contractor and consignee rules ever run.
-            // If Hyundai already had a contact at hdec.com, P3 skipped only the Email half, the
-            // Domain half was still written, and all hdec.com mail was AMBIGUOUS from then on.
-            if (tie.AnotherCustomerOwnsAddress(address))
+            // P2, OWNER DECISION 2026-09-13, POLICY A: A BUYER'S EXACT ADDRESS IS LEARNED ONCE REPS CONFIRM IT FOR THE
+            // SAME CUSTOMER TWICE, AND NEVER FOR ANYONE ELSE. An Email identifier is the strongest thing this engine can
+            // write: verified, 1.00, exclusive to one customer for the whole tenant. On the live tenant "Saudi Aramco"
+            // came to own personal addresses at live.com and bidnet.com from ONE confirmation each. A gmail sole trader
+            // and an organisation's own mailbox go through the same rule, FreeMailAddressConfirmationsRequired decisions
+            // for one customer, whatever customer their pages name; nothing is filed before that (SkipAddressNotYetConfirmed).
+            //
+            // P10, THE SAME DECISION: A WHOLE EMAIL DOMAIN IS NEVER LEARNED FROM CONFIRMATIONS. Hyundai E&C buying for a
+            // Ras Tanura job prints buyer@hdec.com; minting hdec.com as Aramco's Domain linked every later Hyundai enquiry
+            // to Aramco at S2 before its page was read, and every rule that tried to tell a buyer's domain from an
+            // intermediary's by the decisions people took on it found a new wrong 0.95 link. A domain comes only from a
+            // customer contact or an admin entry.
+            switch (await ReadAddressDecisionsAsync(businessUnitId, lead, customerId, address, expiredIds, setAside, now, ct))
             {
-                skips.Add(SkipAliasConflict);
-            }
-            // A SYSTEM MAILBOX IS NEVER MINTED. no-reply@ or ordersender@ on a host nobody listed as a relay carries
-            // every buyer's mail on that system. The resolver and routing refuse such a row unless a person entered
-            // it (IdentityDomainGuard.MayMatchExactAddress), so writing one only left a row that claimed the domain
-            // for this customer in every "who else writes from here" read. The domain is still weighed below.
-            else if (!tie.CustomerAddresses.Contains(address) && IdentityDomainGuard.IsSystemMailbox(address))
-            {
-                skips.Add(SkipPersonalOrRelayAddress);
-            }
-            else if (tie.CustomerAddresses.Contains(address)
-                     || ((tie.TiedToCustomer || tie.ConfirmedAddresses.Contains(address))
-                         && !tie.ClaimedByAnotherCustomer(exceptAddress: address)))
-            {
-                proposals.Add(new Proposal(CustomerIdentifierType.Email, address, address, true, 1.00m));
-            }
-            // A BUYER'S OWN MAILBOX CONFIRMED AGAIN AND AGAIN IS THAT BUYER'S ADDRESS (LG01). Only a printed buyer
-            // address ties a domain, so "K Lee <k.lee@hdec.com>" confirmed for Hyundai twice, with nothing printed,
-            // wrote nothing, and the third message was a 0.65 suggestion; base wrote the address at 1.00 on the first
-            // confirmation. A gmail buyer confirmed twice for one customer is learned, and a corporate buyer must not
-            // be worse off. The same rule as a consumer mailbox, and only for the ADDRESS: people linked it to this
-            // customer FreeMailAddressConfirmationsRequired times, to nobody else, never on a page naming another
-            // organisation, and nobody else holds the domain. The domain itself stays unverified until something
-            // ties it (P10), so the next person on the domain is not linked by it.
-            else if (!tie.ClaimedByAnotherCustomer(exceptAddress: address)
-                     && await ReadAddressDecisionsAsync(
-                         businessUnitId, lead.Id, customerId, customerName, address, documentNamesSomebodyElse,
-                         selfNameKeys, expiredIds, setAside, now, takeBackWhatItTaught: false, ct)
-                        == FreeMailAddressReading.Corroborated)
-            {
-                proposals.Add(new Proposal(CustomerIdentifierType.Email, address, address, true, 1.00m));
-            }
-            // An address nothing ties to the customer is NOT filed even as a suggestion. Email is
-            // exclusive per tenant whatever its source (UX_customer_identifiers_authoritative and
-            // CustomerIdentityMaintenance both ignore Source), so an unverified buyer@hdec.com
-            // against Aramco would make saving Hyundai's real contact at that address fail with
-            // "already linked to another customer" — and there is no command to remove it. The
-            // reviewer's decision is not lost: where this document printed the buyer's address on the
-            // domain, this lead's own human link is what ties the domain on the next confirmation.
-
-            if (tie.ClaimedByAnotherCustomer(exceptAddress: null))
-            {
-                skips.Add(SkipDomainClaimedByAnotherCustomer);
-            }
-            else if (tie.TiedToCustomer)
-            {
-                proposals.Add(new Proposal(CustomerIdentifierType.Domain, domain, domain, true, 0.95m));
-            }
-            else
-            {
-                skips.Add(SkipDomainNotTiedToCustomer);
-                proposals.Add(new Proposal(
-                    CustomerIdentifierType.Domain, domain, domain, false, 0.50m, UnverifiedAliasSource));
-                _log?.LogInformation(
-                    "Client alias learning filed domain {Domain} for customer {CustomerId} as unverified on lead {LeadId}: nothing ties it to that customer.",
-                    domain, customerId, lead.Id);
+                case AddressReading.Confirmed:
+                    proposals.Add(new Proposal(CustomerIdentifierType.Email, address, address, true, 1.00m));
+                    break;
+                case AddressReading.ConfirmedForAnotherCustomer:
+                    skips.Add(SkipAddressConfirmedForAnotherCustomer);
+                    break;
+                default:
+                    skips.Add(SkipAddressNotYetConfirmed);
+                    break;
             }
         }
 
@@ -507,29 +429,18 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 // to Aramco at 0.88 — including an RFQ from Saudi Kayan, who is not a customer.
                 skips.Add(SkipAliasNotDistinctive);
             }
-            else if (IsWrittenInAnotherScript(companyDisplay, customerName))
+            else if (IsArabicOnlyNameOfANonArabicRecord(companyDisplay, customerName))
             {
-                // A NAME IN ANOTHER SCRIPT CANNOT BE COMPARED, WHICH IS NOT THE SAME AS UNLIKE (LF08). "الشركة السعودية
-                // للكهرباء" is Saudi Electricity Company's own name in Arabic. The resemblance tiers compare letters,
-                // so it read as unlike SEC and was filed unverified however many people confirmed it, and the next
-                // Arabic print resolved to nothing where base linked it at 0.90. Where the letters cannot be compared
-                // the page and the people decide: trusted when this page names the customer in a header or an address
-                // and names no other active customer, or once people have linked prints carrying this name to this
-                // customer as often as a consumer mailbox needs, to nobody else, on no page naming another customer.
-                // Another customer whose own record reads as the printed name keeps it unverified.
-                if (await ForeignScriptNameIsTheCustomersAsync(businessUnitId, lead, customerId, customerName, companyDisplay, aliasKey, selfNameKeys, ct))
-                {
+                // AN ARABIC-ONLY NAME CANNOT BE COMPARED, WHICH IS NOT THE SAME AS UNLIKE (LF08). "الشركة السعودية للكهرباء"
+                // is Saudi Electricity Company's own name in Arabic; the resemblance tiers compare letters, so it read as
+                // unlike SEC however many people confirmed it. ASSUMPTION (owner decision 2026-09-13 left it open; this is
+                // the recommendation he was given): trusted after two confirmations for this customer with none for
+                // another, or at once when the page's header or address names this customer. Only this direction: a
+                // Latin print of a customer recorded in Arabic is compared like any other print below.
+                if (await ArabicOnlyNameIsTheCustomersAsync(businessUnitId, lead, customerId, companyDisplay, aliasKey, pages, ct))
                     proposals.Add(new Proposal(CustomerIdentifierType.Alias, aliasKey, companyDisplay, true, 0.90m));
-                }
                 else
-                {
-                    skips.Add(SkipAliasInAnotherScriptNotYetCorroborated);
-                    proposals.Add(new Proposal(
-                        CustomerIdentifierType.Alias, aliasKey, companyDisplay, false, 0.50m, UnverifiedAliasSource));
-                    _log?.LogInformation(
-                        "Client alias learning recorded \"{Alias}\" for customer {CustomerId} as unverified on lead {LeadId}: it is written in another script and nothing yet corroborates it.",
-                        companyDisplay, customerId, lead.Id);
-                }
+                    FileAlias(SkipAliasInAnotherScriptNotYetCorroborated, "it is written only in Arabic and nothing yet corroborates it");
             }
             else if (!ResemblesCustomerName(companyDisplay, customerName))
             {
@@ -550,12 +461,7 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 //
                 // Rows already poisoned in production predate this gate and are untouched by it;
                 // they need a one-off review, which is a data job, not a code path.
-                skips.Add(SkipAliasUnlikeCustomer);
-                proposals.Add(new Proposal(
-                    CustomerIdentifierType.Alias, aliasKey, companyDisplay, false, 0.50m, UnverifiedAliasSource));
-                _log?.LogInformation(
-                    "Client alias learning recorded \"{Alias}\" for customer {CustomerId} as unverified on lead {LeadId}: it does not resemble the customer's own name.",
-                    companyDisplay, customerId, lead.Id);
+                FileAlias(SkipAliasUnlikeCustomer, "it does not resemble the customer's own name");
             }
             else
             {
@@ -565,16 +471,22 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 // taught alias is never suppressed, so confirming "SCC" once for Saudi Cable made
                 // every Saudi Ceramics delivery address reading "SCC Riyadh Plant 2" link to Saudi
                 // Cable at 0.88.
-                var otherNames = await LoadOtherCustomerNamesAsync(businessUnitId, customerId, ct);
-                if (otherNames is null
-                    || NamesAnotherCustomerAtLeastAsClosely(companyDisplay, customerName, otherNames))
+                var book = await pages.BookAsync(ct);
+                if (book is null
+                    || NamesAnotherCustomerAtLeastAsClosely(
+                        companyDisplay, customerName,
+                        book.Customers.Where(customer => customer.CustomerId != customerId).Select(customer => (string?)customer.Name)))
                 {
-                    skips.Add(SkipAliasNamesAnotherCustomer);
-                    proposals.Add(new Proposal(
-                        CustomerIdentifierType.Alias, aliasKey, companyDisplay, false, 0.50m, UnverifiedAliasSource));
-                    _log?.LogInformation(
-                        "Client alias learning recorded \"{Alias}\" for customer {CustomerId} as unverified on lead {LeadId}: another customer in tenant {BusinessUnitId} owns that name at least as closely.",
-                        companyDisplay, customerId, lead.Id, businessUnitId);
+                    FileAlias(SkipAliasNamesAnotherCustomer, "another customer owns that name at least as closely, or the customer book is too large to read");
+                }
+                // OWNER DECISION 2026-09-13, POLICY A: A COMPANY NAME IS LEARNED ONLY WHEN THE DOCUMENT ITSELF NAMES THAT
+                // CUSTOMER. A resembling print used to be trusted on one confirmation, so "ARAMCO" printed on a job whose
+                // delivery address says Saudi Electricity Company, picked as Aramco, became Aramco's alias at 0.90. The
+                // page is read with the names a person entered and never a taught alias, so nothing a reviewer taught
+                // can vouch for what it taught.
+                else if (!pages.DocumentNamesChosenCustomer(lead, customerId, book))
+                {
+                    FileAlias(SkipAliasNotNamedByDocument, "the document does not name that customer");
                 }
                 else
                 {
@@ -600,23 +512,17 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 skips.Add(SkipSharedSupplierNetwork);
             else if (portalPair is { } pair)
             {
-                // P11. The pair was written verified at 0.92 from one confirmation with no look at the
-                // document, and the learned-portal tier decides before the passage tier. One mis-click on
-                // an SEC e-bidding print therefore linked every later SEC print to Saudi Aramco at 0.92,
-                // and lead 680's delivery address never got a say. Where SEC already held the pair, the
-                // same click wrote it a second time and every print from SEC's portal went AMBIGUOUS for
-                // ever. So a pair is a fact only when this document names the customer picked, or an
-                // earlier human decision on the same pair does; SEC's own prints name SEC in the address.
-                // An earlier decision vouches only on a document that named no other customer, and never for
-                // a document that names another customer itself: a rep repeating a wrong pick on a pair-only
-                // print promoted the pair to 0.92, and lead 680's address was never read again.
+                // P11. The pair was written verified at 0.92 from one confirmation with no look at the document, and the
+                // learned-portal tier decides before the passage tier, so one mis-click on an SEC e-bidding print linked
+                // every later SEC print to Saudi Aramco at 0.92 and lead 680's delivery address never got a say. Earlier
+                // decisions were then allowed to vouch for a pair, and a wrong pick repeated on pair-only prints promoted
+                // it all the same. Owner decision 2026-09-13, policy A: a portal account is learned only when THIS document
+                // names the customer picked; SEC's own prints name SEC in the delivery address.
                 if (await PortalPairHeldByAnotherCustomerAsync(businessUnitId, customerId, pair.Key, setAside, ct))
                 {
                     skips.Add(SkipPortalAccountClaimedByAnotherCustomer);
                 }
-                else if (DocumentNamesCustomer(lead, customerId, customerName, selfNameKeys)
-                         || await EarlierDecisionCarriesPairAsync(
-                             businessUnitId, lead, customerId, customerName, pair.Key, selfNameKeys, ct))
+                else if (pages.DocumentNamesChosenCustomer(lead, customerId, await pages.BookAsync(ct)))
                 {
                     proposals.Add(new Proposal(CustomerIdentifierType.PortalAccount, pair.Key, pair.Display, true, 0.92m));
                 }
@@ -624,9 +530,9 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 {
                     skips.Add(SkipPortalAccountNotTiedToCustomer);
                     proposals.Add(new Proposal(
-                        CustomerIdentifierType.PortalAccount, pair.Key, pair.Display, false, 0.50m, UnverifiedAliasSource));
+                        CustomerIdentifierType.PortalAccount, pair.Key, pair.Display, false, UnverifiedFilingConfidence, UnverifiedAliasSource));
                     _log?.LogInformation(
-                        "Client alias learning filed portal pair {Pair} for customer {CustomerId} as unverified on lead {LeadId}: nothing ties it to that customer.",
+                        "Client alias learning filed portal pair {Pair} for customer {CustomerId} as unverified on lead {LeadId}: the document does not name that customer.",
                         pair.Key, customerId, lead.Id);
                 }
             }
@@ -638,7 +544,7 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         var pattern = RfqNumberPattern.Derive(lead.Rfqno);
         if (pattern is not null)
             proposals.Add(new Proposal(
-                CustomerIdentifierType.RfqNumberPattern, pattern, lead.Rfqno!.Trim(), false, 0.50m));
+                CustomerIdentifierType.RfqNumberPattern, pattern, lead.Rfqno!.Trim(), false, UnverifiedFilingConfidence));
 
         if (proposals.Count == 0)
         {
@@ -686,23 +592,22 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                                           && i.EffectiveTo == null, ct);
             if (current is not null)
             {
+                // P12. A human confirmed it again: the counter moves on the matching row, whoever wrote it.
                 current.ObservationCount += 1;
                 current.LastObservedOn = now;
-                // A human just re-confirmed it: a suggestion-grade row may be promoted, but
-                // an RFQ-number SHAPE stays unverified by design.
-                if (proposal.IsVerified && proposal.Type != CustomerIdentifierType.RfqNumberPattern)
+                reinforced++;
+                // Only a row on this class's own shelves is promoted, and only by a proposal the rules above trusted; an
+                // RFQ-number SHAPE stays unverified by design. The shelf moves with the flag, because the resolver checks
+                // Source as well as IsVerified. A row a person entered (or a backfilled one) keeps the grade, confidence
+                // and source it has: a person who marked a detail "not verified" is never overridden by a reviewer's click.
+                if (proposal.IsVerified
+                    && proposal.Type != CustomerIdentifierType.RfqNumberPattern
+                    && LearnedSources.Contains(current.Source, StringComparer.Ordinal))
                 {
                     current.IsVerified = true;
                     if (current.Confidence < proposal.Confidence) current.Confidence = proposal.Confidence;
-                    // The shelf moves with the flag. The resolver checks Source as well as
-                    // IsVerified, so a row promoted on the flag alone stayed on the untrusted
-                    // shelf: the second confirmation that finally tied a domain to its customer
-                    // was counted and then ignored forever. Only this class's own unverified shelf
-                    // is ever moved; a row a person typed keeps the source they gave it.
-                    if (string.Equals(current.Source, UnverifiedAliasSource, StringComparison.Ordinal))
-                        current.Source = proposal.Source;
+                    current.Source = CustomerIdentifierSources.LeadReviewLearned;
                 }
-                reinforced++;
                 continue;
             }
 
@@ -726,47 +631,57 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         }
 
         return new CustomerAliasLearningResult(learned, reinforced, expiredIds.Count, skips);
+
+        // A printed company name recorded for review: the unverified shelf, never trusted, with the reason it was not.
+        void FileAlias(string reason, string why)
+        {
+            skips.Add(reason);
+            proposals.Add(new Proposal(
+                CustomerIdentifierType.Alias, aliasKey, companyDisplay!, false, UnverifiedFilingConfidence, UnverifiedAliasSource));
+            _log?.LogInformation(
+                "Client alias learning recorded \"{Alias}\" for customer {CustomerId} as unverified on lead {LeadId}: {Why}.",
+                companyDisplay, customerId, lead.Id, why);
+        }
     }
 
     /// <summary>
-    /// P5. Expires what the reviewer's correction contradicts and writes the expiry through at once.
+    /// P5. Takes back what the reviewer's correction contradicts and writes it through at once.
     ///
-    /// It used to expire only rows whose LearnedFromLeadId was THIS lead. A reinforced row keeps
+    /// It used to reach only rows whose LearnedFromLeadId was THIS lead. A reinforced row keeps
     /// the id of the first lead that taught it, and that lead can no longer change client once it
     /// has an RFQ. So when lead A (an SEC print from 57322@se.com.sa) was linked to Aramco and
     /// converted, lead B from the same sender auto-linked to Aramco at 1.00, and the rep relinked
-    /// B to SEC, nothing expired: the SEC Email was refused as ALIAS_CONFLICT, se.com.sa was
-    /// added for SEC beside Aramco's (so the domain went AMBIGUOUS), and lead C from the same
-    /// sender still linked to Aramco. The only remedies left were deactivating Aramco or SQL.
+    /// B to SEC, nothing was taken back and lead C from the same sender still linked to Aramco.
     ///
-    /// Now every active row for the rejected customer that this class wrote (LeadReviewLearned or
-    /// LeadReviewUnverified) and whose value this document carries is taken back, whoever taught it.
-    /// A row a person typed on the rejected customer's profile is left alone: P3 still refuses to
-    /// take it, because the reviewer contradicted the machine, not the profile.
+    /// The rows: every active row of the rejected customer on this class's own shelves (LeadReviewLearned,
+    /// LeadReviewUnverified) that this lead taught, or whose value this document carries: its raw addresses
+    /// (Email), their domains (Domain), the printed company name (Alias) or the portal pair (PortalAccount).
+    /// Raw means before any gate, so a legacy row on a relay or a consumer mailbox is reached too. A row a
+    /// person typed on the rejected customer's profile is never touched: the reviewer contradicted the
+    /// machine, not the profile, and P3 still refuses to take it.
     ///
-    /// ONE RELINK IS NOT FIFTY CONFIRMATIONS. Expiring whatever the document carried meant a single
-    /// mis-click relink wiped SEC's Email, Domain, alias and portal pair that people had confirmed fifty
-    /// times. A trusted row that OTHER decisions confirmed more than once (ObservationCount above one, not
-    /// taught by this lead) is therefore demoted: IsVerified false and the unverified shelf, so it leaves
-    /// every auto-link tier at once and stays on the recognition table, and the next confirmation for its
-    /// customer promotes it back through the ordinary shelf move. A row seen once, a row this lead taught,
-    /// and a row that was never trusted are expired as before; demoting those would change nothing but
-    /// keep a claim alive. Demotions are reported as <see cref="SkipContradictedFactDemoted"/>.
+    /// OWNER DECISION 2026-09-13, POLICY A:
+    ///   * An Email and an RFQ-number shape are EXPIRED. An Email row of any grade blocks its address for every
+    ///     other customer (UX_customer_identifiers_authoritative and EnsureAuthoritativeValuesAvailableAsync ignore
+    ///     IsVerified and Source), so a demoted address would stop the right customer's contact being saved. A shape
+    ///     is already unverified, so demoting it would change nothing and would keep the numbering suggestion alive,
+    ///     which is the shape of the 55% incident.
+    ///   * A Domain, an alias and a portal pair are DEMOTED: IsVerified false and the unverified shelf, with the
+    ///     row's ObservationCount, Confidence, LastObservedOn and LearnedFromLeadId kept. One mis-click relink must
+    ///     not wipe what fifty confirmations built; the next confirmation for its own customer re-verifies an alias
+    ///     or a pair only where that page names that customer (P8, P11, P12). A demoted Domain stays unverified for
+    ///     ever, because this class never proposes a Domain (P10).
+    ///   * Nothing is promoted for the new customer here: it gets only what the ordinary rules give this lead.
     ///
-    /// The RFQ-number shape is expired only when this lead taught it. Two buyers can number their
-    /// enquiries the same way, so one lead turning out to be SEC's says nothing about whether
-    /// Aramco also writes C + nine digits.
-    ///
-    /// WHY IT IS WRITTEN THROUGH: EnsureAuthoritativeValuesAvailableAsync and this class's own
-    /// domain reads query the database without the change tracker, so a staged expiry is invisible
-    /// to them and the correction was refused against the very row it had just expired. Flushing
-    /// with SaveChanges would also flush whatever else the caller has staged, so only these rows
-    /// are updated, by id. The entities stay Modified with the same value, so the caller's
-    /// SaveChanges agrees with the database and a failure path that detaches changed entries
-    /// leaves nothing stale behind.
+    /// WHY IT IS WRITTEN THROUGH: EnsureAuthoritativeValuesAvailableAsync and this class's own reads query the
+    /// database without the change tracker, so a staged expiry is invisible to them and the correction was refused
+    /// against the very row it had just expired. Flushing with SaveChanges would also flush whatever else the caller
+    /// has staged, so only these rows are updated, by id. The entities stay Modified with the same values, so the
+    /// caller's SaveChanges agrees with the database and a failure path that detaches changed entries leaves nothing
+    /// stale behind.
     /// </summary>
-    /// <returns>How many rows were demoted rather than expired.</returns>
-    private async Task<int> ExpireContradictedAsync(
+    /// <returns>How many demoted rows were trusted before the relink (verified, or on the LeadReviewLearned shelf).</returns>
+    private async Task<int> TakeBackWhatARelinkContradictsAsync(
         long businessUnitId,
         long leadId,
         long previousCustomerId,
@@ -791,33 +706,35 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         var contradicted = await _db.Set<CustomerIdentifier>().IgnoreQueryFilters()
             .Where(i => i.BusinessUnitId == businessUnitId
                         && i.CustomerId == previousCustomerId
-                        && i.EffectiveTo == null)
+                        && i.EffectiveTo == null
+                        && LearnedSources.Contains(i.Source))
             .Where(i => i.LearnedFromLeadId == leadId
-                        || (LearnedSources.Contains(i.Source)
-                            && ((i.IdentifierType == CustomerIdentifierType.Email && emails.Contains(i.NormalizedValue))
-                                || (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue))
-                                || (i.IdentifierType == CustomerIdentifierType.Alias && aliases.Contains(i.NormalizedValue))
-                                || (i.IdentifierType == CustomerIdentifierType.PortalAccount && portals.Contains(i.NormalizedValue)))))
+                        || (i.IdentifierType == CustomerIdentifierType.Email && emails.Contains(i.NormalizedValue))
+                        || (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue))
+                        || (i.IdentifierType == CustomerIdentifierType.Alias && aliases.Contains(i.NormalizedValue))
+                        || (i.IdentifierType == CustomerIdentifierType.PortalAccount && portals.Contains(i.NormalizedValue)))
             .ToListAsync(ct);
         if (contradicted.Count == 0) return 0;
 
         var expired = new List<long>();
         var demoted = new List<long>();
+        var trustTaken = 0;
         foreach (var identifier in contradicted)
         {
-            if (ConfirmedByOtherDecisions(identifier, leadId))
-            {
-                identifier.IsVerified = false;
-                identifier.Source = UnverifiedAliasSource;
-                demoted.Add(identifier.Id);
-            }
-            else
+            setAside.Add(identifier.Id);
+            if (identifier.IdentifierType is CustomerIdentifierType.Email or CustomerIdentifierType.RfqNumberPattern)
             {
                 identifier.EffectiveTo = now;
                 expired.Add(identifier.Id);
                 expiredIds.Add(identifier.Id);
+                continue;
             }
-            setAside.Add(identifier.Id);
+            if (identifier.IsVerified
+                || string.Equals(identifier.Source, CustomerIdentifierSources.LeadReviewLearned, StringComparison.Ordinal))
+                trustTaken++;
+            identifier.IsVerified = false;
+            identifier.Source = UnverifiedAliasSource;
+            demoted.Add(identifier.Id);
         }
 
         if (expired.Count > 0)
@@ -836,302 +753,10 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                     .SetProperty(i => i.IsVerified, false)
                     .SetProperty(i => i.Source, UnverifiedAliasSource), ct);
             _log?.LogInformation(
-                "Client alias learning demoted identifiers {IdentifierIds} of customer {CustomerId} to unverified on lead {LeadId}: the relink contradicts facts other decisions confirmed more than once.",
+                "Client alias learning demoted identifiers {IdentifierIds} of customer {CustomerId} to unverified on lead {LeadId}: a relink contradicts them.",
                 string.Join(",", ids), previousCustomerId, leadId);
         }
-        return demoted.Count;
-    }
-
-    /// <summary>
-    /// P5. A trusted row that decisions other than this lead's confirmed more than once. Such a row is
-    /// demoted by a relink, never expired by it.
-    /// </summary>
-    private static bool ConfirmedByOtherDecisions(CustomerIdentifier identifier, long leadId)
-        => identifier.ObservationCount > 1
-           && identifier.LearnedFromLeadId != leadId
-           && identifier.IsVerified
-           && string.Equals(identifier.Source, CustomerIdentifierSources.LeadReviewLearned, StringComparison.Ordinal);
-
-    /// <summary>
-    /// Whose domain is this, as far as anything a PERSON did can say? Read once per domain.
-    ///
-    /// Tied to the chosen customer by any one of:
-    ///   * a contact on that customer at the domain, or an Email/Domain identifier a person put on
-    ///     that customer's record (a row this class learned does not vouch for itself);
-    ///   * an earlier document a person linked to that customer that PRINTED a buyer address on the
-    ///     domain, with no earlier lead from the domain (printed or envelope) that a person linked to
-    ///     anybody else. A domain humans have given to two customers is an intermediary's, whichever of
-    ///     them this review picked. Neither that document nor this one may name a different
-    ///     organisation in its company-name field;
-    ///   * the domain spelling the customer's own name (<see cref="DomainLabelSpellsName"/>).
-    ///
-    /// Claimed by another customer when that customer has a contact at the domain or a verified
-    /// Email or Domain identifier on it (rows filed unverified claim nothing; rows expired by this
-    /// review are skipped).
-    /// </summary>
-    private async Task<DomainTie> TieDomainToCustomerAsync(
-        long businessUnitId,
-        long leadId,
-        long customerId,
-        string? customerName,
-        string domain,
-        IReadOnlySet<long> expiredIds,
-        bool documentNamesSomebodyElse,
-        IReadOnlySet<string> selfNameKeys,
-        CancellationToken ct)
-    {
-        var atDomain = "@" + domain;
-        var tie = new DomainTie();
-
-        var contacts = await _db.Contacts.AsNoTracking().IgnoreQueryFilters()
-            .Where(c => c.BusinessUnitId == businessUnitId
-                        && c.CustomerId != null
-                        && c.IsActive != false
-                        && c.Email != null
-                        && c.Email.ToLower().EndsWith(atDomain))
-            .Where(c => _db.Customers.Any(x => x.Buid == businessUnitId && x.Id == c.CustomerId && x.IsActive != false))
-            .OrderBy(c => c.Id)
-            .Select(c => new { CustomerId = c.CustomerId!.Value, Email = c.Email! })
-            .Take(MaximumDomainEvidenceRead)
-            .ToListAsync(ct);
-        foreach (var contact in contacts)
-        {
-            var address = contact.Email.Trim().ToLowerInvariant();
-            if (contact.CustomerId == customerId)
-            {
-                tie.TiedToCustomer = true;
-                tie.CustomerAddresses.Add(address);
-            }
-            else
-            {
-                tie.OtherCustomerFacts.Add((contact.CustomerId, address));
-            }
-        }
-
-        var facts = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
-            .Where(i => i.BusinessUnitId == businessUnitId
-                        && i.EffectiveTo == null
-                        && i.IsVerified
-                        && i.Source != UnverifiedAliasSource
-                        && ((i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == domain)
-                            || (i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue.EndsWith(atDomain))))
-            .Where(i => _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false))
-            .OrderBy(i => i.Id)
-            .Select(i => new { i.Id, i.CustomerId, i.IdentifierType, i.NormalizedValue, i.Source })
-            .Take(MaximumDomainEvidenceRead)
-            .ToListAsync(ct);
-        foreach (var fact in facts)
-        {
-            if (expiredIds.Contains(fact.Id)) continue;
-            // An Email row the resolver's S1 and routing refuse (a system mailbox or relay address nobody entered)
-            // is no fact about who writes from the domain, here as in the resolver's own domain-tie read.
-            if (fact.IdentifierType == CustomerIdentifierType.Email
-                && !IdentityDomainGuard.MayMatchExactAddress(fact.NormalizedValue, fact.Source)) continue;
-            var address = fact.IdentifierType == CustomerIdentifierType.Email ? fact.NormalizedValue : null;
-            if (fact.CustomerId != customerId)
-            {
-                tie.OtherCustomerFacts.Add((fact.CustomerId, address));
-            }
-            else if (!string.Equals(fact.Source, CustomerIdentifierSources.LeadReviewLearned, StringComparison.Ordinal))
-            {
-                tie.TiedToCustomer = true;
-                if (address is not null) tie.CustomerAddresses.Add(address);
-            }
-        }
-
-        if (!tie.TiedToCustomer && DomainLabelSpellsCustomerName(domain, customerName))
-            tie.TiedToCustomer = true;
-
-        if (!tie.TiedToCustomer)
-        {
-            // Clientemail may still carry a display name ("Ali <ali@se.com.sa>"), hence the ">" form.
-            var bracketed = atDomain + ">";
-            // Human statuses are filtered in SQL, BEFORE the cap (the T08 defect, here in the learner's own read).
-            // Filtered after it, 205 newer machine links from the domain pushed a person's older decision for
-            // ANOTHER customer out of the window: its veto was lost, the domain was written to this customer at
-            // 0.95, and the next job from the domain for that other customer linked here without asking anyone.
-            var earlier = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
-                .Where(l => l.BusinessUnitId == businessUnitId
-                            && l.Id != leadId
-                            && l.CustomerId != null
-                            && HumanDecidedStatuses.Contains(l.CustomerMatchStatus)
-                            && ((l.Clientemail != null
-                                 && (l.Clientemail.ToLower().EndsWith(atDomain) || l.Clientemail.ToLower().EndsWith(bracketed)))
-                                || (l.CustomerBuyerEmailExtracted != null
-                                    && (l.CustomerBuyerEmailExtracted.ToLower().EndsWith(atDomain)
-                                        || l.CustomerBuyerEmailExtracted.ToLower().EndsWith(bracketed)))))
-                .OrderByDescending(l => l.Id)
-                .Select(l => new
-                {
-                    CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus,
-                    l.CustomerBuyerEmailExtracted, l.CustomerCompanyNameExtracted
-                })
-                .Take(MaximumDomainEvidenceRead)
-                .ToListAsync(ct);
-            // Only a HUMAN decision vouches. A machine match from this domain is the very thing
-            // this rule exists to stop compounding.
-            var decided = earlier.Where(row => LeadCustomerMatchStatuses.IsHumanDecided(row.CustomerMatchStatus)).ToList();
-            // A DECISION A LATER CORRECTION TOOK BACK DOES NOT VETO. Leads mis-linked to Aramco and then
-            // converted can never be relinked, so their decisions stood against SEC's domain for ever: every
-            // later correct SEC confirmation left se.com.sa unverified and wrote no Email. When a person's
-            // relink has since expired that customer's own learned row for the domain, and it holds nothing
-            // on the domain now (no row of any kind, no contact), its old decisions are not counted.
-            var otherCustomers = decided.Select(row => row.CustomerId).Where(id => id != customerId).Distinct().ToArray();
-            if (otherCustomers.Length > 0)
-            {
-                var withdrawn = await CustomersACorrectionTookTheValueFromAsync(
-                    businessUnitId, otherCustomers, CustomerIdentifierType.Domain, domain, ct);
-                withdrawn.ExceptWith(contacts.Select(contact => contact.CustomerId));
-                if (withdrawn.Count > 0)
-                    decided = decided.Where(row => !withdrawn.Contains(row.CustomerId)).ToList();
-            }
-            // A PICK AGAINST ITS OWN PAGE IS A MIS-CLICK, NOT AN INTERMEDIARY (T26). One SEC print from 57322@se.com.sa,
-            // its company-name field "Saudi Electricity Company", was linked to Saudi Aramco and converted, so it can
-            // never be relinked and no correction ever takes its decision back. That one decision vetoed se.com.sa for
-            // SEC for ever: every later correct SEC confirmation left the domain unverified and wrote no address, and
-            // SEC's next mail was UNRESOLVED or a 0.65 tie with Aramco. A decision for another customer whose own page
-            // printed THIS customer as the buying organisation, and not the customer picked, is set aside as a wrong
-            // pick once this customer has at least the corroboration a consumer mailbox needs
-            // (FreeMailAddressConfirmationsRequired decisions, this one included, none on a page naming another
-            // organisation) and more of them than there are such picks. A decision on a page that names nobody, or
-            // names its own customer, still vetoes: that is the EPC case.
-            //
-            // A PICK SET ASIDE UNLOCKS THE CONFIRMED ADDRESS, NEVER THE DOMAIN. An EPC contractor's requisition prints
-            // the site owner in its company field too. Hyundai's k.lee@hdec.com printed "Saudi Aramco" and his own
-            // address; reps picked Hyundai once and Aramco twice, the Hyundai pick was set aside, and the second Aramco
-            // pick wrote hdec.com as Aramco's verified 0.95 Domain, so every later hdec.com mailbox linked Aramco before
-            // its page was read. Whether a pick was a mis-click or the contractor's own job cannot be told from here.
-            // So while a person's decision for another customer from the domain stands, the domain stays unverified,
-            // and only the address the confirmations printed is released (ConfirmedAddresses).
-            var againstOwnPage = decided
-                .Where(row => row.CustomerId != customerId && ResemblesCustomerName(row.CustomerCompanyNameExtracted, customerName))
-                .ToList();
-            var confirmations = 0;
-            if (againstOwnPage.Count > 0 && !documentNamesSomebodyElse)
-            {
-                var pickedIds = againstOwnPage.Select(row => row.CustomerId).Distinct().ToArray();
-                var pickedNames = await _db.Customers.AsNoTracking().IgnoreQueryFilters()
-                    .Where(c => c.Buid == businessUnitId && pickedIds.Contains(c.Id))
-                    .Select(c => new { c.Id, c.Name })
-                    .ToListAsync(ct);
-                againstOwnPage = againstOwnPage
-                    .Where(row => !ResemblesCustomerName(
-                        row.CustomerCompanyNameExtracted, pickedNames.FirstOrDefault(c => c.Id == row.CustomerId)?.Name))
-                    .ToList();
-                confirmations = 1 + decided.Count(row =>
-                    row.CustomerId == customerId
-                    && !NamesAnOrganisationOtherThan(row.CustomerCompanyNameExtracted, customerName, selfNameKeys));
-            }
-            else
-            {
-                againstOwnPage.Clear();
-            }
-            // Every person's decision from the domain that still stands is for this customer.
-            var noOtherDecisionStands = decided.All(row => row.CustomerId == customerId);
-            // The only decisions for another customer are picks against their own page.
-            var onlyMisClicksStandAgainst = againstOwnPage.Count > 0
-                && decided.All(row => row.CustomerId == customerId || againstOwnPage.Contains(row));
-
-            // THE ENVELOPE NEVER VOUCHES FOR ITSELF. Any earlier human decision from a mailbox on the
-            // domain used to tie it, read off the envelope sender. So an intermediary that forwarded the
-            // same buyer's bids twice vouched for its own domain: a colleague with no Nexora login on a
-            // group domain that does not spell our name, a freight agent on a consumer provider nobody
-            // listed, two people at an EPC contractor accepting the site owner's jobs. The second
-            // confirmation wrote the whole domain at 0.95 and the address at 1.00, and every other
-            // person on it was linked to that customer at S2 whatever the document said. The envelope
-            // says who carried the mail; a buyer address PRINTED on the document speaks for the buyer.
-            // Envelope decisions for another customer still count against the tie, which only ever
-            // makes this more careful. The document's company-name field is asked too, on this lead and
-            // on the vouching one: a Hyundai requisition that prints its own buyer's address is still
-            // Hyundai's mailbox, whoever the site belongs to.
-            var printedVouchers = decided
-                .Where(row => row.CustomerId == customerId
-                              && PrintsAnAddressOn(row.CustomerBuyerEmailExtracted, domain)
-                              && !NamesAnOrganisationOtherThan(row.CustomerCompanyNameExtracted, customerName, selfNameKeys))
-                .ToList();
-            if (!documentNamesSomebodyElse && printedVouchers.Count > 0)
-            {
-                if (noOtherDecisionStands)
-                {
-                    tie.TiedToCustomer = true;
-                }
-                else if (onlyMisClicksStandAgainst
-                         && confirmations >= _policy.FreeMailAddressConfirmationsRequired
-                         && confirmations > againstOwnPage.Count)
-                {
-                    foreach (var row in printedVouchers)
-                    {
-                        var printed = LeadCustomerResolutionService.ParseAddress(row.CustomerBuyerEmailExtracted);
-                        if (printed is not null) tie.ConfirmedAddresses.Add(printed);
-                    }
-                }
-            }
-
-            // A FACT A RELINK DEMOTED IS STILL THIS CUSTOMER'S RECORD (T25). One mis-click relink demotes an Email or a
-            // Domain that other decisions confirmed many times, so that it stops auto-linking at once, and "the next
-            // confirmation for its customer promotes it back". For a portal pair or an alias it did. For the mailbox it
-            // could not: the relink's own decision for the other customer vetoed the domain, and SEC's
-            // fifty-times-confirmed address and domain stayed on the unverified shelf. A row this class demoted keeps the
-            // confidence it was trusted at (a row filed unverified never rises above UnverifiedFilingConfidence) and was
-            // confirmed more than once, and it vouches for its own customer.
-            //
-            // IT VOUCHES, IT DOES NOT OVERRULE. It used to tie the domain before any decision was read. So when a person
-            // CORRECTLY relinked an agent's Ras Tanura job from SEC to Saudi Aramco, the demoted rows gave gulfagency.com
-            // back to SEC on the next SEC confirmation from any mailbox there, and the agent's next Aramco job linked SEC
-            // at 0.95. It now obeys the same veto as a printed address: every standing decision is for this customer, or
-            // the only others are picks against their own page that the record's own confirmations outnumber. Past such a
-            // pick only a record that held the DOMAIN gets the domain back; one that held addresses gets those back.
-            if (!tie.TiedToCustomer && !documentNamesSomebodyElse)
-            {
-                var demoted = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
-                    .Where(i => i.BusinessUnitId == businessUnitId
-                                && i.CustomerId == customerId
-                                && i.EffectiveTo == null
-                                && !i.IsVerified
-                                && i.Source == UnverifiedAliasSource
-                                && i.ObservationCount > 1
-                                && i.Confidence > UnverifiedFilingConfidence
-                                && ((i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == domain)
-                                    || (i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue.EndsWith(atDomain))))
-                    .OrderBy(i => i.Id)
-                    .Select(i => new { i.IdentifierType, i.NormalizedValue, i.ObservationCount })
-                    .Take(MaximumDomainEvidenceRead)
-                    .ToListAsync(ct);
-                if (demoted.Count > 0)
-                {
-                    var recordConfirmations = Math.Max(confirmations, 1 + demoted.Max(row => row.ObservationCount));
-                    if (noOtherDecisionStands)
-                    {
-                        tie.TiedToCustomer = true;
-                    }
-                    else if (onlyMisClicksStandAgainst
-                             && recordConfirmations >= _policy.FreeMailAddressConfirmationsRequired
-                             && recordConfirmations > againstOwnPage.Count)
-                    {
-                        if (demoted.Any(row => row.IdentifierType == CustomerIdentifierType.Domain))
-                            tie.TiedToCustomer = true;
-                        else
-                            foreach (var row in demoted) tie.ConfirmedAddresses.Add(row.NormalizedValue);
-                    }
-                }
-            }
-        }
-
-        return tie;
-    }
-
-    private async Task<List<string?>?> LoadOtherCustomerNamesAsync(long businessUnitId, long customerId, CancellationToken ct)
-    {
-        // Every active customer, not a capped sample: the resolver's own shared-initials check
-        // was computed from a capped list, a customer filtered out stopped counting, and initials
-        // two customers share looked unique. Past the cap this answers "cannot tell" (null).
-        var names = await _db.Customers.AsNoTracking().IgnoreQueryFilters()
-            .Where(c => c.Buid == businessUnitId && c.Id != customerId && c.IsActive != false)
-            .OrderBy(c => c.Id)
-            .Select(c => (string?)c.Name)
-            .Take(MaximumCustomersCompared + 1)
-            .ToListAsync(ct);
-        return names.Count > MaximumCustomersCompared ? null : names;
+        return trustTaken;
     }
 
     /// <summary>
@@ -1288,33 +913,16 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     /// the organisation's whole name, so "oil.com" does not spell Saudi Arabian Oil Company.
     /// Arabic words cannot appear in a domain label and are ignored.
     ///
-    /// THIS IS THE PERMISSIVE READING, kept for the tenant's OWN names
-    /// (<see cref="TenantSelfIdentity.IsOurs(string?, IEnumerable{string}?, IEnumerable{string?}?)"/>), where
-    /// the rule deliberately errs towards "ours". Whether a domain spells a CUSTOMER is
-    /// <see cref="DomainLabelSpellsCustomerName"/>.
+    /// Used ONLY for the tenant's OWN names
+    /// (<see cref="TenantSelfIdentity.IsOurs(string?, IEnumerable{string}?, IEnumerable{string?}?)"/>), where the rule
+    /// deliberately errs towards "ours": a colleague with no Nexora login on a domain that spells one of our distinctive
+    /// words is us, and the error costs a suggestion. Nothing asks whether a domain spells a CUSTOMER any more: since the
+    /// owner's policy A decision (2026-09-13) a customer's domain comes only from a contact or an admin entry.
     /// </summary>
     public static bool DomainLabelSpellsName(string? domainOrAddress, string? name)
-        => LabelSpellsName(domainOrAddress, name, strict: false);
+        => LabelSpellsName(domainOrAddress, name);
 
-    /// <summary>
-    /// Whether the domain's own name spells a CUSTOMER's name, which ties the domain to that customer on the
-    /// first confirmation (P10). The rules of <see cref="DomainLabelSpellsName"/>, except that ONE word of
-    /// the name is not the name.
-    ///
-    /// Any single distinctive word of four letters used to be enough, so pipes.com spelled Arabian Pipes
-    /// Company, bank.com Al Rajhi Bank and jubail.com the Marafiq legal name. One confirmation from
-    /// desk@pipes.com, a pipe marketplace, wrote the address at 1.00 and the domain at 0.95, and the next
-    /// trader on that marketplace was linked to Arabian Pipes whatever the page said. A single-word match
-    /// now counts only when the word is the name's whole key ("Marafiq"), its bracketed trade name
-    /// ("... (Marafiq)", "(SATORP)"), or its only distinctive word ("Saudi Aramco"), and never when the word
-    /// is a sector or place word (<see cref="SectorAndPlaceWords"/>), which is what "Arabian Pipes" and
-    /// "National Water" reduce to. The whole tight key, all the distinctive words run together and the
-    /// first two of them still tie ("alrajhibank", "saudiaramco", "fultoncounty").
-    /// </summary>
-    public static bool DomainLabelSpellsCustomerName(string? domainOrAddress, string? name)
-        => LabelSpellsName(domainOrAddress, name, strict: true);
-
-    private static bool LabelSpellsName(string? domainOrAddress, string? name, bool strict)
+    private static bool LabelSpellsName(string? domainOrAddress, string? name)
     {
         var label = RegistrableLabel(IdentityDomainGuard.DomainOf(domainOrAddress));
         if (label is null) return false;
@@ -1322,15 +930,10 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         if (tokens.Count == 0) return false;
         var nameKey = CustomerNameNormalizer.LooseKey(name);
         var tightKey = CustomerNameNormalizer.TightKey(name);
-        var oneWordName = !nameKey.Contains(' ');
-        var tradeName = strict ? BracketedTradeName(name) : null;
 
         foreach (var spelling in LabelSpellings(label))
         {
-            // "Al Dammam Trading Co." keys to the one word DAMMAM: a city, not a company, however whole.
-            if (string.Equals(spelling, tightKey, StringComparison.Ordinal)
-                && !(strict && oneWordName && SectorAndPlaceWords.Contains(spelling)))
-                return true;
+            if (string.Equals(spelling, tightKey, StringComparison.Ordinal)) return true;
             if (tokens.Count >= 2)
             {
                 if (string.Equals(spelling, string.Concat(tokens), StringComparison.Ordinal)) return true;
@@ -1340,39 +943,17 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
             {
                 if (!string.Equals(spelling, token, StringComparison.Ordinal)) continue;
                 if (token.Length < 4 && !string.Equals(nameKey, token, StringComparison.Ordinal)) continue;
-                if (!strict) return true;
-                if (SectorAndPlaceWords.Contains(token)) continue;
-                if (string.Equals(nameKey, token, StringComparison.Ordinal)
-                    || string.Equals(tradeName, token, StringComparison.Ordinal)
-                    || tokens.Count == 1)
-                    return true;
+                return true;
             }
         }
         return false;
     }
 
     /// <summary>
-    /// The one word in brackets that closes a customer's registered name ("Power and Water Utility Company
-    /// for Jubail and Yanbu (Marafiq)", "... Petrochemical Co. (SATORP)"): Latin letters, at least four,
-    /// and a word that names one company. Null when there is none. Read off the customer's own record, where
-    /// a bracket is the trade name the customer registered, not off a printed address.
-    /// </summary>
-    private static string? BracketedTradeName(string? name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return null;
-        var trimmed = name.Trim();
-        if (!trimmed.EndsWith(')')) return null;
-        var open = trimmed.LastIndexOf('(');
-        if (open <= 0) return null;
-        var key = CustomerNameNormalizer.LooseKey(trimmed[(open + 1)..^1]);
-        return key.Length >= 4 && IsLatinWord(key) && CustomerNameDistinctiveness.HasDistinctiveToken(key) ? key : null;
-    }
-
-    /// <summary>
-    /// Words that name a trade, a utility or a place rather than one company, as they appear in a domain
-    /// label. Used ONLY to stop one such word tying a domain to a customer; it never touches a name match.
-    /// A word missing from this list keeps the single-word tie it always had, so the list can only make the
-    /// learner more careful: an unlisted word costs what it cost before, a listed one costs one suggestion.
+    /// Words that name a trade, a utility or a place rather than one company. The resolver reads this one list so that
+    /// such a word alone is not taken for a company: a one-word name that is a place, or a mailbox signed with a trade.
+    /// A word missing from this list keeps the reading it always had, so the list can only make a reading more careful.
+    /// Nothing in this class reads it since the owner's policy A decision (2026-09-13) deleted the domain-spelling tie.
     /// </summary>
     internal static readonly HashSet<string> SectorAndPlaceWords = new(StringComparer.Ordinal)
     {
@@ -1569,36 +1150,6 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
 
     private static bool IsLatinWord(string token) => token.All(c => c is >= 'A' and <= 'Z');
 
-    /// <summary>What one domain is, as far as the tenant's own records say. See <see cref="TieDomainToCustomerAsync"/>.</summary>
-    private sealed class DomainTie
-    {
-        public bool TiedToCustomer { get; set; }
-
-        /// <summary>Exact addresses a person put on the chosen customer at this domain.</summary>
-        public HashSet<string> CustomerAddresses { get; } = new(StringComparer.Ordinal);
-
-        /// <summary>
-        /// Addresses people confirmed for the chosen customer where the only decisions against it are picks set aside as
-        /// mis-clicks (T26), or that a record a relink demoted held (T25). Each may be learned as an Email; they never
-        /// tie the domain.
-        /// </summary>
-        public HashSet<string> ConfirmedAddresses { get; } = new(StringComparer.Ordinal);
-
-        /// <summary>Another customer's hold on the domain; Address is null for a whole-domain row.</summary>
-        public List<(long CustomerId, string? Address)> OtherCustomerFacts { get; } = [];
-
-        public bool AnotherCustomerOwnsAddress(string address) =>
-            OtherCustomerFacts.Any(fact => string.Equals(fact.Address, address, StringComparison.Ordinal));
-
-        /// <summary>
-        /// Any hold at all when <paramref name="exceptAddress"/> is null; otherwise a hold on the domain
-        /// other than that one address, which P3's exclusivity check answers for on its own.
-        /// </summary>
-        public bool ClaimedByAnotherCustomer(string? exceptAddress) =>
-            OtherCustomerFacts.Any(fact => exceptAddress is null
-                                           || !string.Equals(fact.Address, exceptAddress, StringComparison.Ordinal));
-    }
-
     // ── lead reads ────────────────────────────────────────────────────────────
 
     private static (string Key, string Display)? PortalAccountPair(Lead lead)
@@ -1619,49 +1170,137 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     }
 
     /// <summary>
-    /// Whether the company-name field names an organisation other than the chosen customer: it carries a
-    /// word that names one company, is not our own name, and does not resemble the customer
-    /// (<see cref="ResemblesCustomerName"/>). A blank, generic or self-naming field names nobody else.
+    /// The tenant's customer book as a page is read: every active customer with a name, and the verified Alias and
+    /// CustomerName rows a PERSON entered (<see cref="CustomerIdentifierSources.EnteredByAPerson"/>) on an active customer.
+    /// No contacts and no earlier senders: a page is read for names only. Never a learned row, so nothing a reviewer
+    /// taught vouches for what the next page says (owner decision 2026-09-13, policy A). Null when either list passes
+    /// <see cref="MaximumCustomersCompared"/>, which answers "cannot tell".
     /// </summary>
-    private static bool NamesAnOrganisationOtherThan(string? companyName, string? customerName, IEnumerable<string> selfNameKeys)
+    private async Task<ClientResolutionCorpus?> LoadDocumentReadingBookAsync(long businessUnitId, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(companyName) || !CustomerNameDistinctiveness.HasDistinctiveToken(companyName))
-            return false;
-        if (SelfIdentityGuard.IsSelfName(CustomerNameNormalizer.LooseKey(companyName), selfNameKeys)) return false;
-        return !ResemblesCustomerName(companyName, customerName);
+        var customers = await _db.Customers.AsNoTracking().IgnoreQueryFilters()
+            .Where(c => c.Buid == businessUnitId && c.IsActive != false && c.Name != null)
+            .OrderBy(c => c.Id)
+            .Select(c => new { c.Id, c.Name })
+            .Take(MaximumCustomersCompared + 1)
+            .ToListAsync(ct);
+        if (customers.Count > MaximumCustomersCompared) return null;
+
+        // EF cannot translate a method call, so the SQL filter uses the one array IsEnteredByAPerson reads.
+        var enteredByAPerson = CustomerIdentifierSources.EnteredByAPerson;
+        var names = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
+            .Where(i => i.BusinessUnitId == businessUnitId
+                        && i.EffectiveTo == null
+                        && i.IsVerified
+                        && (i.IdentifierType == CustomerIdentifierType.Alias || i.IdentifierType == CustomerIdentifierType.CustomerName)
+                        && enteredByAPerson.Contains(i.Source))
+            .Where(i => _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false))
+            .OrderBy(i => i.Id)
+            .Take(MaximumCustomersCompared + 1)
+            .Select(i => new { i.Id, i.CustomerId, i.IdentifierType, i.NormalizedValue, i.IsVerified, i.Confidence, i.Source })
+            .ToListAsync(ct);
+        if (names.Count > MaximumCustomersCompared) return null;
+
+        return new ClientResolutionCorpus
+        {
+            Customers = customers.Select(row => new CustomerNameSnapshot(row.Id, row.Name!)).ToList(),
+            Identifiers = names
+                .Select(row => new CustomerIdentifierSnapshot(
+                    row.Id, row.CustomerId, row.IdentifierType, row.NormalizedValue, row.IsVerified, row.Confidence, row.Source))
+                .ToList()
+        };
     }
 
-    /// <summary>Whether a printed buyer address (either shape, "Name &lt;a@b&gt;" or "a@b") is on the domain.</summary>
-    private static bool PrintsAnAddressOn(string? printedBuyerAddress, string domain)
-        => string.Equals(
-            RoutingValueNormalizer.DomainFromEmail(LeadCustomerResolutionService.ParseAddress(printedBuyerAddress)),
-            domain, StringComparison.Ordinal);
-
     /// <summary>
-    /// P11. Whether this document names the customer the reviewer picked, read exactly as the resolver
-    /// reads a page: its headers and delivery addresses, against that one customer's name and initials,
-    /// with every rule a passage hit obeys (one word in an address is only offered, a name that runs on
-    /// into a longer company name is only offered). Item text never counts: "SEC-specified barcode" is a
-    /// specification, not a buyer.
+    /// Reads pages for ONE review. "The document names the customer" means what the resolver, reading only the page's
+    /// headers and delivery addresses against the whole customer book and the names a person entered, links at the
+    /// auto-link line or above: every rule a passage obeys applies (one word in an address is only offered, a name that
+    /// runs on into a longer company name is only offered, shared initials name nobody, bracketed site codes, contractor
+    /// and consignee demotions). Item text never counts: "SEC-specified barcode" is a specification, not a buyer.
+    ///
+    /// The page is on trial, not the mailbox: no sender, printed buyer address, account, registration, portal, supplier
+    /// account, RFQ number, buyer person, sender organisation or self domain is given to the resolver. The book is loaded
+    /// at most once and only when a rule asks, and each page is read once.
     /// </summary>
-    private static bool DocumentNamesCustomer(Lead lead, long customerId, string? customerName, IEnumerable<string> selfNameKeys)
+    private sealed class PageReader(CustomerAliasLearner learner, long businessUnitId, IReadOnlyCollection<string> selfNameKeys)
     {
-        if (string.IsNullOrWhiteSpace(customerName)) return false;
-        var statements = LeadCustomerResolutionService.Passages(lead)
-            .Where(passage => passage.Role != PassageRole.ItemText)
-            .ToList();
-        if (statements.Count == 0) return false;
-        var outcome = CustomerIdentityResolver.Resolve(
-            new LeadClientEvidence
+        private bool _bookLoaded;
+        private ClientResolutionCorpus? _book;
+        private readonly Dictionary<long, long?> _pageLinks = new();
+        private readonly Dictionary<long, bool> _namesAnother = new();
+
+        /// <summary>The customer book (<see cref="LoadDocumentReadingBookAsync"/>); null when it is too large to read.</summary>
+        public async Task<ClientResolutionCorpus?> BookAsync(CancellationToken ct)
+        {
+            if (!_bookLoaded)
             {
-                BusinessUnitId = lead.BusinessUnitId, LeadId = lead.Id,
-                SupplierNameOnDocument = lead.SupplierNameOnDocument,
-                TenantSelfNameKeys = selfNameKeys.ToList(),
-                Passages = statements
-            },
-            new ClientResolutionCorpus { Customers = [new CustomerNameSnapshot(customerId, customerName)] },
-            new CustomerResolutionPolicy());
-        return outcome.CustomerId == customerId;
+                _book = await learner.LoadDocumentReadingBookAsync(businessUnitId, ct);
+                _bookLoaded = true;
+            }
+            return _book;
+        }
+
+        /// <summary>The customer the resolver links this page to, or null when it links nobody.</summary>
+        public long? ReadPage(Lead document, ClientResolutionCorpus book)
+        {
+            if (_pageLinks.TryGetValue(document.Id, out var known)) return known;
+            var outcome = CustomerIdentityResolver.Resolve(
+                new LeadClientEvidence
+                {
+                    BusinessUnitId = document.BusinessUnitId,
+                    LeadId = document.Id,
+                    CustomerCompanyName = document.CustomerCompanyNameExtracted,
+                    SupplierNameOnDocument = document.SupplierNameOnDocument,
+                    TenantSelfNameKeys = selfNameKeys.ToList(),
+                    Passages = Statements(document)
+                },
+                book,
+                DocumentReadingPolicy,
+                tenantSharedAcronyms: null);
+            _pageLinks[document.Id] = outcome.CustomerId;
+            return outcome.CustomerId;
+        }
+
+        /// <summary>The page links the chosen customer. False when the book cannot be read.</summary>
+        public bool DocumentNamesChosenCustomer(Lead document, long customerId, ClientResolutionCorpus? book)
+            => book is not null && ReadPage(document, book) == customerId;
+
+        /// <summary>
+        /// Whether the page names any active customer other than the one picked, even one it only offers: a candidate for
+        /// somebody else found by the name scan (NAME_IN_DOCUMENT) or by a name a person entered (LEARNED_ALIAS).
+        /// </summary>
+        public bool DocumentNamesAnotherCustomer(Lead document, long customerId, ClientResolutionCorpus book)
+        {
+            if (_namesAnother.TryGetValue(document.Id, out var known)) return known;
+            var statements = Statements(document);
+            var names = false;
+            if (statements.Count > 0)
+            {
+                var outcome = CustomerIdentityResolver.Resolve(
+                    new LeadClientEvidence
+                    {
+                        BusinessUnitId = document.BusinessUnitId,
+                        LeadId = document.Id,
+                        SupplierNameOnDocument = document.SupplierNameOnDocument,
+                        TenantSelfNameKeys = selfNameKeys.ToList(),
+                        Passages = statements
+                    },
+                    book,
+                    DocumentReadingPolicy,
+                    tenantSharedAcronyms: null);
+                names = outcome.Candidates.Any(candidate =>
+                    candidate.CustomerId != customerId
+                    && (string.Equals(candidate.ReasonCode, CustomerMatchReasonCodes.NameInDocument, StringComparison.Ordinal)
+                        || string.Equals(candidate.ReasonCode, CustomerMatchReasonCodes.LearnedAlias, StringComparison.Ordinal)));
+            }
+            _namesAnother[document.Id] = names;
+            return names;
+        }
+
+        private static List<DocumentPassage> Statements(Lead document)
+            => LeadCustomerResolutionService.Passages(document)
+                .Where(passage => passage.Role != PassageRole.ItemText)
+                .ToList();
     }
 
     /// <summary>P11. Whether another active customer already holds this pair as a fact (a row expired by this review does not count).</summary>
@@ -1685,179 +1324,78 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     }
 
     /// <summary>
-    /// P11. Whether an earlier lead carrying the same pair was linked by a person to this customer, with
-    /// no earlier human decision on the pair for anybody else. The vendor code is compared in SQL as
-    /// printed (trimmed, upper case) and the whole key in C#, because LooseKey cannot run in SQL; a code
-    /// printed in another format simply does not vouch.
-    ///
-    /// AN EARLIER DECISION IS ONLY AS GOOD AS ITS PAGE. Any earlier human decision on the pair used to vouch,
-    /// so a rep who picked Aramco on an SEC e-bidding print (whose delivery address says Saudi Electricity
-    /// Company) and picked Aramco again on the next, pair-only, print promoted the pair to 0.92, and from then
-    /// on every SEC print linked to Aramco before its address was read. Now:
-    ///   * this document must not name another active customer (a page naming SEC cannot teach Aramco's pair);
-    ///   * a vouching document must name this customer, or name no active customer at all;
-    ///   * human statuses are filtered in SQL before the read is capped;
-    ///   * a customer whose own learned row for the pair a person's later relink expired, and who holds no
-    ///     row for the pair now, does not veto with its old decisions.
-    /// A tenant too large to read its customer book cannot be shown to name nobody else, and does not vouch.
+    /// Whether the printed company name is written only in Arabic letters while the customer's record has letters and
+    /// none of them Arabic ("الشركة السعودية للكهرباء" printed for "Saudi Electricity Company"). Only this direction. The
+    /// rule it replaces worked both ways, so two confirmations trusted a Latin "AL FAISAL ESTABLISHMENT" as the alias of a
+    /// customer recorded as "مؤسسة الفيصل"; a Latin print, or any other pair of scripts, is now compared by the resemblance
+    /// rules like any other print and recorded for review when unlike (owner decision 2026-09-13, policy A).
     /// </summary>
-    private async Task<bool> EarlierDecisionCarriesPairAsync(
-        long businessUnitId, Lead lead, long customerId, string? customerName, string pairKey,
-        IReadOnlySet<string> selfNameKeys, CancellationToken ct)
-    {
-        var customers = await LoadActiveCustomerNamesAsync(businessUnitId, ct);
-        if (customers is null || DocumentNamesAnotherCustomer(lead, customerId, customers, selfNameKeys)) return false;
-
-        var account = lead.SupplierAccountRefOnDocument!.Trim().ToUpper();
-        var earlier = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
-            .Where(l => l.BusinessUnitId == businessUnitId
-                        && l.Id != lead.Id
-                        && l.CustomerId != null
-                        && HumanDecidedStatuses.Contains(l.CustomerMatchStatus)
-                        && l.CustomerPortalNameExtracted != null
-                        && l.SupplierAccountRefOnDocument != null
-                        && l.SupplierAccountRefOnDocument.Trim().ToUpper() == account)
-            .OrderByDescending(l => l.Id)
-            .Select(l => new
-            {
-                l.Id, CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus,
-                l.CustomerPortalNameExtracted, l.SupplierAccountRefOnDocument
-            })
-            .Take(MaximumDomainEvidenceRead)
-            .ToListAsync(ct);
-        var decided = earlier
-            .Where(row => LeadCustomerMatchStatuses.IsHumanDecided(row.CustomerMatchStatus))
-            .Where(row => string.Equals(
-                PortalAccountKey(row.CustomerPortalNameExtracted, row.SupplierAccountRefOnDocument), pairKey, StringComparison.Ordinal))
-            .ToList();
-
-        var otherCustomers = decided.Select(row => row.CustomerId).Where(id => id != customerId).Distinct().ToArray();
-        if (otherCustomers.Length > 0)
-        {
-            var withdrawn = await CustomersACorrectionTookTheValueFromAsync(
-                businessUnitId, otherCustomers, CustomerIdentifierType.PortalAccount, pairKey, ct);
-            if (withdrawn.Count > 0)
-                decided = decided.Where(row => !withdrawn.Contains(row.CustomerId)).ToList();
-        }
-        if (decided.Count == 0 || decided.Any(row => row.CustomerId != customerId)) return false;
-
-        var documents = await LoadEarlierDocumentsAsync(
-            businessUnitId, decided.Select(row => row.Id).Take(MaximumPairVouchersRead).ToArray(), ct);
-        // AN EARLIER PICK AGAINST ITS OWN PAGE VETOES, IT DOES NOT MERELY FAIL TO VOUCH (T24). A rep who picked
-        // Aramco on an SEC e-bidding print whose address says Saudi Electricity Company, and then twice more on
-        // pair-only prints, promoted the pair on the third: the pair-only prints vouched for each other, the page
-        // that named SEC was simply not counted, and from then on the learned-portal tier linked every SEC print
-        // to Aramco at 0.92 before its address was read. A decision for this customer taken on a page that names
-        // another active customer, and not this one, is evidence the pick was wrong, so the pair stays unverified.
-        if (documents.Any(document => !DocumentNamesCustomer(document, customerId, customerName, selfNameKeys)
-                                      && DocumentNamesAnotherCustomer(document, customerId, customers, selfNameKeys)))
-            return false;
-        return documents.Any(document => DocumentNamesCustomer(document, customerId, customerName, selfNameKeys)
-                                         || !DocumentNamesAnotherCustomer(document, customerId, customers, selfNameKeys));
-    }
-
-    /// <summary>
-    /// P11. Whether the page names an active customer other than the one picked, read as the resolver reads a
-    /// page: headers, delivery addresses and labelled columns, never item text. Any customer the name scan
-    /// finds in it counts, even one only offered.
-    /// </summary>
-    private static bool DocumentNamesAnotherCustomer(
-        Lead document, long customerId, IReadOnlyList<CustomerNameSnapshot> customers, IEnumerable<string> selfNameKeys)
-    {
-        var statements = LeadCustomerResolutionService.Passages(document)
-            .Where(passage => passage.Role != PassageRole.ItemText)
-            .ToList();
-        if (statements.Count == 0) return false;
-        var outcome = CustomerIdentityResolver.Resolve(
-            new LeadClientEvidence
-            {
-                BusinessUnitId = document.BusinessUnitId, LeadId = document.Id,
-                SupplierNameOnDocument = document.SupplierNameOnDocument,
-                TenantSelfNameKeys = selfNameKeys.ToList(),
-                Passages = statements
-            },
-            new ClientResolutionCorpus { Customers = customers.ToList() },
-            DocumentReadingPolicy);
-        return outcome.Candidates.Any(candidate =>
-            candidate.CustomerId != customerId
-            && string.Equals(candidate.ReasonCode, CustomerMatchReasonCodes.NameInDocument, StringComparison.Ordinal));
-    }
-
-    /// <summary>
-    /// Whether the printed name and the customer's name are written in different scripts, so their letters cannot be
-    /// compared: every letter of one is Latin and no letter of the other is ("الشركة السعودية للكهرباء" against
-    /// "Saudi Electricity Company", or the other way round).
-    /// </summary>
-    private static bool IsWrittenInAnotherScript(string? printed, string? customerName)
+    private static bool IsArabicOnlyNameOfANonArabicRecord(string? printed, string? customerName)
     {
         if (string.IsNullOrWhiteSpace(printed) || string.IsNullOrWhiteSpace(customerName)) return false;
-        return (OnlyNonLatinLetters(printed) && OnlyLatinLetters(customerName))
-               || (OnlyLatinLetters(printed) && OnlyNonLatinLetters(customerName));
+        var printedLetters = printed.Where(char.IsLetter).ToList();
+        var recordLetters = customerName.Where(char.IsLetter).ToList();
+        return printedLetters.Count > 0 && printedLetters.All(IsArabicLetter)
+               && recordLetters.Count > 0 && !recordLetters.Any(IsArabicLetter);
 
-        static bool IsLatin(char c) => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
-        static bool OnlyLatinLetters(string value) => value.Any(char.IsLetter) && value.Where(char.IsLetter).All(IsLatin);
-        static bool OnlyNonLatinLetters(string value) => value.Any(char.IsLetter) && !value.Any(IsLatin);
+        static bool IsArabicLetter(char c)
+            => c is >= '\u0600' and <= '\u06FF'
+                or >= '\u0750' and <= '\u077F'
+                or >= '\u08A0' and <= '\u08FF'
+                or >= '\uFB50' and <= '\uFDFF'
+                or >= '\uFE70' and <= '\uFEFF';
     }
 
     /// <summary>
-    /// LF08. Whether a company name printed in another script than the chosen customer's name may be trusted as that
-    /// customer's alias. Never while another active customer's own name reads as it, or this page names another active
-    /// customer. Then either this page names the chosen customer in a header or an address, or people linked earlier
-    /// prints carrying the same name to this customer, and to nobody else, often enough that this decision makes
-    /// <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/>, none of those pages naming another
-    /// active customer. A tenant too large to read its customer book cannot be checked and does not trust.
+    /// LF08, THE STATED ASSUMPTION. The owner's policy A decision (2026-09-13) did not answer how an Arabic-only company
+    /// name is trusted; this is the recommendation he was given: after two confirmations for the same customer with none
+    /// for another, or at once when the document's header or address names that customer. In order:
+    ///   1. the customer book cannot be read: not trusted;
+    ///   2. another active customer's own record keys to the printed name or resembles it: not trusted;
+    ///   3. this page names another customer (<see cref="PageReader.DocumentNamesAnotherCustomer"/>): not trusted;
+    ///   4. this page names the chosen customer: trusted;
+    ///   5. otherwise the earlier human decisions on prints whose company name has this name's key: none, any for another
+    ///      customer, or any of those pages naming another customer is not trusted; else trusted once they and this decision
+    ///      reach <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/>.
+    /// BY THE NAME KEY, NEVER THE TEXT AS WRITTEN. Earlier picks were found by their exact text, so a pick for Aramco written
+    /// with a double space, a trailing full stop or a tatweel was invisible, while LooseKey, under which the alias is stored
+    /// and matched, reads them all as this name: the alias was verified on SEC and linked the Aramco pick's own spelling to SEC
+    /// at 0.90 (the conformance round's C1 to C3). LooseKey cannot run in SQL, and no text filter in SQL is a safe stand-in (it
+    /// also drops diacritics and folds presentation forms), so every human decision carrying a company name is read, newest
+    /// first, up to <see cref="MaximumPrintedNameDecisionsRead"/>; a tenant past that cannot be checked, and nothing is trusted.
     /// </summary>
-    private async Task<bool> ForeignScriptNameIsTheCustomersAsync(
-        long businessUnitId, Lead lead, long customerId, string? customerName, string printed, string aliasKey,
-        IReadOnlySet<string> selfNameKeys, CancellationToken ct)
+    private async Task<bool> ArabicOnlyNameIsTheCustomersAsync(
+        long businessUnitId, Lead lead, long customerId, string printed, string aliasKey, PageReader pages, CancellationToken ct)
     {
-        var customers = await LoadActiveCustomerNamesAsync(businessUnitId, ct);
-        if (customers is null) return false;
-        if (customers.Any(customer => customer.CustomerId != customerId
-                                      && (string.Equals(CustomerNameNormalizer.LooseKey(customer.Name), aliasKey, StringComparison.Ordinal)
-                                          || ResemblesCustomerName(printed, customer.Name))))
+        var book = await pages.BookAsync(ct);
+        if (book is null) return false;
+        if (book.Customers.Any(customer => customer.CustomerId != customerId
+                                           && (string.Equals(CustomerNameNormalizer.LooseKey(customer.Name), aliasKey, StringComparison.Ordinal)
+                                               || ResemblesCustomerName(printed, customer.Name))))
             return false;
-        if (DocumentNamesAnotherCustomer(lead, customerId, customers, selfNameKeys)) return false;
-        if (DocumentNamesCustomer(lead, customerId, customerName, selfNameKeys)) return true;
+        if (pages.DocumentNamesAnotherCustomer(lead, customerId, book)) return false;
+        if (pages.DocumentNamesChosenCustomer(lead, customerId, book)) return true;
 
-        // The printed text is compared as written in SQL and by key in C#: LooseKey cannot run in SQL, and a print
-        // written another way simply does not count towards the corroboration.
-        var written = printed.Trim();
         var earlier = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
             .Where(l => l.BusinessUnitId == businessUnitId
                         && l.Id != lead.Id
                         && l.CustomerId != null
                         && HumanDecidedStatuses.Contains(l.CustomerMatchStatus)
-                        && l.CustomerCompanyNameExtracted != null
-                        && l.CustomerCompanyNameExtracted.Trim() == written)
+                        && l.CustomerCompanyNameExtracted != null)
             .OrderByDescending(l => l.Id)
-            .Select(l => new { l.Id, CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus, l.CustomerCompanyNameExtracted })
-            .Take(MaximumDomainEvidenceRead)
+            .Select(l => new { l.Id, CustomerId = l.CustomerId!.Value, l.CustomerCompanyNameExtracted })
+            .Take(MaximumPrintedNameDecisionsRead + 1)
             .ToListAsync(ct);
+        if (earlier.Count > MaximumPrintedNameDecisionsRead) return false;
         var decided = earlier
-            .Where(row => LeadCustomerMatchStatuses.IsHumanDecided(row.CustomerMatchStatus))
             .Where(row => string.Equals(CustomerNameNormalizer.LooseKey(row.CustomerCompanyNameExtracted), aliasKey, StringComparison.Ordinal))
             .ToList();
         if (decided.Count == 0 || decided.Any(row => row.CustomerId != customerId)) return false;
 
         var documents = await LoadEarlierDocumentsAsync(
-            businessUnitId, decided.Select(row => row.Id).Take(MaximumPairVouchersRead).ToArray(), ct);
-        if (documents.Any(document => DocumentNamesAnotherCustomer(document, customerId, customers, selfNameKeys))) return false;
+            businessUnitId, decided.Select(row => row.Id).Take(MaximumEarlierPrintsRead).ToArray(), ct);
+        if (documents.Any(document => pages.DocumentNamesAnotherCustomer(document, customerId, book))) return false;
         return 1 + documents.Count >= _policy.FreeMailAddressConfirmationsRequired;
-    }
-
-    /// <summary>The tenant's active customers by name; null past <see cref="MaximumCustomersCompared"/>, which answers "cannot tell".</summary>
-    private async Task<IReadOnlyList<CustomerNameSnapshot>?> LoadActiveCustomerNamesAsync(long businessUnitId, CancellationToken ct)
-    {
-        var rows = await _db.Customers.AsNoTracking().IgnoreQueryFilters()
-            .Where(c => c.Buid == businessUnitId && c.IsActive != false && c.Name != null)
-            .OrderBy(c => c.Id)
-            .Select(c => new { c.Id, c.Name })
-            .Take(MaximumCustomersCompared + 1)
-            .ToListAsync(ct);
-        return rows.Count > MaximumCustomersCompared
-            ? null
-            : rows.Select(row => new CustomerNameSnapshot(row.Id, row.Name!)).ToList();
     }
 
     /// <summary>
@@ -1893,91 +1431,34 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         }).ToList();
     }
 
-    /// <summary>
-    /// Customers, among <paramref name="customerIds"/>, whose claim on a value a person's later correction
-    /// took back: this class once learned the value for them and P5 has expired that row, and they hold no
-    /// active row on it now, of any source or grade (for a Domain, no Email at the domain either). Their old
-    /// decisions no longer veto the value for another customer. A customer re-confirmed since then holds a
-    /// row again, and its decisions count again.
-    /// </summary>
-    private async Task<HashSet<long>> CustomersACorrectionTookTheValueFromAsync(
-        long businessUnitId, long[] customerIds, CustomerIdentifierType type, string value, CancellationToken ct)
-    {
-        var corrected = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
-            .Where(i => i.BusinessUnitId == businessUnitId
-                        && customerIds.Contains(i.CustomerId)
-                        && i.EffectiveTo != null
-                        && LearnedSources.Contains(i.Source)
-                        && i.IdentifierType == type
-                        && i.NormalizedValue == value)
-            .Select(i => i.CustomerId)
-            .Distinct()
-            .ToListAsync(ct);
-        if (corrected.Count == 0) return new HashSet<long>();
-
-        var atDomain = "@" + value;
-        var isDomain = type == CustomerIdentifierType.Domain;
-        var stillHeld = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
-            .Where(i => i.BusinessUnitId == businessUnitId
-                        && corrected.Contains(i.CustomerId)
-                        && i.EffectiveTo == null
-                        && ((i.IdentifierType == type && i.NormalizedValue == value)
-                            || (isDomain && i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue.EndsWith(atDomain))))
-            .Select(i => i.CustomerId)
-            .Distinct()
-            .ToListAsync(ct);
-        return corrected.Where(id => !stillHeld.Contains(id)).ToHashSet();
-    }
-
-    private enum FreeMailAddressReading { NotYetCorroborated, Corroborated, ConfirmedForAnotherCustomer }
+    private enum AddressReading { NotYetConfirmed, Confirmed, ConfirmedForAnotherCustomer }
 
     /// <summary>
-    /// P2. What people have said about one consumer-mailbox address: the earlier leads a person linked whose
-    /// envelope sender, sender column or printed buyer address is exactly this address, human statuses
-    /// filtered in SQL before the read is capped.
-    ///   * Any decision for a customer other than this one: the address is an agent's. Nothing is learned, and
-    ///     every row this class learned for the address, on any customer, is expired and written through.
-    ///   * Otherwise: corroborated once this decision and the earlier ones for this customer reach
-    ///     <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/>. A decision on a page whose company-name field
-    ///     names another organisation does not count towards it, and this page naming one blocks it, exactly
-    ///     as neither vouches for a domain (P10).
+    /// P2, OWNER DECISION 2026-09-13, POLICY A: "A buyer's exact email address is learned once reps confirm it for the same
+    /// customer twice, and never for anyone else." What people have said about one exact address, and nothing else, read
+    /// through <see cref="HumanAddressDecisions"/>: the leads whose envelope sender, sender column or printed buyer address is
+    /// the address itself or ends in "&lt;address&gt;", under a human status, each counted for the customer it is linked to NOW.
+    ///   E1 any earlier decision for another customer: nothing is learned, and every row this class learned for the address, on
+    ///      any customer, is expired and written through. Its own EXISTS, filtered on the customer in SQL and never capped, so
+    ///      no number of newer decisions, and no longer address containing this one, can hide it (the conformance round's V5b
+    ///      and V5c). The remedy for a wrong pick that stands is a contact on the right customer.
+    ///   E2 otherwise confirmed once this decision and the earlier decisions for this customer reach
+    ///      <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/>, whatever customer their pages name.
+    /// No longer read, because each let confirmations vouch for more than the address: contacts of this or any other customer,
+    /// other customers' holdings on the domain, whether the domain spells a name, printed-versus-envelope distinctions, "against
+    /// its own page" set-asides, "withdrawn" decisions and demoted rows. Nor whether this page or an earlier one names another
+    /// customer: that veto was never approved, and under it a trader buying for an SEC job, or an EPC contractor delivering to
+    /// an Aramco plant, was never recognised by email however often reps confirmed them, while the site owner kept being
+    /// auto-linked (the regression round's ADV5.16, ADV5.17, ADV5.20). ITS COST, stated for the owner: two picks of Aramco on
+    /// SEC's own prints from 57322@se.com.sa, with no decision for SEC on that address, make it Aramco's at 1.00 (ADV5.05a),
+    /// until the first decision for SEC, on any screen, makes it nobody's.
     /// </summary>
-    /// <param name="takeBackWhatItTaught">
-    /// True for a consumer mailbox, whose first decision for a second customer marks it an agent's and expires what
-    /// was learned for it. False for an organisation's own mailbox (LG01), read only to ask whether it is
-    /// corroborated: its learned rows answer to P3 and P5 like any other organisation's, and a relink's demotion of
-    /// a fact confirmed many times must not be undone by a read.
-    /// </param>
-    private async Task<FreeMailAddressReading> ReadAddressDecisionsAsync(
-        long businessUnitId, long leadId, long customerId, string? customerName, string address,
-        bool documentNamesSomebodyElse, IReadOnlySet<string> selfNameKeys,
-        HashSet<long> expiredIds, HashSet<long> setAside, DateTime now, bool takeBackWhatItTaught, CancellationToken ct)
+    private async Task<AddressReading> ReadAddressDecisionsAsync(
+        long businessUnitId, Lead lead, long customerId, string address,
+        HashSet<long> expiredIds, HashSet<long> setAside, DateTime now, CancellationToken ct)
     {
-        var earlier = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
-            .Where(l => l.BusinessUnitId == businessUnitId
-                        && l.Id != leadId
-                        && l.CustomerId != null
-                        && HumanDecidedStatuses.Contains(l.CustomerMatchStatus)
-                        && ((l.Clientemail != null && l.Clientemail.ToLower().Contains(address))
-                            || (l.CustomerBuyerEmailExtracted != null && l.CustomerBuyerEmailExtracted.ToLower().Contains(address))
-                            || (l.EmailIngests != null && l.EmailIngests.FromEmail.ToLower().Contains(address))))
-            .OrderByDescending(l => l.Id)
-            .Select(l => new
-            {
-                CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus, l.Clientemail, l.CustomerBuyerEmailExtracted,
-                FromEmail = l.EmailIngests != null ? l.EmailIngests.FromEmail : null,
-                l.CustomerCompanyNameExtracted
-            })
-            .Take(MaximumDomainEvidenceRead)
-            .ToListAsync(ct);
-        var decided = earlier
-            .Where(row => LeadCustomerMatchStatuses.IsHumanDecided(row.CustomerMatchStatus))
-            .Where(row => IsThisAddress(row.FromEmail) || IsThisAddress(row.Clientemail) || IsThisAddress(row.CustomerBuyerEmailExtracted))
-            .ToList();
-
-        if (decided.Any(row => row.CustomerId != customerId))
+        if (await HumanAddressDecisions.DecidedForAnotherCustomerAsync(_db, businessUnitId, address, customerId, lead.Id, ct))
         {
-            if (!takeBackWhatItTaught) return FreeMailAddressReading.ConfirmedForAnotherCustomer;
             var taught = await _db.Set<CustomerIdentifier>().IgnoreQueryFilters()
                 .Where(i => i.BusinessUnitId == businessUnitId
                             && i.EffectiveTo == null
@@ -1998,18 +1479,28 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                     .Where(i => i.BusinessUnitId == businessUnitId && ids.Contains(i.Id))
                     .ExecuteUpdateAsync(set => set.SetProperty(i => i.EffectiveTo, (DateTime?)now), ct);
                 _log?.LogInformation(
-                    "Client alias learning expired {Count} learned Email row(s) for a consumer mailbox on lead {LeadId}: people have linked that address to more than one customer.",
-                    ids.Length, leadId);
+                    "Client alias learning expired {Count} learned Email row(s) on lead {LeadId}: people have linked that address to more than one customer.",
+                    ids.Length, lead.Id);
             }
-            return FreeMailAddressReading.ConfirmedForAnotherCustomer;
+            return AddressReading.ConfirmedForAnotherCustomer;
         }
 
-        if (documentNamesSomebodyElse) return FreeMailAddressReading.NotYetCorroborated;
-        var confirmations = 1 + decided.Count(row =>
-            !NamesAnOrganisationOtherThan(row.CustomerCompanyNameExtracted, customerName, selfNameKeys));
+        var earlier = await HumanAddressDecisions
+            .Carrying(_db.Leads.AsNoTracking().IgnoreQueryFilters(), businessUnitId, address)
+            .Where(l => l.Id != lead.Id && l.CustomerId == customerId)
+            .OrderByDescending(l => l.Id)
+            .Select(l => new
+            {
+                l.Clientemail, l.CustomerBuyerEmailExtracted,
+                FromEmail = l.EmailIngests != null ? l.EmailIngests.FromEmail : null
+            })
+            .Take(MaximumEarlierPrintsRead)
+            .ToListAsync(ct);
+        var confirmations = 1 + earlier.Count(row =>
+            IsThisAddress(row.FromEmail) || IsThisAddress(row.Clientemail) || IsThisAddress(row.CustomerBuyerEmailExtracted));
         return confirmations >= _policy.FreeMailAddressConfirmationsRequired
-            ? FreeMailAddressReading.Corroborated
-            : FreeMailAddressReading.NotYetCorroborated;
+            ? AddressReading.Confirmed
+            : AddressReading.NotYetConfirmed;
 
         bool IsThisAddress(string? raw)
             => string.Equals(LeadCustomerResolutionService.ParseAddress(raw), address, StringComparison.Ordinal);

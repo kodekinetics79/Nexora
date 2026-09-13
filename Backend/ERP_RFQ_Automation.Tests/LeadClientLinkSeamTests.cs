@@ -313,6 +313,16 @@ public sealed class LeadClientLinkSeamTests
                 .LinkClientAsync(taught, Tenant,
                     new LeadClientLinkRequestDTO { CustomerId = ClientLinkSpine.CustomerId }, "rep@tenant.test");
 
+        // Owner decision 2026-09-13, policy A: one confirmation teaches no address and never a domain; the
+        // company field names the customer, so the alias is learned.
+        await using (var read = spine.Context())
+        {
+            var rows = await read.Set<CustomerIdentifier>().IgnoreQueryFilters()
+                .Where(i => i.BusinessUnitId == Tenant).ToListAsync();
+            Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
+            Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
+        }
+
         // A second enquiry from the same buyer, arriving later. Nobody touches it.
         var second = await spine.IngestUnresolvedLeadAsync("CRM-SEAM-004", "procurement@fultoncountyga.gov");
 
@@ -320,7 +330,9 @@ public sealed class LeadClientLinkSeamTests
         {
             var outcome = await new LeadCustomerResolutionService(context)
                 .ResolveAsync(Tenant, second, CancellationToken.None);
-            Assert.Equal(CustomerMatchReasonCodes.SenderDomain, outcome.ReasonCode);
+            // Owner decision 2026-09-13, policy A: the domain is never learned from a confirmation, so the next
+            // enquiry is recognised by the company name the first one's page carried, not by its sender domain.
+            Assert.Equal(CustomerMatchReasonCodes.LearnedAlias, outcome.ReasonCode);
         }
 
         await using var verify = spine.Context();

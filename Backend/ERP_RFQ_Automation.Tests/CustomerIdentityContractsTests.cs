@@ -465,6 +465,39 @@ public sealed class CustomerIdentityContractsTests
         Assert.DoesNotContain(CustomerIdentifierSources.LeadReviewUnverified, CustomerIdentifierSources.TrustedForAutoLink);
     }
 
+    [Theory]
+    [InlineData("MasterData", true)]
+    [InlineData("CustomerProfile", true)]
+    [InlineData("CustomerContact", true)]
+    [InlineData("CustomerImport", true)]
+    [InlineData("LeadReviewLearned", false)]
+    [InlineData("LeadReviewUnverified", false)]
+    [InlineData("MigrationBackfill", false)]
+    [InlineData("masterdata", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void PolicyA_the_person_entered_sources_are_one_list_and_one_predicate(string? source, bool expected)
+    {
+        // OWNER DECISION 2026-09-13 (policy A, "learn slowly, never guess"): a whole email domain is never
+        // learned from confirmations; it comes only from a customer contact or an admin entry. The resolver's
+        // Domain tier, the loader and routing all ask this one question, so a learned or backfilled Domain row
+        // links and routes nothing. The array (read inside EF queries) and the predicate (read in memory)
+        // must never disagree, and the comparison is ordinal: a lower-cased copy is not a person's entry.
+        Assert.Equal(expected, CustomerIdentifierSources.IsEnteredByAPerson(source));
+        Assert.Equal(expected, CustomerIdentifierSources.EnteredByAPerson.Contains(source ?? ""));
+    }
+
+    [Fact]
+    public void PolicyA_the_person_entered_sources_are_exactly_the_four_a_person_fills_in()
+    {
+        // OWNER DECISION 2026-09-13 (policy A): the setup screen, the customer profile, its contacts and a
+        // customer import. Adding a machine source here (the learner, the migration backfill) would let a
+        // confirmation mint a Domain that links at 0.95 again.
+        Assert.Equal(
+            new[] { "CustomerContact", "CustomerImport", "CustomerProfile", "MasterData" },
+            CustomerIdentifierSources.EnteredByAPerson.Order(StringComparer.Ordinal).ToArray());
+    }
+
     // ── the tenant's own domains ─────────────────────────────────────────────
 
     private const long SelfTenant = 8910;
@@ -848,6 +881,9 @@ public sealed class CustomerIdentityContractsTests
     {
         // One confirmation each gave Saudi Aramco personal live.com addresses; none at all left a sole
         // trader confirmed twice on gmail a 0.65 suggestion forever. The number is policy, and it is two.
+        // OWNER DECISION 2026-09-13 (policy A): the rule covers every learnable address, corporate as well
+        // as free mail. A buyer's exact address is learned once reps confirm it for the same customer twice
+        // and never for anyone else, so a new buyer is recognised by email from their third message.
         var policy = new CustomerResolutionPolicy();
         Assert.Equal(2, policy.FreeMailAddressConfirmationsRequired);
         Assert.True(policy.FreeMailAddressConfirmationsRequired > 1);

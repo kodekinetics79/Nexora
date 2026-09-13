@@ -36,12 +36,18 @@ public sealed class RoutingSenderIdentityGuardTests
     private const long SecOwner = 7822;
     private const long MarafiqOwner = 7826;
 
-    [Fact]
-    public async Task A_legacy_relay_domain_row_does_not_write_a_customer_through_routing()
+    [Theory]
+    // The legacy row as the old learner wrote it.
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned)]
+    // The same row as a contact sync wrote it before the organisation-domain guard. Policy A (owner decision
+    // 2026-09-13) routes no learned Domain row whatever its host, so only a row a person entered still shows
+    // the relay guard holding.
+    [InlineData("CustomerContact")]
+    public async Task A_legacy_relay_domain_row_does_not_write_a_customer_through_routing(string source)
     {
         using var db = new TestDb();
         await SeedAsync(db, "alerts@bidnet.com", context => context.Set<CustomerIdentifier>().Add(
-            Identifier(7851, Aramco, CustomerIdentifierType.Domain, "bidnet.com", 0.95m)));
+            Identifier(7851, Aramco, CustomerIdentifierType.Domain, "bidnet.com", 0.95m, source)));
         await using var context = await RoutingContextAsync(db);
 
         var result = await Service(context).RouteLeadAsync(Tenant,
@@ -70,8 +76,9 @@ public sealed class RoutingSenderIdentityGuardTests
         using var db = new TestDb();
         await SeedAsync(db, "57322@se.com.sa", context =>
         {
+            // Policy A (owner decision 2026-09-13): a Domain routes only where a person entered it.
             context.Set<CustomerIdentifier>().Add(
-                Identifier(7852, Sec, CustomerIdentifierType.Domain, "se.com.sa", 0.95m));
+                Identifier(7852, Sec, CustomerIdentifierType.Domain, "se.com.sa", 0.95m, source: "CustomerContact"));
             Seed.EmailConfig(context, 7861, Tenant).EmailAddress = "rfq@alquraishi.com";
             context.Users.Add(User(7823, Tenant, "ahmed@alquraishi.com.sa"));
             Seed.EnsureBusinessUnit(context, OtherTenant);
@@ -94,20 +101,28 @@ public sealed class RoutingSenderIdentityGuardTests
 
     [Theory]
     // A relay's sending host: every Ariba buyer's RFQ comes from under ariba.com.
-    [InlineData("rfq@s4.ansmtp.ariba.com", "s4.ansmtp.ariba.com")]
+    [InlineData("rfq@s4.ansmtp.ariba.com", "s4.ansmtp.ariba.com", CustomerIdentifierSources.LeadReviewLearned)]
     // Etimad delivers the whole Saudi government's tenders.
-    [InlineData("noreply@etimad.sa", "etimad.sa")]
+    [InlineData("noreply@etimad.sa", "etimad.sa", CustomerIdentifierSources.LeadReviewLearned)]
     // Consumer mail. fastmail.com was missing from the free-mail list until 2026-09-12.
-    [InlineData("agent@fastmail.com", "fastmail.com")]
-    [InlineData("buyer.sec@gmail.com", "gmail.com")]
+    [InlineData("agent@fastmail.com", "fastmail.com", CustomerIdentifierSources.LeadReviewLearned)]
+    [InlineData("buyer.sec@gmail.com", "gmail.com", CustomerIdentifierSources.LeadReviewLearned)]
     // Nexora's own ingestion placeholder: the folder and upload doors write this address.
-    [InlineData("extraction@pipeline.local", "pipeline.local")]
+    [InlineData("extraction@pipeline.local", "pipeline.local", CustomerIdentifierSources.LeadReviewLearned)]
+    // The same rows as a contact sync wrote them before the organisation-domain guard (sahara.com was one).
+    // Policy A (owner decision 2026-09-13) routes no learned Domain row at all, so only these rows, which a person
+    // entered, still show that a domain naming no single organisation never routes.
+    [InlineData("rfq@s4.ansmtp.ariba.com", "s4.ansmtp.ariba.com", "CustomerContact")]
+    [InlineData("noreply@etimad.sa", "etimad.sa", "CustomerContact")]
+    [InlineData("agent@fastmail.com", "fastmail.com", "CustomerContact")]
+    [InlineData("buyer.sec@gmail.com", "gmail.com", "CustomerContact")]
+    [InlineData("extraction@pipeline.local", "pipeline.local", "CustomerContact")]
     public async Task A_domain_that_names_no_single_organisation_never_names_a_customer_through_routing(
-        string sender, string storedDomain)
+        string sender, string storedDomain, string source)
     {
         using var db = new TestDb();
         await SeedAsync(db, sender, context => context.Set<CustomerIdentifier>().Add(
-            Identifier(7853, Aramco, CustomerIdentifierType.Domain, storedDomain, 0.95m)));
+            Identifier(7853, Aramco, CustomerIdentifierType.Domain, storedDomain, 0.95m, source)));
         await using var context = await RoutingContextAsync(db);
 
         var result = await Service(context).RouteLeadAsync(Tenant,
@@ -277,8 +292,9 @@ public sealed class RoutingSenderIdentityGuardTests
         await SeedAsync(db, "57322@se.com.sa", context =>
         {
             context.BusinessUnits.Find(Tenant)!.BusinessUnitName = "ALI ZAID AL-QURAISHI & PARTNERS";
+            // Policy A (owner decision 2026-09-13): a Domain routes only where a person entered it.
             context.Set<CustomerIdentifier>().Add(
-                Identifier(7864, Sec, CustomerIdentifierType.Domain, "se.com.sa", 0.95m));
+                Identifier(7864, Sec, CustomerIdentifierType.Domain, "se.com.sa", 0.95m, source: "CustomerContact"));
         });
         await using var context = await RoutingContextAsync(db);
 
@@ -589,15 +605,19 @@ public sealed class RoutingSenderIdentityGuardTests
     [InlineData("no-reply@etimad.gov.sa", "etimad.gov.sa", CustomerIdentifierSources.LeadReviewLearned, false)]
     [InlineData("do_not_reply@coupa.com", "coupa.com", CustomerIdentifierSources.LeadReviewLearned, false)]
     [InlineData("no-reply@sap.com", "sap.com", CustomerIdentifierSources.LeadReviewLearned, false)]
-    // Controls: a rule a person entered, and a person's own mailbox on the host, still route.
+    // Policy A (owner decision 2026-09-13): a person's own mailbox on the host no longer makes a learned row route.
+    [InlineData("buyer@etimad.gov.sa", "etimad.gov.sa", CustomerIdentifierSources.LeadReviewLearned, false)]
+    // Controls: a row a person entered routes, for the portal's mailbox and for a person's own.
     [InlineData("no-reply@etimad.gov.sa", "etimad.gov.sa", CustomerIdentifierSources.MasterData, true)]
-    [InlineData("buyer@etimad.gov.sa", "etimad.gov.sa", CustomerIdentifierSources.LeadReviewLearned, true)]
-    public async Task A_domain_row_nobody_entered_does_not_route_what_a_system_mailbox_on_that_host_carries(
+    [InlineData("buyer@etimad.gov.sa", "etimad.gov.sa", "CustomerContact", true)]
+    public async Task A_domain_row_nobody_entered_never_routes_whatever_mailbox_carries_the_lead(
         string sender, string domain, string source, bool routes)
     {
         // MUST STAY FIXED (W03.04, W03.05, W03.08), routing's half. The resolver's domain tier refuses a learned Domain
-        // row for a lead a system mailbox carried; routing read the same row as a verified 0.95 match, so the SEC
-        // tender went to Aramco's owner and Aramco was written onto the lead one step later.
+        // row; routing read the same row as a verified 0.95 match, so the SEC tender went to Aramco's owner and Aramco
+        // was written onto the lead one step later. The old fix refused the row only for a system mailbox. Policy A,
+        // owner decision 2026-09-13: a domain comes only from a customer contact or an admin entry, so a learned row
+        // routes nothing whichever mailbox carried the lead.
         using var db = new TestDb();
         await SeedAsync(db, sender, context => context.Set<CustomerIdentifier>().Add(
             Identifier(7880, Aramco, CustomerIdentifierType.Domain, domain, 0.95m, source)));
@@ -618,6 +638,201 @@ public sealed class RoutingSenderIdentityGuardTests
         Assert.Null(result.AssignmentId);
         var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
         Assert.Null(lead.CustomerId);
+    }
+
+    [Theory]
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned)]
+    [InlineData("MigrationBackfill")]
+    public async Task PolicyA_a_learned_or_backfilled_domain_row_never_routes_a_persons_mailbox(string source)
+    {
+        // OWNER DECISION 2026-09-13, policy A: a whole email domain is never learned from confirmations; it comes only
+        // from a customer contact or an admin entry. 57322@se.com.sa is a person's mailbox, so the old system-mailbox
+        // refusal let this verified 0.95 row route the lead to SEC's owner and write SEC through.
+        using var db = new TestDb();
+        await SeedAsync(db, "57322@se.com.sa", context => context.Set<CustomerIdentifier>().Add(
+            Identifier(7886, Sec, CustomerIdentifierType.Domain, "se.com.sa", 0.95m, source)));
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, $"route-policy-a-{source}", $"corr-policy-a-{source}"), CancellationToken.None);
+
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        Assert.Null(result.AssignmentId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Null(lead.CustomerId);
+        Assert.Null(lead.AssignTo);
+    }
+
+    [Theory]
+    // Domain: verified AND entered by a person (the resolver's S2).
+    [InlineData(CustomerIdentifierType.Domain, CustomerIdentifierSources.MasterData, true, true)]
+    [InlineData(CustomerIdentifierType.Domain, "CustomerProfile", true, true)]
+    [InlineData(CustomerIdentifierType.Domain, "CustomerContact", true, true)]
+    [InlineData(CustomerIdentifierType.Domain, "CustomerImport", true, true)]
+    [InlineData(CustomerIdentifierType.Domain, CustomerIdentifierSources.LeadReviewLearned, true, false)]
+    [InlineData(CustomerIdentifierType.Domain, "MigrationBackfill", true, false)]
+    [InlineData(CustomerIdentifierType.Domain, "SomeOtherProcess", true, false)]
+    [InlineData(CustomerIdentifierType.Domain, CustomerIdentifierSources.LeadReviewUnverified, true, false)]
+    [InlineData(CustomerIdentifierType.Domain, CustomerIdentifierSources.MasterData, false, false)]
+    // Email: verified and never a LeadReviewUnverified filing (the resolver's S1). A legacy learned or backfilled
+    // exact address still links: no data migration was approved.
+    [InlineData(CustomerIdentifierType.Email, CustomerIdentifierSources.LeadReviewLearned, true, true)]
+    [InlineData(CustomerIdentifierType.Email, "MigrationBackfill", true, true)]
+    [InlineData(CustomerIdentifierType.Email, "CustomerContact", true, true)]
+    [InlineData(CustomerIdentifierType.Email, CustomerIdentifierSources.LeadReviewUnverified, true, false)]
+    [InlineData(CustomerIdentifierType.Email, CustomerIdentifierSources.MasterData, false, false)]
+    public async Task PolicyA_routing_trusts_a_sender_row_exactly_where_the_resolver_does(
+        CustomerIdentifierType type, string source, bool verified, bool links)
+    {
+        // THE SEAM, policy A (owner decision 2026-09-13). Routing writes the customer it finds onto the lead one step
+        // after the resolver, so a row the resolver will not trust must not route either, and a row the resolver
+        // links on must still route to that customer's owner. Both read the same lead from a person's mailbox here.
+        using var db = new TestDb();
+        const string sender = "57322@se.com.sa";
+        await SeedAsync(db, sender, context =>
+        {
+            context.EmailIngests.Local.Single(i => i.Id == 20_000 + LeadId).FromEmail = sender;
+            var row = type == CustomerIdentifierType.Domain
+                ? Identifier(7887, Sec, CustomerIdentifierType.Domain, "se.com.sa", 0.95m, source)
+                : Identifier(7887, Sec, CustomerIdentifierType.Email, sender, 1.00m, source);
+            row.IsVerified = verified;
+            context.Set<CustomerIdentifier>().Add(row);
+        });
+        var reason = type == CustomerIdentifierType.Domain
+            ? CustomerMatchReasonCodes.SenderDomain
+            : CustomerMatchReasonCodes.SenderEmailExact;
+
+        await using (var resolving = db.ContextFor(Tenant))
+        {
+            var lead = await resolving.Leads.Include(l => l.LeadItems).Include(l => l.EmailIngests)
+                .SingleAsync(l => l.Id == LeadId);
+            var resolved = await new LeadCustomerResolutionService(resolving).ResolveCoreAsync(Tenant, lead, CancellationToken.None);
+            if (links)
+            {
+                Assert.Equal(Sec, resolved.CustomerId);
+                Assert.Equal(reason, resolved.ReasonCode);
+            }
+            else
+            {
+                Assert.Null(resolved.CustomerId);
+            }
+        }
+
+        await using var context = await RoutingContextAsync(db);
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, $"route-seam-{type}-{source}-{verified}", $"corr-seam-{type}-{source}-{verified}"),
+            CancellationToken.None);
+        var routed = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        if (links)
+        {
+            Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+            Assert.Equal(SecOwner, result.SelectedUserId);
+            Assert.Equal(Sec, routed.CustomerId);
+            Assert.Equal(reason, routed.CustomerMatchReasonCode);
+            return;
+        }
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        Assert.Null(result.AssignmentId);
+        Assert.Null(routed.CustomerId);
+        Assert.Null(routed.AssignTo);
+    }
+
+    [Fact]
+    public async Task PolicyA_a_contact_saved_on_the_customer_routes_its_domain_where_a_confirmations_row_stood()
+    {
+        // Policy A (owner decision 2026-09-13): a domain comes only from a customer contact or an admin entry. SEC
+        // already holds the verified learned se.com.sa row an earlier confirmation left, which routes nothing now.
+        // A person then saves SEC's procurement desk as a contact. The contact sync must make that domain SEC's
+        // person-entered row, or the one approved way to teach a domain would route nothing either.
+        using var db = new TestDb();
+        await SeedAsync(db, "57322@se.com.sa", context =>
+        {
+            Seed.Contact(context, 7888, Tenant, Sec, "procurement@se.com.sa");
+            context.Set<CustomerIdentifier>().Add(
+                Identifier(7889, Sec, CustomerIdentifierType.Domain, "se.com.sa", 0.95m));
+        });
+        await using (var saving = db.ContextFor(Tenant))
+        {
+            await CustomerIdentityMaintenance.SynchronizeAsync(saving, Tenant, Sec, "CustomerContact");
+            await saving.SaveChangesAsync();
+        }
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-contact-domain", "corr-contact-domain"), CancellationToken.None);
+
+        Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+        Assert.Equal(SecOwner, result.SelectedUserId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Equal(Sec, lead.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderDomain, lead.CustomerMatchReasonCode);
+        Assert.Equal(0.95m, lead.CustomerMatchConfidence);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    // The control: the address people confirmed twice for SEC, and never for anyone else, links and routes at 1.00.
+    [InlineData(false)]
+    public async Task PolicyA_a_learned_address_a_person_has_since_decided_for_another_customer_neither_links_nor_routes(bool decidedForAnother)
+    {
+        // OWNER DECISION 2026-09-13, policy A: a buyer's exact address is learned once reps confirm it for the same customer
+        // twice, "and never for anyone else". THE DEFECT (the conformance round's V1a): k.lee@hdec.com was confirmed twice for
+        // SEC and learned. A third lead from it was then SAVED for Aramco on the review screen, which records a human decision
+        // but does not run the learner, so nothing took the address back: the next message linked SEC at 1.00, and routing
+        // assigned SEC's owner and wrote SEC onto the lead. The standing decision is now read where the address is used.
+        using var db = new TestDb();
+        const string address = "k.lee@hdec.com";
+        await SeedAsync(db, address, context =>
+        {
+            context.EmailIngests.Local.Single(i => i.Id == 20_000 + LeadId).FromEmail = $"K Lee <{address}>";
+            context.Set<CustomerIdentifier>().Add(Identifier(7890, Sec, CustomerIdentifierType.Email, address, 1.00m));
+            foreach (var (id, customerId) in decidedForAnother
+                         ? new[] { (7901L, Sec), (7902L, Sec), (7903L, Aramco) }
+                         : new[] { (7901L, Sec), (7902L, Sec) })
+            {
+                var decided = Seed.Lead(context, id, Tenant, buyersName: null);
+                decided.Rfqno = null;
+                // The saved lead carries the address in its envelope only, as "Name <address>".
+                decided.Clientemail = customerId == Aramco ? null : address;
+                context.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail = $"K Lee <{address}>";
+                decided.ResolveCommercialIdentity(customerId, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            }
+        });
+
+        await using (var resolving = db.ContextFor(Tenant))
+        {
+            var lead = await resolving.Leads.Include(l => l.LeadItems).Include(l => l.EmailIngests)
+                .SingleAsync(l => l.Id == LeadId);
+            var resolved = await new LeadCustomerResolutionService(resolving).ResolveCoreAsync(Tenant, lead, CancellationToken.None);
+            if (decidedForAnother)
+            {
+                Assert.Null(resolved.CustomerId);
+                Assert.NotEqual(CustomerMatchReasonCodes.SenderEmailExact, resolved.ReasonCode);
+            }
+            else
+            {
+                Assert.Equal(Sec, resolved.CustomerId);
+                Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, resolved.ReasonCode);
+            }
+        }
+
+        await using var context = await RoutingContextAsync(db);
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, $"route-saved-for-another-{decidedForAnother}", $"corr-saved-for-another-{decidedForAnother}"),
+            CancellationToken.None);
+        var routed = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        if (!decidedForAnother)
+        {
+            Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+            Assert.Equal(SecOwner, result.SelectedUserId);
+            Assert.Equal(Sec, routed.CustomerId);
+            Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, routed.CustomerMatchReasonCode);
+            return;
+        }
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        Assert.Null(result.AssignmentId);
+        Assert.Null(routed.CustomerId);
+        Assert.Null(routed.AssignTo);
     }
 
     private static CommercialRoutingApplicationService Service(ErpRfqAutomationContext context) =>

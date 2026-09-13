@@ -43,17 +43,20 @@ public static class CustomerIdentifierSources
     public const string MasterData = "MasterData";
 
     /// <summary>
-    /// What a reviewer confirmed that the sanity gates would not trust: a printed name that does
-    /// not resemble the chosen customer, a mailbox on a domain nobody tied to that customer. The
-    /// row is kept so a person can look at it; it is NOT a fact. It is deliberately absent from
+    /// What a reviewer confirmed that the rules would not trust, and what a correction took back. Since the
+    /// owner's policy A decision (2026-09-13) the learner writes exactly two kinds of row here: a printed
+    /// company name or a portal account the document does not tie to the chosen customer, filed at 0.50; and a
+    /// Domain, alias or portal pair a relink demoted, which keeps its counts and confidence. It never writes an
+    /// Email or a Domain here any more; a mailbox row on this shelf predates policy A. The row is kept so a
+    /// person can look at it; it is NOT a fact. It is deliberately absent from
     /// <see cref="TrustedForAutoLink"/> and from <c>CustomerIdentityMaintenance.ManagedSources</c>.
     ///
-    /// It lives here, beside the trusted sources, because three readers must skip it and they
-    /// were about to spell it three times: the learner writes it, the resolver's exact tiers
-    /// (S1 e-mail, S2 domain) and routing must refuse it. Those two tiers never looked at Source
-    /// at all, so a demoted row still linked at 1.00 or 0.95, and a misspelt copy of this string
-    /// in any one reader would quietly reopen that hole. <c>CustomerAliasLearner.UnverifiedAliasSource</c>
-    /// must stay equal to this value; a contract test pins it.
+    /// It lives here, beside the trusted sources, because several readers must skip it and they
+    /// were about to spell it several times: the learner writes it; the resolver's S1, S3 and passage scan,
+    /// the corpus loader and routing refuse it. S1 and S2 once never looked at Source at all, so a demoted
+    /// row still linked at 1.00 or 0.95, and a misspelt copy of this string in any one reader would quietly
+    /// reopen that hole. <c>CustomerAliasLearner.UnverifiedAliasSource</c> must stay equal to this value; a
+    /// contract test pins it.
     /// </summary>
     public const string LeadReviewUnverified = "LeadReviewUnverified";
 
@@ -73,8 +76,30 @@ public static class CustomerIdentifierSources
     /// somebody said so: a procurement relay's or a system mailbox's own sending address
     /// (<see cref="IdentityDomainGuard.MayMatchExactAddress"/>), and whether a customer is on record
     /// with a staff login's domain (<see cref="TenantSelfIdentity.LoadSelfDomainsAsync"/>).
+    ///
+    /// OWNER DECISION 2026-09-13, policy A ("learn slowly, never guess"): a whole email domain is never
+    /// learned from confirmations. It comes only from a customer contact or an admin entry, so the Domain
+    /// tier in the resolver, the loader and routing trust a Domain row only when its source is on this
+    /// list. A LeadReviewLearned or MigrationBackfill Domain row, however old, links and routes nothing.
+    /// A buyer's exact address is learned once reps confirm it for the same customer twice and never for
+    /// anyone else; a company name or portal account only when the document itself names that customer.
+    /// ASSUMPTION (sub-decision the owner did not answer, defaulted to the recommendation he was given):
+    /// an Arabic-only company name is trusted after two confirmations for the same customer with none for
+    /// another, or at once when the document's header or address names that customer.
+    ///
+    /// EF Core reads this array inside queries (<c>EnteredByAPerson.Contains(i.Source)</c>); in memory,
+    /// use <see cref="IsEnteredByAPerson"/> so every reader compares the same way.
     /// </summary>
     public static readonly string[] EnteredByAPerson = [MasterData, "CustomerProfile", "CustomerContact", "CustomerImport"];
+
+    /// <summary>
+    /// True only when <paramref name="source"/> is one of <see cref="EnteredByAPerson"/>, compared
+    /// ordinally: "masterdata" is not "MasterData", and null, empty and anything unlisted
+    /// ("LeadReviewLearned", "LeadReviewUnverified", "MigrationBackfill") are false. One predicate
+    /// for the resolver, the loader, routing and the exact-address guard (policy A, 2026-09-13).
+    /// </summary>
+    public static bool IsEnteredByAPerson(string? source)
+        => source is not null && EnteredByAPerson.Contains(source, StringComparer.Ordinal);
 }
 
 /// <summary>
@@ -134,8 +159,10 @@ public static class SyntheticIdentityGuard
         "emirates.net.ae", "eim.ae", "naver.com", "hanmail.net", "daum.net", "sina.com", "sohu.com",
         // Still missing on 2026-09-12, and each an "organisation" to the learner until then: DuckDuckGo's
         // address relay, Saudi Telecom's consumer ISP, and national webmail elsewhere. This list will
-        // never be complete, which is why an unlisted provider is stopped by P10 in CustomerAliasLearner
-        // (the envelope never vouches for its own domain), not by this list.
+        // never be complete. An unlisted provider cannot become a customer's domain through confirmations,
+        // because the learner never learns a Domain and S2 and routing read only a Domain row a person
+        // entered (owner decision 2026-09-13, policy A); what this list still stops is a contact saved at
+        // such a provider writing its domain (CustomerIdentityMaintenance).
         "duck.com", "awalnet.net.sa", "mail2world.com", "sina.cn", "inbox.lv", "seznam.cz", "wp.pl",
         "o2.pl", "interia.pl", "onet.pl", "libero.it", "virgilio.it", "orange.fr", "wanadoo.fr",
         "laposte.net", "bigpond.com", "optonline.net", "cox.net", "charter.net", "earthlink.net",
@@ -586,7 +613,7 @@ public static class IdentityDomainGuard
     /// </summary>
     public static bool MayMatchExactAddress(string? address, string? source)
     {
-        if (CustomerIdentifierSources.EnteredByAPerson.Contains(source ?? string.Empty, StringComparer.Ordinal))
+        if (CustomerIdentifierSources.IsEnteredByAPerson(source))
             return true;
         return !SyntheticIdentityGuard.IsPortalRelayDomain(DomainOf(address)) && !IsSystemMailbox(address);
     }
@@ -848,12 +875,16 @@ public sealed record CustomerResolutionPolicy
     public decimal MinimumAutoLinkConfidence { get; init; } = 0.85m;
 
     /// <summary>
-    /// How many human decisions naming ONE customer, the current review included, make a consumer-mailbox
-    /// address (buyer.person@gmail.com) that customer's Email identifier, provided no decision names
-    /// another customer. Nothing is written before this count is reached, and the address is written
-    /// verified when it is (CustomerAliasLearner reads this setting). One is not enough: that is how Saudi Aramco came to own personal addresses at live.com from
-    /// a single confirmation each. And never a Domain, at any count: a free-mail domain is everybody's.
-    /// A sole trader on gmail who has been confirmed this many times is linked on the next message.
+    /// How many human decisions naming ONE customer, the current review included, make a buyer's exact
+    /// address that customer's Email identifier, provided no decision names another customer. Since the
+    /// owner's policy A decision (2026-09-13) this covers EVERY learnable address, corporate
+    /// (57322@se.com.sa) as well as consumer mailbox (buyer.person@gmail.com); the name is historic.
+    /// Nothing is written before this count is reached, and the address is written verified when it is
+    /// (CustomerAliasLearner reads this setting). One is not enough: that is how Saudi Aramco came to own
+    /// personal addresses at live.com from a single confirmation each. And never a Domain, at any count:
+    /// a domain comes only from a customer contact or an admin entry
+    /// (<see cref="CustomerIdentifierSources.EnteredByAPerson"/>). A buyer confirmed this many times is
+    /// linked on the next message, which is the third: the accepted cost of policy A.
     /// </summary>
     public int FreeMailAddressConfirmationsRequired { get; init; } = 2;
 

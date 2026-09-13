@@ -1533,10 +1533,11 @@ public sealed class CustomerIdentityResolverTests
     public void A_mailbox_the_learner_refused_to_vouch_for_never_links_at_the_exact_tiers(
         CustomerIdentifierType type, string value)
     {
-        // THE DEFECT: the learner demotes a mailbox on a domain nobody tied to the chosen customer
+        // THE DEFECT: the learner used to demote a mailbox on a domain nobody tied to the chosen customer
         // to LeadReviewUnverified, but S1 and S2 never read Source, so the demoted row linked every
         // later mail from that sender at 1.00 or 0.95 anyway. The Source is what decides: the same
-        // row entered by an administrator still links.
+        // row entered by an administrator still links. Owner decision 2026-09-13, policy A: the learner
+        // no longer files an Email or a Domain at all, so this guards the rows filed before it.
         var evidence = new LeadClientEvidence { BusinessUnitId = 1, LeadId = 10, SenderEmail = "ahmed@alquraishi-trading.com" };
 
         var demoted = CustomerIdentityResolver.Resolve(evidence, Corpus(
@@ -2333,6 +2334,63 @@ public sealed class CustomerIdentityResolverTests
     }
 
     [Theory]
+    [InlineData("one person's decision on another mailbox at the domain", false)]
+    [InlineData("one person's decision on this very mailbox", false)]
+    [InlineData("an address the learner wrote for another mailbox at the domain", false)]
+    // The controls: a fact a person entered on the site owner at the domain still shields it.
+    [InlineData("a contact on the site owner at the domain", true)]
+    [InlineData("an address a person registered on the site owner at the domain", true)]
+    public void PolicyA_only_a_fact_a_person_entered_shields_a_named_consignee_from_the_writers_record(string shield, bool links)
+    {
+        // OWNER DECISION 2026-09-13, policy A: "A whole email domain is never learned from confirmations." Hyundai's buyer
+        // k.lee@hdec.com is on Hyundai's record, so a Hyundai mailbox's print naming Aramco's Ras Tanura site is Hyundai
+        // buying and is only offered. But ONE decision for Aramco on m.kim@hdec.com's lead, even a mis-click on an SEC job,
+        // was read as a fact about the whole domain: it shielded Aramco, and every later hdec.com print to an Aramco site,
+        // from mailboxes never seen before, auto-linked Aramco at 0.88 (the conformance round's B1, B2, B4). A decision on
+        // this very mailbox did the same after one click, and an address the learner wrote from confirmations shielded
+        // every other mailbox on its domain. Decisions and taught addresses may still speak AGAINST a consignee; only a
+        // contact or an address a person entered speaks FOR it.
+        const long aramco = OtherCustomer, hyundai = ThirdCustomer;
+        CustomerNameSnapshot[] customers = [new(aramco, "Saudi Aramco"), new(hyundai, "Hyundai Engineering & Construction")];
+        List<CustomerIdentifierSnapshot> identifiers =
+            [new(1, hyundai, CustomerIdentifierType.Email, "k.lee@hdec.com", true, 1m, CustomerIdentifierSources.MasterData)];
+        List<CustomerContactSnapshot> contacts = [];
+        List<PriorSenderResolution> earlier = [];
+        switch (shield)
+        {
+            case "one person's decision on another mailbox at the domain": earlier.Add(new("m.kim@hdec.com", aramco)); break;
+            case "one person's decision on this very mailbox": earlier.Add(new("j.park@hdec.com", aramco)); break;
+            case "an address the learner wrote for another mailbox at the domain":
+                identifiers.Add(new(2, aramco, CustomerIdentifierType.Email, "m.kim@hdec.com", true, 1m, CustomerIdentifierSources.LeadReviewLearned));
+                break;
+            case "a contact on the site owner at the domain": contacts.Add(new(3, aramco, "m.kim@hdec.com", "M", "Kim")); break;
+            default:
+                identifiers.Add(new(2, aramco, CustomerIdentifierType.Email, "m.kim@hdec.com", true, 1m, CustomerIdentifierSources.MasterData));
+                break;
+        }
+
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "j.park@hdec.com",
+            Passages = [new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)],
+        }, Corpus(customers, identifiers, contacts, earlier), Policy);
+
+        if (links)
+        {
+            Assert.Equal(aramco, outcome.CustomerId);
+            Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+            return;
+        }
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Contains(outcome.Candidates, candidate => candidate.CustomerId == hyundai);
+        var site = Assert.Single(outcome.Candidates, candidate => candidate.CustomerId == aramco
+                                                                  && candidate.ReasonCode == CustomerMatchReasonCodes.NameInDocument);
+        Assert.True(site.Confidence < Policy.MinimumAutoLinkConfidence, $"Aramco was offered at {site.Confidence}, which is link strength.");
+    }
+
+    [Theory]
     [InlineData("Dammam", "procurement@se.com.sa", "Saudi Electricity Company-DAMMAM", "Al Dammam Trading Co.")]
     [InlineData("Jubail", "materials@se.com.sa", "Saudi Electricity Company-JUBAIL", "Jubail Trading Est")]
     public void Lead_680_from_SECs_own_department_mailbox_signed_with_its_city_still_links(
@@ -2551,11 +2609,16 @@ public sealed class CustomerIdentityResolverTests
     [InlineData("etimad.gov.sa", "no-reply@etimad.gov.sa")]
     [InlineData("coupa.com", "do_not_reply@coupa.com")]
     [InlineData("sap.com", "no-reply@sap.com")]
-    public void A_domain_row_nobody_entered_does_not_link_what_a_system_mailbox_on_that_host_carries(string domain, string systemMailbox)
+    public void A_domain_row_nobody_entered_never_links_whatever_mailbox_carries_the_print(string domain, string systemMailbox)
     {
-        // MUST STAY FIXED (W03.04, W03.05, W03.08). S1 refuses a learned row on a system mailbox, but a learned Domain
-        // row for the host a portal sends from still linked every SEC print it carried to Saudi Aramco at 0.95, in both
-        // builds, because the relay list does not name etimad.gov.sa, coupa.com or sap.com and never will name every host.
+        // MUST STAY FIXED (W03.04, W03.05, W03.08). A learned Domain row for the host a portal sends from linked every SEC
+        // print it carried to Saudi Aramco at 0.95, because the relay list does not name etimad.gov.sa, coupa.com or
+        // sap.com and never will name every host.
+        //
+        // OWNER DECISION 2026-09-13, policy A ("2 A"): a whole email domain is never learned from confirmations; it only
+        // comes from a customer contact or an admin entry. This test used to assert that a person's own mailbox on the
+        // host was still matched by the learned row. Under policy A no mailbox is: the learned row links nothing from
+        // the system envelope, from buyer@{domain}, or with buyer@{domain} printed beside the system envelope.
         const long aramco = OtherCustomer;
         CustomerNameSnapshot[] customers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")];
         ClientResolutionOutcome Mail(string sender, string source, string? printedBuyer = null) => CustomerIdentityResolver.Resolve(
@@ -2566,23 +2629,128 @@ public sealed class CustomerIdentityResolverTests
             },
             Corpus(customers, [new(1, aramco, CustomerIdentifierType.Domain, domain, true, 0.95m, source)]), Policy);
 
-        var learned = Mail(systemMailbox, CustomerIdentifierSources.LeadReviewLearned);
-        Assert.Equal(Sec, learned.CustomerId);
-        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, learned.ReasonCode);
-        Assert.Equal(Policy.NameInAddressConfidence, learned.Confidence);
-
-        // A rule a person entered still decides, and a person's own mailbox on that host, on the envelope or printed on
-        // the page beside the system envelope, is still matched by the learned row.
-        foreach (var outcome in new[]
+        foreach (var (learned, mailbox) in new[]
         {
-            Mail(systemMailbox, CustomerIdentifierSources.MasterData),
-            Mail($"buyer@{domain}", CustomerIdentifierSources.LeadReviewLearned),
-            Mail(systemMailbox, CustomerIdentifierSources.LeadReviewLearned, printedBuyer: $"buyer@{domain}"),
+            (Mail(systemMailbox, CustomerIdentifierSources.LeadReviewLearned), "the system mailbox"),
+            (Mail($"buyer@{domain}", CustomerIdentifierSources.LeadReviewLearned), "a person's own mailbox on the host"),
+            (Mail(systemMailbox, CustomerIdentifierSources.LeadReviewLearned, printedBuyer: $"buyer@{domain}"),
+                "the system mailbox with a person's address printed on the page"),
         })
         {
-            Assert.Equal(aramco, outcome.CustomerId);
+            Assert.True(learned.CustomerId == Sec, mailbox);
+            Assert.Equal(CustomerMatchReasonCodes.NameInDocument, learned.ReasonCode);
+            Assert.Equal(Policy.NameInAddressConfidence, learned.Confidence);
+            Assert.DoesNotContain(learned.Candidates, candidate => candidate.ReasonCode == CustomerMatchReasonCodes.SenderDomain);
+        }
+
+        // Controls: a Domain row a person entered still decides, from the system mailbox and from a person's own.
+        foreach (var (outcome, why) in new[]
+        {
+            (Mail(systemMailbox, CustomerIdentifierSources.MasterData), "an admin entry, from the system mailbox"),
+            (Mail($"buyer@{domain}", "CustomerContact"), "a customer contact, from a person's own mailbox"),
+        })
+        {
+            Assert.True(outcome.CustomerId == aramco, why);
             Assert.Equal(CustomerMatchReasonCodes.SenderDomain, outcome.ReasonCode);
         }
+    }
+
+    [Theory]
+    [InlineData(CustomerIdentifierSources.MasterData, true)]
+    [InlineData("CustomerProfile", true)]
+    [InlineData("CustomerContact", true)]
+    [InlineData("CustomerImport", true)]
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned, false)]
+    [InlineData("MigrationBackfill", false)]
+    [InlineData("SomeOtherProcess", false)]
+    public void PolicyA_the_domain_tier_links_only_a_domain_row_a_person_entered(string source, bool links)
+    {
+        // OWNER DECISION 2026-09-13, policy A ("2 A"): "A whole email domain is never learned from confirmations. It
+        // only comes from a customer contact or an admin entry." The domain tier reads Source, not the mailbox: a
+        // person's own mailbox, no passages, and a verified 0.95 row are linked only when a person entered the row.
+        const long newco = ThirdCustomer;
+        var outcome = CustomerIdentityResolver.Resolve(
+            new LeadClientEvidence { BusinessUnitId = 1, LeadId = 10, SenderEmail = "buyer@newco.com.sa" },
+            Corpus(
+                customers: [new(newco, "Newco Industrial Services")],
+                identifiers: [new(1, newco, CustomerIdentifierType.Domain, "newco.com.sa", true, 0.95m, source)]),
+            Policy);
+
+        if (links)
+        {
+            Assert.Equal(newco, outcome.CustomerId);
+            Assert.Equal(CustomerMatchReasonCodes.SenderDomain, outcome.ReasonCode);
+            Assert.Equal(0.95m, outcome.Confidence);
+        }
+        else
+        {
+            Assert.Null(outcome.CustomerId);
+            Assert.DoesNotContain(outcome.Candidates, candidate => candidate.ReasonCode == CustomerMatchReasonCodes.SenderDomain);
+        }
+    }
+
+    [Fact]
+    public void PolicyA_a_first_confirmation_filing_is_never_evidence_until_it_is_verified()
+    {
+        // OWNER DECISION 2026-09-13, policy A ("2 A"): learn slowly, never guess. One confirmation files a
+        // LeadReviewLearned row with IsVerified false; only a second confirmation for the same customer verifies it.
+        // Until then the filing is not a fact to any tier: it links no address, pair or name, and it does not say
+        // whose domain it is. Each case pairs the filing with the same row verified, which must act.
+        const long aramco = OtherCustomer, hyundai = ThirdCustomer;
+        CustomerIdentifierSnapshot Filing(long owner, CustomerIdentifierType type, string value, bool verified) =>
+            new(1, owner, type, value, verified, verified ? 1m : 0.50m, CustomerIdentifierSources.LeadReviewLearned);
+
+        // The buyer's exact address (S1).
+        CustomerNameSnapshot[] buyers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")];
+        var addressEvidence = new LeadClientEvidence { BusinessUnitId = 1, LeadId = 21, SenderEmail = "k.lee@hdec.com" };
+        var addressFiled = CustomerIdentityResolver.Resolve(addressEvidence,
+            Corpus(buyers, [Filing(aramco, CustomerIdentifierType.Email, "k.lee@hdec.com", verified: false)]), Policy);
+        Assert.Null(addressFiled.CustomerId);
+        Assert.DoesNotContain(addressFiled.Candidates, candidate => candidate.ReasonCode == CustomerMatchReasonCodes.SenderEmailExact);
+        var addressLearned = CustomerIdentityResolver.Resolve(addressEvidence,
+            Corpus(buyers, [Filing(aramco, CustomerIdentifierType.Email, "k.lee@hdec.com", verified: true)]), Policy);
+        Assert.Equal(aramco, addressLearned.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, addressLearned.ReasonCode);
+
+        // The buyer-operated portal pair (S3).
+        var pairFiled = CustomerIdentityResolver.Resolve(EBiddingPrint(),
+            Corpus(buyers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned) with { IsVerified = false }]), Policy);
+        Assert.Null(pairFiled.CustomerId);
+        Assert.DoesNotContain(pairFiled.Candidates, candidate => candidate.ReasonCode == CustomerMatchReasonCodes.LearnedPortalAccount);
+        var pairLearned = CustomerIdentityResolver.Resolve(EBiddingPrint(),
+            Corpus(buyers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned)]), Policy);
+        Assert.Equal(aramco, pairLearned.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, pairLearned.ReasonCode);
+
+        // A name written in the delivery address (the passage scan).
+        var nameEvidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 22,
+            Passages = [new DocumentPassage("delivery address", "KAHRABA ENERGY-DAMMAM", true)],
+        };
+        var nameFiled = CustomerIdentityResolver.Resolve(nameEvidence,
+            Corpus(buyers, [Filing(Sec, CustomerIdentifierType.Alias, "KAHRABA ENERGY", verified: false)]), Policy);
+        Assert.Null(nameFiled.CustomerId);
+        Assert.DoesNotContain(nameFiled.Candidates, candidate => candidate.CustomerId == Sec);
+        var nameLearned = CustomerIdentityResolver.Resolve(nameEvidence,
+            Corpus(buyers, [Filing(Sec, CustomerIdentifierType.Alias, "KAHRABA ENERGY", verified: true)]), Policy);
+        Assert.Equal(Sec, nameLearned.CustomerId);
+
+        // Whose domain it is: a filing at hdec.com on Hyundai neither demotes Aramco's own site nor offers Hyundai.
+        CustomerNameSnapshot[] epc = [new(aramco, "Saudi Aramco"), new(hyundai, "Hyundai Engineering & Construction")];
+        var siteEvidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 23, SenderEmail = "procurement@hdec.com",
+            Passages = [new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)],
+        };
+        var tieFiled = CustomerIdentityResolver.Resolve(siteEvidence,
+            Corpus(epc, [Filing(hyundai, CustomerIdentifierType.Email, "k.lee@hdec.com", verified: false)]), Policy);
+        Assert.Equal(aramco, tieFiled.CustomerId);
+        Assert.DoesNotContain(tieFiled.Candidates, candidate => candidate.CustomerId == hyundai);
+        var tieLearned = CustomerIdentityResolver.Resolve(siteEvidence,
+            Corpus(epc, [Filing(hyundai, CustomerIdentifierType.Email, "k.lee@hdec.com", verified: true)]), Policy);
+        Assert.Null(tieLearned.CustomerId);
+        Assert.Contains(tieLearned.Candidates, candidate => candidate.CustomerId == hyundai);
     }
 
     [Theory]

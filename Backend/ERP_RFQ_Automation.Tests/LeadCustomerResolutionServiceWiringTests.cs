@@ -95,16 +95,18 @@ public sealed class LeadCustomerResolutionServiceWiringTests
     [Theory]
     [InlineData(0)]
     [InlineData(205)]
-    public async Task A_consignees_older_human_decision_on_its_domain_is_not_crowded_out_by_newer_machine_links(
+    public async Task A_rivals_older_human_decisions_on_the_domain_are_not_crowded_out_by_newer_machine_links(
         int newerMachineLinks)
     {
-        // T08. SADAF's contact k.harbi@sabic.com ties sabic.com to SADAF; SABIC's own lead from
-        // a.buyer@sabic.com, linked by a person, ties it to SABIC too, so the domain is a group's and
-        // does not demote SABIC's own address. The prior-lead read took the 200 most recent linked leads
-        // on the domain and only THEN kept human decisions: 205 newer machine links from bulk@sabic.com
-        // pushed the person's decision past the cap, SABIC's tie was lost, and SADAF's contact demoted
-        // SABIC to a 0.70 suggestion under SADAF. With no machine links (the control) it linked.
-        const long sabic = 8751, sadaf = 8752, humanLead = 8760, newLead = 8999;
+        // T08. The prior-lead read took the 200 most recent linked leads on the domain and only THEN kept human
+        // decisions, so 205 newer machine links from bulk@sabic.com pushed every person's decision past the cap.
+        //
+        // OWNER DECISION 2026-09-13, policy A ("A whole email domain is never learned from confirmations"): this test used
+        // to prove the read through a decision that SHIELDED SABIC's address from SADAF's contact. No decision shields a
+        // consignee any more (see the next test), so T08 is proven where decisions still speak: two people each linked a
+        // lead from a different sabic.com mailbox to SADAF, and those decisions must still be read, however many newer
+        // machine links there are, to demote SABIC's address to a suggestion.
+        const long sabic = 8751, sadaf = 8752, newLead = 8999;
         const long firstMachineLead = 9_100;
         using var db = new TestDb();
         await using (var seed = db.ContextFor(null))
@@ -112,11 +114,13 @@ public sealed class LeadCustomerResolutionServiceWiringTests
             Seed.EnsureBusinessUnit(seed, Tenant);
             Seed.Customer(seed, sabic, Tenant, "Saudi Basic Industries Corporation");
             Seed.Customer(seed, sadaf, Tenant, "Saudi Petrochemical Company (SADAF)");
-            Seed.Contact(seed, 8771, Tenant, sadaf, email: "k.harbi@sabic.com");
 
-            var human = Seed.Lead(seed, humanLead, Tenant, buyersName: null);
-            human.Clientemail = "a.buyer@sabic.com";
-            human.ResolveCommercialIdentity(sabic, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            foreach (var (id, mailbox) in new[] { (8760L, "y.otaibi@sabic.com"), (8761L, "k.harbi@sabic.com") })
+            {
+                var human = Seed.Lead(seed, id, Tenant, buyersName: null);
+                human.Clientemail = mailbox;
+                human.ResolveCommercialIdentity(sadaf, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            }
 
             for (var i = 0; i < newerMachineLinks; i++)
             {
@@ -138,10 +142,102 @@ public sealed class LeadCustomerResolutionServiceWiringTests
         await using var context = db.ContextFor(Tenant);
         var outcome = await new LeadCustomerResolutionService(context).ResolveAsync(Tenant, newLead);
 
-        Assert.Equal(sabic, outcome.CustomerId);
-        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
-        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
-        Assert.Equal(0.88m, outcome.Confidence);
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Equal(sabic, outcome.Candidates[0].CustomerId);
+        Assert.True(outcome.Candidates[0].Confidence < 0.85m);
+        Assert.Contains(outcome.Candidates, candidate => candidate.CustomerId == sadaf);
+    }
+
+    [Fact]
+    public async Task PolicyA_one_persons_decision_on_another_mailbox_does_not_shield_the_consignee_from_a_rivals_contact()
+    {
+        // OWNER DECISION 2026-09-13, policy A: "A whole email domain is never learned from confirmations." SADAF's contact
+        // k.harbi@sabic.com is on SADAF's record. ONE person's link of a lead from a.buyer@sabic.com to SABIC used to be read
+        // as SABIC's hold on the whole domain: it shielded SABIC's address, and every later sabic.com print naming SABIC,
+        // from any mailbox, auto-linked SABIC at 0.88 over the contact (this was T08's own assertion). One decision is a fact
+        // about one mailbox. Through the entry point the extraction worker calls, so the domain read is proven too.
+        const long sabic = 8753, sadaf = 8754, humanLead = 8762, newLead = 8998;
+        using var db = new TestDb();
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, Tenant);
+            Seed.Customer(seed, sabic, Tenant, "Saudi Basic Industries Corporation");
+            Seed.Customer(seed, sadaf, Tenant, "Saudi Petrochemical Company (SADAF)");
+            Seed.Contact(seed, 8772, Tenant, sadaf, email: "k.harbi@sabic.com");
+
+            var human = Seed.Lead(seed, humanLead, Tenant, buyersName: null);
+            human.Clientemail = "a.buyer@sabic.com";
+            human.ResolveCommercialIdentity(sabic, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+
+            var lead = Seed.Lead(seed, newLead, Tenant, buyersName: null);
+            lead.Rfqno = null;
+            lead.Clientemail = "procurement@sabic.com";
+            lead.DeliveryLocation = "Saudi Basic Industries Corporation - Jubail";
+            seed.EmailIngests.Local.Single(i => i.Id == 20_000 + newLead).FromEmail =
+                "Procurement <procurement@sabic.com>";
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(Tenant);
+        var outcome = await new LeadCustomerResolutionService(context).ResolveAsync(Tenant, newLead);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Contains(outcome.Candidates, candidate => candidate.CustomerId == sadaf);
+        var site = Assert.Single(outcome.Candidates, candidate => candidate.CustomerId == sabic);
+        Assert.True(site.Confidence < 0.85m, $"SABIC was offered at {site.Confidence}, which is link strength.");
+    }
+
+    [Fact]
+    public async Task PolicyA_a_traders_address_confirmed_twice_links_the_next_message_although_its_pages_name_the_site_owner()
+    {
+        // OWNER DECISION 2026-09-13, policy A, in the words he approved: "A buyer's exact email address is learned once reps
+        // confirm it for the same customer twice, and never for anyone else." A trader buying for an SEC job prints SEC's
+        // delivery address. Reps linked two of trader.z@gmail.com's enquiries to Al-Rashid Trading, and the learner refused
+        // both because the page named SEC, a veto the owner never approved: the third enquiry auto-linked SEC at 0.88
+        // (the regression round's ADV5.20). The approved control: confirmed twice for one customer, never for another, the
+        // next message links at 1.00.
+        //
+        // ResolveCoreAsync, not ResolveAsync: SQLite stores the decimal as text, and its CHECK constraint refuses a 1.00
+        // candidate row that PostgreSQL accepts. Nothing here is about persistence.
+        const long rashid = 8755, sec = 8756, first = 8763, second = 8764, next = 8765;
+        const string trader = "trader.z@gmail.com";
+        using var db = new TestDb();
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, Tenant);
+            Seed.Customer(seed, rashid, Tenant, "Al-Rashid Trading");
+            Seed.Customer(seed, sec, Tenant, "Saudi Electricity Company");
+            foreach (var id in new[] { first, second, next })
+            {
+                var lead = Seed.Lead(seed, id, Tenant, buyersName: null);
+                lead.Rfqno = null;
+                lead.Clientemail = trader;
+                lead.DeliveryLocation = "Saudi Electricity Company-DAMMAM";
+                seed.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail = $"Trader <{trader}>";
+                if (id != next)
+                    lead.ResolveCommercialIdentity(rashid, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var reviewing = db.ContextFor(Tenant))
+        {
+            var confirmed = await reviewing.Leads.Include(l => l.EmailIngests).Include(l => l.LeadItems).SingleAsync(l => l.Id == second);
+            await new CustomerAliasLearner(reviewing).LearnFromReviewAsync(Tenant, confirmed, rashid, null, 99);
+            await reviewing.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(Tenant);
+        var saved = await context.Leads.IgnoreQueryFilters()
+            .Include(l => l.LeadItems).Include(l => l.EmailIngests)
+            .SingleAsync(l => l.Id == next);
+        var outcome = await new LeadCustomerResolutionService(context).ResolveCoreAsync(Tenant, saved, CancellationToken.None);
+
+        Assert.Equal(rashid, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, outcome.ReasonCode);
+        Assert.Equal(1.00m, outcome.Confidence);
     }
 
     [Fact]
@@ -405,11 +501,16 @@ public sealed class LeadCustomerResolutionServiceWiringTests
     }
 
     [Fact]
-    public async Task A_learned_domain_row_for_a_portal_host_is_neither_loaded_nor_linked_for_the_portals_system_mailbox()
+    public async Task A_learned_domain_row_is_never_loaded_or_linked_whatever_mailbox_carries_the_print()
     {
         // MUST STAY FIXED (W03.04), through the loader and the entry point. A learned etimad.gov.sa Domain row on Saudi
         // Aramco linked every SEC tender Etimad's no-reply mailbox carried to Aramco at 0.95.
-        const long sec = 8787, leadId = 8799;
+        //
+        // OWNER DECISION 2026-09-13, policy A ("2 A"): a whole email domain is never learned from confirmations; it only
+        // comes from a customer contact or an admin entry. This test used to assert that a person's own mailbox on the
+        // host still loaded the learned row. Under policy A neither mailbox loads it, and a row a person entered is
+        // loaded for both.
+        const long sec = 8787, portalOperator = 8788, leadId = 8799;
         const string portal = "no-reply@etimad.gov.sa";
         using var db = new TestDb();
         await using (var seed = db.ContextFor(null))
@@ -429,22 +530,49 @@ public sealed class LeadCustomerResolutionServiceWiringTests
             await seed.SaveChangesAsync();
         }
 
-        await using var context = db.ContextFor(Tenant);
-        var service = new LeadCustomerResolutionService(context);
         LeadClientEvidence Evidence(string sender) => new()
         {
             BusinessUnitId = Tenant, LeadId = leadId, SenderEmail = sender,
             Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)]
         };
-        var fromThePortal = await service.LoadCorpusAsync(Tenant, Evidence(portal), CancellationToken.None);
-        Assert.DoesNotContain(fromThePortal.Identifiers, identifier => identifier.IdentifierType == CustomerIdentifierType.Domain);
-        var fromAPerson = await service.LoadCorpusAsync(Tenant, Evidence("buyer@etimad.gov.sa"), CancellationToken.None);
-        Assert.Contains(fromAPerson.Identifiers, identifier => identifier.IdentifierType == CustomerIdentifierType.Domain
-                                                               && identifier.CustomerId == Aramco);
+        var mailboxes = new[] { portal, "buyer@etimad.gov.sa" };
 
-        var outcome = await service.ResolveAsync(Tenant, leadId);
-        Assert.Equal(sec, outcome.CustomerId);
-        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        await using (var context = db.ContextFor(Tenant))
+        {
+            var service = new LeadCustomerResolutionService(context);
+            foreach (var mailbox in mailboxes)
+            {
+                var loaded = await service.LoadCorpusAsync(Tenant, Evidence(mailbox), CancellationToken.None);
+                Assert.DoesNotContain(loaded.Identifiers, identifier => identifier.IdentifierType == CustomerIdentifierType.Domain);
+            }
+
+            var outcome = await service.ResolveAsync(Tenant, leadId);
+            Assert.Equal(sec, outcome.CustomerId);
+            Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        }
+
+        // The control: a Domain row a person entered (a customer contact) is loaded for both mailboxes.
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, portalOperator, Tenant, "National Tender Portal Company");
+            await seed.SaveChangesAsync();
+            seed.Set<CustomerIdentifier>().Add(Identifier(portalOperator, CustomerIdentifierType.Domain, "etimad.gov.sa", 0.95m));
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var context = db.ContextFor(Tenant))
+        {
+            var service = new LeadCustomerResolutionService(context);
+            foreach (var mailbox in mailboxes)
+            {
+                var loaded = await service.LoadCorpusAsync(Tenant, Evidence(mailbox), CancellationToken.None);
+                Assert.Contains(loaded.Identifiers, identifier => identifier.IdentifierType == CustomerIdentifierType.Domain
+                                                                  && identifier.CustomerId == portalOperator
+                                                                  && identifier.Source == "CustomerContact");
+                Assert.DoesNotContain(loaded.Identifiers, identifier => identifier.IdentifierType == CustomerIdentifierType.Domain
+                                                                        && identifier.CustomerId == Aramco);
+            }
+        }
     }
 
     private static CustomerIdentifier Identifier(long customerId, CustomerIdentifierType type, string value, decimal confidence)

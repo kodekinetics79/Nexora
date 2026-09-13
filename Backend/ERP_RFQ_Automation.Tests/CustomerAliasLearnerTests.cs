@@ -19,8 +19,12 @@ public sealed class CustomerAliasLearnerTests
     private const long Swcc = 8303;
 
     [Fact]
-    public async Task A_human_correction_teaches_sender_domain_name_and_portal_account()
+    public async Task A_human_correction_teaches_the_twice_confirmed_address_the_named_alias_and_the_named_pair_never_the_domain()
     {
+        // Owner decision 2026-09-13, policy A: a buyer's exact address is learned once reps confirm it for the same customer
+        // twice; a company name and a portal account only when the document itself names that customer; a whole email
+        // domain never. The seed decides lead 8402 for SEC from the same mailbox, so this review is the address's second
+        // confirmation, and the page names Saudi Electricity Company in its company-name field.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -33,8 +37,7 @@ public sealed class CustomerAliasLearnerTests
         var learned = await LearnedAsync(context);
         Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.Email
                                       && i.NormalizedValue == "57322@se.com.sa" && i.IsVerified);
-        Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.Domain
-                                      && i.NormalizedValue == "se.com.sa" && i.Confidence == 0.95m);
+        Assert.DoesNotContain(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Domain);
         Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.Alias
                                       && i.NormalizedValue == CustomerNameNormalizer.LooseKey("Saudi Electricity Company"));
         Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.PortalAccount
@@ -152,14 +155,15 @@ public sealed class CustomerAliasLearnerTests
     }
 
     [Theory]
-    // A consumer mailbox: one freight agent forwards bids for four different end customers.
-    [InlineData("Buyer Person <buyer.person@gmail.com>", "buyer.person@gmail.com")]
-    [InlineData("agent@live.com", "agent@live.com")]
-    // A procurement portal's relay, including a sending host the portal minted itself.
-    [InlineData("noreply@ariba.com", "noreply@ariba.com")]
-    [InlineData("system@s4.ansmtp.ariba.com", "system@s4.ansmtp.ariba.com")]
-    [InlineData("alerts@bidnet.com", "alerts@bidnet.com")]
-    public async Task P2_a_personal_or_relay_sender_never_becomes_an_identifier(string from, string address)
+    // A consumer mailbox confirmed once: one freight agent forwards bids for four different end customers, so one
+    // confirmation writes nothing.
+    [InlineData("Buyer Person <buyer.person@gmail.com>", "buyer.person@gmail.com", CustomerAliasLearner.SkipAddressNotYetConfirmed)]
+    [InlineData("agent@live.com", "agent@live.com", CustomerAliasLearner.SkipAddressNotYetConfirmed)]
+    // A procurement portal's relay, including a sending host the portal minted itself: never, however often.
+    [InlineData("noreply@ariba.com", "noreply@ariba.com", CustomerAliasLearner.SkipPersonalOrRelayAddress)]
+    [InlineData("system@s4.ansmtp.ariba.com", "system@s4.ansmtp.ariba.com", CustomerAliasLearner.SkipPersonalOrRelayAddress)]
+    [InlineData("alerts@bidnet.com", "alerts@bidnet.com", CustomerAliasLearner.SkipPersonalOrRelayAddress)]
+    public async Task P2_a_personal_or_relay_sender_never_becomes_an_identifier(string from, string address, string expectedSkip)
     {
         // THE CHANGE THIS TEST GUARDS. Until now ANY confirmed sender became a VERIFIED Email
         // identifier at 1.00 — the strongest, most exclusive thing this engine can write. On the
@@ -171,6 +175,9 @@ public sealed class CustomerAliasLearnerTests
         // matches exactly in the resolver. What the learner refuses to do is MINT one of these
         // from a single document. A consumer mailbox people link to the same customer AGAIN is learned
         // as an address (P2_a_free_mail_buyer_people_confirmed_twice_...); a relay never is.
+        //
+        // Owner decision 2026-09-13, policy A: the skip says which rule held. A consumer mailbox is not yet confirmed; a
+        // relay is a postman and is never learned.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -187,7 +194,7 @@ public sealed class CustomerAliasLearnerTests
         // not a free-mail domain, so it used to be learned as a Domain at 0.95 and would have
         // auto-linked the next portal-delivered RFQ from a completely different buyer.
         Assert.DoesNotContain(learned, i => i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.Contains(CustomerAliasLearner.SkipPersonalOrRelayAddress, result.SkipReasons);
+        Assert.Contains(expectedSkip, result.SkipReasons);
         // Everything else the document said is still learned: only the mailbox is refused.
         Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.Alias);
     }
@@ -200,6 +207,9 @@ public sealed class CustomerAliasLearnerTests
         // incident and stranded every sole trader on gmail: reps confirmed Al-Rashid Trading's buyer again and
         // again, and the next message was only ever offered at 0.65. One confirmation still writes nothing
         // (that is what closed the incident); the second for the same customer writes the ADDRESS, never gmail.com.
+        //
+        // Owner decision 2026-09-13, policy A: the rule now holds for every learnable address, and the first result says
+        // the address is not yet confirmed.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
@@ -215,7 +225,7 @@ public sealed class CustomerAliasLearnerTests
         await context.SaveChangesAsync();
         Assert.DoesNotContain(await ActiveAsync(context),
             i => i.IdentifierType is CustomerIdentifierType.Email or CustomerIdentifierType.Domain);
-        Assert.Contains(CustomerAliasLearner.SkipPersonalOrRelayAddress, firstResult.SkipReasons);
+        Assert.Contains(CustomerAliasLearner.SkipAddressNotYetConfirmed, firstResult.SkipReasons);
 
         var second = await LoadLeadAsync(context, 8402);
         FromGmailBuyer(second, Rashid);
@@ -230,7 +240,7 @@ public sealed class CustomerAliasLearnerTests
         Assert.Equal(1.00m, email.Confidence);
         Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, email.Source);
         Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.DoesNotContain(CustomerAliasLearner.SkipPersonalOrRelayAddress, secondResult.SkipReasons);
+        Assert.DoesNotContain(CustomerAliasLearner.SkipAddressNotYetConfirmed, secondResult.SkipReasons);
 
         // The next message from that buyer, with nothing else on it, is linked by the address.
         await using (var seed = db.ContextFor(null))
@@ -253,6 +263,7 @@ public sealed class CustomerAliasLearnerTests
         // The freight agent: one gmail account forwards bids for several end customers. Once a person links the
         // address to a second customer it names neither, so nothing is learned and the address the first
         // customer was taught is expired, and further confirmations for the first customer do not win it back.
+        // Owner decision 2026-09-13, policy A: an address is learned "never for anyone else", consumer or corporate alike.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
@@ -278,7 +289,7 @@ public sealed class CustomerAliasLearnerTests
         var result = await learner.LearnFromReviewAsync(Tenant, forSec, Sec, null, 101);
         await context.SaveChangesAsync();
 
-        Assert.Contains(CustomerAliasLearner.SkipFreeMailAddressConfirmedForAnotherCustomer, result.SkipReasons);
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
         Assert.Equal(1, result.Expired);
         Assert.DoesNotContain(await ActiveAsync(context),
             i => i.IdentifierType is CustomerIdentifierType.Email or CustomerIdentifierType.Domain);
@@ -287,7 +298,7 @@ public sealed class CustomerAliasLearnerTests
         FromGmailBuyer(again, Rashid);
         var againResult = await learner.LearnFromReviewAsync(Tenant, again, Rashid, null, 102);
         await context.SaveChangesAsync();
-        Assert.Contains(CustomerAliasLearner.SkipFreeMailAddressConfirmedForAnotherCustomer, againResult.SkipReasons);
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, againResult.SkipReasons);
         Assert.DoesNotContain(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Email);
     }
 
@@ -383,6 +394,8 @@ public sealed class CustomerAliasLearnerTests
         // The gate must not break the learning loop it protects. A buyer writing its own
         // initials is the commonest alias there is, and it scores only 0.67 on similarity —
         // which is exactly why AcronymKey is one of the three ways in.
+        // Owner decision 2026-09-13, policy A: it is trusted because the page itself names SWCC, by the initials in its
+        // company-name field, read against the whole customer book.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
@@ -475,14 +488,11 @@ public sealed class CustomerAliasLearnerTests
     [Fact]
     public async Task Re_confirmation_increments_the_observation_count()
     {
-        // CORROBORATION IS RECORDED, NOT ENFORCED — deliberately, and this test pins both
-        // halves so the day the owner takes that decision the data it needs is already real.
-        //
-        // The counter climbs with every human confirmation. Nothing reads it: the resolver's
-        // learned-alias tier asks IsVerified, Source and Confidence and stops, so ONE sighting
-        // still auto-links exactly as fifty would. Requiring a second sighting before auto-link
-        // makes the platform slower to learn, which is a product call the owner has not made.
-        // Where the enforcement would go is written on CustomerAliasLearner's <remarks>.
+        // Owner decision 2026-09-13, policy A: OBSERVATIONCOUNT IS HISTORY ONLY. Every human confirmation increments it, a
+        // relink's demotion or expiry leaves it alone, and no rule reads it: policy A counts the human-decided leads that
+        // carry a value, never a row's counter, because a counter cannot say who decided, whether the decision still stands
+        // or what its page said. The alias here is trusted from the first confirmation because the page itself names SEC,
+        // not because of the count, and the count keeps climbing so the history stays honest.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -497,7 +507,7 @@ public sealed class CustomerAliasLearnerTests
                 .SingleAsync(i => i.IdentifierType == CustomerIdentifierType.Alias && i.EffectiveTo == null);
             Assert.Equal(confirmation, row.ObservationCount);
             Assert.NotNull(row.LastObservedOn);
-            // Unchanged on purpose: the FIRST sighting is already authoritative.
+            // Unchanged on purpose: the FIRST sighting on a page naming the customer is already authoritative.
             Assert.True(row.IsVerified);
             Assert.Contains(CustomerIdentifierSources.TrustedForAutoLink, source =>
                 string.Equals(source, row.Source, StringComparison.Ordinal));
@@ -559,8 +569,12 @@ public sealed class CustomerAliasLearnerTests
     }
 
     [Fact]
-    public async Task P5_changing_the_customer_expires_what_this_lead_previously_taught()
+    public async Task P5_changing_the_customer_expires_the_address_and_numbering_shape_and_demotes_the_name_and_pair()
     {
+        // Owner decision 2026-09-13, policy A: a relink EXPIRES the address (an Email row of any grade blocks the right
+        // customer's contact) and the numbering shape (already unverified, so a demotion would change nothing and keep the
+        // suggestion alive), and DEMOTES the company name and the portal account to unverified with their counts kept.
+        // Nothing verified is written for the customer the lead moved to.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -574,12 +588,21 @@ public sealed class CustomerAliasLearnerTests
         var result = await learner.LearnFromReviewAsync(Tenant, lead, Aramco, Sec, 101);
         await context.SaveChangesAsync();
 
+        var secRows = await context.Set<CustomerIdentifier>().Where(i => i.CustomerId == Sec).ToListAsync();
         Assert.True(result.Expired > 0);
-        Assert.Empty(await context.Set<CustomerIdentifier>()
-            .Where(i => i.CustomerId == Sec && i.EffectiveTo == null
-                        && i.Source == CustomerIdentifierSources.LeadReviewLearned)
-            .ToListAsync());
+        Assert.Equal(result.Expired, secRows.Count(i => i.EffectiveTo != null));
+        Assert.DoesNotContain(secRows, i => i.EffectiveTo == null
+                                            && i.IdentifierType is CustomerIdentifierType.Email or CustomerIdentifierType.RfqNumberPattern);
+        foreach (var type in new[] { CustomerIdentifierType.Alias, CustomerIdentifierType.PortalAccount })
+        {
+            var row = Assert.Single(secRows, i => i.EffectiveTo == null && i.IdentifierType == type);
+            Assert.False(row.IsVerified);
+            Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, row.Source);
+            Assert.Equal(1, row.ObservationCount);
+        }
+        Assert.Contains(CustomerAliasLearner.SkipContradictedFactDemoted, result.SkipReasons);
         Assert.All(await LearnedAsync(context), i => Assert.Equal(Aramco, i.CustomerId));
+        Assert.DoesNotContain(await ActiveAsync(context), i => i.CustomerId == Aramco && i.IsVerified);
     }
 
     [Fact]
@@ -869,6 +892,8 @@ public sealed class CustomerAliasLearnerTests
         // CASE B. Hyundai E&C buys for a Ras Tanura job and prints its own buyer's address; the
         // reviewer rightly says the DOCUMENT is Saudi Aramco's. That wrote hdec.com as Aramco's
         // Domain at 0.95, and S2 decides before the contractor and consignee rules ever run.
+        // Owner decision 2026-09-13, policy A: one confirmation of the address writes nothing, and the domain is never
+        // learned from confirmations, not even as a suggestion.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -879,126 +904,14 @@ public sealed class CustomerAliasLearnerTests
         var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Aramco, null, 99);
         await context.SaveChangesAsync();
 
-        Assert.Contains(CustomerAliasLearner.SkipDomainNotTiedToCustomer, result.SkipReasons);
+        Assert.Contains(CustomerAliasLearner.SkipAddressNotYetConfirmed, result.SkipReasons);
         var rows = await ActiveAsync(context);
         // Not even a suggestion: Email is exclusive whatever its source, so an unverified row would
         // make saving Hyundai's real contact at this address fail.
         Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
-        var domain = Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.Equal("hdec.com", domain.NormalizedValue);
-        Assert.False(domain.IsVerified);
-        Assert.Equal(CustomerAliasLearner.UnverifiedAliasSource, domain.Source);
-        Assert.DoesNotContain(CustomerIdentifierSources.TrustedForAutoLink, source =>
-            string.Equals(source, domain.Source, StringComparison.Ordinal));
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
         // The name on the document is still learned: only the intermediary's mailbox is refused.
         Assert.Contains(await LearnedAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias);
-    }
-
-    [Fact]
-    public async Task P17_a_domain_another_customer_already_writes_from_is_not_filed_against_this_one()
-    {
-        // Hyundai E&C is a customer too, with a contact at hdec.com. P3 used to skip only the Email
-        // half; the Domain half was still written for Aramco, and all hdec.com mail was AMBIGUOUS
-        // from then on.
-        using var db = new TestDb();
-        await using var context = await SeedAsync(db);
-        await using (var seed = db.ContextFor(null))
-        {
-            Seed.Customer(seed, Hyundai, Tenant, "Hyundai Engineering & Construction");
-            Seed.Contact(seed, 9301, Tenant, Hyundai, "procurement@hdec.com");
-            await seed.SaveChangesAsync();
-        }
-        var lead = await LoadLeadAsync(context, 8401);
-        StripAddresses(lead);
-        lead.CustomerBuyerEmailExtracted = "buyer@hdec.com";
-
-        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Aramco, null, 99);
-        await context.SaveChangesAsync();
-
-        Assert.Contains(CustomerAliasLearner.SkipDomainClaimedByAnotherCustomer, result.SkipReasons);
-        Assert.DoesNotContain(await ActiveAsync(context),
-            i => i.IdentifierType is CustomerIdentifierType.Email or CustomerIdentifierType.Domain);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task P17_a_contact_on_the_customer_ties_its_domain_so_the_first_confirmation_is_trusted(bool withContact)
-    {
-        using var db = new TestDb();
-        await using var context = await SeedAsync(db);
-        await ForgetSiblingAddressesAsync(context);
-        if (withContact)
-        {
-            await using var seed = db.ContextFor(null);
-            Seed.Contact(seed, 9302, Tenant, Sec, "procurement@se.com.sa");
-            await seed.SaveChangesAsync();
-        }
-        var lead = await LoadLeadAsync(context, 8401);
-        StripAddresses(lead);
-        lead.CustomerBuyerEmailExtracted = "57322@se.com.sa";
-
-        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
-        await context.SaveChangesAsync();
-
-        var rows = await ActiveAsync(context);
-        var domain = Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
-        if (withContact)
-        {
-            var email = Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
-            Assert.Equal("57322@se.com.sa", email.NormalizedValue);
-            Assert.True(email.IsVerified);
-            Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, email.Source);
-            Assert.True(domain.IsVerified);
-            Assert.Equal(0.95m, domain.Confidence);
-            Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, domain.Source);
-        }
-        else
-        {
-            // se.com.sa does not spell "Saudi Electricity": initials never tie a domain, because
-            // se.com is Schneider Electric's. With no contact and no earlier human decision the
-            // first confirmation is a suggestion.
-            Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
-            Assert.False(domain.IsVerified);
-            Assert.Equal(CustomerAliasLearner.UnverifiedAliasSource, domain.Source);
-            Assert.Contains(CustomerAliasLearner.SkipDomainNotTiedToCustomer, result.SkipReasons);
-        }
-    }
-
-    [Fact]
-    public async Task P17_a_second_human_confirmation_from_the_same_domain_promotes_the_unverified_domain()
-    {
-        // The first confirmation from an untied domain is a suggestion; the lead it confirmed is
-        // itself the earlier human decision that ties the domain for the next one. The promotion
-        // must move the SHELF as well as the flag, or the resolver, which checks Source, would
-        // ignore the row forever.
-        using var db = new TestDb();
-        await using var context = await SeedAsync(db);
-        await ForgetSiblingAddressesAsync(context);
-        var learner = new CustomerAliasLearner(context);
-
-        var first = await LoadLeadAsync(context, 8401);
-        StripAddresses(first);
-        first.CustomerBuyerEmailExtracted = "57322@se.com.sa";
-        await learner.LearnFromReviewAsync(Tenant, first, Sec, null, 99);
-        await context.SaveChangesAsync();
-        var suggested = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.False(suggested.IsVerified);
-
-        var second = await LoadLeadAsync(context, 8402);
-        StripAddresses(second);
-        second.CustomerBuyerEmailExtracted = "92442@se.com.sa";
-        await learner.LearnFromReviewAsync(Tenant, second, Sec, null, 100);
-        await context.SaveChangesAsync();
-
-        var rows = await ActiveAsync(context);
-        var domain = Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.True(domain.IsVerified);
-        Assert.Equal(0.95m, domain.Confidence);
-        Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, domain.Source);
-        Assert.Equal(2, domain.ObservationCount);
-        Assert.Contains(rows, i => i.IdentifierType == CustomerIdentifierType.Email
-                                   && i.NormalizedValue == "92442@se.com.sa" && i.IsVerified);
     }
 
     [Theory]
@@ -1009,7 +922,7 @@ public sealed class CustomerAliasLearnerTests
     [InlineData("aramco.com", "Saudi Aramco", true)]
     [InlineData("saudiaramco.com", "Saudi Aramco", true)]
     [InlineData("mail.sabic.com", "SABIC", true)]
-    // Initials never tie a domain: se.com is Schneider Electric's, swcc could be anybody's.
+    // Initials never spell a name: se.com is Schneider Electric's, swcc could be anybody's.
     [InlineData("se.com.sa", "Saudi Electricity Company", false)]
     [InlineData("se.com", "Saudi Electricity Company", false)]
     [InlineData("swcc.gov.sa", "Saline Water Conversion Corporation", false)]
@@ -1023,53 +936,29 @@ public sealed class CustomerAliasLearnerTests
     [InlineData("watertech.com", "National Water Company", false)]
     [InlineData(null, "Saudi Aramco", false)]
     [InlineData("aramco.com", null, false)]
-    public void P17_a_domain_is_tied_to_a_customer_by_its_own_name_never_by_initials(
+    public void The_tenants_own_domain_reading_spells_a_name_by_its_words_never_by_initials(
         string? domain, string? name, bool spells)
     {
-        // The learner ties customers with the strict reading and our own names use the permissive one; on
-        // every row here the two agree.
-        Assert.Equal(spells, CustomerAliasLearner.DomainLabelSpellsCustomerName(domain, name));
+        // The reading TenantSelfIdentity.IsOurs asks of the tenant's own names. Owner decision 2026-09-13, policy A: nothing
+        // ties a domain to a CUSTOMER by its spelling any more, so the strict customer reading is gone and this is the only one.
         Assert.Equal(spells, CustomerAliasLearner.DomainLabelSpellsName(domain, name));
     }
-
-    [Theory]
-    // One sector or place word of the name. Each of these tied its domain to the customer on the FIRST
-    // confirmation: one mail from desk@pipes.com, a pipe marketplace, wrote the address at 1.00 and the
-    // domain at 0.95, and the next trader there was linked to Arabian Pipes whatever the page said.
-    [InlineData("bank.com", "Al Rajhi Bank")]
-    [InlineData("pipes.com", "Arabian Pipes Company")]
-    [InlineData("water.com", "National Water Company")]
-    [InlineData("jubail.com", "Power and Water Utility Company for Jubail and Yanbu (Marafiq)")]
-    [InlineData("utility.com", "Power and Water Utility Company for Jubail and Yanbu (Marafiq)")]
-    [InlineData("electricity.com", "Saudi Electricity Company")]
-    // A name that keys to one place word is a city, however whole.
-    [InlineData("dammam.com", "Al Dammam Trading Co.")]
-    public void P17_one_sector_or_place_word_of_a_customers_name_does_not_spell_that_customer(string domain, string name)
-        => Assert.False(CustomerAliasLearner.DomainLabelSpellsCustomerName(domain, name));
-
-    [Theory]
-    // The only distinctive word, the bracketed trade name, the whole key, the whole name run together.
-    [InlineData("aramco.com", "Saudi Aramco")]
-    [InlineData("marafiq.com.sa", "Power and Water Utility Company for Jubail and Yanbu (Marafiq)")]
-    [InlineData("marafiq.com.sa", "Marafiq")]
-    [InlineData("satorp.com", "Saudi Aramco Total Refining & Petrochemical Co. (SATORP)")]
-    [InlineData("mail.sabic.com", "SABIC")]
-    [InlineData("alrajhibank.com.sa", "Al Rajhi Bank")]
-    public void P17_a_customers_own_word_trade_name_or_whole_name_still_spells_it(string domain, string name)
-        => Assert.True(CustomerAliasLearner.DomainLabelSpellsCustomerName(domain, name));
 
     [Fact]
     public void P17_our_own_name_keeps_the_permissive_reading()
     {
-        // TenantSelfIdentity.IsOurs asks the permissive reading on purpose: a colleague with no login on a
-        // domain that spells one of our distinctive words is ours, and the error costs a suggestion.
+        // TenantSelfIdentity.IsOurs asks the permissive reading on purpose: a colleague with no login on a domain that spells
+        // one of our distinctive words is ours, and the error costs a suggestion.
         Assert.True(CustomerAliasLearner.DomainLabelSpellsName("alquraishi.com.sa", "ALI ZAID AL-QURAISHI & PARTNERS"));
-        Assert.False(CustomerAliasLearner.DomainLabelSpellsCustomerName("alquraishi.com.sa", "ALI ZAID AL-QURAISHI & PARTNERS"));
     }
 
     [Fact]
     public async Task P17_a_marketplace_on_a_sector_word_domain_is_not_tied_to_a_customer_by_one_confirmation()
     {
+        // One mail from desk@pipes.com, a pipe marketplace, confirmed for Arabian Pipes Company wrote the address at 1.00
+        // and the domain at 0.95, and the next trader there was linked to Arabian Pipes whatever the page said.
+        // Owner decision 2026-09-13, policy A: one confirmation of the address writes nothing, and a whole email domain is
+        // never learned from confirmations.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
@@ -1091,11 +980,8 @@ public sealed class CustomerAliasLearnerTests
 
         var rows = await ActiveAsync(context);
         Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
-        var domain = Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.Equal("pipes.com", domain.NormalizedValue);
-        Assert.False(domain.IsVerified);
-        Assert.Equal(CustomerAliasLearner.UnverifiedAliasSource, domain.Source);
-        Assert.Contains(CustomerAliasLearner.SkipDomainNotTiedToCustomer, result.SkipReasons);
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
+        Assert.Contains(CustomerAliasLearner.SkipAddressNotYetConfirmed, result.SkipReasons);
 
         // Another trader on the marketplace sends an SEC delivery: the domain no longer decides it for Arabian Pipes.
         await using (var seed = db.ContextFor(null))
@@ -1117,14 +1003,15 @@ public sealed class CustomerAliasLearnerTests
     // ── P23: a mailbox provider nobody listed ────────────────────────────────
 
     [Theory]
-    [InlineData("agent@fastmail.com", false)]          // on the list: nothing at all
-    [InlineData("agent@quietpost-mail.net", true)]     // not on any list: a suggestion, never a fact
-    public async Task P23_a_consumer_mailbox_never_becomes_a_domain_fact_on_one_confirmation(string from, bool filedForReview)
+    [InlineData("agent@fastmail.com")]          // on the consumer-provider list
+    [InlineData("agent@quietpost-mail.net")]    // not on any list
+    public async Task P23_a_consumer_mailbox_never_becomes_a_domain_fact_on_one_confirmation(string from)
     {
         // A freight agent forwards an SEC bid from a consumer provider. One confirmation made the
         // whole provider SEC's Domain at 0.95, and any later sender there, for any buyer, linked to
-        // SEC at S2. A list of providers can never be complete, so the rule is the same one that
-        // stops a contractor: a domain nothing ties to the customer is not a fact.
+        // SEC at S2. A list of providers can never be complete.
+        // Owner decision 2026-09-13, policy A: a whole email domain is never learned from confirmations, listed provider or
+        // not, so not even a suggestion is filed for review.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -1135,11 +1022,9 @@ public sealed class CustomerAliasLearnerTests
         await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
         await context.SaveChangesAsync();
 
-        var rows = await ActiveAsync(context);
-        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
-        Assert.DoesNotContain(await LearnedAsync(context), i => i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.Equal(filedForReview, rows.Any(i => i.IdentifierType == CustomerIdentifierType.Domain
-                                                  && i.Source == CustomerAliasLearner.UnverifiedAliasSource));
+        Assert.DoesNotContain(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Email);
+        Assert.DoesNotContain(await context.Set<CustomerIdentifier>().ToListAsync(),
+            i => i.IdentifierType == CustomerIdentifierType.Domain);
     }
 
     [Fact]
@@ -1148,6 +1033,8 @@ public sealed class CustomerAliasLearnerTests
         // An SEC portal mail carries 57322@se.com.sa as the sender AND as the buyer address on the
         // page. Both were proposed, two identical rows were staged, the unique index refused the
         // flush, and the review's learning was rolled back as "learningFailed".
+        // Owner decision 2026-09-13, policy A: the seed's lead 8402 is the address's other confirmation, and no domain row
+        // is written.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -1158,7 +1045,7 @@ public sealed class CustomerAliasLearnerTests
 
         var rows = await ActiveAsync(context);
         Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
-        Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
     }
 
     [Theory]
@@ -1175,8 +1062,10 @@ public sealed class CustomerAliasLearnerTests
         // colleague with no login or a freight agent, therefore vouched for itself: the second
         // confirmation wrote its whole domain as that customer's at 0.95 and its address at 1.00, and
         // the next person on that domain forwarding another buyer's bid linked to the same customer at
-        // S2, whatever the document said. The envelope says who carried the mail; only a buyer address
-        // printed on an earlier document speaks for the buyer.
+        // S2, whatever the document said.
+        //
+        // Owner decision 2026-09-13, policy A: a whole email domain is never learned from confirmations, of any grade, and an
+        // exact address only once reps confirm that same address for the same customer twice.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await ForgetSiblingAddressesAsync(context);
@@ -1200,20 +1089,19 @@ public sealed class CustomerAliasLearnerTests
         var rows = await ActiveAsync(context);
         if (first == second)
         {
-            // THE SAME MAILBOX CONFIRMED TWICE FOR ONE CUSTOMER IS THAT ADDRESS, NEVER ITS DOMAIN (LG01). The consumer
-            // mailbox rule, applied to an organisation's mailbox: exactly this address is learned, verified, and
-            // nothing else on the domain is. The rest of this test is unchanged: the domain stays unverified and the
-            // next person on it is not linked by it.
+            // THE SAME MAILBOX CONFIRMED TWICE FOR ONE CUSTOMER IS THAT ADDRESS, NEVER ITS DOMAIN (LG01).
             var address = Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
             Assert.Equal(first, address.NormalizedValue);
             Assert.True(address.IsVerified);
+            Assert.DoesNotContain(CustomerAliasLearner.SkipAddressNotYetConfirmed, result.SkipReasons);
         }
         else
         {
             Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email);
+            Assert.Contains(CustomerAliasLearner.SkipAddressNotYetConfirmed, result.SkipReasons);
         }
-        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain && i.IsVerified);
-        Assert.Contains(CustomerAliasLearner.SkipDomainNotTiedToCustomer, result.SkipReasons);
+        Assert.DoesNotContain(await context.Set<CustomerIdentifier>().ToListAsync(),
+            i => i.IdentifierType == CustomerIdentifierType.Domain);
 
         // The next person on that domain forwards an Aramco bid. The domain no longer decides it for SEC
         // at 0.95. The two SEC decisions from the domain still speak against Aramco's delivery address,
@@ -1315,11 +1203,12 @@ public sealed class CustomerAliasLearnerTests
     }
 
     [Fact]
-    public async Task P11_a_second_human_decision_on_the_same_portal_pair_promotes_it()
+    public async Task P11_a_pair_confirmed_again_on_prints_that_name_nobody_is_never_promoted()
     {
-        // A print that names nobody ties nothing, so the first confirmation is a suggestion. The lead it
-        // confirmed is itself the earlier human decision that ties the pair on the next one, exactly as
-        // P10 ties a mailbox domain, and the promotion moves the shelf as well as the flag.
+        // A print that names nobody ties nothing, so the first confirmation is a suggestion. A second decision on another such
+        // print used to promote the pair to 0.92 on the strength of the first, and a wrong pick repeated on pair-only prints
+        // promoted it just the same. Owner decision 2026-09-13, policy A: a portal account is learned only when the document
+        // itself names that customer, so no earlier decision vouches for a pair however often it is repeated.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var sibling = await LoadLeadAsync(context, 8402);
@@ -1339,14 +1228,14 @@ public sealed class CustomerAliasLearnerTests
         StripAddresses(second);
         second.CustomerCompanyNameExtracted = null;
         second.SupplierAccountRefOnDocument = "2004414";
-        await learner.LearnFromReviewAsync(Tenant, second, Sec, null, 100);
+        var result = await learner.LearnFromReviewAsync(Tenant, second, Sec, null, 100);
         await context.SaveChangesAsync();
 
         var pair = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.PortalAccount);
-        Assert.True(pair.IsVerified);
-        Assert.Equal(0.92m, pair.Confidence);
-        Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, pair.Source);
+        Assert.False(pair.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, pair.Source);
         Assert.Equal(2, pair.ObservationCount);
+        Assert.Contains(CustomerAliasLearner.SkipPortalAccountNotTiedToCustomer, result.SkipReasons);
     }
 
     [Fact]
@@ -1482,12 +1371,14 @@ public sealed class CustomerAliasLearnerTests
     }
 
     [Fact]
-    public async Task P5_the_next_confirmation_promotes_a_mailbox_a_mis_click_relink_demoted_back_to_its_customer()
+    public async Task P5_after_a_relink_the_address_is_nobodys_the_domain_stays_demoted_and_only_what_the_page_names_comes_back()
     {
-        // THE DEFECT (T25 residual). One mis-click relink demotes SEC's fifty-times-confirmed address and domain, as it
-        // should, and "the next confirmation promotes them back". For the portal pair it did. For the mailbox the next
-        // SEC confirmation read the relink's own Aramco decision as a veto and skipped the demoted rows, so the address
-        // and domain stayed unverified and SEC's next plain mail fell from 1.00 to a 0.65 tie with Aramco.
+        // One mis-click relink of an SEC print to Aramco takes SEC's fifty-times-confirmed facts off the auto-link tiers. The
+        // rule this replaces promoted SEC's address and domain back on the next SEC confirmation by setting the relink's own
+        // Aramco decision aside, and the same machinery later gave an agent's domain back to the wrong customer.
+        // Owner decision 2026-09-13, policy A: the relink's decision for Aramco stands, so the address is nobody's; a whole
+        // email domain is never learned from confirmations, so the domain stays demoted; the company name and the portal
+        // account come back because SEC's own page names SEC. SEC's next plain mail asks a person. Remedy: a contact on SEC.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         context.Set<CustomerIdentifier>().AddRange(
@@ -1514,15 +1405,22 @@ public sealed class CustomerAliasLearnerTests
         relinked.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
         await learner.LearnFromReviewAsync(Tenant, relinked, Aramco, Sec, 101);
         await context.SaveChangesAsync();
+        Assert.DoesNotContain(await ActiveAsync(context),
+            i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "57322@se.com.sa");
 
         var confirmed = await LoadLeadAsync(context, 8402);
         SecPortalPrint(confirmed);
         var result = await learner.LearnFromReviewAsync(Tenant, confirmed, Sec, null, 102);
         await context.SaveChangesAsync();
 
-        Assert.DoesNotContain(CustomerAliasLearner.SkipDomainNotTiedToCustomer, result.SkipReasons);
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
         var active = await ActiveAsync(context);
-        foreach (var type in new[] { CustomerIdentifierType.Email, CustomerIdentifierType.Domain })
+        Assert.DoesNotContain(active, i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "57322@se.com.sa");
+        var domain = Assert.Single(active, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain);
+        Assert.False(domain.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, domain.Source);
+        Assert.Equal(50, domain.ObservationCount);
+        foreach (var type in new[] { CustomerIdentifierType.Alias, CustomerIdentifierType.PortalAccount })
         {
             var row = Assert.Single(active, i => i.CustomerId == Sec && i.IdentifierType == type);
             Assert.True(row.IsVerified);
@@ -1531,26 +1429,24 @@ public sealed class CustomerAliasLearnerTests
         }
 
         var fromTheMailbox = await ResolveWithoutSavingAsync(db, 8610);
-        Assert.Equal(Sec, fromTheMailbox.CustomerId);
-        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, fromTheMailbox.ReasonCode);
-        var fromTheDomain = await ResolveWithoutSavingAsync(db, 8611);
-        Assert.Equal(Sec, fromTheDomain.CustomerId);
-        Assert.Equal(CustomerMatchReasonCodes.SenderDomain, fromTheDomain.ReasonCode);
+        Assert.Null(fromTheMailbox.CustomerId);
+        Assert.DoesNotContain(fromTheMailbox.Candidates, candidate => candidate.Confidence >= 0.85m);
+        Assert.Null((await ResolveWithoutSavingAsync(db, 8611)).CustomerId);
     }
 
     [Theory]
     [InlineData(true)]
-    // The control: a pick on a page that names nobody is the EPC shape, and it still vetoes the domain.
+    // The control: a pick on a page that names nobody, the EPC shape.
     [InlineData(false)]
-    public async Task P10_a_wrong_pick_against_its_own_page_stops_vetoing_the_address_once_the_right_customer_is_confirmed_twice(
+    public async Task P10_a_standing_decision_for_another_customer_makes_the_address_nobodys_however_often_the_right_customer_is_confirmed(
         bool pickNamedTheRightCustomer)
     {
-        // THE DEFECT (T26 residual). One SEC print from 57322@se.com.sa, its company-name field "Saudi Electricity
-        // Company", was linked to Saudi Aramco and converted, so it can never be relinked. That single decision vetoed
-        // se.com.sa for SEC for ever: two correct SEC confirmations later the domain was still unverified, no address
-        // was written, and SEC's next plain mail was UNRESOLVED. The set-aside pick releases the confirmed address only:
-        // the domain stays unverified while that Aramco decision stands, because an EPC contractor's requisition prints
-        // the site owner in its company field too (P10_an_EPC_contractors_domain_is_not_written_...).
+        // One SEC print from 57322@se.com.sa, its company-name field "Saudi Electricity Company", was linked to Saudi Aramco
+        // and converted, so it can never be relinked. A rule then set such a pick aside as "against its own page" and released
+        // the address to SEC after two SEC confirmations; the same release wrote an EPC contractor's buyer as the site owner's
+        // (P10_an_EPC_contractors_domain_...), because a mis-click and a contractor's own job look the same from here.
+        // Owner decision 2026-09-13, policy A: an address is learned "never for anyone else", whatever the page of the
+        // standing pick said, and a whole email domain is never learned from confirmations. Remedy: a contact on SEC.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
@@ -1576,21 +1472,20 @@ public sealed class CustomerAliasLearnerTests
         SecPortalPrint(firstConfirmation);
         await learner.LearnFromReviewAsync(Tenant, firstConfirmation, Sec, null, 100);
         await context.SaveChangesAsync();
-        // One confirmation against one wrong pick is not yet enough.
         Assert.DoesNotContain(await ActiveAsync(context),
             i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain && i.IsVerified);
 
         var secondConfirmation = await LoadLeadAsync(context, 8403);
         SecPortalPrint(secondConfirmation);
         secondConfirmation.ResolveCommercialIdentity(Sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
-        await learner.LearnFromReviewAsync(Tenant, secondConfirmation, Sec, null, 101);
+        var result = await learner.LearnFromReviewAsync(Tenant, secondConfirmation, Sec, null, 101);
         await context.SaveChangesAsync();
 
         var rows = await ActiveAsync(context);
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "57322@se.com.sa");
         Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain
                                          && i.NormalizedValue == "se.com.sa" && i.IsVerified);
-        Assert.Equal(pickNamedTheRightCustomer, rows.Any(i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Email
-                                                               && i.NormalizedValue == "57322@se.com.sa" && i.IsVerified));
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
     }
 
     private const string RasTanura = "Saudi Aramco Ras Tanura Refinery";
@@ -1603,6 +1498,9 @@ public sealed class CustomerAliasLearnerTests
         // rows. The demoted rows then tied the domain back to SEC before anyone's decisions were read, so ONE SEC
         // confirmation from another mailbox there wrote gulfagency.com back as SEC's verified 0.95 Domain, and agent3's
         // next Ras Tanura job linked SEC at 0.95 whatever its page said. Base asked a person; this linked the wrong client.
+        // Owner decision 2026-09-13, policy A: the relink expires agent1's address and demotes the domain, and the next SEC
+        // confirmation, from agent2, writes nothing: one confirmation of an address is not enough, and a whole email domain
+        // is never learned from confirmations, so no demoted row can hand the domain back.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
@@ -1700,9 +1598,9 @@ public sealed class CustomerAliasLearnerTests
 
         Assert.DoesNotContain(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Domain
                                                                 && i.NormalizedValue == "hdec.com" && i.IsVerified);
-        // The address K Lee's Aramco confirmations printed may still be released: nothing here tells this apart from
-        // the 57322@se.com.sa case above. That Aramco address makes Park's SEC job an offer with SEC on it rather than
-        // a link, which is the owner's call. What must never happen is a link to Aramco off the domain.
+        // Owner decision 2026-09-13, policy A: no address is learned either, because people linked k.lee@hdec.com to two
+        // customers and an address is learned "never for anyone else"; and no domain is ever learned from confirmations.
+        // What must never happen is a link to Aramco off the domain.
         var parksSecJob = await ResolveWithoutSavingAsync(db, 8643);
         Assert.NotEqual(Aramco, parksSecJob.CustomerId);
         Assert.Contains(parksSecJob.Candidates, candidate => candidate.CustomerId == Sec);
@@ -1811,6 +1709,9 @@ public sealed class CustomerAliasLearnerTests
         // THE DEFECT (LF08). SEC's own name in Arabic cannot be compared letter by letter with "Saudi Electricity
         // Company", so it read as unlike SEC and was filed unverified however often people confirmed it; the next Arabic
         // print resolved to nothing, where base linked it at 0.90.
+        // ASSUMPTION (owner decision 2026-09-13 left it open; the recommendation he was given): an Arabic-only company name is
+        // trusted after two confirmations for the same customer with none for another, or at once when the document's header
+        // or address names that customer. This test is the "two confirmations" half.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await SeedArabicPrintAsync(db, 8612);
@@ -1846,6 +1747,8 @@ public sealed class CustomerAliasLearnerTests
     [InlineData(false)]
     public async Task P8_a_company_name_in_another_script_is_trusted_at_once_only_where_the_page_names_that_customer(bool pickedTheNamedCustomer)
     {
+        // ASSUMPTION (owner decision 2026-09-13 left it open; the recommendation he was given): an Arabic-only company name is
+        // trusted at once when the document's header or address names that customer, and never while the page names another.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await SeedArabicPrintAsync(db, 8612);
@@ -1879,14 +1782,19 @@ public sealed class CustomerAliasLearnerTests
     // ── P22: a correction reaches what an earlier lead taught ────────────────
 
     [Fact]
-    public async Task P22_relinking_a_lead_expires_the_wrong_customers_facts_even_when_another_lead_taught_them()
+    public async Task P22_a_relink_takes_the_wrong_customers_address_and_demotes_its_domain_and_name_even_when_another_lead_taught_them()
     {
         // THE STORY OF THE FINDING, END TO END. Lead A, an SEC print from 57322@se.com.sa, was
         // linked to Saudi Aramco and converted to an RFQ, so it can never be relinked; it taught
         // Aramco the address, the domain and SEC's name. Lead B from the same sender auto-linked
         // to Aramco at 1.00 and the rep relinked it to SEC. P5 expired nothing (no row carried B's
         // id), the SEC address was refused as ALIAS_CONFLICT, and lead C from the same sender
-        // still went to Aramco. Deactivating Aramco or SQL were the only remedies.
+        // still went to Aramco.
+        //
+        // Owner decision 2026-09-13, policy A: the relink reaches what lead A taught, expires Aramco's address and demotes its
+        // domain and name. SEC does not get the address: lead A's decision for Aramco still stands, so the address is
+        // nobody's, and SEC's contact at procurement@se.com.sa vouches for nothing. Nor does SEC get the domain, which is never
+        // learned from confirmations. Lead C is therefore asked about, not linked to either customer.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var leadA = await LoadLeadAsync(context, 8401);
@@ -1906,15 +1814,21 @@ public sealed class CustomerAliasLearnerTests
         var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, leadB, Sec, Aramco, 101);
         await context.SaveChangesAsync();
 
-        Assert.Equal(3, result.Expired);
+        Assert.Equal(1, result.Expired);
         Assert.DoesNotContain(CustomerAliasLearner.SkipAliasConflict, result.SkipReasons);
-        Assert.Empty(await context.Set<CustomerIdentifier>()
-            .Where(i => i.CustomerId == Aramco && i.EffectiveTo == null).ToListAsync());
-        var learned = await LearnedAsync(context);
-        Assert.Contains(learned, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Email
-                                      && i.NormalizedValue == "57322@se.com.sa" && i.IsVerified);
-        Assert.Contains(learned, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain
-                                      && i.NormalizedValue == "se.com.sa" && i.IsVerified);
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
+        var active = await ActiveAsync(context);
+        Assert.DoesNotContain(active, i => i.CustomerId == Aramco && i.IdentifierType == CustomerIdentifierType.Email);
+        foreach (var type in new[] { CustomerIdentifierType.Domain, CustomerIdentifierType.Alias })
+        {
+            var row = Assert.Single(active, i => i.CustomerId == Aramco && i.IdentifierType == type);
+            Assert.False(row.IsVerified);
+            Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, row.Source);
+            Assert.Equal(1, row.ObservationCount);
+        }
+        Assert.DoesNotContain(active, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Email
+                                           && i.NormalizedValue == "57322@se.com.sa");
+        Assert.DoesNotContain(active, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain);
 
         // Lead C, from the same sender, decided by the resolver over exactly the rows now in the
         // store. Not pushed through LeadCustomerResolutionService only because that service
@@ -1935,8 +1849,7 @@ public sealed class CustomerAliasLearnerTests
             },
             new CustomerResolutionPolicy());
 
-        Assert.Equal(Sec, outcome.CustomerId);
-        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, outcome.ReasonCode);
+        Assert.Null(outcome.CustomerId);
     }
 
     [Fact]
@@ -1966,12 +1879,13 @@ public sealed class CustomerAliasLearnerTests
     }
 
     [Fact]
-    public async Task P5_one_relink_demotes_facts_other_decisions_confirmed_many_times_instead_of_expiring_them()
+    public async Task P5_one_relink_expires_the_address_and_demotes_the_domain_name_and_pair_keeping_their_counts()
     {
-        // SEC's address, domain, name and portal pair were confirmed fifty times. One lead from that mailbox is
-        // relinked to Aramco by a mis-click, and every one of the four used to be expired. They are demoted
-        // instead: out of every auto-link tier, still on the recognition table, promoted back by the next
-        // confirmation. Nothing verified is written for Aramco, and the next SEC print still links from its address.
+        // SEC's address, domain, name and portal pair were confirmed fifty times. One lead from that mailbox is relinked to
+        // Aramco by a mis-click, and every one of the four used to be expired. Owner decision 2026-09-13, policy A: the
+        // address is expired, because an Email row of any grade blocks the right customer's contact; the domain, the name and
+        // the pair are demoted, out of every auto-link tier and still on the recognition table, with their counts and
+        // confidence kept. Nothing verified is written for Aramco, and the next SEC print still links from its address.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         context.Set<CustomerIdentifier>().AddRange(
@@ -1987,17 +1901,22 @@ public sealed class CustomerAliasLearnerTests
         var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, relinked, Aramco, Sec, 101);
         await context.SaveChangesAsync();
 
-        Assert.Equal(0, result.Expired);
+        Assert.Equal(1, result.Expired);
         Assert.Contains(CustomerAliasLearner.SkipContradictedFactDemoted, result.SkipReasons);
         var sec = await context.Set<CustomerIdentifier>()
             .Where(i => i.CustomerId == Sec && i.EffectiveTo == null).ToListAsync();
-        Assert.Equal(4, sec.Count);
+        Assert.Equal(
+            new[] { CustomerIdentifierType.Domain, CustomerIdentifierType.Alias, CustomerIdentifierType.PortalAccount }.OrderBy(type => type),
+            sec.Select(i => i.IdentifierType).OrderBy(type => type));
         Assert.All(sec, i =>
         {
             Assert.False(i.IsVerified);
-            Assert.Equal(CustomerAliasLearner.UnverifiedAliasSource, i.Source);
+            Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, i.Source);
             Assert.Equal(50, i.ObservationCount);
         });
+        Assert.Equal(0.95m, sec.Single(i => i.IdentifierType == CustomerIdentifierType.Domain).Confidence);
+        Assert.Equal(0.90m, sec.Single(i => i.IdentifierType == CustomerIdentifierType.Alias).Confidence);
+        Assert.Equal(0.92m, sec.Single(i => i.IdentifierType == CustomerIdentifierType.PortalAccount).Confidence);
         Assert.DoesNotContain(await ActiveAsync(context), i => i.CustomerId == Aramco && i.IsVerified);
 
         await using (var seed = db.ContextFor(null))
@@ -2019,60 +1938,6 @@ public sealed class CustomerAliasLearnerTests
         Assert.Equal(LeadCustomerMatchStatuses.AutoMatchedContactUnresolved, outcome.Status);
     }
 
-    [Fact]
-    public async Task P10_decisions_a_later_relink_took_back_no_longer_veto_the_right_customers_domain()
-    {
-        // Leads A1 and A2, SEC's own prints from 57322@se.com.sa, were linked to Aramco by mistake and
-        // converted, so they can never be relinked. Lead B was relinked from Aramco to SEC, and lead C was
-        // confirmed SEC. A1's and A2's decisions still vetoed se.com.sa for SEC for ever: C left the domain
-        // unverified and wrote no address. B's relink expired Aramco's own learned row for the domain and
-        // Aramco holds nothing on it now, so those decisions no longer count.
-        using var db = new TestDb();
-        await using var context = await SeedAsync(db);
-        await using (var seed = db.ContextFor(null))
-        {
-            foreach (var id in new long[] { 8403, 8404 })
-            {
-                SecPortalPrint(Seed.Lead(seed, id, Tenant, buyersName: null));
-                seed.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail = "57322@se.com.sa";
-            }
-            await seed.SaveChangesAsync();
-        }
-        var learner = new CustomerAliasLearner(context);
-
-        foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
-        {
-            var misLinked = await LoadLeadAsync(context, leadId);
-            SecPortalPrint(misLinked);
-            misLinked.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
-            await learner.LearnFromReviewAsync(Tenant, misLinked, Aramco, null, audit);
-            await context.SaveChangesAsync();
-        }
-
-        var relinked = await LoadLeadAsync(context, 8403);
-        relinked.AutoResolveCommercialIdentity(Aramco, null, CustomerMatchReasonCodes.SenderDomain, 0.95m, "machine", DateTime.UtcNow);
-        relinked.ResolveCommercialIdentity(Sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
-        await learner.LearnFromReviewAsync(Tenant, relinked, Sec, Aramco, 101);
-        await context.SaveChangesAsync();
-
-        var confirmed = await LoadLeadAsync(context, 8404);
-        confirmed.ResolveCommercialIdentity(Sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
-        await learner.LearnFromReviewAsync(Tenant, confirmed, Sec, null, 102);
-        await context.SaveChangesAsync();
-
-        var rows = await ActiveAsync(context);
-        var domain = Assert.Single(rows, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain);
-        Assert.Equal("se.com.sa", domain.NormalizedValue);
-        Assert.True(domain.IsVerified);
-        Assert.Equal(0.95m, domain.Confidence);
-        Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, domain.Source);
-        Assert.Contains(rows, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Email
-                                   && i.NormalizedValue == "57322@se.com.sa" && i.IsVerified);
-        Assert.DoesNotContain(rows, i => i.CustomerId == Aramco
-                                         && i.IdentifierType is CustomerIdentifierType.Domain or CustomerIdentifierType.Email
-                                             or CustomerIdentifierType.PortalAccount);
-    }
-
     // ── helpers ──────────────────────────────────────────────────────────────
 
     // ── seams between the lanes (GREEN, 2026-09-13) ─────────────────────────
@@ -2084,53 +1949,65 @@ public sealed class CustomerAliasLearnerTests
         // document's vendor block make an address ours; the learner still passed it raw. A Marafiq print from
         // buyer@marafiq.com.sa whose vendor field was misread as "MARAFIQ" made marafiq.com.sa ours to the
         // learner alone, and a person's confirmation taught nothing (selfIdentity).
-        const long marafiq = 8311;
+        //
+        // Owner decision 2026-09-13, policy A: the address is learned on its second confirmation for Marafiq, and the domain
+        // never. The company-name field is left empty on purpose: the misread vendor block is our own name to the NAME rules,
+        // so a printed "Marafiq" is refused as an alias (selfIdentity) whatever the address rules do, and this test is about
+        // the address rules alone.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
         {
-            Seed.Customer(seed, marafiq, Tenant, "Marafiq");
+            Seed.Customer(seed, Marafiq, Tenant, "Marafiq");
             await seed.SaveChangesAsync();
         }
-        var lead = await LoadLeadAsync(context, 8401);
-        lead.EmailIngests!.FromEmail = "Tenders <buyer@marafiq.com.sa>";
-        lead.Clientemail = "buyer@marafiq.com.sa";
-        lead.CustomerBuyerEmailExtracted = "buyer@marafiq.com.sa";
-        lead.CustomerCompanyNameExtracted = "Marafiq";
-        lead.CustomerPortalNameExtracted = null;
-        lead.SupplierAccountRefOnDocument = null;
-        lead.SupplierNameOnDocument = "MARAFIQ";
-        lead.ResolveCommercialIdentity(marafiq, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        var learner = new CustomerAliasLearner(context);
+        var results = new List<CustomerAliasLearningResult>();
+        foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
+        {
+            var lead = await LoadLeadAsync(context, leadId);
+            lead.EmailIngests!.FromEmail = "Tenders <buyer@marafiq.com.sa>";
+            lead.Clientemail = "buyer@marafiq.com.sa";
+            lead.CustomerBuyerEmailExtracted = "buyer@marafiq.com.sa";
+            lead.CustomerCompanyNameExtracted = null;
+            lead.CustomerPortalNameExtracted = null;
+            lead.SupplierAccountRefOnDocument = null;
+            lead.SupplierNameOnDocument = "MARAFIQ";
+            lead.ResolveCommercialIdentity(Marafiq, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
 
-        await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, marafiq, null, 99);
-        await context.SaveChangesAsync();
+            results.Add(await learner.LearnFromReviewAsync(Tenant, lead, Marafiq, null, audit));
+            await context.SaveChangesAsync();
+            if (leadId == 8401)
+                Assert.DoesNotContain(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Email
+                                                                        && i.NormalizedValue == "buyer@marafiq.com.sa");
+        }
 
-        var rows = await ActiveAsync(context);
-        Assert.Contains(rows, i => i.CustomerId == marafiq && i.IdentifierType == CustomerIdentifierType.Email
-                                   && i.NormalizedValue == "buyer@marafiq.com.sa" && i.IsVerified);
-        Assert.Contains(rows, i => i.CustomerId == marafiq && i.IdentifierType == CustomerIdentifierType.Domain
-                                   && i.NormalizedValue == "marafiq.com.sa" && i.IsVerified);
+        Assert.Contains(await ActiveAsync(context), i => i.CustomerId == Marafiq && i.IdentifierType == CustomerIdentifierType.Email
+                                                          && i.NormalizedValue == "buyer@marafiq.com.sa" && i.IsVerified);
+        Assert.DoesNotContain(await context.Set<CustomerIdentifier>().ToListAsync(),
+            i => i.IdentifierType == CustomerIdentifierType.Domain);
+        Assert.All(results, result => Assert.DoesNotContain(CustomerAliasLearner.SkipSelfIdentity, result.SkipReasons));
     }
 
     [Theory]
-    // A person linked mail from the domain to ANOTHER customer long ago: that veto must not be crowded out.
+    // A person linked the address to ANOTHER customer long ago: that decision must not be crowded out.
     [InlineData(true)]
-    // A person's own older decision for this customer is what ties the domain: it must not be crowded out either.
+    // A person's own older decision for this customer is the address's other confirmation: it must not be crowded out either.
     [InlineData(false)]
-    public async Task P10_a_persons_decision_on_a_domain_is_read_past_a_flood_of_newer_machine_links(bool anotherCustomerDecided)
+    public async Task P2_a_persons_decision_on_an_address_is_read_past_a_flood_of_newer_machine_links(bool anotherCustomerDecided)
     {
-        // T08, in the learner's own domain-tie read. It capped earlier leads at 200 and only then kept the human
-        // decisions. With 205 newer machine links from newco.com.sa, a person's older decision fell out of the
-        // window: with a rival's decision gone the domain was written to SEC at 0.95 (and the next Aramco job from
-        // the domain linked to SEC without asking anyone); with SEC's own decision gone, a tie was lost.
+        // T08, in the learner's own read. It capped earlier leads at 200 and only then kept the human decisions. With 205
+        // newer machine links from the same mailbox, a person's older decision fell out of the window: with a rival's decision
+        // gone the address was written for the wrong customer, and with this customer's own decision gone its confirmation
+        // never counted. Owner decision 2026-09-13, policy A: it is the exact address that is counted, never its domain.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
         {
             var oldest = Seed.Lead(seed, 9000, Tenant, buyersName: null);
             oldest.Rfqno = null;
-            oldest.Clientemail = "x@newco.com.sa";
-            oldest.CustomerBuyerEmailExtracted = "x@newco.com.sa";
+            oldest.Clientemail = "y@newco.com.sa";
+            oldest.CustomerBuyerEmailExtracted = "y@newco.com.sa";
             oldest.CustomerCompanyNameExtracted = null;
             oldest.ResolveCommercialIdentity(anotherCustomerDecided ? Aramco : Sec, null,
                 LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
@@ -2138,17 +2015,7 @@ public sealed class CustomerAliasLearnerTests
             {
                 var machine = Seed.Lead(seed, 9000 + i, Tenant, buyersName: null);
                 machine.Rfqno = null;
-                machine.Clientemail = $"m{i}@newco.com.sa";
-            }
-            if (anotherCustomerDecided)
-            {
-                // The newest decision is SEC's, printed on the domain: alone it would tie newco.com.sa to SEC.
-                var newest = Seed.Lead(seed, 9300, Tenant, buyersName: null);
-                newest.Rfqno = null;
-                newest.Clientemail = "z@newco.com.sa";
-                newest.CustomerBuyerEmailExtracted = "z@newco.com.sa";
-                newest.CustomerCompanyNameExtracted = null;
-                newest.ResolveCommercialIdentity(Sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+                machine.Clientemail = "y@newco.com.sa";
             }
             await seed.SaveChangesAsync();
             foreach (var machine in seed.Leads.Local.Where(l => l.Id is > 9000 and <= 9205).ToList())
@@ -2162,21 +2029,32 @@ public sealed class CustomerAliasLearnerTests
         lead.CustomerBuyerEmailExtracted = "y@newco.com.sa";
         lead.CustomerPortalNameExtracted = null;
         lead.SupplierAccountRefOnDocument = null;
-        await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
         await context.SaveChangesAsync();
 
-        var domain = Assert.Single(await ActiveAsync(context),
-            i => i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == "newco.com.sa");
-        Assert.Equal(Sec, domain.CustomerId);
-        Assert.Equal(!anotherCustomerDecided, domain.IsVerified);
+        var rows = await ActiveAsync(context);
+        if (anotherCustomerDecided)
+        {
+            Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "y@newco.com.sa");
+            Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
+        }
+        else
+        {
+            var address = Assert.Single(rows, i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "y@newco.com.sa");
+            Assert.Equal(Sec, address.CustomerId);
+            Assert.True(address.IsVerified);
+        }
+        Assert.DoesNotContain(await context.Set<CustomerIdentifier>().ToListAsync(),
+            i => i.IdentifierType == CustomerIdentifierType.Domain);
     }
 
     [Fact]
-    public async Task A_system_mailbox_on_the_customers_own_domain_teaches_the_domain_but_is_never_minted_as_an_address()
+    public async Task A_system_mailbox_on_the_customers_own_domain_is_never_minted_and_teaches_no_domain()
     {
         // T17, the learner's half. The resolver and routing refuse a learned row on a system mailbox, so minting
         // noreply@se.com.sa as SEC's Email at 1.00 wrote a row nothing may match that still claimed the domain in
-        // every "who else writes from here" read. The domain is SEC's all the same (a person linked 57322@se.com.sa).
+        // every "who else writes from here" read. Owner decision 2026-09-13, policy A: nor does the mailbox teach se.com.sa,
+        // although the page names SEC: a whole email domain is never learned from confirmations.
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var lead = await LoadLeadAsync(context, 8401);
@@ -2189,36 +2067,8 @@ public sealed class CustomerAliasLearnerTests
 
         var rows = await ActiveAsync(context);
         Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "noreply@se.com.sa");
-        Assert.Contains(rows, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain
-                                   && i.NormalizedValue == "se.com.sa" && i.IsVerified);
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain);
         Assert.Contains(CustomerAliasLearner.SkipPersonalOrRelayAddress, result.SkipReasons);
-    }
-
-    [Fact]
-    public async Task A_learned_system_mailbox_row_on_another_customer_is_no_claim_on_the_domain()
-    {
-        // The same row read the other way: a legacy learned noreply@se.com.sa on Aramco, a row the resolver and
-        // routing will never match, made se.com.sa "claimed by another customer", so SEC's own confirmation
-        // from 57322@se.com.sa wrote neither the address nor the domain.
-        using var db = new TestDb();
-        await using var context = await SeedAsync(db);
-        context.Set<CustomerIdentifier>().Add(new CustomerIdentifier
-        {
-            BusinessUnitId = Tenant, CustomerId = Aramco, IdentifierType = CustomerIdentifierType.Email,
-            NormalizedValue = "noreply@se.com.sa", DisplayValue = "noreply@se.com.sa", IsVerified = true, Confidence = 1m,
-            Source = CustomerIdentifierSources.LeadReviewLearned, EffectiveFrom = DateTime.UtcNow.AddDays(-30)
-        });
-        await context.SaveChangesAsync();
-        var lead = await LoadLeadAsync(context, 8401);
-
-        await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
-        await context.SaveChangesAsync();
-
-        var rows = await ActiveAsync(context);
-        Assert.Contains(rows, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain
-                                   && i.NormalizedValue == "se.com.sa" && i.IsVerified);
-        Assert.Contains(rows, i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Email
-                                   && i.NormalizedValue == "57322@se.com.sa" && i.IsVerified);
     }
 
     [Fact]
@@ -2251,6 +2101,626 @@ public sealed class CustomerAliasLearnerTests
         // Two copies of the human statuses drift apart the day one changes. The service's list is the one.
         => Assert.Same(LeadCustomerResolutionService.HumanDecidedStatuses, CustomerAliasLearner.HumanDecidedStatuses);
 
+    // ── OWNER DECISION 2026-09-13, POLICY A: learn slowly, never guess ──────────────────
+
+    [Theory]
+    [InlineData("a contact on SEC at se.com.sa, one confirmation printing 57322")]
+    [InlineData("buyer@marafiq.com.sa confirmed twice for Marafiq")]
+    [InlineData("the same SEC print confirmed twice")]
+    [InlineData("57322 and 92442 printed, one confirmation each")]
+    [InlineData("a Hyundai contact at hdec.com, buyer@hdec.com confirmed for Aramco")]
+    [InlineData("agent@quietpost-mail.net confirmed twice")]
+    public async Task PolicyA_the_learner_never_writes_a_domain_row_whatever_ties_the_domain(string scenario)
+    {
+        // Owner decision 2026-09-13, policy A: a whole email domain is never learned from confirmations; it only comes from a
+        // customer contact or an admin entry. Every row is a shape that used to tie the domain to the customer: a contact on
+        // the customer, a domain that spells the customer's name, a buyer address printed and confirmed twice, two addresses
+        // on one domain, a contractor's domain, and a provider nobody listed.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var learner = new CustomerAliasLearner(context);
+
+        async Task TeachAsync(long leadId, long customerId, string? sender, string? printed, string? company, long audit)
+        {
+            var lead = await LoadLeadAsync(context, leadId);
+            StripAddresses(lead);
+            if (sender is not null)
+            {
+                lead.EmailIngests!.FromEmail = sender;
+                lead.Clientemail = sender;
+            }
+            lead.CustomerBuyerEmailExtracted = printed;
+            lead.CustomerCompanyNameExtracted = company;
+            lead.ResolveCommercialIdentity(customerId, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            await learner.LearnFromReviewAsync(Tenant, lead, customerId, null, audit);
+            await context.SaveChangesAsync();
+        }
+
+        switch (scenario)
+        {
+            case "a contact on SEC at se.com.sa, one confirmation printing 57322":
+                await ForgetSiblingAddressesAsync(context);
+                await using (var seed = db.ContextFor(null))
+                {
+                    Seed.Contact(seed, 9311, Tenant, Sec, "procurement@se.com.sa");
+                    await seed.SaveChangesAsync();
+                }
+                await TeachAsync(8401, Sec, null, "57322@se.com.sa", "Saudi Electricity Company", 99);
+                break;
+            case "buyer@marafiq.com.sa confirmed twice for Marafiq":
+                await using (var seed = db.ContextFor(null))
+                {
+                    Seed.Customer(seed, Marafiq, Tenant, "Marafiq");
+                    await seed.SaveChangesAsync();
+                }
+                await TeachAsync(8401, Marafiq, "buyer@marafiq.com.sa", "buyer@marafiq.com.sa", "Marafiq", 99);
+                await TeachAsync(8402, Marafiq, "buyer@marafiq.com.sa", "buyer@marafiq.com.sa", "Marafiq", 100);
+                break;
+            case "the same SEC print confirmed twice":
+                foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
+                {
+                    var print = await LoadLeadAsync(context, leadId);
+                    SecPortalPrint(print);
+                    await learner.LearnFromReviewAsync(Tenant, print, Sec, null, audit);
+                    await context.SaveChangesAsync();
+                }
+                break;
+            case "57322 and 92442 printed, one confirmation each":
+                await ForgetSiblingAddressesAsync(context);
+                await TeachAsync(8401, Sec, null, "57322@se.com.sa", "Saudi Electricity Company", 99);
+                await TeachAsync(8402, Sec, null, "92442@se.com.sa", "Saudi Electricity Company", 100);
+                break;
+            case "a Hyundai contact at hdec.com, buyer@hdec.com confirmed for Aramco":
+                await using (var seed = db.ContextFor(null))
+                {
+                    Seed.Customer(seed, Hyundai, Tenant, "Hyundai Engineering & Construction");
+                    Seed.Contact(seed, 9312, Tenant, Hyundai, "procurement@hdec.com");
+                    await seed.SaveChangesAsync();
+                }
+                await TeachAsync(8401, Aramco, null, "buyer@hdec.com", "Saudi Aramco", 99);
+                break;
+            default:
+                await TeachAsync(8401, Sec, "agent@quietpost-mail.net", null, "Saudi Electricity Company", 99);
+                await TeachAsync(8402, Sec, "agent@quietpost-mail.net", null, "Saudi Electricity Company", 100);
+                break;
+        }
+
+        var everyRow = await context.Set<CustomerIdentifier>().IgnoreQueryFilters()
+            .Where(i => i.BusinessUnitId == Tenant).ToListAsync();
+        Assert.DoesNotContain(everyRow, i => i.IdentifierType == CustomerIdentifierType.Domain
+                                             && (i.Source == CustomerIdentifierSources.LeadReviewLearned
+                                                 || i.Source == CustomerIdentifierSources.LeadReviewUnverified
+                                                 || i.LearnedFromLeadId != null));
+    }
+
+    [Theory]
+    [InlineData("k.lee@hdec.com")]
+    [InlineData("buyer.person@gmail.com")]
+    [InlineData("agent@quietpost-mail.net")]
+    public async Task PolicyA_a_first_confirmation_of_an_address_writes_no_row_of_any_grade(string address)
+    {
+        // Owner decision 2026-09-13, policy A: a buyer's exact address is learned once reps confirm it for the same customer
+        // twice. Before that nothing is written, not even an unverified filing: an Email row of any grade blocks the address
+        // for every other customer, so a filing on the wrong customer would stop the right customer's contact being saved.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var lead = await LoadLeadAsync(context, 8401);
+        StripAddresses(lead);
+        lead.EmailIngests!.FromEmail = address;
+        lead.Clientemail = address;
+
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
+        await context.SaveChangesAsync();
+
+        Assert.DoesNotContain(await context.Set<CustomerIdentifier>().ToListAsync(),
+            i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == address);
+        Assert.Contains(CustomerAliasLearner.SkipAddressNotYetConfirmed, result.SkipReasons);
+    }
+
+    [Fact]
+    public async Task PolicyA_a_decision_for_another_customer_takes_a_learned_corporate_address_back_from_everyone()
+    {
+        // Owner decision 2026-09-13, policy A: an address is learned "never for anyone else". The take-back used to reach only
+        // consumer mailboxes, so an organisation's mailbox kept what it had taught after a person linked it to a second
+        // customer, and K Lee's next message still linked Hyundai at 1.00 whichever customer it was about.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await SeedHyundaiMailboxAsync(db);
+        var learner = new CustomerAliasLearner(context);
+        await ConfirmAsync(context, learner, 8403, Hyundai, 99);
+        await ConfirmAsync(context, learner, 8404, Hyundai, 100);
+        Assert.Single(await ActiveAsync(context), i => i.CustomerId == Hyundai && i.IdentifierType == CustomerIdentifierType.Email
+                                                        && i.NormalizedValue == "k.lee@hdec.com");
+
+        var forAramco = await LoadLeadAsync(context, 8405);
+        forAramco.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        var result = await learner.LearnFromReviewAsync(Tenant, forAramco, Aramco, null, 101);
+        await context.SaveChangesAsync();
+
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
+        Assert.Equal(1, result.Expired);
+        Assert.DoesNotContain(await ActiveAsync(context),
+            i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "k.lee@hdec.com");
+    }
+
+    [Theory]
+    [InlineData(RasTanura, true)]
+    [InlineData(null, false)]
+    [InlineData("Saudi Electricity Company-DAMMAM", false)]
+    public async Task PolicyA_a_resembling_company_name_is_trusted_only_where_the_page_names_that_customer(string? delivery, bool trusted)
+    {
+        // Owner decision 2026-09-13, policy A: a company name is learned only when the document itself names that customer.
+        // "ARAMCO" resembles Saudi Aramco and nobody else, and one confirmation used to write it as Aramco's alias at 0.90
+        // whatever the page said, a page whose delivery address names Saudi Electricity Company included.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var lead = await LoadLeadAsync(context, 8401);
+        StripAddresses(lead);
+        lead.CustomerPortalNameExtracted = null;
+        lead.CustomerCompanyNameExtracted = "ARAMCO";
+        lead.DeliveryLocation = delivery;
+        lead.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Aramco, null, 99);
+        await context.SaveChangesAsync();
+
+        var alias = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias);
+        Assert.Equal(Aramco, alias.CustomerId);
+        Assert.Equal(CustomerNameNormalizer.LooseKey("ARAMCO"), alias.NormalizedValue);
+        if (trusted)
+        {
+            Assert.True(alias.IsVerified);
+            Assert.Equal(0.90m, alias.Confidence);
+            Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, alias.Source);
+            Assert.DoesNotContain(CustomerAliasLearner.SkipAliasNotNamedByDocument, result.SkipReasons);
+        }
+        else
+        {
+            Assert.False(alias.IsVerified);
+            Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, alias.Source);
+            Assert.Contains(CustomerAliasLearner.SkipAliasNotNamedByDocument, result.SkipReasons);
+        }
+    }
+
+    [Theory]
+    [InlineData(CustomerIdentifierSources.MasterData)]
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned)]
+    public async Task PolicyA_the_page_is_read_with_names_a_person_entered_never_with_a_taught_alias(string source)
+    {
+        // Owner decision 2026-09-13, policy A: a company name is learned only when the document itself names that customer,
+        // and the page is read with the names a person entered. A taught alias reading its own page would vouch for itself:
+        // once "MARAFIQ" was taught, every later "MARAFIQ" page would "name" whichever customer it was taught for. An admin's
+        // alias is the remedy the owner accepted for a name the page cannot show by itself.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, Marafiq, Tenant, "Marafiq Power & Water Utility Company");
+            await seed.SaveChangesAsync();
+        }
+        context.Set<CustomerIdentifier>().Add(new CustomerIdentifier
+        {
+            BusinessUnitId = Tenant, CustomerId = Marafiq, IdentifierType = CustomerIdentifierType.Alias,
+            NormalizedValue = CustomerNameNormalizer.LooseKey("MARAFIQ"), DisplayValue = "MARAFIQ", IsVerified = true,
+            Confidence = 0.90m, Source = source, EffectiveFrom = DateTime.UtcNow.AddDays(-5), ObservationCount = 1,
+            LastObservedOn = DateTime.UtcNow.AddDays(-5)
+        });
+        await context.SaveChangesAsync();
+        var lead = await LoadLeadAsync(context, 8401);
+        StripAddresses(lead);
+        lead.CustomerPortalNameExtracted = null;
+        lead.CustomerCompanyNameExtracted = "MARAFIQ";
+        lead.DeliveryLocation = "MARAFIQ Yanbu Warehouse";
+        lead.ResolveCommercialIdentity(Marafiq, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Marafiq, null, 99);
+        await context.SaveChangesAsync();
+
+        if (source == CustomerIdentifierSources.MasterData)
+            Assert.DoesNotContain(CustomerAliasLearner.SkipAliasNotNamedByDocument, result.SkipReasons);
+        else
+            Assert.Contains(CustomerAliasLearner.SkipAliasNotNamedByDocument, result.SkipReasons);
+    }
+
+    [Fact]
+    public async Task PolicyA_the_page_is_read_against_the_whole_customer_book()
+    {
+        // Owner decision 2026-09-13, policy A: a portal account is learned only when the document itself names that customer,
+        // and "names" is what the resolver reads with the tenant's whole customer book. Read against the chosen customer
+        // alone, "SCC" is Saudi Cable's initials and nobody else's; against the book it is Saudi Ceramics' too, and names
+        // neither of them.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, SaudiCable, Tenant, "Saudi Cable Company");
+            Seed.Customer(seed, SaudiCeramics, Tenant, "Saudi Ceramics Company");
+            await seed.SaveChangesAsync();
+        }
+        var lead = await LoadLeadAsync(context, 8401);
+        StripAddresses(lead);
+        lead.CustomerCompanyNameExtracted = null;
+        lead.DeliveryLocation = "SCC Riyadh Plant 2";
+        lead.ResolveCommercialIdentity(SaudiCable, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, SaudiCable, null, 99);
+        await context.SaveChangesAsync();
+
+        Assert.Contains(CustomerAliasLearner.SkipPortalAccountNotTiedToCustomer, result.SkipReasons);
+        var pair = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.PortalAccount);
+        Assert.Equal(SaudiCable, pair.CustomerId);
+        Assert.False(pair.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, pair.Source);
+    }
+
+    [Fact]
+    public async Task PolicyA_a_verified_proposal_never_overrides_a_detail_a_person_marked_unverified()
+    {
+        // Owner decision 2026-09-13, policy A (P12): a re-confirmation promotes only a row this class filed. A person who put
+        // buyer.person@gmail.com on Al-Rashid's profile and left it "not verified" meant it; two reviewers' clicks used to
+        // flip that person's own row to verified.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, Rashid, Tenant, "Al-Rashid Trading");
+            await seed.SaveChangesAsync();
+        }
+        context.Set<CustomerIdentifier>().Add(new CustomerIdentifier
+        {
+            BusinessUnitId = Tenant, CustomerId = Rashid, IdentifierType = CustomerIdentifierType.Email,
+            NormalizedValue = GmailBuyer, DisplayValue = GmailBuyer, IsVerified = false, Confidence = 0.60m,
+            Source = CustomerIdentifierSources.MasterData, EffectiveFrom = DateTime.UtcNow.AddDays(-5), ObservationCount = 1
+        });
+        await context.SaveChangesAsync();
+        var learner = new CustomerAliasLearner(context);
+        foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
+        {
+            var lead = await LoadLeadAsync(context, leadId);
+            FromGmailBuyer(lead, Rashid);
+            await learner.LearnFromReviewAsync(Tenant, lead, Rashid, null, audit);
+            await context.SaveChangesAsync();
+        }
+
+        var row = Assert.Single(await ActiveAsync(context),
+            i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == GmailBuyer);
+        Assert.Equal(Rashid, row.CustomerId);
+        Assert.False(row.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.MasterData, row.Source);
+        Assert.Equal(0.60m, row.Confidence);
+        Assert.Equal(2, row.ObservationCount);
+    }
+
+    [Fact]
+    public async Task PolicyA_a_latin_print_of_a_customer_recorded_in_arabic_is_never_trusted_by_confirmations()
+    {
+        // Owner decision 2026-09-13, policy A, with the ASSUMPTION it leaves open: only an ARABIC-ONLY company name printed for
+        // a customer recorded in another script may be trusted by two confirmations. The rule used to run in both directions,
+        // so a Latin "AL FAISAL ESTABLISHMENT" confirmed twice became the trusted alias of a customer recorded in Arabic,
+        // although nothing ever compared its letters with the record.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, AlFaisal, Tenant, "مؤسسة الفيصل");
+            await seed.SaveChangesAsync();
+        }
+        var learner = new CustomerAliasLearner(context);
+        var results = new List<CustomerAliasLearningResult>();
+        foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
+        {
+            var lead = await LoadLeadAsync(context, leadId);
+            StripAddresses(lead);
+            lead.CustomerCompanyNameExtracted = "AL FAISAL ESTABLISHMENT";
+            lead.ResolveCommercialIdentity(AlFaisal, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            results.Add(await learner.LearnFromReviewAsync(Tenant, lead, AlFaisal, null, audit));
+            await context.SaveChangesAsync();
+        }
+
+        var alias = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias && i.CustomerId == AlFaisal);
+        Assert.False(alias.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, alias.Source);
+        Assert.All(results, result =>
+        {
+            Assert.Contains(CustomerAliasLearner.SkipAliasUnlikeCustomer, result.SkipReasons);
+            Assert.DoesNotContain(CustomerAliasLearner.SkipAliasInAnotherScriptNotYetCorroborated, result.SkipReasons);
+        });
+    }
+
+    [Fact]
+    public async Task PolicyA_an_address_confirmed_twice_is_learned_although_another_customer_writes_from_the_domain()
+    {
+        // Owner decision 2026-09-13, policy A: a buyer's exact address is learned once reps confirm it for the same customer
+        // twice, and nothing else about the domain is read. Hyundai's contact at procurement@hdec.com used to keep k.lee's
+        // address from ever being learned for Aramco. THE ACCEPTED COST (RP04): confirmed twice for Aramco, the address links
+        // Aramco even on another customer's page; a contact on the right customer is the remedy.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await SeedHyundaiMailboxAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Contact(seed, 9312, Tenant, Hyundai, "procurement@hdec.com");
+            await seed.SaveChangesAsync();
+        }
+        var learner = new CustomerAliasLearner(context);
+
+        await ConfirmAsync(context, learner, 8403, Aramco, 99);
+        await ConfirmAsync(context, learner, 8404, Aramco, 100);
+
+        var address = Assert.Single(await ActiveAsync(context),
+            i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "k.lee@hdec.com");
+        Assert.Equal(Aramco, address.CustomerId);
+        Assert.True(address.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, address.Source);
+        Assert.DoesNotContain(await context.Set<CustomerIdentifier>().ToListAsync(),
+            i => i.IdentifierType == CustomerIdentifierType.Domain);
+    }
+
+    [Theory]
+    [InlineData("a contact on SEC at se.com.sa")]
+    [InlineData("a domain that spells Marafiq")]
+    [InlineData("a domain that spells Saudi Aramco")]
+    public async Task PolicyA_a_contact_or_a_domain_that_spells_the_name_does_not_make_a_first_confirmation_trusted(string shape)
+    {
+        // Owner decision 2026-09-13, policy A: a buyer's exact address is learned once reps confirm it for the same customer
+        // twice. A contact on the customer at the domain, or a domain whose own name spells the customer, used to make the
+        // FIRST confirmation write the address at 1.00 and the whole domain at 0.95.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await ForgetSiblingAddressesAsync(context);
+        (long CustomerId, string? Sender, string? Printed) setup = shape switch
+        {
+            "a contact on SEC at se.com.sa" => (Sec, null, "57322@se.com.sa"),
+            "a domain that spells Marafiq" => (Marafiq, "buyer@marafiq.com.sa", null),
+            _ => (Aramco, "buyer@aramco.com", null)
+        };
+        await using (var seed = db.ContextFor(null))
+        {
+            if (setup.CustomerId == Sec) Seed.Contact(seed, 9313, Tenant, Sec, "procurement@se.com.sa");
+            if (setup.CustomerId == Marafiq) Seed.Customer(seed, Marafiq, Tenant, "Marafiq");
+            await seed.SaveChangesAsync();
+        }
+        var lead = await LoadLeadAsync(context, 8401);
+        StripAddresses(lead);
+        if (setup.Sender is not null)
+        {
+            lead.EmailIngests!.FromEmail = setup.Sender;
+            lead.Clientemail = setup.Sender;
+        }
+        lead.CustomerBuyerEmailExtracted = setup.Printed;
+        lead.CustomerCompanyNameExtracted = null;
+        lead.CustomerPortalNameExtracted = null;
+        lead.DeliveryLocation = null;
+        lead.ResolveCommercialIdentity(setup.CustomerId, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, setup.CustomerId, null, 99);
+        await context.SaveChangesAsync();
+
+        var everyRow = await context.Set<CustomerIdentifier>().ToListAsync();
+        Assert.DoesNotContain(everyRow, i => i.IdentifierType == CustomerIdentifierType.Email);
+        Assert.DoesNotContain(everyRow, i => i.IdentifierType == CustomerIdentifierType.Domain);
+        Assert.Contains(CustomerAliasLearner.SkipAddressNotYetConfirmed, result.SkipReasons);
+    }
+
+    [Fact]
+    public async Task PolicyA_a_decision_that_stands_for_another_customer_is_never_withdrawn_by_a_later_relink()
+    {
+        // Leads A1 and A2, SEC's own prints from 57322@se.com.sa, were picked as Aramco and converted, so they can never be
+        // relinked. Lead B's relink from Aramco to SEC used to "withdraw" A1's and A2's decisions, and lead C's confirmation
+        // then wrote the address and the whole domain to SEC. Owner decision 2026-09-13, policy A: a decision stands while its
+        // lead is linked, so the address is nobody's; a whole email domain is never learned from confirmations; and what
+        // SEC's own page names, its name and its portal account, is learned as usual.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            foreach (var id in new long[] { 8403, 8404 })
+            {
+                SecPortalPrint(Seed.Lead(seed, id, Tenant, buyersName: null));
+                seed.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail = "57322@se.com.sa";
+            }
+            await seed.SaveChangesAsync();
+        }
+        var learner = new CustomerAliasLearner(context);
+
+        foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
+        {
+            var misLinked = await LoadLeadAsync(context, leadId);
+            SecPortalPrint(misLinked);
+            misLinked.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            await learner.LearnFromReviewAsync(Tenant, misLinked, Aramco, null, audit);
+            await context.SaveChangesAsync();
+        }
+
+        var relinked = await LoadLeadAsync(context, 8403);
+        relinked.AutoResolveCommercialIdentity(Aramco, null, CustomerMatchReasonCodes.SenderDomain, 0.95m, "machine", DateTime.UtcNow);
+        relinked.ResolveCommercialIdentity(Sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        await learner.LearnFromReviewAsync(Tenant, relinked, Sec, Aramco, 101);
+        await context.SaveChangesAsync();
+
+        var confirmed = await LoadLeadAsync(context, 8404);
+        confirmed.ResolveCommercialIdentity(Sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        var result = await learner.LearnFromReviewAsync(Tenant, confirmed, Sec, null, 102);
+        await context.SaveChangesAsync();
+
+        var rows = await ActiveAsync(context);
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "57322@se.com.sa");
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain && i.IsVerified);
+        foreach (var type in new[] { CustomerIdentifierType.Alias, CustomerIdentifierType.PortalAccount })
+        {
+            var row = Assert.Single(rows, i => i.CustomerId == Sec && i.IdentifierType == type);
+            Assert.True(row.IsVerified);
+            Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, row.Source);
+        }
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    // The control: the same two picks on prints that name nobody, and the address is Aramco's after the second.
+    [InlineData(false)]
+    public async Task PolicyA_an_address_confirmed_twice_for_one_customer_is_learned_whatever_customer_its_pages_name(bool pageNamesSec)
+    {
+        // OWNER DECISION 2026-09-13, policy A, in the words he approved: "A buyer's exact email address is learned once reps
+        // confirm it for the same customer twice, and never for anyone else." The rule has no page exception. This test used
+        // to assert one that was never put to him: a decision taken on a page naming another customer neither counted nor
+        // taught. Under it a trader buying for an SEC job, or an EPC contractor delivering to an Aramco plant, was never
+        // recognised by email however often reps confirmed them, and the site owner kept being auto-linked (ADV5.16, ADV5.17,
+        // ADV5.20), which broke the approved control "an address confirmed twice for one customer and never for another links
+        // at 1.00 on the next message".
+        // THE COST, stated for the owner: two picks of Aramco on SEC's own prints from 57322@se.com.sa, with no decision for
+        // SEC on that address, make the address Aramco's at 1.00 (ADV5.05a). The first decision for SEC on any lead carrying
+        // it, through any screen, makes the address nobody's again (HumanAddressDecisions).
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var learner = new CustomerAliasLearner(context);
+        // Both decisions stand before either is learned from, as when two reps pick Aramco on the same morning.
+        var leads = new List<Lead>();
+        foreach (var leadId in new long[] { 8401, 8402 })
+        {
+            var lead = await LoadLeadAsync(context, leadId);
+            SecPortalPrint(lead);
+            if (!pageNamesSec)
+            {
+                lead.CustomerCompanyNameExtracted = null;
+                lead.DeliveryLocation = null;
+            }
+            lead.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            leads.Add(lead);
+        }
+        await context.SaveChangesAsync();
+
+        var results = new List<CustomerAliasLearningResult>();
+        foreach (var (lead, audit) in leads.Zip(new long[] { 99, 100 }))
+        {
+            results.Add(await learner.LearnFromReviewAsync(Tenant, lead, Aramco, null, audit));
+            await context.SaveChangesAsync();
+        }
+
+        var aramcosAddress = (await ActiveAsync(context))
+            .Where(i => i.CustomerId == Aramco && i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "57322@se.com.sa")
+            .ToList();
+        var address = Assert.Single(aramcosAddress);
+        Assert.True(address.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, address.Source);
+        Assert.All(results, result => Assert.DoesNotContain(CustomerAliasLearner.SkipAddressNotYetConfirmed, result.SkipReasons));
+    }
+
+    [Theory]
+    // The control: an older pick for Aramco with a handful of newer Hyundai decisions was always read.
+    [InlineData("k.lee@hdec.com", "k.lee@hdec.com", 5)]
+    // 200 newer decisions on the same address pushed the older Aramco pick out of a newest-first window of 200.
+    [InlineData("k.lee@hdec.com", "k.lee@hdec.com", 200)]
+    // lee@hdec.com was matched as a substring of every k.lee@hdec.com lead, and those filled the window.
+    [InlineData("lee@hdec.com", "k.lee@hdec.com", 200)]
+    public async Task PolicyA_an_older_decision_for_another_customer_is_never_crowded_out_of_the_address_read(
+        string address, string newerAddress, int newerDecisions)
+    {
+        // Owner decision 2026-09-13, policy A: a buyer's exact address is learned "never for anyone else". The decisions were
+        // read through ONE newest-first window of 200 with a substring match, so an older decision for another customer fell
+        // out of it and the address was learned for Hyundai at 1.00 despite it (the conformance round's V5b and V5c).
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        const long olderPick = 9_001, firstNewer = 9_100, earlierConfirmation = 9_900, confirming = 9_950;
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, Hyundai, Tenant, "Hyundai Engineering & Construction");
+            // The older pick is written in the envelope only, as "Name <address>".
+            AddressLead(seed, olderPick, clientEmail: null, from: $"Lee <{address}>", Aramco);
+            for (var i = 0; i < newerDecisions; i++)
+                AddressLead(seed, firstNewer + i, newerAddress, $"K Lee <{newerAddress}>", Hyundai);
+            AddressLead(seed, earlierConfirmation, address, address, Hyundai);
+            AddressLead(seed, confirming, address, address, Hyundai);
+            await seed.SaveChangesAsync();
+        }
+
+        var lead = await LoadLeadAsync(context, confirming);
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Hyundai, null, 99);
+        await context.SaveChangesAsync();
+
+        Assert.DoesNotContain(await ActiveAsync(context),
+            i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == address);
+        Assert.Contains(CustomerAliasLearner.SkipAddressConfirmedForAnotherCustomer, result.SkipReasons);
+
+        static void AddressLead(ErpRfqAutomationContext seed, long id, string? clientEmail, string from, long customerId)
+        {
+            var lead = Seed.Lead(seed, id, Tenant, buyersName: null);
+            lead.Rfqno = null;
+            lead.Clientemail = clientEmail;
+            seed.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail = from;
+            lead.ResolveCommercialIdentity(customerId, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        }
+    }
+
+    [Theory]
+    // The control: the Aramco pick spelt exactly as SEC's prints.
+    [InlineData("الشركة السعودية للكهرباء")]
+    [InlineData("الشركة  السعودية للكهرباء")]
+    [InlineData("الشركة السعودية للكهرباء.")]
+    [InlineData("الشركة السعودية للكهربـاء")]
+    public async Task PolicyA_an_arabic_name_picked_for_another_customer_counts_against_it_however_it_is_spelt(string aramcoPick)
+    {
+        // Owner decision 2026-09-13, policy A, with the ASSUMPTION it leaves open (the recommendation he was given): an
+        // Arabic-only company name is trusted after two confirmations for the same customer WITH NONE FOR ANOTHER. Earlier
+        // decisions were found by the exact text, so a pick for Aramco written with a double space, a trailing full stop or a
+        // tatweel was invisible. LooseKey reads all four as one name, the resolver links by that key, and the alias verified on
+        // SEC linked the Aramco pick's own spelling to SEC at 0.90 (the conformance round's C1 to C3).
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            var pick = Seed.Lead(seed, 8620, Tenant, buyersName: null);
+            pick.Rfqno = null;
+            pick.Clientemail = "extraction@pipeline.local";
+            pick.CustomerCompanyNameExtracted = aramcoPick;
+            seed.EmailIngests.Local.Single(i => i.Id == 20_000 + 8620).FromEmail = "extraction@pipeline.local";
+            pick.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            await seed.SaveChangesAsync();
+        }
+        var earlier = await LoadLeadAsync(context, 8401);
+        ArabicNamePrint(earlier, Sec);
+        await context.SaveChangesAsync();
+
+        var confirming = await LoadLeadAsync(context, 8402);
+        ArabicNamePrint(confirming, Sec);
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, confirming, Sec, null, 100);
+        await context.SaveChangesAsync();
+
+        var alias = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias && i.CustomerId == Sec);
+        Assert.False(alias.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, alias.Source);
+        Assert.Contains(CustomerAliasLearner.SkipAliasInAnotherScriptNotYetCorroborated, result.SkipReasons);
+    }
+
+    [Fact]
+    public async Task PolicyA_a_relink_expires_the_address_itself_even_where_no_other_decision_would_take_it_back()
+    {
+        // Owner decision 2026-09-13, policy A: a relink EXPIRES the rejected customer's learned address; it never demotes it.
+        // An Email row of any grade blocks its address for every other customer (UX_customer_identifiers_authoritative and
+        // EnsureAuthoritativeValuesAvailableAsync ignore IsVerified and Source), so a demoted address would stop the right
+        // customer's contact at that address being saved, and no approved command removes the row. Here no other person's
+        // decision carries the address, so nothing but the relink itself takes it back.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await ForgetSiblingAddressesAsync(context);
+        context.Set<CustomerIdentifier>().Add(ConfirmedFiftyTimes(CustomerIdentifierType.Email, "57322@se.com.sa", 1.00m));
+        await context.SaveChangesAsync();
+
+        var relinked = await LoadLeadAsync(context, 8401);
+        SecPortalPrint(relinked);
+        relinked.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, relinked, Aramco, Sec, 101);
+        await context.SaveChangesAsync();
+
+        Assert.Equal(1, result.Expired);
+        Assert.DoesNotContain(await ActiveAsync(context),
+            i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == "57322@se.com.sa");
+        // Nothing claims the address any more, so a person can put it on the customer the lead now belongs to.
+        await CustomerIdentityMaintenance.EnsureAuthoritativeValuesAvailableAsync(
+            context, Tenant, Aramco, new List<(CustomerIdentifierType, string?)> { (CustomerIdentifierType.Email, "57322@se.com.sa") },
+            CancellationToken.None);
+    }
+
     private const long Satorp = 8304;
     private const long SaudiCable = 8305;
     private const long SaudiCeramics = 8306;
@@ -2258,6 +2728,8 @@ public sealed class CustomerAliasLearnerTests
     private const long Hyundai = 8308;
     private const long Rashid = 8309;
     private const long ArabianPipes = 8310;
+    private const long Marafiq = 8311;
+    private const long AlFaisal = 8312;
     private const string GmailBuyer = "buyer.person@gmail.com";
 
     /// <summary>A message from a sole trader's gmail mailbox and nothing else, linked by a person to <paramref name="customerId"/>.</summary>
@@ -2413,22 +2885,26 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
 {
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task A_correction_moves_the_senders_address_to_the_right_customer_inside_the_review_transaction()
+    public async Task A_correction_expires_the_wrong_customers_learned_address_before_the_right_one_is_checked()
     {
+        // Owner decision 2026-09-13, policy A: a relink expires the rejected customer's learned address and demotes its
+        // domain, written through inside the review's transaction and savepoint, so the right customer's address is checked
+        // against the store as it now stands. The address still needs two human decisions for SEC: lead C is one and this
+        // review the other. Lead A's machine link is no decision, so it does not stand against SEC. SEC gets no domain.
         var suffix = Random.Shared.Next(1, 50_000);
         var tenant = 9_410_000L + suffix;
         var sec = 9_420_000L + suffix;
         var aramco = 9_425_000L + suffix;
         var leadA = 9_430_000L + suffix;
         var leadB = 9_435_000L + suffix;
+        var leadC = 9_440_000L + suffix;
 
         await using (var seed = database.ContextFor(null))
         {
             Seed.EnsureBusinessUnit(seed, tenant);
             Seed.Customer(seed, sec, tenant, "Saudi Electricity Company");
             Seed.Customer(seed, aramco, tenant, "Saudi Aramco");
-            Seed.Contact(seed, 9_450_000L + suffix, tenant, sec, "procurement@se.com.sa");
-            foreach (var id in new[] { leadA, leadB })
+            foreach (var id in new[] { leadA, leadB, leadC })
             {
                 var lead = Seed.Lead(seed, id, tenant, buyersName: "3C2-AMER AL-DOSSARY");
                 lead.Clientemail = "57322@se.com.sa";
@@ -2439,11 +2915,13 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
 
         await using (var seed = database.ContextFor(null))
         {
-            // Lead A: linked to Aramco by a person, converted, never relinkable. It taught Aramco
-            // the SEC buyer's address and domain. Lead B carries the correction to SEC (see summary).
+            // Lead A: linked to Aramco by the machine, and it taught Aramco the SEC buyer's address and domain. Lead B carries
+            // the correction to SEC (see summary); lead C is a person's earlier decision for SEC.
             (await seed.Leads.SingleAsync(l => l.Id == leadA))
-                .ResolveCommercialIdentity(aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+                .AutoResolveCommercialIdentity(aramco, null, CustomerMatchReasonCodes.SenderEmailExact, 1.00m, "machine", DateTime.UtcNow);
             (await seed.Leads.SingleAsync(l => l.Id == leadB))
+                .ResolveCommercialIdentity(sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            (await seed.Leads.SingleAsync(l => l.Id == leadC))
                 .ResolveCommercialIdentity(sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
             foreach (var (type, value, confidence) in new[]
                      {
@@ -2473,28 +2951,32 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
             await transaction.CommitAsync();
         }
 
-        Assert.Equal(2, result.Expired);
+        Assert.Equal(1, result.Expired);
         Assert.DoesNotContain(CustomerAliasLearner.SkipAliasConflict, result.SkipReasons);
 
         await using var verify = database.ContextFor(tenant);
         var active = await verify.Set<CustomerIdentifier>().AsNoTracking()
             .Where(i => i.BusinessUnitId == tenant && i.EffectiveTo == null)
             .ToListAsync();
-        Assert.DoesNotContain(active, i => i.CustomerId == aramco);
+        Assert.DoesNotContain(active, i => i.CustomerId == aramco && i.IdentifierType == CustomerIdentifierType.Email);
+        var demoted = Assert.Single(active, i => i.CustomerId == aramco && i.IdentifierType == CustomerIdentifierType.Domain
+                                                 && i.NormalizedValue == "se.com.sa");
+        Assert.False(demoted.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, demoted.Source);
         Assert.Contains(active, i => i.CustomerId == sec && i.IdentifierType == CustomerIdentifierType.Email
                                      && i.NormalizedValue == "57322@se.com.sa" && i.IsVerified
                                      && i.Source == CustomerIdentifierSources.LeadReviewLearned);
-        Assert.Contains(active, i => i.CustomerId == sec && i.IdentifierType == CustomerIdentifierType.Domain
-                                     && i.NormalizedValue == "se.com.sa" && i.IsVerified);
+        Assert.DoesNotContain(active, i => i.CustomerId == sec && i.IdentifierType == CustomerIdentifierType.Domain);
     }
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task The_free_mail_the_earlier_document_and_the_demotion_reads_run_on_the_production_dialect()
+    public async Task The_address_arabic_print_page_reading_and_demotion_reads_run_on_the_production_dialect()
     {
-        // Three reads were proven on SQLite only, and each translates differently on Npgsql: the consumer-address
-        // search over the sender columns and the ingest join, an earlier document's lines through a capped
-        // correlated projection, and the relink's two-column demotion written through with ExecuteUpdate.
+        // Owner decision 2026-09-13, policy A. Four reads were proven on SQLite only, and each translates differently on
+        // Npgsql: the address search over the sender columns and the ingest join; an earlier Arabic print compared as written
+        // and its lines read through a capped correlated projection; the customer book with the person-entered names
+        // filtered on an array of sources; and the relink's two-column demotion written through with ExecuteUpdate.
         // Every lead is seeded with its final customer: PostgreSQL refuses to move a resolved lead (see summary).
         var suffix = Random.Shared.Next(1, 50_000);
         var tenant = 9_510_000L + suffix;
@@ -2503,10 +2985,12 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
         var rashid = 9_527_000L + suffix;
         var gmailFirst = 9_600_000L + suffix;
         var gmailSecond = 9_650_000L + suffix;
-        var pairFirst = 9_700_000L + suffix;
-        var pairSecond = 9_750_000L + suffix;
+        var arabicFirst = 9_700_000L + suffix;
+        var arabicSecond = 9_750_000L + suffix;
         var relinked = 9_800_000L + suffix;
+        var pairPrint = 9_850_000L + suffix;
         const string gmail = "buyer.person@gmail.com";
+        const string arabicSec = "الشركة السعودية للكهرباء";
 
         await using (var seed = database.ContextFor(null))
         {
@@ -2516,19 +3000,22 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
             Seed.Customer(seed, rashid, tenant, "Al-Rashid Trading");
             foreach (var id in new[] { gmailFirst, gmailSecond })
                 Seed.Lead(seed, id, tenant, buyersName: null).Clientemail = gmail;
-            foreach (var id in new[] { pairFirst, pairSecond })
+            foreach (var id in new[] { arabicFirst, arabicSecond })
             {
                 var lead = Seed.Lead(seed, id, tenant, buyersName: null);
-                lead.CustomerPortalNameExtracted = "MATERIALS E-BIDDING SYSTEM";
-                lead.SupplierAccountRefOnDocument = "2004414";
-                lead.SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL";
-                if (id == pairFirst)
+                lead.CustomerCompanyNameExtracted = arabicSec;
+                if (id == arabicFirst)
                 {
                     var line = Seed.LeadItem(9_900_000L + suffix, "10", 1, "BALL VALVE");
                     line.StorageLocation = "Main Store 3";
                     lead.LeadItems.Add(line);
                 }
             }
+            var pair = Seed.Lead(seed, pairPrint, tenant, buyersName: null);
+            pair.CustomerPortalNameExtracted = "MATERIALS E-BIDDING SYSTEM";
+            pair.SupplierAccountRefOnDocument = "2004414";
+            pair.SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL";
+            pair.DeliveryLocation = "Saudi Electricity Company-DAMMAM";
             Seed.Lead(seed, relinked, tenant, buyersName: null).Clientemail = "57322@se.com.sa";
             await seed.SaveChangesAsync();
         }
@@ -2539,7 +3026,11 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
                 (await seed.EmailIngests.SingleAsync(i => i.Id == 20_000 + id)).FromEmail = $"Buyer Person <{gmail}>";
             // The envelope is read before Clientemail, so SEC's mailbox must be the envelope for the relink to carry se.com.sa.
             (await seed.EmailIngests.SingleAsync(i => i.Id == 20_000 + relinked)).FromEmail = "57322@se.com.sa";
-            foreach (var (id, customer) in new[] { (gmailFirst, rashid), (gmailSecond, rashid), (pairFirst, sec), (pairSecond, sec), (relinked, aramco) })
+            foreach (var (id, customer) in new[]
+                     {
+                         (gmailFirst, rashid), (gmailSecond, rashid), (arabicFirst, sec), (arabicSecond, sec), (pairPrint, sec),
+                         (relinked, aramco)
+                     })
                 (await seed.Leads.SingleAsync(l => l.Id == id))
                     .ResolveCommercialIdentity(customer, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
             seed.Set<CustomerIdentifier>().Add(new CustomerIdentifier
@@ -2548,6 +3039,14 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
                 NormalizedValue = "se.com.sa", DisplayValue = "se.com.sa", IsVerified = true, Confidence = 0.95m,
                 Source = CustomerIdentifierSources.LeadReviewLearned, EffectiveFrom = DateTime.UtcNow.AddDays(-30),
                 ObservationCount = 5, LastObservedOn = DateTime.UtcNow.AddDays(-1)
+            });
+            // A name a person entered, so the customer book's identifier read returns a row on this dialect.
+            seed.Set<CustomerIdentifier>().Add(new CustomerIdentifier
+            {
+                BusinessUnitId = tenant, CustomerId = sec, IdentifierType = CustomerIdentifierType.Alias,
+                NormalizedValue = "SEC", DisplayValue = "SEC", IsVerified = true, Confidence = 0.90m,
+                Source = CustomerIdentifierSources.MasterData, EffectiveFrom = DateTime.UtcNow.AddDays(-30),
+                ObservationCount = 1, LastObservedOn = DateTime.UtcNow.AddDays(-30)
             });
             await seed.SaveChangesAsync();
         }
@@ -2564,7 +3063,8 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
         }
 
         await LearnAsync(gmailSecond, rashid, null);
-        await LearnAsync(pairSecond, sec, null);
+        await LearnAsync(arabicSecond, sec, null);
+        await LearnAsync(pairPrint, sec, null);
         var relinkResult = await LearnAsync(relinked, aramco, sec);
 
         await using var verify = database.ContextFor(tenant);
@@ -2574,6 +3074,10 @@ public sealed class CustomerAliasLearnerPostgreSqlTests(PostgreSqlTestDatabase d
         Assert.Contains(active, i => i.CustomerId == rashid && i.IdentifierType == CustomerIdentifierType.Email
                                      && i.NormalizedValue == gmail && i.IsVerified);
         Assert.DoesNotContain(active, i => i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == "gmail.com");
+        var arabic = Assert.Single(active, i => i.CustomerId == sec && i.IdentifierType == CustomerIdentifierType.Alias
+                                                && i.NormalizedValue == CustomerNameNormalizer.LooseKey(arabicSec));
+        Assert.True(arabic.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewLearned, arabic.Source);
         Assert.Contains(active, i => i.CustomerId == sec && i.IdentifierType == CustomerIdentifierType.PortalAccount
                                      && i.IsVerified && i.Confidence == 0.92m);
         var demoted = Assert.Single(active, i => i.CustomerId == sec && i.IdentifierType == CustomerIdentifierType.Domain

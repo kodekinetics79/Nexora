@@ -119,12 +119,25 @@ public static class CustomerIdentityMaintenance
                 i.IdentifierType == item.Type && i.NormalizedValue == item.NormalizedValue);
             if (current is not null)
             {
-                if (ManagedSources.Contains(current.Source, StringComparer.Ordinal))
+                // A PERSON'S ENTRY TAKES OVER A ROW NO PERSON ENTERED. Policy A, owner decision 2026-09-13: a whole
+                // email domain is never learned from confirmations, it comes only from a customer contact or an admin
+                // entry, and the resolver's S2 and routing read a Domain row only where a person entered it. One
+                // active row may hold a value per customer (the unique index), so the LeadReviewLearned or
+                // LeadReviewUnverified row a confirmation left on se.com.sa used to swallow the contact a person
+                // then saved at that domain: the sync saw a row, left it as it was, and the contact's domain never
+                // linked or routed. The row now becomes the contact's. Its lead provenance goes with the take-over,
+                // because a row a person entered is not the learner's to expire or demote when that lead is
+                // relinked. A row an administrator entered (MasterData, not managed here) is left exactly as the
+                // administrator set it, verified or not.
+                if (ManagedSources.Contains(current.Source, StringComparer.Ordinal)
+                    || !CustomerResolution.CustomerIdentifierSources.IsEnteredByAPerson(current.Source))
                 {
                     current.DisplayValue = item.DisplayValue;
                     current.IsVerified = item.IsVerified;
                     current.Confidence = item.Confidence;
                     current.Source = item.Source;
+                    current.LearnedFromLeadId = null;
+                    current.LearnedFromReviewAuditId = null;
                 }
                 continue;
             }
@@ -146,8 +159,11 @@ public static class CustomerIdentityMaintenance
         void AddEmail(string? value, string identitySource)
         {
             Add(CustomerIdentifierType.Email, value, true, 1m, identitySource);
-            // A saved contact vouches for its own mailbox. Its DOMAIN is written only when that domain
-            // could belong to one organisation: a contact at a consumer provider or ISP (gmail.com,
+            // A saved contact vouches for its own mailbox. Its DOMAIN is written only from here, the
+            // customer's profile address or an active contact's address, both typed or imported by a person.
+            // Policy A (owner decision 2026-09-13) has the learner write no Domain row, so this is the one
+            // automatic writer of a Domain row the resolver's S2 and routing will read. It is written only when
+            // that domain could belong to one organisation: a contact at a consumer provider or ISP (gmail.com,
             // sahara.com), on a procurement relay (bidnet.com) or on a placeholder host names a person,
             // and a verified 0.95 Domain row for it linked every other sender on that provider, for
             // any buyer, to this customer. A row an earlier sync wrote for such a domain is no longer

@@ -106,8 +106,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 var selfNames = CustomerResolution.TenantSelfIdentity.DomainSelfNames([tenantName], lead.SupplierNameOnDocument);
                 var evidence = BuildEvidence(lead, selfDomains, selfNames, _identityPolicy.MinimumErpAccountLength);
                 var identifiers = await LoadMatchingIdentifiersAsync(
-                    businessUnitId, evidence, selfDomains, selfNames,
-                    CustomerResolution.IdentityDomainGuard.IsSystemMailbox(lead.Clientemail), ct);
+                    businessUnitId, evidence, selfDomains, selfNames, ct);
 
                 // A customer a HUMAN has already confirmed on this lead is the strongest evidence
                 // that exists — stronger than any inferred email/domain identifier. It was being
@@ -1392,19 +1391,25 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     /// <para>A row a reviewer confirmed but the learner would not trust
     /// (<see cref="CustomerResolution.CustomerIdentifierSources.LeadReviewUnverified"/>) is never
     /// loaded. It exists so a person can look at it. The engine drops unverified rows, but it reads
-    /// only the IsVerified flag, and the flag and the source are separate columns that do drift
-    /// apart: when a later confirmation re-proposes the same value, the learner's reinforcement
-    /// path sets IsVerified to true and leaves Source alone. Such a row would otherwise route the
-    /// lead to that customer's owner and write the customer through at identifier grade.</para>
+    /// only the IsVerified flag, and the flag and the source are separate columns that have drifted
+    /// apart: the learner's reinforcement path used to set IsVerified to true and leave Source alone.
+    /// It now moves the shelf with the flag (CustomerAliasLearner P12, owner decision 2026-09-13), but
+    /// rows written before that are still in the store. Such a row would otherwise route the lead to
+    /// that customer's owner and write the customer through at identifier grade.</para>
+    ///
+    /// <para>A DOMAIN ROUTES ONLY WHERE A PERSON ENTERED IT, WHATEVER MAILBOX CARRIED THE LEAD. Policy A, owner
+    /// decision 2026-09-13: a whole email domain is never learned from confirmations; it comes only from a customer
+    /// contact or an admin entry (<see cref="CustomerResolution.CustomerIdentifierSources.EnteredByAPerson"/>).
+    /// That is the resolver's S2 rule, verified and entered by a person: the engine drops an unverified row, and this
+    /// query loads no Domain row of any other source. A learned etimad.gov.sa row on Saudi Aramco routed every SEC
+    /// tender the portal carried to Aramco's owner; refusing it only for the portal's system mailbox still let the
+    /// same row, or a LeadReviewLearned or MigrationBackfill se.com.sa row, route a person's own mailbox on that host
+    /// and write the customer through at 0.95. An Email row follows the resolver's S1: verified, never a
+    /// LeadReviewUnverified filing, and a relay or system mailbox only where a person registered it.</para>
     /// </summary>
-    /// <param name="senderIsSystemMailbox">
-    /// The lead's sender is a mailbox no person reads (<see cref="CustomerResolution.IdentityDomainGuard.IsSystemMailbox"/>).
-    /// Its domain then matches only a Domain row a person entered, exactly as in the resolver's domain tier: a learned
-    /// etimad.gov.sa or coupa.com row on Saudi Aramco otherwise routed every SEC tender the portal carried to Aramco's owner.
-    /// </param>
     private async Task<List<CustomerIdentifier>> LoadMatchingIdentifiersAsync(
         long businessUnitId, Dictionary<CustomerIdentifierType, HashSet<string>> evidence,
-        IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames, bool senderIsSystemMailbox, CancellationToken ct)
+        IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames, CancellationToken ct)
     {
         var emails = Values(CustomerIdentifierType.Email)
             .Where(email => IsSenderAddressEvidence(email, selfDomains, selfNames)).ToArray();
@@ -1415,15 +1420,32 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             .Where(account => account.Length >= _identityPolicy.MinimumErpAccountLength).ToArray();
         var names = Values(CustomerIdentifierType.CustomerName);
         var unverifiedSource = CustomerResolution.CustomerIdentifierSources.LeadReviewUnverified;
+        // The array, not IsEnteredByAPerson: EF translates Contains on it and cannot translate the method call.
+        var enteredByAPerson = CustomerResolution.CustomerIdentifierSources.EnteredByAPerson;
         var rows = await _db.Set<CustomerIdentifier>().AsNoTracking()
             .Where(i => i.BusinessUnitId == businessUnitId && i.EffectiveTo == null &&
                 i.Source != unverifiedSource &&
                 _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false) &&
                 ((i.IdentifierType == CustomerIdentifierType.Email && emails.Contains(i.NormalizedValue)) ||
-                 (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)) ||
+                 // Policy A: a Domain row a person entered, and no other (see the summary).
+                 (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)
+                  && enteredByAPerson.Contains(i.Source)) ||
                  (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
                  ((i.IdentifierType == CustomerIdentifierType.CustomerName || i.IdentifierType == CustomerIdentifierType.Alias) && names.Contains(i.NormalizedValue))))
             .ToListAsync(ct);
+
+        // A LEARNED ADDRESS A PERSON HAS SINCE DECIDED FOR ANOTHER CUSTOMER ROUTES NOBODY. OWNER DECISION 2026-09-13,
+        // POLICY A: a buyer's exact address is learned "never for anyone else". k.lee@hdec.com, confirmed twice for Hyundai
+        // and then saved for Aramco on the review screen (which does not run the learner), routed the next message to
+        // Hyundai's owner as a verified 1.00 match and wrote Hyundai onto the lead. The resolver's corpus loader drops the
+        // same rows; a row a person entered is never overruled.
+        var taughtAddresses = rows
+            .Where(i => CustomerResolution.HumanAddressDecisions.IsTaughtAddress(i.IdentifierType, i.Source))
+            .Select(i => (i.Id, i.CustomerId, i.NormalizedValue))
+            .ToList();
+        var contradicted = taughtAddresses.Count == 0
+            ? new HashSet<long>()
+            : await CustomerResolution.HumanAddressDecisions.ContradictedAsync(_db, businessUnitId, taughtAddresses, ct);
 
         // A RELAY'S OWN SENDING ADDRESS NAMES A BUYER ONLY WHERE A PERSON SAID SO. A relay address is
         // still let through as exact evidence above, because one mailbox a person registered is one
@@ -1431,12 +1453,9 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         // from one confirmation, and with that row in the store every Ariba buyer's RFQ went to Aramco's
         // owner and had Aramco written onto the lead. The resolver's exact tier asks the same predicate.
         return rows
+            .Where(i => !contradicted.Contains(i.Id))
             .Where(i => i.IdentifierType != CustomerIdentifierType.Email
                         || CustomerResolution.IdentityDomainGuard.MayMatchExactAddress(i.NormalizedValue, i.Source))
-            // A system mailbox's domain names a buyer only where a person entered the Domain row (the resolver's S2).
-            .Where(i => i.IdentifierType != CustomerIdentifierType.Domain
-                        || !senderIsSystemMailbox
-                        || CustomerResolution.CustomerIdentifierSources.EnteredByAPerson.Contains(i.Source, StringComparer.Ordinal))
             .ToList();
 
         string[] Values(CustomerIdentifierType type) => evidence.TryGetValue(type, out var values) ? values.ToArray() : [];

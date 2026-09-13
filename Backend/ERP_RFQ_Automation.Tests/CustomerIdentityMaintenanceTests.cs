@@ -214,6 +214,171 @@ public sealed class CustomerIdentityMaintenanceTests
         Assert.Contains(active, i => i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == "se.com.sa");
     }
 
+    [Theory]
+    // What a confirmation left on the customer before policy A: a verified learned row, a demoted or
+    // unverified filing, and a row some other process wrote. None of them links or routes a domain now.
+    [InlineData(CustomerIdentifierType.Domain, "LeadReviewLearned", true)]
+    [InlineData(CustomerIdentifierType.Domain, "LeadReviewUnverified", false)]
+    [InlineData(CustomerIdentifierType.Domain, "SomeOtherProcess", true)]
+    [InlineData(CustomerIdentifierType.Email, "LeadReviewLearned", true)]
+    [InlineData(CustomerIdentifierType.Email, "LeadReviewUnverified", false)]
+    public async Task PolicyA_a_contact_a_person_saves_takes_over_the_row_a_confirmation_left_for_its_address(
+        CustomerIdentifierType type, string source, bool verified)
+    {
+        // OWNER DECISION 2026-09-13, policy A: a whole email domain is never learned from confirmations; it
+        // comes only from a customer contact or an admin entry, and the resolver's S2 and routing read a Domain
+        // row only where a person entered it. One active row may hold a value per customer, so the row a
+        // confirmation left on se.com.sa swallowed the contact a person then saved there: the sync left it
+        // LeadReviewLearned and SEC's contact domain never linked or routed. The exact address the same.
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, 41);
+        var customer = Customer(41, "CU00000041", "Saudi Electricity Company", "unused@example.test");
+        customer.ContactEmail = null;
+        db.Customers.Add(customer);
+        await db.SaveChangesAsync();
+        var value = type == CustomerIdentifierType.Domain ? "se.com.sa" : "procurement@se.com.sa";
+        db.Add(new CustomerIdentifier
+        {
+            BusinessUnitId = 41,
+            CustomerId = customer.Id,
+            IdentifierType = type,
+            NormalizedValue = value,
+            DisplayValue = value,
+            IsVerified = verified,
+            Confidence = verified ? 0.95m : 0.50m,
+            Source = source,
+            EffectiveFrom = DateTime.UtcNow.AddDays(-30),
+            ObservationCount = 2,
+            LastObservedOn = DateTime.UtcNow.AddDays(-1),
+            LearnedFromLeadId = 9001,
+            LearnedFromReviewAuditId = 9002
+        });
+        var contact = ContactAt(customer.Id, "procurement@se.com.sa");
+        db.Contacts.Add(contact);
+        await db.SaveChangesAsync();
+
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerContact");
+        await db.SaveChangesAsync();
+
+        var row = Assert.Single(await ActiveAsync(db, customer.Id, type, value));
+        Assert.Equal("CustomerContact", row.Source);
+        Assert.True(row.IsVerified);
+        Assert.Equal(type == CustomerIdentifierType.Domain ? 0.95m : 1m, row.Confidence);
+        // No longer the learner's: a relink of lead 9001 must not expire or demote the contact's row.
+        Assert.Null(row.LearnedFromLeadId);
+        Assert.Null(row.LearnedFromReviewAuditId);
+
+        // The contact leaves. Its row goes with it, and the confirmation's filing does not come back.
+        contact.IsActive = false;
+        await db.SaveChangesAsync();
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerContact");
+        await db.SaveChangesAsync();
+        Assert.Empty(await ActiveAsync(db, customer.Id, type, value));
+    }
+
+    [Fact]
+    public async Task PolicyA_a_contact_sync_never_rewrites_a_domain_row_an_administrator_entered()
+    {
+        // Policy A: a domain comes from a customer contact OR an admin entry. An administrator who put
+        // se.com.sa on SEC and left it unverified said "not yet". A contact saved at that domain does not
+        // overrule the administrator, and the row is not the sync's to expire when the contact goes.
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, 41);
+        var customer = Customer(41, "CU00000041", "Saudi Electricity Company", "unused@example.test");
+        customer.ContactEmail = null;
+        db.Customers.Add(customer);
+        await db.SaveChangesAsync();
+        db.Add(new CustomerIdentifier
+        {
+            BusinessUnitId = 41,
+            CustomerId = customer.Id,
+            IdentifierType = CustomerIdentifierType.Domain,
+            NormalizedValue = "se.com.sa",
+            DisplayValue = "se.com.sa",
+            IsVerified = false,
+            Confidence = 0.50m,
+            Source = "MasterData",
+            EffectiveFrom = DateTime.UtcNow.AddDays(-30)
+        });
+        var contact = ContactAt(customer.Id, "procurement@se.com.sa");
+        db.Contacts.Add(contact);
+        await db.SaveChangesAsync();
+
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerContact");
+        await db.SaveChangesAsync();
+
+        var row = Assert.Single(await ActiveAsync(db, customer.Id, CustomerIdentifierType.Domain, "se.com.sa"));
+        Assert.Equal("MasterData", row.Source);
+        Assert.False(row.IsVerified);
+        Assert.Equal(0.50m, row.Confidence);
+
+        contact.IsActive = false;
+        await db.SaveChangesAsync();
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerContact");
+        await db.SaveChangesAsync();
+        row = Assert.Single(await ActiveAsync(db, customer.Id, CustomerIdentifierType.Domain, "se.com.sa"));
+        Assert.Equal("MasterData", row.Source);
+    }
+
+    [Fact]
+    public async Task PolicyA_a_contact_on_a_shared_mail_domain_never_turns_a_learned_domain_row_into_a_contacts_row()
+    {
+        // The organisation-domain guard stands in front of the take-over. gmail.com names nobody, so a contact
+        // at buyer.person@gmail.com writes its exact address and nothing for gmail.com, and the learned gmail.com
+        // row a confirmation left stays a learned row, which links and routes nothing under policy A.
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, 41);
+        var customer = Customer(41, "CU00000041", "Saudi Electricity Company", "unused@example.test");
+        customer.ContactEmail = null;
+        db.Customers.Add(customer);
+        await db.SaveChangesAsync();
+        db.Add(new CustomerIdentifier
+        {
+            BusinessUnitId = 41,
+            CustomerId = customer.Id,
+            IdentifierType = CustomerIdentifierType.Domain,
+            NormalizedValue = "gmail.com",
+            DisplayValue = "gmail.com",
+            IsVerified = true,
+            Confidence = 0.95m,
+            Source = "LeadReviewLearned",
+            EffectiveFrom = DateTime.UtcNow.AddDays(-30)
+        });
+        db.Contacts.Add(ContactAt(customer.Id, "buyer.person@gmail.com"));
+        await db.SaveChangesAsync();
+
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerContact");
+        await db.SaveChangesAsync();
+
+        var row = Assert.Single(await ActiveAsync(db, customer.Id, CustomerIdentifierType.Domain, "gmail.com"));
+        Assert.Equal("LeadReviewLearned", row.Source);
+        var address = Assert.Single(await ActiveAsync(db, customer.Id, CustomerIdentifierType.Email, "buyer.person@gmail.com"));
+        Assert.Equal("CustomerContact", address.Source);
+    }
+
+    private static async Task<List<CustomerIdentifier>> ActiveAsync(
+        ErpRfqAutomationContext db, long customerId, CustomerIdentifierType type, string value) =>
+        await db.Set<CustomerIdentifier>().AsNoTracking()
+            .Where(i => i.BusinessUnitId == 41 && i.CustomerId == customerId && i.IdentifierType == type
+                        && i.NormalizedValue == value && i.EffectiveTo == null)
+            .ToListAsync();
+
+    private static Contact ContactAt(long customerId, string email) => new()
+    {
+        BusinessUnitId = 41,
+        CustomerId = customerId,
+        FirstName = "Procurement",
+        LastName = "Desk",
+        Email = email,
+        IsActive = true,
+        CreatedBy = "seed",
+        CreatedOn = DateTime.UtcNow,
+        ConcurrencyToken = Guid.NewGuid()
+    };
+
     private static Customer Customer(long tenantId, string docId, string name, string email) => new()
     {
         Buid = tenantId,

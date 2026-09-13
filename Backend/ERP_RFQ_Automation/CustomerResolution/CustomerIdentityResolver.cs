@@ -13,7 +13,7 @@ namespace ERP_RFQ_Automation.CustomerResolution;
 /// Tiers run in order and the FIRST decisive tier wins:
 ///   S0 guard   — direction of trade, tenant self-identity, synthetic + free-mail domains
 ///   S1 exact   — sender/buyer address, ERP account, tax registration      -> AUTO 1.00
-///   S2 domain  — corporate sender domain                                  -> AUTO 0.95
+///   S2 domain  — corporate sender domain, on a row a person entered       -> AUTO 0.95
 ///   S3 learned — human-taught alias / portal+vendor-code pair             -> AUTO 0.90/0.92
 ///   S4..S6     — read-only scans that only ever SUGGEST
 ///   S7         — UNRESOLVED
@@ -122,11 +122,12 @@ public static class CustomerIdentityResolver
         var authoritative = new List<Hit>();
         foreach (var identifier in corpus.Identifiers)
         {
-            // A ROW THE LEARNER REFUSED TO TRUST IS NOT A FACT. CustomerAliasLearner writes
-            // LeadReviewUnverified for a mailbox on a domain nobody tied to the chosen customer, so
-            // that a person can look at it. This tier never read Source at all, so the demoted row
-            // still linked every later mail from that address at 1.00, and nothing on the page could
-            // outvote it.
+            // A ROW THE LEARNER REFUSED TO TRUST IS NOT A FACT. CustomerAliasLearner used to file a
+            // mailbox on a domain nobody tied to the chosen customer as LeadReviewUnverified, so that a
+            // person could look at it. Since the owner's policy A decision (2026-09-13) it writes an
+            // address only verified, after two confirmations for one customer, but rows filed before
+            // that are still in the store. This tier never read Source at all, so such a row still
+            // linked every later mail from that address at 1.00, and nothing on the page could outvote it.
             //
             // NOR IS A ROW A PERSON MARKED UNVERIFIED. Unticking "verified" on the setup screen is the
             // one correction an administrator can make to a wrong fact today, and routing's engine
@@ -171,23 +172,23 @@ public static class CustomerIdentityResolver
 
         // ── S2 CORPORATE SENDER DOMAIN ────────────────────────────────────────
         // guarded.Domains holds only domains IdentityDomainGuard accepts as an organisation's own,
-        // and a row the learner demoted to LeadReviewUnverified, or a person marked unverified, is
-        // skipped for the same reasons as at S1: it links at 0.95, which asks nobody.
+        // and a row a person marked unverified is skipped for the same reason as at S1: it links at
+        // 0.95, which asks nobody.
         //
-        // A SYSTEM MAILBOX IS THE POSTMAN ON WHATEVER HOST IT SITS, FOR A DOMAIN AS FOR AN ADDRESS. S1 refuses a
-        // learned no-reply@etimad.gov.sa row, but a learned Domain row etimad.gov.sa (or coupa.com, or sap.com
-        // for SAP Ariba's no-reply@sap.com) still linked every SEC print the portal carried to Saudi Aramco here
-        // at 0.95, because no list of relay hosts is ever complete. A domain that reaches this tier only through
-        // a system mailbox (IdentityDomainGuard.IsSystemMailbox) is matched only by a row a person entered; a
-        // person's own mailbox on the same host still matches every row, as before. Routing and the corpus
-        // loader ask the same question.
+        // A WHOLE DOMAIN IS NEVER LEARNED FROM CONFIRMATIONS (owner decision 2026-09-13, policy A: "A whole
+        // email domain is never learned from confirmations. It only comes from a customer contact or an admin
+        // entry."). So this tier links only a Domain row a person entered (CustomerIdentifierSources
+        // .EnteredByAPerson), whatever mailbox carries the page. A learned, backfilled or demoted row links
+        // nothing, from a system mailbox or a person's own. Before, a learned etimad.gov.sa (or coupa.com, or
+        // sap.com) row still linked every SEC print a buyer on that host sent to Saudi Aramco at 0.95, and each
+        // repair round that tried to say when a confirmation had earned a domain found a new wrong 0.95 link.
+        // Legacy learned Domain rows are left in the store (no data migration was approved) and are simply
+        // inert here. Routing and the corpus loader ask the same question.
         var domainHits = corpus.Identifiers
             .Where(i => i.IdentifierType == CustomerIdentifierType.Domain
                         && i.IsVerified
-                        && !IsUnverifiedLearned(i)
-                        && guarded.Domains.Contains(i.NormalizedValue)
-                        && (guarded.PersonMailboxDomains.Contains(i.NormalizedValue)
-                            || CustomerIdentifierSources.EnteredByAPerson.Contains(i.Source, StringComparer.Ordinal)))
+                        && CustomerIdentifierSources.IsEnteredByAPerson(i.Source)
+                        && guarded.Domains.Contains(i.NormalizedValue))
             .Select(i => new Hit(i.CustomerId, policy.DomainConfidence,
                 CustomerMatchReasonCodes.SenderDomain,
                 $"Shares the corporate sender domain {i.NormalizedValue}."))
@@ -770,7 +771,6 @@ public static class CustomerIdentityResolver
 
         var addresses = new HashSet<string>(StringComparer.Ordinal);
         var domains = new HashSet<string>(StringComparer.Ordinal);
-        var personMailboxDomains = new HashSet<string>(StringComparer.Ordinal);
         AddAddress(evidence.SenderEmail);
         AddAddress(evidence.DocumentBuyerEmail);
 
@@ -819,8 +819,7 @@ public static class CustomerIdentityResolver
             portalAccountKey,
             CustomerNameNormalizer.LooseKey(evidence.BuyerPersonName),
             passages,
-            selfNames,
-            personMailboxDomains);
+            selfNames);
 
         bool IsSelfName(string key) => SelfIdentityGuard.IsSelfName(key, selfNames);
 
@@ -863,11 +862,7 @@ public static class CustomerIdentityResolver
             // address is still evidence (S1). One shared predicate decides, so this tier, the
             // learner and routing cannot disagree about which domains are an organisation's own.
             if (IdentityDomainGuard.IsOrganisationDomain(domain, evidence.TenantSelfDomains))
-            {
                 domains.Add(domain);
-                // Whether a person's mailbox, and not only a system mailbox, speaks for the domain (see S2).
-                if (!IdentityDomainGuard.IsSystemMailbox(address)) personMailboxDomains.Add(domain);
-            }
         }
     }
 
@@ -1145,8 +1140,7 @@ public static class CustomerIdentityResolver
         string? PortalAccountKey,
         string BuyerPersonKey,
         IReadOnlyList<GuardedPassage> Passages,
-        HashSet<string> SelfNameKeys,
-        HashSet<string> PersonMailboxDomains)
+        HashSet<string> SelfNameKeys)
     {
         public bool IsEmpty =>
             Addresses.Count == 0 && Domains.Count == 0 && AccountReferences.Count == 0 &&
@@ -1652,8 +1646,16 @@ public static class CustomerIdentityResolver
         /// <summary>What kind of fact ties a mail domain to a customer, because they are not worth the same.</summary>
         private enum TieKind
         {
-            /// <summary>A contact a person entered, or a verified address registered to the customer.</summary>
+            /// <summary>
+            /// A contact a person entered, or a verified address a person registered on the customer (or the migration
+            /// backfilled from the customer's record). The only tie that speaks FOR a consignee.
+            /// </summary>
             Record,
+            /// <summary>
+            /// A verified address the learner wrote from people's confirmations. A fact about that one mailbox: it speaks
+            /// against a consignee like a record, and never for one (owner decision 2026-09-13, policy A).
+            /// </summary>
+            TaughtAddress,
             /// <summary>An earlier lead a person resolved, from the very address on this page.</summary>
             DecisionFromThisMailbox,
             /// <summary>An earlier lead a person resolved, from a different address on the same domain.</summary>
@@ -1714,9 +1716,11 @@ public static class CustomerIdentityResolver
                         owners.Add(identifier.CustomerId);
             }
 
-            // A mail domain belongs to a customer when that customer's own records write from it: a
+            // A mail domain is tied to a customer when that customer's own records write from it: a
             // contact a person entered, an earlier lead from it a person resolved, an address
             // registered to them. Facts somebody set, never a guess at what a domain's letters spell.
+            // Under policy A (owner decision 2026-09-13) only a contact or an address a person entered
+            // may speak FOR a consignee; see CompetesWith.
             // A Domain row is not read here: had one matched, S2 would already have decided.
             // Guard has already removed synthetic, self, free-mail and relay domains, so the postman
             // (ansmtp.ariba.com) can never be a rival. Ordered, so the sentence names the same
@@ -1751,8 +1755,8 @@ public static class CustomerIdentityResolver
                             address));
                     }
                 foreach (var identifier in corpus.Identifiers)
-                    // Only a fact ties: the same test S1 applies, and the one the learner uses for
-                    // "another customer already writes from this domain".
+                    // Only a fact ties: the same test S1 applies. (The learner no longer reads domain ties at
+                    // all: under policy A, owner decision 2026-09-13, it never learns a Domain.)
                     // S1 also refuses a row nobody entered on a system mailbox (MayMatchExactAddress), and so must
                     // this: a learned no-reply@etimad.gov.sa on Aramco matched nothing at S1 and still demoted an SEC
                     // print through the same relay to 0.70, with Aramco ranked first.
@@ -1762,7 +1766,8 @@ public static class CustomerIdentityResolver
                         && IdentityDomainGuard.MayMatchExactAddress(identifier.NormalizedValue, identifier.Source)
                         && SameDomain(identifier.NormalizedValue, domain))
                         ties.Add(new DomainTie(domain, identifier.CustomerId,
-                            $"{identifier.NormalizedValue} is registered to {NameOf(identifier.CustomerId)}", TieKind.Record));
+                            $"{identifier.NormalizedValue} is registered to {NameOf(identifier.CustomerId)}",
+                            IsTaught(identifier) ? TieKind.TaughtAddress : TieKind.Record));
             }
 
             // THE ORGANISATION THE SENDER'S MAILBOX IS SIGNED WITH (#14). Hyundai E&C mails from hdec.com
@@ -1839,7 +1844,15 @@ public static class CustomerIdentityResolver
             // nobody on this customer's own records. A signature is never one of those records: it may
             // add a rival, it never shields the consignee (an EPC mailbox signed with the site owner's
             // name is still the contractor's mailbox).
-            if (_domainTies.Any(tie => tie.CustomerId == customerId && tie.Kind != TieKind.Signature)) return null;
+            //
+            // NOR IS ANYTHING PEOPLE'S CONFIRMATIONS PRODUCED. OWNER DECISION 2026-09-13, POLICY A: "A whole email domain is
+            // never learned from confirmations." ONE decision for Aramco on m.kim@hdec.com's lead, even a mis-click on an SEC
+            // job, shielded Aramco on every later hdec.com print to an Aramco site, from mailboxes never seen before, over
+            // Hyundai's buyer on record, and it linked at 0.88 (the conformance round's B1, B2, B4). A decision on this very
+            // mailbox did the same after one click, and an address the learner wrote shielded every other mailbox on its
+            // domain. Only a fact a person entered (TieKind.Record) speaks FOR a consignee. Decisions and taught addresses
+            // still speak AGAINST one below; a buyer's own mailbox earns trust only as policy A's learned address, at S1.
+            if (_domainTies.Any(tie => tie.CustomerId == customerId && tie.Kind == TieKind.Record)) return null;
             var rivals = _domainTies.Where(tie => tie.CustomerId != customerId && Speaks(tie)).ToList();
             if (rivals.Count == 0) return null;
             var rival = rivals[0];
