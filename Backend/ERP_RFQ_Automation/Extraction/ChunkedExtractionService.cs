@@ -802,6 +802,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
         var headerContext = Clip(input.HeaderText, HeaderContextBudget);
         var mergedItems = new List<LeadItemData>(expected);
+        var seenAcrossChunks = new HashSet<string>(StringComparer.Ordinal);
+        var duplicatesAcrossChunks = 0;
         LeadExtractionResult? headerSource = null;
         var failedChunks = 0;
 
@@ -927,8 +929,34 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
             headerSource ??= outcome.Result; // header fields come from the first successful chunk
             if (outcome.Result.Items is { Count: > 0 })
-                mergedItems.AddRange(outcome.Result.Items); // REDUCE: union in order
+            {
+                // REDUCE: union in order — but an item an EARLIER chunk already returned is not
+                // a new item. Every chunk carries the same header context, and a model that
+                // finds a line item in that context returns it on every call: a one-item
+                // Marafiq RFQ read in five chunks came back as five copies of the same
+                // transformer, and all five were saved on the lead. Duplicates are only ever
+                // dropped ACROSS chunks; what one chunk returns is that chunk's reading.
+                var added = 0;
+                foreach (var item in outcome.Result.Items)
+                {
+                    var key = CrossChunkKey(item);
+                    if (key is not null && seenAcrossChunks.Contains(key)) { duplicatesAcrossChunks++; continue; }
+                    mergedItems.Add(item);
+                    added++;
+                }
+                foreach (var item in outcome.Result.Items)
+                    if (CrossChunkKey(item) is { } key) seenAcrossChunks.Add(key);
+                if (added < outcome.Result.Items.Count)
+                    _log.LogWarning(
+                        "Chunk {Index}/{Total} for {Document} repeated {Dropped} item(s) an earlier chunk "
+                        + "already returned; kept {Kept}.", i + 1, pending.Count, input.SourceDocumentName,
+                        outcome.Result.Items.Count - added, added);
+            }
         }
+        if (duplicatesAcrossChunks > 0)
+            diagnostics.Add(
+                $"Dropped {duplicatesAcrossChunks} item(s) repeated across chunks "
+                + "(same line number, material code, quantity and unit as an item from an earlier chunk).");
 
         if (headerSource is null)
         {
@@ -1119,11 +1147,43 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         return chunks;
     }
 
+    /// <summary>
+    /// Identity of a line item for cross-chunk de-duplication. Two items are the same item
+    /// when their line number, material code / part number, quantity and unit agree after
+    /// whitespace and case normalisation (plus the description when only a line number anchors them). Confidence, source span and inferred fields are
+    /// deliberately NOT part of it: the same line read twice differs in nothing else.
+    /// </summary>
+    internal static string? CrossChunkKey(LeadItemData item)
+    {
+        static string N(string? s) => string.IsNullOrWhiteSpace(s)
+            ? string.Empty
+            : System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"\s+", " ").ToUpperInvariant();
+        // Only an item with an identity anchor takes part. Two bare descriptions that happen to
+        // agree are not provably the same line; a repeated line NUMBER or material CODE is.
+        if (string.IsNullOrWhiteSpace(item.LineItemNo) && string.IsNullOrWhiteSpace(item.ItemMaterialCode)
+            && string.IsNullOrWhiteSpace(item.ManufacturerPartNumber))
+            return null;
+        var qty = item.Quantity is { } q ? q.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture) : "";
+        // A code or part number identifies the line on its own; the description is then left
+        // out, because the same line read twice comes back with different spacing and commas
+        // ("40KVA PRIMARY" / "40KVAPRIMARY" on the Marafiq lead). Anchored by a line NUMBER
+        // alone, the description stays in: line "1" of two inquiries is two different lines.
+        var codeAnchored = !string.IsNullOrWhiteSpace(item.ItemMaterialCode)
+            || !string.IsNullOrWhiteSpace(item.ManufacturerPartNumber);
+        return string.Join("\u001f",
+            N(item.InquiryGroup), N(item.LineItemNo), N(item.ItemMaterialCode), N(item.ManufacturerPartNumber),
+            qty, N(item.UnitOfMeasure),
+            codeAnchored ? "" : N(item.ProductShortName), codeAnchored ? "" : N(item.ProductShortDescription));
+    }
+
     private static string BuildChunkText(string headerContext, List<string> regions)
     {
         var sb = new StringBuilder();
         if (!string.IsNullOrWhiteSpace(headerContext))
-            sb.Append("[DOCUMENT HEADER / CONTEXT]\n").Append(headerContext).Append("\n\n");
+            sb.Append("[DOCUMENT HEADER / CONTEXT — reference only. Read RFQ number, buyer, dates, currency and "
+                      + "delivery terms from here. Do NOT extract line items from this section; any item that "
+                      + "appears here is listed again under LINE ITEMS if it belongs to this chunk.]\n")
+              .Append(headerContext).Append("\n\n");
         sb.Append("[LINE ITEMS — extract EVERY item below, do not skip any]\n");
         for (var i = 0; i < regions.Count; i++)
             sb.Append(regions[i]).Append('\n');

@@ -195,4 +195,55 @@ public sealed class LineItemRegionGrouperTests
 
         Assert.Equal(lines.Count, regions.Count);
     }
+    // ---- Header / region split ----------------------------------------------------------------
+    //
+    // A fixed 20-line header used to swallow whatever items began inside it: those items then
+    // rode along as "context" on every chunk and sat in no region. The header stops at the
+    // first item.
+
+    private static string[] Preamble(int n) => Enumerable.Range(1, n).Select(i => $"preamble line {i}").ToArray();
+
+    [Fact]
+    public void The_header_stops_where_the_first_item_starts()
+    {
+        string[] lines = [
+            .. Preamble(8),
+            .. Item("906002718", "RELAY:GP,240 VAC 5 A", "CONTACT RATING:", "240 VAC 5 A;"),
+            .. Item("906003335", "BREAKER,CRCT,MC,400 VAC", "AMPERAGE:", "SCREW TERMINAL;"),
+            .. Item("906004001", "FUSE,CARTRIDGE,30 A", "VOLTAGE:", "600 V;"),
+        ];
+
+        var (header, regions) = LineItemRegionGrouper.SplitHeaderAndRegions(lines, headerLineCap: 20);
+
+        Assert.Equal(8, header.Split('\n').Length);
+        Assert.DoesNotContain("906002718", header);
+        Assert.Equal(3, regions.Count);
+        Assert.StartsWith("906002718", regions[0]);
+        Assert.StartsWith("906004001", regions[2]);
+    }
+
+    [Fact]
+    public void Without_recognisable_items_the_header_keeps_its_cap()
+    {
+        var lines = Preamble(30);
+
+        var (header, regions) = LineItemRegionGrouper.SplitHeaderAndRegions(lines, headerLineCap: 20);
+
+        Assert.Equal(20, header.Split('\n').Length);
+        Assert.Equal(10, regions.Count); // the body, one region per line as before
+    }
+
+    [Fact]
+    public void A_short_unstructured_document_still_gets_the_whole_document_pass()
+    {
+        // PdfPig hands back one text line per PAGE, so a 13-page terms-and-conditions RFQ is 13
+        // lines with no item shape at all. Today's behaviour is kept: everything is context and
+        // every line is a region, so the single item on page 1 is still in front of the model.
+        var lines = Enumerable.Range(1, 13).Select(i => $"page {i} text").ToArray();
+
+        var (header, regions) = LineItemRegionGrouper.SplitHeaderAndRegions(lines, headerLineCap: 20);
+
+        Assert.Equal(13, header.Split('\n').Length);
+        Assert.Equal(13, regions.Count);
+    }
 }
