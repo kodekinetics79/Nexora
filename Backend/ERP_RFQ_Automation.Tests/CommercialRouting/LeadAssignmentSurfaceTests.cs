@@ -206,20 +206,55 @@ public sealed class LeadAssignmentSurfaceTests
 
     /// <summary>
     /// The profile editor round-trips <c>effectiveFromUtc</c> so that adjusting a rep's capacity
-    /// does not silently restart the effective period. That round trip only works if the value
-    /// survives model binding as UTC: <c>UpsertProfileAsync</c> calls <c>RequireUtc</c> and throws
-    /// <c>SalesValidationException</c> for any other kind, which would turn every EDIT of an
-    /// existing profile — never a create, which omits the field — into a 400.
+    /// does not silently restart the effective period. The earlier version of this test fed model
+    /// binding a string ending in "Z" and passed while production answered
+    /// "EffectiveFromUtc must be UTC." to every edit: the column is <c>timestamp without time
+    /// zone</c>, EF hands the value back as <see cref="DateTimeKind.Unspecified"/>, and the
+    /// read endpoint serialised it WITHOUT a "Z". This test uses the body production actually
+    /// produced and drives the real action, so the edit path is asserted rather than assumed.
     /// </summary>
     [Fact]
-    public void Effective_dates_round_trip_through_model_binding_as_utc()
+    public async Task Editing_an_existing_profile_with_the_offset_less_date_the_read_endpoint_emits_is_accepted()
     {
-        var body = JsonSerializer.Deserialize<UpsertRepRoutingProfileRequest>(
-            """{"effectiveFromUtc":"2026-08-19T00:00:00Z","effectiveToUtc":"2027-01-01T00:00:00Z"}""",
-            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        const long tenant = 91_261;
+        const long rep = 91_262;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        context.Users.Add(User(rep, tenant, "edited@test"));
+        var stored = EligibleProfile(tenant, rep);
+        stored.EffectiveFromUtc = new DateTime(2026, 8, 20, 0, 0, 0, DateTimeKind.Utc);
+        context.SalesRepProfiles.Add(stored);
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
 
-        Assert.Equal(DateTimeKind.Utc, body.EffectiveFromUtc!.Value.Kind);
-        Assert.Equal(DateTimeKind.Utc, body.EffectiveToUtc!.Value.Kind);
+        // Read side: the JSON the editor receives must carry the offset, so an honest client
+        // binds it back as UTC.
+        var row = (await ProfileRowsAsync(context, tenant)).Single();
+        Assert.EndsWith("Z", row.GetProperty("effectiveFromUtc").GetString());
+
+        // Write side: even the offset-less shape the OLD read endpoint emitted — which every
+        // deployed editor session was echoing — must not be rejected. Model binding yields
+        // Unspecified for it; that is the trap the controller now normalises.
+        var body = JsonSerializer.Deserialize<UpsertRepRoutingProfileRequest>(
+            """
+            {"isRoutingEligible":true,"capacityPercent":80,"distributionWeight":1,
+             "territoryKeys":[],"productCategoryKeys":[],
+             "effectiveFromUtc":"2026-08-20T00:00:00","expectedVersion":1}
+            """,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(DateTimeKind.Unspecified, body.EffectiveFromUtc!.Value.Kind);
+
+        var controller = IntelligenceWithSales(context, tenant);
+        controller.Request.Headers["Idempotency-Key"] = "profile-utc-roundtrip-1";
+        var response = await controller.UpsertRepRoutingProfile(rep, body, default);
+
+        Assert.IsType<OkObjectResult>(response);
+        var saved = await context.SalesRepProfiles.AsNoTracking().SingleAsync(x => x.UserId == rep);
+        Assert.Equal(80, saved.CapacityPercent);
+        Assert.Equal(2, saved.Version);
+        // The effective period did not restart: the edited row keeps the date it was created with.
+        Assert.Equal(new DateTime(2026, 8, 20), saved.EffectiveFromUtc.Date);
     }
 
     private static async Task<JsonElement[]> QueueRowsAsync(ErpRfqAutomationContext context, long tenant)
@@ -240,6 +275,15 @@ public sealed class LeadAssignmentSurfaceTests
         JsonDocument.Parse(JsonSerializer.Serialize(value,
                 new JsonSerializerOptions(JsonSerializerDefaults.Web)))
             .RootElement.EnumerateArray().ToArray();
+
+    private static CommercialIntelligenceController IntelligenceWithSales(ErpRfqAutomationContext context, long tenant) =>
+        new(context, new SalesApplicationService(new EfSalesPersistence(context)), RoutingService(context), new TestRoleGate())
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant) }
+            }
+        };
 
     private static CommercialIntelligenceController Intelligence(ErpRfqAutomationContext context, long tenant) =>
         new(context, null!, RoutingService(context), new TestRoleGate())
