@@ -75,35 +75,11 @@ public static class LineItemRegionGrouper
     {
         if (lines is null || lines.Count == 0) return Array.Empty<string>();
 
-        // HIGH-PRECISION SHAPES FIRST. A standalone material code and an explicitly labelled
-        // item are unambiguous: specification prose never looks like either. An ordinal prefix
-        // is different — "1." opens a line item on a bid list and a numbered CLAUSE in a
-        // contract, and a 54-page Word RFQ is full of the latter.
-        var starts = new List<int>();
-        for (var i = 0; i < lines.Count; i++)
-            if (StandaloneCode.IsMatch(lines[i]) || LabelledItem.IsMatch(lines[i])) starts.Add(i);
-
-        // Only when the precise shapes find nothing is the ordinal considered, and then only
-        // if the ordinals RUN — a real item list numbers 1, 2, 3, 4 in order, while numbered
-        // clauses scattered through prose restart and repeat.
-        if (starts.Count < MinimumBoundaries)
-            starts = SequentialOrdinalStarts(lines);
+        var starts = FindItemStarts(lines);
 
         // Not enough structure to be sure. Keep today's behaviour rather than trade one wrong
         // answer for another.
-        if (starts.Count < MinimumBoundaries) return lines;
-
-        // OVER-DETECTION GUARD, and it is a COST control as much as a correctness one.
-        //
-        // The chunk plan is derived from this count, and every chunk resends the full
-        // extraction prompt — so an inflated region count multiplies the bill directly. A real
-        // line item carries a description, a quantity and a unit, so it occupies several lines;
-        // a document claiming an item on more than every other line is being mis-read.
-        //
-        // Measured: a 54-page .docx reported 1,603 items and planned 70 chunks. It consumed an
-        // entire monthly token budget, was refused partway at chunk 49, and returned 24 real
-        // line items. Almost every "item" was a numbered paragraph.
-        if (starts.Count * 2 > lines.Count) return lines;
+        if (starts.Count == 0) return lines;
 
         var regions = new List<string>(starts.Count + 1);
 
@@ -122,6 +98,76 @@ public static class LineItemRegionGrouper
         }
 
         return regions;
+    }
+
+    /// <summary>
+    /// The header/body split every unstructured document goes through before chunking:
+    /// the first <paramref name="headerLineCap"/> lines become the header context and the
+    /// rest is grouped into item regions — EXCEPT that the header never swallows a line item.
+    ///
+    /// <para>It used to. A fixed top slice of 20 lines was the header regardless of where the
+    /// items began, so a compact RFQ whose first item sits on line 9 carried that item (and
+    /// the ones after it, up to line 20) in the header context of EVERY chunk and in no
+    /// region at all. The model then re-extracted the header's items on every chunk, and a
+    /// one-item Marafiq RFQ came back as five copies of the same transformer. The header is
+    /// now cut at the first detected item start when that start falls inside the cap.</para>
+    /// </summary>
+    public static (string Header, List<string> Regions) SplitHeaderAndRegions(
+        IReadOnlyList<string> lines, int headerLineCap)
+    {
+        if (lines is null || lines.Count == 0) return (string.Empty, new List<string>());
+
+        var headerCount = Math.Min(Math.Max(headerLineCap, 0), lines.Count);
+        var starts = FindItemStarts(lines);
+        if (starts.Count > 0 && starts[0] < headerCount)
+            headerCount = starts[0];
+
+        var header = Join(lines, 0, headerCount);
+        var regions = Group(lines.Skip(headerCount).ToList()).ToList();
+        if (regions.Count == 0 && lines.Count > 0)
+            regions = lines.ToList(); // whole-doc pass when the body is short
+        return (header, regions);
+    }
+
+    /// <summary>
+    /// Line indices where a line item starts, after every guard <see cref="Group"/> applies.
+    /// Empty when the document shows too little structure to be sure.
+    /// </summary>
+    public static List<int> FindItemStarts(IReadOnlyList<string> lines)
+    {
+        if (lines is null || lines.Count == 0) return new List<int>();
+
+        // HIGH-PRECISION SHAPES FIRST. A standalone material code and an explicitly labelled
+        // item are unambiguous: specification prose never looks like either. An ordinal prefix
+        // is different — "1." opens a line item on a bid list and a numbered CLAUSE in a
+        // contract, and a 54-page Word RFQ is full of the latter.
+        var starts = new List<int>();
+        for (var i = 0; i < lines.Count; i++)
+            if (StandaloneCode.IsMatch(lines[i]) || LabelledItem.IsMatch(lines[i])) starts.Add(i);
+
+        // Only when the precise shapes find nothing is the ordinal considered, and then only
+        // if the ordinals RUN — a real item list numbers 1, 2, 3, 4 in order, while numbered
+        // clauses scattered through prose restart and repeat.
+        if (starts.Count < MinimumBoundaries)
+            starts = SequentialOrdinalStarts(lines);
+
+        // Not enough structure to be sure. Keep today's behaviour rather than trade one wrong
+        // answer for another.
+        if (starts.Count < MinimumBoundaries) return new List<int>();
+
+        // OVER-DETECTION GUARD, and it is a COST control as much as a correctness one.
+        //
+        // The chunk plan is derived from this count, and every chunk resends the full
+        // extraction prompt — so an inflated region count multiplies the bill directly. A real
+        // line item carries a description, a quantity and a unit, so it occupies several lines;
+        // a document claiming an item on more than every other line is being mis-read.
+        //
+        // Measured: a 54-page .docx reported 1,603 items and planned 70 chunks. It consumed an
+        // entire monthly token budget, was refused partway at chunk 49, and returned 24 real
+        // line items. Almost every "item" was a numbered paragraph.
+        if (starts.Count * 2 > lines.Count) return new List<int>();
+
+        return starts;
     }
 
 
