@@ -171,6 +171,7 @@ public sealed class CommercialIntelligenceController(
                 version = profile?.Version ?? 0,
                 updatedAtUtc = profile?.UpdatedAtUtc, updatedBy = profile?.UpdatedBy,
                 isAvailable = option?.IsAvailable ?? false,
+                acceptsManualAssignment = option?.AcceptsManualAssignment ?? false,
                 eligibilityReason = option?.EligibilityReason
                     ?? (profile == null
                         ? RoutingEligibilityReasons.ProfileRequired

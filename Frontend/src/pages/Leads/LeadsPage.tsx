@@ -503,7 +503,7 @@ const LeadsPage: React.FC = () => {
     () => (ownerOptions.data ?? []).find((option) => option.userId === myUserId) ?? null,
     [ownerOptions.data, myUserId],
   );
-  const iCanTakeLeads = myOwnerOption?.isAvailable === true;
+  const iCanTakeLeads = myOwnerOption?.acceptsManualAssignment === true;
   /** Only stated once we actually know — never inferred from a list that has not loaded. */
   const whyICannotTakeLeads = canEditLeads && !ownerOptions.isLoading && !ownerOptions.isError && !iCanTakeLeads
     ? (myOwnerOption?.eligibilityReason?.trim()

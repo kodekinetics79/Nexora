@@ -153,7 +153,8 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 if (eligibility.TryGetValue(user.Id, out var option))
                 {
-                    user.IsEligibleForAssignment = option.IsAvailable;
+                    // Every name here is picked BY HAND, so the flag mirrors the hand rule.
+                    user.IsEligibleForAssignment = option.AcceptsManualAssignment;
                     user.EligibilityReason = option.EligibilityReason;
                     user.CapacityPercent = option.CapacityPercent;
                     user.WorkloadPoints = option.Workload.WorkloadPoints;

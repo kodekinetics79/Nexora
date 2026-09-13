@@ -180,6 +180,61 @@ public sealed class CommercialRoutingApplicationServiceTests
             option.EligibilityReason, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Capacity is the ENGINE's distribution rule. A manager handing a lead to someone by hand
+    /// needs only an active, routing-eligible profile; the workload ceiling does not apply.
+    /// Before this, a tenant whose only user carried two old-dated journeys was locked out of
+    /// its own inquiries: every upload parked on the queue and every "Assign to me" answered
+    /// 409, with no override anywhere. Automatic routing keeps honouring capacity unchanged.
+    /// </summary>
+    [Fact]
+    public async Task Manual_assignment_accepts_a_profile_over_capacity_and_still_refuses_one_that_is_not_eligible()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
+        await using var context = db.ContextFor(71);
+        var now = DateTime.UtcNow;
+        context.SalesRepProfiles.AddRange(
+            new SalesRepProfile
+            {
+                // Configured capacity 0 = the ceiling is exhausted before any workload is measured.
+                BusinessUnitId = 71, UserId = 7101, IsRoutingEligible = true,
+                CapacityPercent = 0, DistributionWeight = 1, EffectiveFromUtc = now.AddDays(-1),
+                Version = 1, UpdatedAtUtc = now, UpdatedBy = "test", LastMutationIdempotencyKey = "profile-over-capacity"
+            },
+            new SalesRepProfile
+            {
+                BusinessUnitId = 71, UserId = 7102, IsRoutingEligible = false,
+                CapacityPercent = 100, DistributionWeight = 1, EffectiveFromUtc = now.AddDays(-1),
+                Version = 1, UpdatedAtUtc = now, UpdatedBy = "test", LastMutationIdempotencyKey = "profile-not-eligible"
+            });
+        await context.SaveChangesAsync();
+        var service = Service(context);
+
+        var options = (await service.GetOwnerOptionsAsync(71, CancellationToken.None))
+            .ToDictionary(option => option.UserId);
+        // The two verdicts differ exactly where they should.
+        Assert.False(options[7101].IsAvailable);
+        Assert.True(options[7101].AcceptsManualAssignment);
+        Assert.Equal(RoutingEligibilityReasons.CapacityExhausted, options[7101].EligibilityReason);
+        Assert.False(options[7102].IsAvailable);
+        Assert.False(options[7102].AcceptsManualAssignment);
+
+        // Over capacity: a hand assignment goes through.
+        await service.AssignLeadAsync(71, new ManualAssignLeadCommand(
+            701, 7101, 7102, "manual-over-capacity", "corr-over-capacity",
+            AssignmentScope.LeadOnly, null, true, null), CancellationToken.None);
+        Assert.Equal(7101, (await context.Leads.SingleAsync(l => l.Id == 701)).AssignTo);
+
+        // Not routing-eligible: still refused, and the refusal says what to fix.
+        var refused = await Assert.ThrowsAsync<RoutingConflictException>(() => service.AssignLeadAsync(71,
+            new ManualAssignLeadCommand(
+                701, 7102, 7101, "manual-not-eligible", "corr-not-eligible",
+                AssignmentScope.LeadOnly, "handing over for coverage", true, 7101), CancellationToken.None));
+        Assert.Contains("Sales Rep profile", refused.Message);
+        Assert.Equal(7101, (await context.Leads.SingleAsync(l => l.Id == 701)).AssignTo);
+    }
+
     [Fact]
     public async Task Manual_assignment_rejects_a_stale_expected_assignee()
     {

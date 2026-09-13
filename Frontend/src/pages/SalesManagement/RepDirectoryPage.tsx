@@ -36,9 +36,12 @@ type DraftState = {
 };
 
 function RoutingCell({ row }: { row: RepRoutingProfileDTO }) {
+  // "At capacity" is not "Blocked": automatic routing will skip this person, a manager may still
+  // hand them a lead. Only a profile problem blocks both.
   const label = !row.hasProfile ? 'No profile'
     : !row.profileEffectiveNow ? 'Not effective'
-    : row.isAvailable ? 'Eligible' : 'Blocked';
+    : row.isAvailable ? 'Eligible'
+    : row.acceptsManualAssignment ? 'At capacity' : 'Blocked';
   const color = label === 'Eligible' ? 'success' : label === 'No profile' ? 'default' : 'warning';
   return (
     <Stack spacing={0.25}>
@@ -76,7 +79,12 @@ export default function RepDirectoryPage() {
     const byUser = new Map((profiles.data ?? []).map(profile => [profile.userId, profile]));
     return (summaries.data ?? []).map(summary => ({ summary, profile: byUser.get(summary.userId) }));
   }, [summaries.data, profiles.data]);
-  const nobodyEligible = !!profiles.data?.length && !profiles.data.some(profile => profile.isAvailable);
+  // Two different emergencies. Nobody with a usable profile means nothing can be assigned at all,
+  // by the engine or by hand. Everybody at capacity only means the engine will park new leads on
+  // the queue; a manager can still hand them out.
+  const profileRows = profiles.data ?? [];
+  const nobodyAssignable = profileRows.length > 0 && !profileRows.some(profile => profile.acceptsManualAssignment);
+  const everyoneAtCapacity = !nobodyAssignable && profileRows.length > 0 && !profileRows.some(profile => profile.isAvailable);
 
   const mutation = useMutation({
     mutationFn: () => {
@@ -153,11 +161,17 @@ export default function RepDirectoryPage() {
 
   return (
     <PageShell title="Rep directory" subtitle="Sales ownership, workload, and who the routing engine is allowed to assign work to.">
-      {nobodyEligible && (
+      {nobodyAssignable && (
         <Alert severity="warning" sx={{ mb: 2 }}>
-          No representative in this business unit is currently eligible for governed routing, so every
-          incoming lead will land in the routing queue unassigned and no manual assignment will be
-          accepted either. Give at least one person an eligible routing profile below.
+          No representative in this business unit has an eligible routing profile, so every incoming
+          lead will land in the routing queue unassigned and no manual assignment will be accepted
+          either. Give at least one person an eligible routing profile below.
+        </Alert>
+      )}
+      {everyoneAtCapacity && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Everyone with a routing profile is at capacity, so automatic routing will park new leads in
+          the routing queue. A manager can still assign them by hand from the lead or the queue.
         </Alert>
       )}
       <QueryState
@@ -240,7 +254,7 @@ export default function RepDirectoryPage() {
             <TextField
               label="Capacity percent" type="number" value={draft?.capacityPercent ?? ''}
               onChange={event => setDraft(current => current && { ...current, capacityPercent: event.target.value })}
-              error={!capacityValid} helperText="0-100. Caps how much of the measured workload ceiling this rep may carry."
+              error={!capacityValid} helperText="0-100. Caps how much of the measured workload ceiling automatic routing may give this rep. Hand assignment ignores it."
               slotProps={{ htmlInput: { min: 0, max: 100, step: 1 } }}
             />
             <TextField

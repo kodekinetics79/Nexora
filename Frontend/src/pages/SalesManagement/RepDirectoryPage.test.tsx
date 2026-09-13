@@ -51,6 +51,7 @@ const missingProfile = {
   productCategoryKeys: [],
   version: 0,
   isAvailable: false,
+  acceptsManualAssignment: false,
   eligibilityReason: 'A governed routing profile is required.',
 };
 const savedProfile = {
@@ -62,8 +63,53 @@ const savedProfile = {
   distributionWeight: 1,
   version: 1,
   isAvailable: true,
+  acceptsManualAssignment: true,
   eligibilityReason: 'Eligible for governed routing.',
 };
+const overCapacityProfile = {
+  ...savedProfile,
+  isAvailable: false,
+  acceptsManualAssignment: true,
+  measuredCapacityPercent: 0,
+  workloadPoints: 127,
+  eligibilityReason: 'Configured or measured capacity is exhausted',
+};
+
+describe('RepDirectoryPage routing verdicts', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getRepDirectory.mockResolvedValue([summary]);
+  });
+
+  const renderPage = () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <RepDirectoryPage />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+  };
+
+  it('calls a rep over the workload ceiling "At capacity", not "Blocked", and says a manager can still assign', async () => {
+    mocks.getRepRoutingProfiles.mockResolvedValue([overCapacityProfile]);
+    renderPage();
+
+    expect(await screen.findByText('At capacity', { exact: true })).toBeVisible();
+    expect(screen.getByText(/127 workload points/)).toBeVisible();
+    expect(screen.getByText(/a manager can still assign them by hand/i)).toBeVisible();
+    expect(screen.queryByText(/no manual assignment will be accepted/i)).not.toBeInTheDocument();
+  });
+
+  it('warns that nothing can be assigned at all only when nobody has an eligible profile', async () => {
+    mocks.getRepRoutingProfiles.mockResolvedValue([missingProfile]);
+    renderPage();
+
+    expect(await screen.findByText(/no manual assignment will be accepted/i)).toBeVisible();
+    expect(screen.getByText('No profile', { exact: true })).toBeVisible();
+  });
+});
 
 describe('RepDirectoryPage routing profile editor', () => {
   beforeEach(() => {

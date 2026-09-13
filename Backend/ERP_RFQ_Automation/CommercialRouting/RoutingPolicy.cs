@@ -84,7 +84,11 @@ public sealed record RoutingUserAvailability(
     int CapacityPercent = 100,
     RoutingWorkloadSnapshot? Workload = null,
     bool HasGovernedProfile = false,
-    string EligibilityReason = "Active tenant user");
+    string EligibilityReason = "Active tenant user",
+    // Whether a MANAGER may hand this person a lead. Capacity is a distribution rule for the
+    // engine; a hand assignment needs only an active, routing-eligible profile. See
+    // CommercialRoutingApplicationService.AssignLeadAsync for why the two verdicts differ.
+    bool AcceptsManualAssignment = true);
 
 public sealed record RoutingWorkloadSnapshot(
     int ActiveLeadCount,

@@ -180,6 +180,8 @@ export interface RepRoutingProfileDTO {
   /** 0 when no profile exists — the create sentinel the write endpoint expects. */
   version: number;
   updatedAtUtc?: string | null;
+  /** True when a manager may hand this person a lead, even while automatic routing will not. */
+  acceptsManualAssignment: boolean;
   updatedBy?: string | null;
   isAvailable: boolean;
   eligibilityReason: string;

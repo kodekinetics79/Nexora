@@ -683,8 +683,9 @@ export interface LeadReconciliationResultDTO {
  * A candidate assignee for a lead or an RFQ, as returned by
  * `GET /api/UnAssignedLead/users-for-assignment`.
  *
- * The list is every active user in the tenant, but governed routing will only accept the ones
- * carrying an effective, eligible Sales Rep profile with capacity left. `isEligibleForAssignment`
+ * The list is every active user in the tenant, but a hand assignment is only accepted for the
+ * ones carrying an effective, routing-eligible Sales Rep profile. Workload capacity governs
+ * automatic routing only, so a rep over the ceiling is still pickable. `isEligibleForAssignment`
  * is the server's own verdict and `eligibilityReason` is the sentence the routing engine uses,
  * so a dialog can grey out a name and say why instead of letting the assignment fail with a 409.
  */
