@@ -161,8 +161,11 @@ public sealed class CommercialIntelligenceController(
                 distributionWeight = profile?.DistributionWeight,
                 territoryKeys = profile?.TerritoryKeys ?? Array.Empty<string>(),
                 productCategoryKeys = profile?.ProductCategoryKeys ?? Array.Empty<string>(),
-                effectiveFromUtc = profile?.EffectiveFromUtc,
-                effectiveToUtc = profile?.EffectiveToUtc,
+                // Stamped UTC on the way out so the JSON carries a "Z" and any client that echoes
+                // it back binds as UTC. The column is `timestamp without time zone`, so EF hands
+                // these back as Unspecified and they would otherwise serialise offset-less.
+                effectiveFromUtc = profile == null ? (DateTime?)null : NormalizeUtc(profile.EffectiveFromUtc),
+                effectiveToUtc = profile?.EffectiveToUtc is { } to ? NormalizeUtc(to) : (DateTime?)null,
                 // 0 is the create sentinel the write endpoint expects, so a user with no row can
                 // be POSTed straight back without the client inventing a version.
                 version = profile?.Version ?? 0,
@@ -225,8 +228,18 @@ public sealed class CommercialIntelligenceController(
                 // not "from 14:12:55.441094". (2) A sub-second default defeats the idempotency
                 // key: a genuine retry sends the same key with a different timestamp, the service
                 // sees different content and answers 409, so no caller can safely retry.
-                EffectiveFromUtc: request.EffectiveFromUtc ?? DateTime.UtcNow.Date,
-                EffectiveToUtc: request.EffectiveToUtc,
+                //
+                // Normalised, not trusted. The stored value lives in a `timestamp without time
+                // zone` column under Npgsql's legacy timestamp switch, so the GET above serialises
+                // it WITHOUT a trailing "Z" ("2026-08-20T00:00:00"). The editor round-trips that
+                // string, model binding produces DateTimeKind.Unspecified, and the service's
+                // RequireUtc answered "EffectiveFromUtc must be UTC." to every edit of an existing
+                // profile while creates (which omit the field) kept working. The field is named
+                // Utc; an offset-less value on this contract IS UTC.
+                EffectiveFromUtc: request.EffectiveFromUtc.HasValue
+                    ? NormalizeUtc(request.EffectiveFromUtc.Value) : DateTime.UtcNow.Date,
+                EffectiveToUtc: request.EffectiveToUtc.HasValue
+                    ? NormalizeUtc(request.EffectiveToUtc.Value) : null,
                 ExpectedVersion: request.ExpectedVersion,
                 ActorId: User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name ?? "System",
                 IdempotencyKey: IdempotencyKey()), ct);
