@@ -104,6 +104,10 @@ export interface PromotionReceiptDTO {
   promotedLineCount: number;
   promotedAtUtc: string;
   promotedBy?: string | null;
+  /** The promoter's full name, when their address matches a user of this business unit. */
+  promotedByName?: string | null;
+  /** Line count of the promoted revision (the current revision may be newer). */
+  promotedRevisionLineCount?: number | null;
 }
 
 export interface LeadDecisionWorkbenchDTO {
@@ -142,6 +146,14 @@ export interface LeadDecisionWorkbenchDTO {
   fitAssessment?: FitAssessmentDTO | null;
   promotion?: PromotionReceiptDTO | null;
   blockers: Array<{ code: string; message: string; actionLabel?: string | null; actionPath?: string | null }>;
+  /** Intake channel of the source ("Email", "ManualUpload", "Folder"…). */
+  sourceChannel?: string | null;
+  /** Non-email sources only: when the request was put into Nexora. */
+  uploadedAtUtc?: string | null;
+  /** Non-email sources only: the uploader's address, when the upload recorded a person. */
+  uploadedBy?: string | null;
+  /** The uploader's full name, when their address matches a user of this business unit. */
+  uploadedByName?: string | null;
 }
 
 export interface ParticipationLineInput {

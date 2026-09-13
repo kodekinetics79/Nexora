@@ -20,12 +20,18 @@ export interface NextStepPanelProps {
   /** Detail under the sentence: the list of blockers, each with its own link. */
   children?: React.ReactNode;
   testId?: string;
+  /**
+   * The panel's accessible name. A screen that repeats the sentence beside its button names only
+   * one of the two, so a reader (and a test) finds exactly one "Next step".
+   */
+  ariaLabel?: string;
 }
 
-const NextStepPanel: React.FC<NextStepPanelProps> = ({ tone, title, sentence, action, children, testId }) => (
+const NextStepPanel: React.FC<NextStepPanelProps> = ({ tone, title, sentence, action, children, testId, ariaLabel }) => (
   <Alert
     severity={tone}
     role="status"
+    aria-label={ariaLabel}
     data-testid={testId}
     sx={{
       mb: 2,

@@ -580,6 +580,115 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task Workbench_receipt_names_people_and_counts_the_promoted_revision_not_a_newer_one()
+    {
+        const long PromoterUserId = 9_472_401;
+        const long UploaderUserId = 9_472_402;
+        const string uploader = "receipt.uploader@nexora.invalid";
+        var scenario = await CreateScenarioAsync([
+            Line("00010", 25, "EA", "SAR", "RECEIPT-BID"),
+            Line("00020", 7, "EA", "SAR", "RECEIPT-EXCLUDED")
+        ], "receipt-names");
+        await using (var seed = database.ContextFor(null))
+        {
+            if (!await seed.Users.AnyAsync(x => x.Id == PromoterUserId))
+            {
+                seed.Users.AddRange(
+                    new User
+                    {
+                        Id = PromoterUserId, FirstName = "Priya", LastName = "Rahman",
+                        Email = "receipt.manager@nexora.invalid", PasswordHash = "x", ImageUrl = "n/a",
+                        Buid = Tenant, IsActive = true, CreatedBy = "tests", CreatedOn = Now
+                    },
+                    new User
+                    {
+                        Id = UploaderUserId, FirstName = "Omar", LastName = "Haddad",
+                        Email = uploader, PasswordHash = "x", ImageUrl = "n/a",
+                        Buid = Tenant, IsActive = true, CreatedBy = "tests", CreatedOn = Now
+                    });
+                await seed.SaveChangesAsync();
+            }
+        }
+
+        await using (var context = database.ContextFor(Tenant))
+        {
+            var participation = Service(context);
+            var fit = await FitAsync(participation, scenario, "receipt-names");
+            var decision = await participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+                Decision(scenario, fit.Id,
+                    [Bid(scenario.LineRevisionIds[0],
+                        "Buyer drawing and catalog substitution were reviewed by the bid desk.",
+                        ProductId, 25, "EA", "SAR"),
+                     new LeadLineParticipationCommand(
+                        scenario.LineRevisionIds[1], LeadLineParticipationChoice.NoBid,
+                        ReasonCode: "OUT_OF_SCOPE",
+                        ReasonNotes: "The second line is outside our approved product scope.")],
+                    "receipt-names"));
+            // The promoter's address is stored as the actor typed it; the lookup is case-insensitive.
+            await new RfqPromotionService(context,
+                    new ExactEvidenceStorage(scenario.StorageUri, scenario.EvidenceHash, scenario.EvidenceBytes))
+                .PromoteAsync(Tenant, scenario.LeadId,
+                    Promotion(scenario, decision, "receipt-names") with { Actor = "Receipt.Manager@Nexora.invalid" });
+
+            var sameRevision = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
+                .GetAsync(Tenant, scenario.LeadId);
+            var sameReceipt = Assert.IsType<PromotionReceiptDto>(sameRevision.Promotion);
+            Assert.Equal(sameRevision.LeadRevisionNumber, sameReceipt.LeadRevisionNumber);
+            Assert.Equal("Priya Rahman", sameReceipt.PromotedByName);
+            Assert.Equal(1, sameReceipt.PromotedLineCount);
+            Assert.Equal(2, sameReceipt.PromotedRevisionLineCount);
+        }
+
+        // The customer then sends an amended request with a third line, uploaded by a person.
+        var amendmentBatchId = Guid.NewGuid();
+        var amendmentKey = $"participation-warning:receipt-names-amendment:{amendmentBatchId:N}";
+        await using (var amendmentContext = database.ContextFor(Tenant))
+        {
+            var original = await amendmentContext.Leads.AsNoTracking().SingleAsync(x => x.Id == scenario.LeadId);
+            var amendment = new Lead
+            {
+                Rfqno = original.Rfqno, BuyersName = original.BuyersName, RecDate = original.RecDate,
+                BidClosingDate = original.BidClosingDate, LeadSource = original.LeadSource,
+                CreatedBy = "tests", CreatedDate = Now, BusinessUnitId = Tenant, NoOfLineItems = 3
+            };
+            foreach (var line in new[]
+                     {
+                         Line("00010", 25, "EA", "SAR", "RECEIPT-BID"),
+                         Line("00020", 7, "EA", "SAR", "RECEIPT-EXCLUDED"),
+                         Line("00030", 4, "EA", "SAR", "RECEIPT-ADDED")
+                     })
+                amendment.LeadItems.Add(line);
+            var reconciled = await new LeadIdentityApplicationService(amendmentContext).ReconcileAsync(amendment,
+                new LeadIntakeDescriptor(
+                    amendmentBatchId, "ManualUpload", amendmentKey, amendmentKey, null,
+                    "ParticipationWarningTests", null, "RFQ receipt-names amendment", "receipt-names-amendment.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 20480,
+                    new string('c', 64), null, null, Now, Now, LeadProcessingPath.Deterministic,
+                    false, null, "User", uploader, amendmentKey), CancellationToken.None);
+            Assert.Equal(LeadOccurrenceClassification.Revision, reconciled.Classification);
+            Assert.Equal(scenario.LeadId, reconciled.LeadId);
+        }
+
+        await using var read = database.ContextFor(Tenant);
+        var workbench = await new LeadDecisionWorkbenchService(read, new LeadOutcomeReasons(read))
+            .GetAsync(Tenant, scenario.LeadId);
+        var receipt = Assert.IsType<PromotionReceiptDto>(workbench.Promotion);
+        Assert.Equal(scenario.RevisionNumber, receipt.LeadRevisionNumber);
+        Assert.NotEqual(receipt.LeadRevisionNumber, workbench.LeadRevisionNumber);
+        Assert.Equal(3, workbench.Lines.Count);
+        Assert.Equal(1, receipt.PromotedLineCount);
+        Assert.Equal(2, receipt.PromotedRevisionLineCount);
+        Assert.Equal("Priya Rahman", receipt.PromotedByName);
+        Assert.Equal("ManualUpload", workbench.SourceChannel);
+        var amendmentBatch = await read.Set<LeadIngestionBatch>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == amendmentBatchId);
+        Assert.Equal(amendmentBatch.CreatedAtUtc, workbench.UploadedAtUtc);
+        Assert.Equal(uploader, workbench.UploadedBy);
+        Assert.Equal("Omar Haddad", workbench.UploadedByName);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task Twenty_acknowledged_lines_commit_and_promote_without_losing_warning_evidence()
     {
         var lines = Enumerable.Range(1, 20)

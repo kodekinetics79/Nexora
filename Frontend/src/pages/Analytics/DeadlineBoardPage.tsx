@@ -20,6 +20,7 @@ import ResolveClientDialog from '../Leads/ResolveClientDialog';
 import { useAuth } from '../../context/AuthContext';
 import { parseDateSafe } from '../../utils/dates';
 import { presentableErrorMessage } from '../../utils/apiErrors';
+import { leadStatusWords } from '../../utils/leadStatusWords';
 import { LoadingState, ErrorState, EmptyState } from '../../platform/components/States';
 
 // ---------------------------------------------------------------------------
@@ -488,7 +489,9 @@ const DeadlineBoardPage: React.FC = () => {
                             pile of new mail, and the rep cannot see which tenders she has already
                             started — the exact question that sends her back into each row. */}
                         <Typography variant="caption" component="div" color="text.secondary" sx={{ fontWeight: 600 }}>
-                          {lead.leadStatusLabel?.trim() || 'Not yet triaged'}
+                          {/* The same words the Leads list uses for the same status; the tenant's
+                              own label only for a code the product does not know. */}
+                          {leadStatusWords(lead.leadStatusCode) ?? (lead.leadStatusLabel?.trim() || 'Not yet triaged')}
                         </Typography>
                       </TableCell>
                       <TableCell>

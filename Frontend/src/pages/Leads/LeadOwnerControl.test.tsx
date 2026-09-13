@@ -94,6 +94,38 @@ describe('LeadOwnerControl', () => {
     changeLeadOwner.mockResolvedValue({ leadId: 101, assignmentVersion: 4 });
   });
 
+  it('saysHowTheOwnerWasChosenInWords_withTheDetailOnHover', () => {
+    const view = renderControl({ assignedToId: COLLEAGUE, assignedToName: 'Tariq Al-Harbi', assignmentMethod: 'MANUAL' });
+    const picked = screen.getByText('Picked by a person');
+    expect(screen.queryByText('Manual')).not.toBeInTheDocument();
+    expect(picked.closest('.MuiChip-root')).toHaveAttribute('title', 'Someone assigned this request by hand. Owner history below shows who and when.');
+    view.unmount();
+
+    renderControl({ assignedToId: COLLEAGUE, assignedToName: 'Tariq Al-Harbi', assignmentMethod: 'AUTOMATIC' });
+    const routed = screen.getByText('Routed automatically');
+    expect(screen.queryByText('Automatic')).not.toBeInTheDocument();
+    expect(routed.closest('.MuiChip-root')).toHaveAttribute('title', "Nexora's routing rules picked this owner.");
+  });
+
+  it('saysNothingAboutHowAnOwnerWasChosen_whenNobodyOwnsTheLead', () => {
+    // Putting a lead back in the pool is recorded MANUAL too; "Picked by a person" beside
+    // "Unassigned" would be false.
+    renderControl({ assignedToId: null, assignedToName: null, assignmentMethod: 'MANUAL' });
+    expect(screen.queryByText('Picked by a person')).not.toBeInTheDocument();
+    expect(screen.queryByText('Routed automatically')).not.toBeInTheDocument();
+  });
+
+  it('saysWhyTheOwnerCannotBeChangedHere_whenTheScreenLocksIt', () => {
+    renderControl({
+      assignedToId: ME,
+      assignedToName: 'Sara Bin Ali',
+      canEdit: false,
+      lockedReason: 'This request is decided, so its owner is changed on the lead page.',
+    });
+    expect(screen.getByRole('button', { name: /sara bin ali/i })).toBeDisabled();
+    expect(screen.getByText('This request is decided, so its owner is changed on the lead page.')).toBeInTheDocument();
+  });
+
   it('saysNobodyCanReceiveALead_insteadOfRenderingAnEmptyPicker', async () => {
     getOwnerOptions.mockResolvedValue([]);
     asManager();

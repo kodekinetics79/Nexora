@@ -22,6 +22,7 @@ import {
   TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { ExpandMore as ExpandIcon } from '@mui/icons-material';
@@ -35,8 +36,9 @@ import LeadOwnerControl from '../LeadOwnerControl';
 import NextStepPanel from '../../../components/common/NextStepPanel';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
 import { useAuth } from '../../../context/AuthContext';
-import { presentableErrorMessage } from '../../../utils/apiErrors';
+import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
 import { formatDateSafe } from '../../../utils/dates';
+import { leadStatusWords } from '../../../utils/leadStatusWords';
 import {
   commercialActionPermissions,
   hasCommercialDecisionAuthority,
@@ -57,6 +59,7 @@ import {
 } from '../Workbench/workbenchRules';
 import LinesTable from './LinesTable';
 import CheckDocumentDialog, { type ConfirmedLine } from './CheckDocumentDialog';
+import CreateRfqConfirmDialog, { type QualificationOutlook } from './CreateRfqConfirmDialog';
 import { decisionLabel } from '../decisionRead';
 import {
   applyUnitToUnitless,
@@ -74,17 +77,43 @@ import {
   keepTenantUnits,
   lineKeys,
   lineLabel,
+  lineWord,
   newId,
+  nextStepCopy,
   nextThing,
   normalizeConcern,
+  partialFailureSentence,
+  QUALIFIED,
+  qualificationStep,
   qualificationTransition,
-  TERMINAL_BLOCKERS,
+  receiptSentence,
+  rfqRefOf,
   withAcknowledgement,
   type ConcernState,
   type NextAction,
+  type StepAction,
+  type StepTone,
+  type WrittenSteps,
 } from './decideRules';
 
 type Mode = 'rfq' | 'draft' | 'decline';
+/** What the request needed when a save was pressed; it changes only the words said afterwards. */
+type DraftKind = 'ready' | 'concern' | 'decline';
+
+const CONCERN_ANSWER_WORDS: Readonly<Record<string, string>> = {
+  FIT: 'No concerns',
+  CONDITIONAL: 'Concern raised',
+  NOT_FIT: 'Not a fit',
+};
+
+// "Draft saved", not "Saved as a draft": the caption beside the button starts with those words and
+// the history fold is in the page even while folded, so one phrase must not name two things.
+const LINE_CHOICES_WORDS: Readonly<Record<string, string>> = {
+  NONE: 'Not saved yet',
+  DRAFT: 'Draft saved',
+  COMMITTED: 'Decided',
+  STALE: 'Needs deciding again: the request or the concern answer changed',
+};
 
 /**
  * What the unsaved-work guard compares and keeps. Choices are keyed by line number, not by this
@@ -170,6 +199,7 @@ const DecidePage: React.FC = () => {
   const [customerDialogOpen, setCustomerDialogOpen] = React.useState(false);
   const [declineOpen, setDeclineOpen] = React.useState(false);
   const [rfqImpactOpen, setRfqImpactOpen] = React.useState(false);
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [historyOpen, setHistoryOpen] = React.useState(() => ['evidence', 'validate'].includes(searchParams.get('stage') ?? ''));
   const [checkOpen, setCheckOpen] = React.useState(false);
   const [checkFocus, setCheckFocus] = React.useState<number | null>(null);
@@ -406,12 +436,14 @@ const DecidePage: React.FC = () => {
    * versions the next write must quote, so a failure half-way leaves a record the page can
    * simply re-derive its next sentence from.
    */
-  const run = React.useCallback(async (mode: Mode, header?: { reasonCode: string; notes?: string }) => {
+  const run = React.useCallback(async (mode: Mode, header?: { reasonCode: string; notes?: string }, draftKind: DraftKind = 'ready') => {
     if (!workbench) return;
     const codes = criterionCodes(workbench.fitAssessment);
     let current: LeadDecisionWorkbenchDTO = workbench;
+    // What this click has written so far, so a failure half-way says what did go through. Only
+    // read by the error message; nothing below branches on it.
+    const written: Omit<WrittenSteps, 'alreadyQualified'> = { fitSaved: false, qualifiedNow: false, choicesSavedNow: false, choicesAlreadyCommitted: false };
     try {
-      let fitSaved = false;
       if (!fitMatchesSaved(current.fitAssessment, concern, codes)) {
         setBusy('Recording the assessment…');
         const request = buildFitRequest(current, concern, codes);
@@ -419,7 +451,7 @@ const DecidePage: React.FC = () => {
         fitOperation.current = operation;
         await leadDecisionService.saveFitAssessment(leadId, request, operation.key);
         fitOperation.current = null;
-        fitSaved = true;
+        written.fitSaved = true;
         current = await freshWorkbench();
       }
 
@@ -431,12 +463,14 @@ const DecidePage: React.FC = () => {
         if (lifecycle && option) {
           setBusy('Qualifying the lead…');
           await lifecycleService.transition('leads', leadId, lifecycle, option);
+          written.qualifiedNow = true;
           await queryClient.invalidateQueries({ queryKey: ['lifecycle', 'leads', leadId] });
         }
       }
 
       const commit = mode !== 'draft';
-      const alreadyCommitted = current.participationStatus === 'COMMITTED' && !guard.isDirty && !fitSaved && !header;
+      const alreadyCommitted = current.participationStatus === 'COMMITTED' && !guard.isDirty && !written.fitSaved && !header;
+      if (commit && alreadyCommitted) written.choicesAlreadyCommitted = true;
       if (!(commit && alreadyCommitted)) {
         setBusy(commit ? 'Recording the decision…' : 'Saving for a manager…');
         const request = buildParticipationRequest(current, decisions, commit, header);
@@ -445,12 +479,20 @@ const DecidePage: React.FC = () => {
         participationOperation.current = operation;
         await leadDecisionService.saveParticipation(leadId, request, operation.key);
         participationOperation.current = null;
+        written.choicesSavedNow = true;
         guard.markSaved(formOf(workbench, decisions, concern));
         current = await freshWorkbench();
       }
 
       if (mode === 'draft') {
-        enqueueSnackbar('Saved. A manager can create the RFQ from here.', { variant: 'success' });
+        enqueueSnackbar(
+          draftKind === 'concern'
+            ? 'Saved with your concern. No RFQ can be created while it stands.'
+            : draftKind === 'decline'
+              ? 'Saved with every line skipped. A manager can decline the request from here.'
+              : 'Saved. A manager can create the RFQ from here.',
+          { variant: 'success' },
+        );
         await refresh({ workbench: false });
         return;
       }
@@ -478,7 +520,20 @@ const DecidePage: React.FC = () => {
       await refresh();
       if (commercialAccess.canViewPromotedRfq) navigate(`/procurement/rfqs/view/${receipt.rfqId}`);
     } catch (error: unknown) {
-      enqueueSnackbar(presentableErrorMessage(error, 'That did not go through. Nothing was changed.'), { variant: 'error' });
+      const sentence = partialFailureSentence(
+        mode,
+        { ...written, alreadyQualified: lifecycleQuery.data?.currentStatusCode === QUALIFIED },
+        draftKind === 'concern' ? 'Save for review' : 'Save for a manager',
+      );
+      if (sentence == null) {
+        enqueueSnackbar(presentableErrorMessage(error, 'That did not go through. Nothing was changed.'), { variant: 'error' });
+      } else {
+        // The server's own reason is worth reading when it refused the step; a 5xx or a dropped
+        // connection has nothing to add to the sentence.
+        const presented = toPresentableError(error);
+        const reason = typeof presented.status === 'number' && presented.status < 500 ? ` ${presented.message}` : '';
+        enqueueSnackbar(`${sentence}${reason}`, { variant: 'error' });
+      }
       await refresh();
     } finally {
       setBusy(null);
@@ -532,35 +587,61 @@ const DecidePage: React.FC = () => {
 
   const counts = countDecisions(decisions);
   const locked = decisionRecordIsLocked(workbench, decisions);
-  const declined = locked && !workbench.promotion && counts.total > 0 && counts.noBid === counts.total;
-  const terminal = workbench.blockers.filter((blocker) => TERMINAL_BLOCKERS.has(blocker.code));
-  const rfqRevisionBlocker = terminal.find((blocker) => blocker.code === 'RFQ_REVISION_REQUIRED');
-  const legacyBlocker = terminal.find((blocker) => blocker.code === 'LEGACY_RFQ');
-  const inconsistentBlocker = terminal.find((blocker) => blocker.code === 'INCONSISTENT_CONVERTED_STATE');
-  // Locked records and view-only roles read as text. A save in flight keeps the controls on
-  // screen and only the button changes, so the page does not flicker mid-click.
   // The order is upload, assign, decide. Until somebody owns the request nothing on it can be
   // decided — the lines are shown, not editable, and the owner control says what to do.
   const ownerKnown = leadQuery.data != null;
   const unowned = ownerKnown && leadQuery.data!.assignedToId == null;
-  const readOnly = locked || !canEdit || unowned;
   const next = nextThing({ workbench, decisions, concern, lifecycle: lifecycleQuery.data, leadId });
+  // The decision, its question and its one button belong to a request that can still be decided.
+  // A request that became an RFQ, was declined, or is closed only reports where it stands.
+  const showDecision = !locked && next.kind !== 'closed';
+  // Locked or closed records and view-only roles read as text. A save in flight keeps the controls
+  // on screen and only the button changes, so the page does not flicker mid-click.
+  const readOnly = locked || next.kind === 'closed' || !canEdit || unowned;
   const days = daysUntil(workbench.bidClosingDate);
   const dueTone = days == null ? 'default' : days < 0 ? 'late' : days <= 3 ? 'due' : 'default';
   const brief = briefQuery.data;
   const codes = criterionCodes(workbench.fitAssessment);
   const quoted = counts.bid;
+  const lineCount = workbench.lines.length;
   const reference = workbench.customerRfqReference || `Lead #${leadId}`;
+  const customer = workbench.customerName || reference;
+  const promotion = workbench.promotion ?? null;
+  const rfqRef = promotion ? rfqRefOf(promotion) : null;
   const rfqLabel = workbench.promotion ? (workbench.promotion.rfqNumber || `RFQ #${workbench.promotion.rfqId}`) : null;
+  const canReviewChange = commercialAccess.canResolveRfqRevisionImpact && isManager;
+  const ownerName = leadQuery.data?.assignedToFullName?.trim() || null;
+  const statusReadFailed = lifecycleQuery.isError;
+  const chipMode = promotion
+    ? (promotion.leadRevisionNumber === workbench.leadRevisionNumber ? 'rfq' : 'newer-revision')
+    : next.kind === 'legacy' ? 'legacy' : 'choice';
 
-  const primary = (() => {
+  // A finished or stopped request: one sentence from the record, and the one control it offers.
+  const stepCopy = nextStepCopy(next, {
+    leadId,
+    canViewRfq: commercialAccess.canViewPromotedRfq,
+    canReviewChange,
+    mayReopen: isManager && canEdit,
+    currentRevisionNumber: workbench.leadRevisionNumber,
+    promotedRevisionNumber: promotion?.leadRevisionNumber,
+    statusLabel: workbench.lifecycleStatusLabel,
+  });
+
+  const runStepAction = (action: StepAction) => {
+    if (action.intent === 'review-change') setRfqImpactOpen(true);
+    else if (action.path) navigate(action.path);
+  };
+
+  const primary = ((): { label: string; disabled: boolean; onClick: () => void; hint?: string } | null => {
     if (busy) return { label: busy, disabled: true, onClick: () => undefined };
-    if (!canEdit) return { label: 'Create RFQ', disabled: true, onClick: () => undefined };
+    // A role that can never decide gets no button: a grey "Create RFQ" it could never use said
+    // there was something to do here.
+    if (!canEdit) return null;
     // THE ONE BUTTON DOES THE NEXT THING. A grey "Create RFQ" beside a sentence with a link in
     // it left a rep stuck: the action was there, but not where a button is expected. Until the
     // request can be promoted, the button IS the next step — assign, check, choose — and it
     // becomes "Create RFQ" the moment nothing stands in the way.
-    if (unowned && !locked) return { label: 'Assign an owner', disabled: false, onClick: () => document.querySelector('[data-testid="decide-owner"]')?.scrollIntoView({ block: 'center', behavior: 'smooth' }) };
+    if (unowned) return { label: 'Assign an owner', disabled: false, onClick: () => document.querySelector('[data-testid="decide-owner"]')?.scrollIntoView({ block: 'center', behavior: 'smooth' }) };
     if (next.kind === 'blocked' && next.action) {
       const action = next.action;
       return { label: action.label, disabled: false, onClick: () => runAction(action) };
@@ -568,21 +649,116 @@ const DecidePage: React.FC = () => {
     // Declining is a committed decision, which the server allows only to commercial authority;
     // a rep's skip-everything is saved as a draft for a manager to decline.
     if (next.kind === 'decline' && canPromote) return { label: 'Decline request', disabled: false, onClick: () => setDeclineOpen(true) };
-    if (next.kind === 'concern' || next.kind === 'decline') return { label: next.kind === 'concern' ? 'Save for review' : 'Save for a manager', disabled: false, onClick: () => run('draft') };
+    if (next.kind === 'concern') return { label: 'Save for review', disabled: false, onClick: () => run('draft', undefined, 'concern') };
+    if (next.kind === 'decline') return { label: 'Save for a manager', disabled: false, onClick: () => run('draft', undefined, 'decline') };
     if (!canPromote) return { label: 'Save for a manager', disabled: next.kind !== 'ready', onClick: () => run('draft') };
-    return { label: 'Create RFQ', disabled: next.kind !== 'ready', onClick: () => run('rfq') };
+    // Create RFQ asks first. The chain it runs is unchanged; the question only comes before it.
+    return {
+      label: 'Create RFQ',
+      disabled: next.kind !== 'ready',
+      onClick: () => setConfirmOpen(true),
+      hint: next.kind === 'ready' ? undefined : 'Available once the step beside it is done.',
+    };
   })();
 
-  const footerSentence = (() => {
-    if (busy) return 'Please wait.';
-    if (!canEdit) return 'Your role can view this request but not decide it.';
-    if (next.kind === 'blocked' || next.kind === 'closed') return next.sentence;
-    if (next.kind === 'decline' && !canPromote) return 'Every line is skipped. Saving records your reasons; a manager declines the request.';
-    if (next.kind === 'decline') return 'Every line is skipped. Declining records the reason and closes the request without an RFQ.';
-    if (next.kind === 'concern') return 'A concern stops the RFQ. Saving records it for a manager to review, or skip every line to decline.';
-    if (!canPromote) return 'Records the assessment and your choices. A manager creates the RFQ.';
-    return 'Records the assessment, the decision and the RFQ together.';
+  // The sentence for an open request: true for this state, naming the button beside it.
+  const openStep = ((): { sentence: string; tone: StepTone } => {
+    if (busy) return { sentence: 'Please wait.', tone: 'info' };
+    if (!canEdit) {
+      return {
+        tone: 'info',
+        sentence: ownerName
+          ? `Your role can view this request but not decide it. Ask ${ownerName} or a manager to change it.`
+          : 'Your role can view this request but not decide it. Ask a manager to change it.',
+      };
+    }
+    if (unowned) return { sentence: 'Assign an owner first: take it, or give it to someone, at the top of this request.', tone: 'warning' };
+    if (next.kind === 'blocked') return { sentence: next.sentence, tone: 'warning' };
+    if (next.kind === 'decline') {
+      return {
+        tone: 'info',
+        sentence: canPromote
+          ? 'Every line is skipped. Decline request records the reason and closes the request without an RFQ.'
+          : 'Every line is skipped. Save for a manager keeps your reasons; a manager declines the request.',
+      };
+    }
+    if (next.kind === 'concern') {
+      return {
+        tone: 'info',
+        sentence: canPromote
+          ? 'A concern stops the RFQ. Save for review records it; no RFQ can be created while it stands.'
+          : 'A concern stops the RFQ. Save for review records it for a manager.',
+      };
+    }
+    if (!canPromote) return { sentence: 'Save for a manager keeps your choices. A manager creates the RFQ.', tone: 'success' };
+    if (statusReadFailed) {
+      return {
+        tone: 'warning',
+        sentence: "Nexora couldn't read this request's status, so it can't be marked qualified here. Check the status again before you create the RFQ.",
+      };
+    }
+    return {
+      tone: 'success',
+      sentence: `Ready: Create RFQ asks you to confirm, then puts ${quoted} of ${lineCount} ${lineWord(lineCount)} for ${customer} into a new RFQ.`,
+    };
   })();
+  const panel = stepCopy ?? openStep;
+
+  // What the counter beside the lines says: a running tally while there are choices to make, the
+  // skipped total on a declined request, and nothing once the lines are the RFQ's.
+  const draftSeenReadOnly = !locked && (!canEdit || unowned) && workbench.participationStatus === 'DRAFT';
+  const counter = next.kind === 'rfq' || next.kind === 'legacy' || next.kind === 'inconsistent'
+    ? null
+    : next.kind === 'declined'
+      ? <>{lineCount} of {lineCount} {lineWord(lineCount)} skipped</>
+      : <><Box component="b" sx={{ color: 'text.primary' }}>{quoted}</Box> of {lineCount} {lineWord(lineCount)} marked to quote{draftSeenReadOnly ? ' in the saved draft' : ''}</>;
+
+  // The caption under the button describes the draft on the server, so it only claims a concern or
+  // an all-skipped draft when that is what was saved, not merely what is on screen now.
+  const savedConcern = concernFromSaved(workbench.fitAssessment).raised;
+  const savedAllSkipped = lineCount > 0 && workbench.lines.every((line) => line.participation?.decision === 'NoBid');
+  const draftCaption = (() => {
+    if (workbench.participationStatus !== 'DRAFT' || busy) return null;
+    if (!canEdit || unowned) return 'Saved as a draft.';
+    if (next.kind === 'concern' && savedConcern) {
+      return canPromote
+        ? 'Saved as a draft with the concern. No RFQ can be created while it stands.'
+        : 'Saved as a draft with the concern, for a manager to review. No RFQ can be created while it stands.';
+    }
+    if (next.kind === 'decline' && savedAllSkipped) {
+      return canPromote
+        ? 'Saved as a draft with every line skipped. Press Decline request to close it.'
+        : 'Saved as a draft with every line skipped. A manager declines the request from here.';
+    }
+    if (next.kind === 'ready') {
+      return canPromote
+        ? 'Saved as a draft. Check the choices, then press Create RFQ.'
+        : 'Saved as a draft. A manager creates the RFQ from here.';
+    }
+    return canPromote ? 'Saved as a draft.' : 'Saved as a draft. A manager creates the RFQ from here.';
+  })();
+
+  // Close the question if the request stopped being ready behind it (a background re-read, a
+  // withdrawn grant): "Yes" must never run the chain from a state whose button was not enabled.
+  if (confirmOpen && (next.kind !== 'ready' || !canPromote || !canEdit || unowned || locked)) setConfirmOpen(false);
+  const qualification: QualificationOutlook = !lifecycleQuery.data
+    ? 'unknown'
+    : qualificationStep(lifecycleQuery.data) === 'transition' ? 'transition' : 'already';
+
+  const uploaded = Boolean(workbench.uploadedAtUtc) && (workbench.sourceChannel ?? '').trim().toLowerCase() !== 'email';
+  const uploader = workbench.uploadedByName?.trim() || workbench.uploadedBy?.trim() || '';
+
+  const primaryButton = primary ? (
+    <Button
+      variant="contained"
+      size="large"
+      disabled={primary.disabled}
+      onClick={primary.onClick}
+      sx={{ fontWeight: 800, px: 3 }}
+    >
+      {primary.label}
+    </Button>
+  ) : null;
 
   return (
     <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, maxWidth: 1120, mx: 'auto', minWidth: 0 }}>
@@ -596,52 +772,50 @@ const DecidePage: React.FC = () => {
         </Link>
       </Stack>
 
-      {workbench.promotion ? (
+      {/* Banners carry facts. The control for the next move is in the Next step panel, so each
+          name appears once; the one exception is a manager reviewing a customer's change, whose
+          panel control is Review the change. */}
+      {promotion ? (
         <Alert
           severity="success"
           sx={{ mb: 1.5 }}
-          action={commercialAccess.canViewPromotedRfq
-            ? <Button color="inherit" onClick={() => navigate(`/procurement/rfqs/view/${workbench.promotion!.rfqId}`)}>Open the RFQ</Button>
+          action={next.kind === 'rfq' && next.changed && canReviewChange && commercialAccess.canViewPromotedRfq
+            ? <Button color="inherit" onClick={() => navigate(`/procurement/rfqs/view/${promotion.rfqId}`)}>Open the RFQ</Button>
             : undefined}
         >
-          <AlertTitle>RFQ {rfqLabel} created</AlertTitle>
-          {workbench.promotion.promotedLineCount} of {workbench.lines.length} line{workbench.lines.length === 1 ? '' : 's'} carried over on {formatDateSafe(workbench.promotion.promotedAtUtc)}
-          {workbench.promotion.promotedBy ? ` by ${workbench.promotion.promotedBy}` : ''}. Already promoted, so nothing here can create a second one.
+          <AlertTitle>{`Became an RFQ: ${rfqRef}`}</AlertTitle>
+          {receiptSentence(promotion, { revisionNumber: workbench.leadRevisionNumber, lineCount }, userData?.email)}
         </Alert>
       ) : null}
 
-      {declined ? (
+      {next.kind === 'declined' ? (
         <Alert severity="info" sx={{ mb: 1.5 }}>
           <AlertTitle>Request declined</AlertTitle>
           Every line was skipped and the reason is recorded. No RFQ was created.
         </Alert>
       ) : null}
 
-      {rfqRevisionBlocker && workbench.promotion ? (
-        <Alert
-          severity="warning"
-          sx={{ mb: 1.5 }}
-          action={commercialAccess.canResolveRfqRevisionImpact && isManager
-            ? <Button color="inherit" onClick={() => setRfqImpactOpen(true)}>Review the change</Button>
-            : undefined}
-        >
+      {next.kind === 'rfq' && next.changed && promotion ? (
+        <Alert severity="warning" sx={{ mb: 1.5 }}>
           <AlertTitle>The customer changed this request after the RFQ was created</AlertTitle>
-          {rfqRevisionBlocker.message}
+          {`Revision ${workbench.leadRevisionNumber} arrived after RFQ ${rfqRef} was created from revision ${promotion.leadRevisionNumber}. Reviewing it records what you did; the RFQ itself is not changed.`}
         </Alert>
       ) : null}
 
-      {legacyBlocker ? (
+      {next.kind === 'legacy' ? (
         <LegacyDecisionRecordNotice
-          message={legacyBlocker.message}
-          actionLabel={commercialAccess.canViewPromotedRfq ? legacyBlocker.actionLabel : null}
-          onOpenRfq={legacyBlocker.actionPath ? () => navigate(legacyBlocker.actionPath!) : undefined}
+          title="Became an RFQ before this screen recorded decisions"
+          message={commercialAccess.canViewPromotedRfq
+            ? 'The lines below may not match what went into the RFQ. Open the RFQ to see its lines.'
+            : 'The lines below may not match what went into the RFQ.'}
+          actionLabel={null}
         />
       ) : null}
 
-      {inconsistentBlocker ? (
+      {next.kind === 'inconsistent' ? (
         <Alert severity="error" sx={{ mb: 1.5 }}>
           <AlertTitle>This record needs an administrator</AlertTitle>
-          {inconsistentBlocker.message}
+          Nexora shows this request as having become an RFQ, but there is no RFQ behind it. Nothing here can be changed until it is repaired.
         </Alert>
       ) : null}
 
@@ -656,12 +830,17 @@ const DecidePage: React.FC = () => {
         </Alert>
       ) : null}
 
-      {/* The next step, first. The same sentence repeats beside the one button in the sticky bar
-          under the lines, so a rep never has to scroll to learn what the request is waiting for. */}
+      {/* The next step, first. While the request can be decided, the same sentence repeats beside
+          the one button in the sticky bar under the lines, and that copy is the one named "Next
+          step". Once there is no bar, this panel carries the name and the one control. */}
       <NextStepPanel
-        tone={busy ? 'info' : next.kind === 'ready' ? 'success' : next.kind === 'blocked' || (unowned && !locked) ? 'warning' : next.kind === 'closed' ? 'info' : 'info'}
+        tone={panel.tone}
         title="Next step"
-        sentence={unowned && !locked ? 'Assign an owner first: take it, or give it to someone, at the top of this request.' : footerSentence}
+        sentence={panel.sentence}
+        ariaLabel={showDecision ? undefined : 'Next step'}
+        action={!showDecision && stepCopy?.action
+          ? <Button variant="contained" onClick={() => runStepAction(stepCopy.action!)} sx={{ fontWeight: 800 }}>{stepCopy.action.label}</Button>
+          : undefined}
         testId="decide-next-step"
       />
 
@@ -685,7 +864,16 @@ const DecidePage: React.FC = () => {
           </Stack>
           <Stack direction="row" spacing={{ xs: 2.5, sm: 4 }} sx={{ mt: 2, flexWrap: 'wrap', rowGap: 1.5 }}>
             <Fact label="Their reference" value={workbench.customerRfqReference || 'Not stated'} />
-            <Fact label="Received" value={formatDateSafe(workbench.receivedAtUtc)} />
+            {/* An uploaded document has no received time of its own; who uploaded it and when is
+                what is known, when the server says so. */}
+            {uploaded ? (
+              <Fact
+                label="Uploaded"
+                value={`${formatDateSafe(workbench.uploadedAtUtc, 'Not recorded')}${uploader ? ` by ${uploader}` : ''}`}
+              />
+            ) : (
+              <Fact label="Received" value={formatDateSafe(workbench.receivedAtUtc, 'Not recorded')} />
+            )}
             <Fact
               label="Quote due"
               tone={dueTone}
@@ -696,7 +884,7 @@ const DecidePage: React.FC = () => {
           </Stack>
           {ownerKnown ? (
             <Box sx={{ mt: 2 }} data-testid="decide-owner">
-              <Typography variant="overline" sx={{ color: unowned && !locked ? 'warning.dark' : 'text.secondary', fontWeight: 700, letterSpacing: '0.08em' }}>
+              <Typography variant="overline" sx={{ color: unowned && showDecision ? 'warning.dark' : 'text.secondary', fontWeight: 700, letterSpacing: '0.08em' }}>
                 {unowned ? "Who's on it — nobody yet" : "Who's on it"}
               </Typography>
               <LeadOwnerControl
@@ -706,6 +894,9 @@ const DecidePage: React.FC = () => {
                 assignmentMethod={leadQuery.data!.assignmentMethod}
                 assignmentVersion={leadQuery.data!.assignmentVersion ?? 1}
                 canEdit={canEdit && !locked}
+                lockedReason={!canEdit
+                  ? "Your role can't change the owner."
+                  : locked ? 'This request is decided, so its owner is changed on the lead page.' : null}
               />
             </Box>
           ) : null}
@@ -745,9 +936,11 @@ const DecidePage: React.FC = () => {
                   Check against the document
                 </Button>
               ) : null}
-              <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-                <Box component="b" sx={{ color: 'text.primary' }}>{quoted}</Box> of {workbench.lines.length} lines to quote
-              </Typography>
+              {counter ? (
+                <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {counter}
+                </Typography>
+              ) : null}
             </Stack>
           </Stack>
           <LinesTable
@@ -762,11 +955,15 @@ const DecidePage: React.FC = () => {
             onOpenDocument={openDocument}
             onBulkUnit={setUnitOnUnitless}
             focusUnit={unitFocus}
+            chipMode={chipMode}
+            rfqRef={rfqRef}
+            currentRevisionNumber={workbench.leadRevisionNumber}
+            promotedRevisionNumber={promotion?.leadRevisionNumber ?? null}
           />
         </Box>
 
         {/* THE DECISION */}
-        {!locked ? (
+        {showDecision ? (
           <Box component="section" aria-labelledby="decide-question" sx={{ p: { xs: 2, sm: 3 }, bgcolor: 'action.hover', borderTop: 1, borderColor: 'divider' }}>
             {brief ? (
               <Paper variant="outlined" sx={{ p: 2, mb: 2, borderLeft: 3, borderLeftColor: 'primary.main', borderRadius: 2 }}>
@@ -846,42 +1043,30 @@ const DecidePage: React.FC = () => {
                 button under a scroll. The bar is part of the page, so it ends where the page ends. */}
             <Box sx={{ position: 'sticky', bottom: 0, zIndex: 2, bgcolor: 'background.paper', borderTop: 1, borderColor: 'divider', boxShadow: '0 -8px 20px -16px rgba(15,18,24,0.55)', mt: 2, pt: 1.5, pb: 0.5, mx: { xs: -2, sm: -3 }, px: { xs: 2, sm: 3 } }}>
             <Stack direction="row" spacing={2} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}>
-              <Button
-                variant="contained"
-                size="large"
-                disabled={primary.disabled}
-                onClick={primary.onClick}
-                sx={{ fontWeight: 800, px: 3 }}
-              >
-                {primary.label}
-              </Button>
+              {primary?.hint && primaryButton ? (
+                // A disabled button takes no hover, so the call-out sits on a wrapper.
+                <Tooltip describeChild title={primary.hint}>
+                  <Box component="span" sx={{ display: 'inline-flex' }}>{primaryButton}</Box>
+                </Tooltip>
+              ) : primaryButton}
+              {/* The sentence holds no link: the button beside it is the one control for the step. */}
               <Typography
                 role="status"
                 aria-label="Next step"
                 variant="body2"
-                sx={{ color: next.kind === 'ready' || next.kind === 'decline' || busy ? 'text.secondary' : 'warning.dark', fontWeight: next.kind === 'blocked' ? 600 : 400 }}
+                sx={{ color: openStep.tone === 'warning' ? 'warning.dark' : 'text.secondary', fontWeight: next.kind === 'blocked' && !busy ? 600 : 400 }}
               >
-                {unowned && !locked ? 'Assign an owner first: take it, or give it to someone, at the top of this request.' : footerSentence}
-                {/* The unit step's button sits right beside this sentence; a second control with
-                    the same name would only be read twice. */}
-                {!unowned && next.kind === 'blocked' && next.action && next.action.intent !== 'choose-unit' ? (
-                  <>
-                    {' '}
-                    <Link
-                      component="button"
-                      type="button"
-                      onClick={() => runAction(next.action!)}
-                      sx={{ fontWeight: 700, verticalAlign: 'baseline' }}
-                    >
-                      {next.action.label}
-                    </Link>
-                  </>
-                ) : null}
+                {openStep.sentence}
               </Typography>
+              {canPromote && canEdit && !unowned && !busy && next.kind === 'ready' && statusReadFailed ? (
+                <Button size="small" variant="outlined" onClick={() => { void lifecycleQuery.refetch(); }} sx={{ fontWeight: 700 }}>
+                  Check the status again
+                </Button>
+              ) : null}
             </Stack>
-            {workbench.participationStatus === 'DRAFT' && !busy ? (
+            {draftCaption ? (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                Saved as a draft{workbench.assignedToName ? ` for ${workbench.assignedToName}` : ''}. A manager creates the RFQ from here.
+                {draftCaption}
               </Typography>
             ) : null}
             </Box>
@@ -907,7 +1092,10 @@ const DecidePage: React.FC = () => {
           </Typography>
           <Stack direction="row" spacing={{ xs: 2.5, sm: 4 }} sx={{ flexWrap: 'wrap', rowGap: 1.5, mb: 2 }}>
             <Fact label="Nexora serial" value={workbench.nexoraSerial || 'Not issued'} />
-            <Fact label="Lead status" value={workbench.lifecycleStatusLabel || workbench.lifecycleStatusCode} />
+            <Fact
+              label="Lead status"
+              value={leadStatusWords(workbench.lifecycleStatusCode) ?? (workbench.lifecycleStatusLabel?.trim() || 'Not recorded')}
+            />
             <Fact
               label="Lines checked against source"
               value={workbench.sourceCoverage ? `${workbench.sourceCoverage.coveredLines} of ${workbench.sourceCoverage.totalLines}` : 'Not recorded'}
@@ -917,12 +1105,15 @@ const DecidePage: React.FC = () => {
               value={workbench.verifiedBy ? `${workbench.verifiedBy} · ${formatDateSafe(workbench.verifiedAtUtc)}` : 'Not yet'}
             />
             <Fact
-              label="Assessment"
+              label="Concern answer"
               value={workbench.fitAssessment && workbench.fitAssessment.version > 0
-                ? `v${workbench.fitAssessment.version} · ${workbench.fitAssessment.assessedBy || 'unknown'} · ${formatDateSafe(workbench.fitAssessment.assessedAtUtc)}`
+                ? `${CONCERN_ANSWER_WORDS[workbench.fitAssessment.overallDecision] ?? 'Recorded'} · ${workbench.fitAssessment.assessedBy || 'unknown'} · ${formatDateSafe(workbench.fitAssessment.assessedAtUtc)}`
                 : 'Not yet recorded'}
             />
-            <Fact label="Decision" value={`${workbench.participationStatus.toLowerCase()}${workbench.participationVersion ? ` · v${workbench.participationVersion}` : ''}`} />
+            <Fact
+              label="Line choices"
+              value={`${LINE_CHOICES_WORDS[workbench.participationStatus] ?? 'Not recorded'}${workbench.participationVersion ? ` (version ${workbench.participationVersion})` : ''}`}
+            />
           </Stack>
           {historyOpen ? <SourceEvidencePanel workbench={workbench} compact /> : null}
         </AccordionDetails>
@@ -944,6 +1135,16 @@ const DecidePage: React.FC = () => {
         prefill={{ email: workbench.senderEmail, contactName: workbench.buyerName }}
         onClose={() => setCustomerDialogOpen(false)}
         onResolved={() => { setCustomerDialogOpen(false); void refresh(); }}
+      />
+
+      <CreateRfqConfirmDialog
+        open={confirmOpen}
+        customer={customer}
+        bidCount={quoted}
+        lineCount={lineCount}
+        qualification={qualification}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => { setConfirmOpen(false); void run('rfq'); }}
       />
 
       <FullNoBidCommitDialog

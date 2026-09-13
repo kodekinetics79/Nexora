@@ -1,5 +1,5 @@
 import React from 'react';
-import { Alert, Box, Button, Chip, CircularProgress, Menu, MenuItem, Stack, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, CircularProgress, Menu, MenuItem, Stack, Tooltip, Typography } from '@mui/material';
 import { ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'react-hot-toast';
@@ -20,6 +20,8 @@ interface Props {
   assignmentMethod?: 'AUTOMATIC' | 'MANUAL';
   assignmentVersion: number;
   canEdit: boolean;
+  /** Why the owner cannot be changed here, said under the owner when the control is locked. */
+  lockedReason?: string | null;
 }
 
 /**
@@ -48,7 +50,7 @@ const mutationIdentity = (leadId: number): string =>
   `lead-owner-${leadId}-${Date.now()}-${crypto.randomUUID()}`;
 
 const LeadOwnerControl: React.FC<Props> = ({
-  leadId, assignedToId, assignedToName, assignmentMethod = 'AUTOMATIC', assignmentVersion, canEdit,
+  leadId, assignedToId, assignedToName, assignmentMethod = 'AUTOMATIC', assignmentVersion, canEdit, lockedReason,
 }) => {
   const queryClient = useQueryClient();
   const { userData } = useAuth();
@@ -133,13 +135,30 @@ const LeadOwnerControl: React.FC<Props> = ({
         >
           {ownerLabel}
         </Button>
-        <Chip
-          size="small"
-          label={assignmentMethod === 'MANUAL' ? 'Manual' : 'Automatic'}
-          color={assignmentMethod === 'MANUAL' ? 'primary' : 'default'}
-          variant="outlined"
-        />
+        {/* How the owner was chosen, in words. Only an owned request has an answer: a request put
+            back in the pool is also recorded MANUAL, and "Picked by a person" beside "Unassigned"
+            would say something that is not true. */}
+        {assignedToId != null ? (
+          <Tooltip
+            describeChild
+            title={assignmentMethod === 'MANUAL'
+              ? 'Someone assigned this request by hand. Owner history below shows who and when.'
+              : "Nexora's routing rules picked this owner."}
+          >
+            <Chip
+              size="small"
+              label={assignmentMethod === 'MANUAL' ? 'Picked by a person' : 'Routed automatically'}
+              color={assignmentMethod === 'MANUAL' ? 'primary' : 'default'}
+              variant="outlined"
+            />
+          </Tooltip>
+        ) : null}
       </Stack>
+      {lockedReason ? (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+          {lockedReason}
+        </Typography>
+      ) : null}
 
       <Menu anchorEl={anchorEl} open={menuOpen} onClose={() => setAnchorEl(null)}>
         {userData?.id && authority.canTakeIt ? (

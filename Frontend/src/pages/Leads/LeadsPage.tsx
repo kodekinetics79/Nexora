@@ -46,6 +46,7 @@ import {
   OwnerPickerMenu, AssignReasonDialog, assignmentNeedsReason, useOwnerOptions,
 } from './LeadOwnerPicker';
 import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
+import { LEAD_STATUS_WORDS } from '../../utils/leadStatusWords';
 
 // ---------------------------------------------------------------------------
 // Column visibility and order are AA-01 server-side per-user preferences now
@@ -137,19 +138,23 @@ interface StatusMeta {
 // The tenant's own status code is the fact. `isAccepted` is a legacy hard-coded id (24) that
 // this tenant does not use, so a lead already converted to an RFQ used to read "New" with a
 // Decide button beside it — the exact lie the DTO comment on `leadStatusCode` warns about.
+// The words come from the one shared map, so the list, the Deadline board and the Decide screen
+// name a status the same way; only the colour and weight are this grid's own.
+const statusMeta = (code: string, color: StatusMeta['color'], variant: StatusMeta['variant']): StatusMeta =>
+  ({ label: LEAD_STATUS_WORDS[code], color, variant });
 const STATUS_META: Record<string, StatusMeta> = {
-  CONVERTED_TO_RFQ: { label: 'Became an RFQ', color: 'success', variant: 'filled' },
-  QUOTED: { label: 'Quoted', color: 'success', variant: 'filled' },
-  NEGOTIATION: { label: 'In negotiation', color: 'success', variant: 'outlined' },
-  AWARDED: { label: 'Won', color: 'success', variant: 'filled' },
-  PARTIALLY_AWARDED: { label: 'Partly won', color: 'success', variant: 'outlined' },
-  COMPLETED: { label: 'Completed', color: 'success', variant: 'outlined' },
-  QUALIFIED: { label: 'Qualified', color: 'primary', variant: 'filled' },
-  UNDER_REVIEW: { label: 'Under review', color: 'warning', variant: 'outlined' },
-  DISQUALIFIED: { label: 'Declined', color: 'error', variant: 'outlined' },
-  LOST: { label: 'Lost', color: 'error', variant: 'outlined' },
-  CANCELLED: { label: 'Cancelled', color: 'error', variant: 'outlined' },
-  DUPLICATED: { label: 'Duplicate', color: 'warning', variant: 'outlined' },
+  CONVERTED_TO_RFQ: statusMeta('CONVERTED_TO_RFQ', 'success', 'filled'),
+  QUOTED: statusMeta('QUOTED', 'success', 'filled'),
+  NEGOTIATION: statusMeta('NEGOTIATION', 'success', 'outlined'),
+  AWARDED: statusMeta('AWARDED', 'success', 'filled'),
+  PARTIALLY_AWARDED: statusMeta('PARTIALLY_AWARDED', 'success', 'outlined'),
+  COMPLETED: statusMeta('COMPLETED', 'success', 'outlined'),
+  QUALIFIED: statusMeta('QUALIFIED', 'primary', 'filled'),
+  UNDER_REVIEW: statusMeta('UNDER_REVIEW', 'warning', 'outlined'),
+  DISQUALIFIED: statusMeta('DISQUALIFIED', 'error', 'outlined'),
+  LOST: statusMeta('LOST', 'error', 'outlined'),
+  CANCELLED: statusMeta('CANCELLED', 'error', 'outlined'),
+  DUPLICATED: statusMeta('DUPLICATED', 'warning', 'outlined'),
 };
 /** A lead whose decision has been made: the row offers "See decision", not "Decide". */
 const DECIDED_CODES = new Set(['CONVERTED_TO_RFQ', 'QUOTED', 'NEGOTIATION', 'AWARDED', 'PARTIALLY_AWARDED', 'COMPLETED', 'DISQUALIFIED', 'LOST', 'CANCELLED', 'DUPLICATED']);

@@ -365,3 +365,38 @@ describe('DeadlineBoardPage — arriving from the dashboard band', () => {
     expect(screen.queryByText(/showing \d+ in/)).not.toBeInTheDocument();
   });
 });
+
+/**
+ * The board printed the tenant's setup label ("Converted to RFQ") under the reference while the
+ * Leads list called the same request "Became an RFQ". Both now read the one shared map.
+ */
+describe('DeadlineBoardPage — a status reads the same as on the Leads list', () => {
+  it('names a request that became an RFQ in the list\'s words, not the tenant\'s setup label', async () => {
+    getAllLeads.mockResolvedValue({
+      items: [unlinkedLead({
+        id: 683, rfqno: 'FC-2026-0683', customerId: 42, customerName: 'Saudi Aramco',
+        leadStatusCode: 'CONVERTED_TO_RFQ', leadStatusLabel: 'Converted to RFQ',
+      })],
+      totalCount: 1, pageNumber: 1, pageSize: 500,
+    });
+    render(<DeadlineBoardPage />, { wrapper });
+
+    expect(await screen.findByText('FC-2026-0683')).toBeInTheDocument();
+    expect(screen.getByText('Became an RFQ')).toBeInTheDocument();
+    expect(screen.queryByText('Converted to RFQ')).toBeNull();
+  });
+
+  it('keeps the tenant\'s own label for a status code the product does not know', async () => {
+    getAllLeads.mockResolvedValue({
+      items: [unlinkedLead({
+        id: 684, rfqno: 'FC-2026-0684', customerId: 42, customerName: 'Saudi Aramco',
+        leadStatusCode: 'TENANT_HOLD', leadStatusLabel: 'On hold for the buyer',
+      })],
+      totalCount: 1, pageNumber: 1, pageSize: 500,
+    });
+    render(<DeadlineBoardPage />, { wrapper });
+
+    expect(await screen.findByText('FC-2026-0684')).toBeInTheDocument();
+    expect(screen.getByText('On hold for the buyer')).toBeInTheDocument();
+  });
+});

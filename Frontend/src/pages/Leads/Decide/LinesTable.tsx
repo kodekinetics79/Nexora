@@ -18,11 +18,13 @@ import {
   TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import type {
   DecisionReasonCodeDTO,
   LeadDecisionLineDTO,
+  LineParticipationDecision,
 } from '../../../api/services/leadDecisionService';
 import type { DecisionMap, EditableLineDecision } from '../Workbench/workbenchRules';
 import { catalogWarningSummary } from '../Workbench/catalogWarningPresentation';
@@ -42,7 +44,7 @@ export interface LinesTableProps {
   onChange: (revisionLineId: number, patch: Partial<EditableLineDecision>) => void;
   /** Opens the document check beside the lines, focused on the given line when there is one. */
   onOpenDocument: (line?: LeadDecisionLineDTO) => void;
-  /** Sets the rep's chosen unit on every quoted line that has none the tenant quotes in. */
+  /** Sets the rep's chosen unit on every line marked to quote that has none the tenant quotes in. */
   onBulkUnit?: (code: string) => void;
   /**
    * A request to take the rep to a unit picker: one line's (turning to its page), or the one for
@@ -51,7 +53,69 @@ export interface LinesTableProps {
   focusUnit?: { lineId?: number; nonce: number } | null;
   /** Lines drawn per page; the default suits a real bid list, tests use fewer. */
   linesPerPage?: number;
+  /**
+   * What a read-only line reports. `choice`: what was chosen (the default). `rfq`: whether the line
+   * went into the RFQ this revision became. `newer-revision`: the lines arrived after the RFQ was
+   * created. `legacy`: the RFQ was created before this screen recorded line choices.
+   */
+  chipMode?: LineChipMode;
+  /** The RFQ's number (or `#id`), for the newer-revision call-out. */
+  rfqRef?: string | null;
+  /** The revision on screen, for the newer-revision call-out. */
+  currentRevisionNumber?: number | null;
+  /** The revision the RFQ was created from, for the newer-revision call-out. */
+  promotedRevisionNumber?: number | null;
 }
+
+export type LineChipMode = 'choice' | 'rfq' | 'newer-revision' | 'legacy';
+
+export interface ReadOnlyLineChip {
+  label: string;
+  color: 'primary' | 'default';
+  variant: 'filled' | 'outlined';
+  /** Said on hover when the label alone does not explain itself. */
+  tooltip?: string;
+}
+
+/**
+ * The chip a read-only line shows in place of Quote / Skip.
+ *
+ * The word "Quoted" is never used: a line marked Bid has not been quoted to anyone, and on a
+ * request that had only become an RFQ the old chip read as "a quote went out". A skipped line says
+ * why in the tenant's own reason words, and never a raw reason code.
+ */
+export const readOnlyLineChip = (
+  mode: LineChipMode,
+  choice: LineParticipationDecision | undefined,
+  reasonLabel: string | null | undefined,
+  context: { rfqRef?: string | null; currentRevisionNumber?: number | null; promotedRevisionNumber?: number | null } = {},
+): ReadOnlyLineChip => {
+  const quiet = (label: string, tooltip?: string): ReadOnlyLineChip =>
+    ({ label, color: 'default', variant: 'outlined', ...(tooltip ? { tooltip } : {}) });
+  const reason = reasonLabel?.trim();
+  const withReason = (base: string) => (reason ? `${base} · ${reason}` : base);
+
+  if (mode === 'newer-revision') {
+    const arrived = context.currentRevisionNumber != null ? `Revision ${context.currentRevisionNumber}` : 'A newer revision';
+    const rfq = context.rfqRef ? `RFQ ${context.rfqRef}` : 'the RFQ';
+    const from = context.promotedRevisionNumber != null ? ` from revision ${context.promotedRevisionNumber}` : '';
+    return quiet('Newer revision', `${arrived} arrived after ${rfq} was created${from}. Its lines are not decided one by one.`);
+  }
+  if (mode === 'rfq') {
+    // Only lines marked to quote are copied onto the RFQ, so every other line was left out.
+    if (choice === 'Bid') return { label: 'Went into the RFQ', color: 'primary', variant: 'filled' };
+    return quiet(choice === 'NoBid' ? withReason('Left out') : 'Left out');
+  }
+  if (choice === 'Bid') return { label: 'Marked to quote', color: 'primary', variant: 'outlined' };
+  if (choice === 'NoBid') return quiet(withReason('Skipped'));
+  if (mode === 'legacy') {
+    return quiet(
+      'Not recorded here',
+      'This request became an RFQ before this screen recorded decisions. The RFQ shows which lines it holds.',
+    );
+  }
+  return quiet('Not chosen yet');
+};
 
 /** Lines drawn at once. Enough to work through, few enough to draw instantly. */
 export const LINES_PER_PAGE = 100;
@@ -70,6 +134,12 @@ interface LineRowProps {
   readOnly: boolean;
   onChange: LinesTableProps['onChange'];
   onOpenDocument: LinesTableProps['onOpenDocument'];
+  /** The tenant's words for the line's saved reason, or null when it has none they name. */
+  reasonLabel: string | null;
+  chipMode: LineChipMode;
+  rfqRef?: string | null;
+  currentRevisionNumber?: number | null;
+  promotedRevisionNumber?: number | null;
 }
 
 /**
@@ -79,6 +149,7 @@ interface LineRowProps {
  */
 const LineRow = React.memo(function LineRow({
   line, decision, unitOptions, currencyOptions, unitCodes, currencyCodes, skipReasons, readOnly, onChange, onOpenDocument,
+  reasonLabel, chipMode, rfqRef, currentRevisionNumber, promotedRevisionNumber,
 }: LineRowProps) {
   const label = lineLabel(line);
   const choice = decision?.decision ?? 'Pending';
@@ -224,14 +295,22 @@ const LineRow = React.memo(function LineRow({
           )}
         </TableCell>
         <TableCell align="right">
-          {readOnly ? (
-            <Chip
-              size="small"
-              label={quoting ? 'Quoted' : skipping ? 'Skipped' : 'Undecided'}
-              color={quoting ? 'primary' : 'default'}
-              variant={quoting ? 'filled' : 'outlined'}
-            />
-          ) : (
+          {readOnly ? (() => {
+            const chip = readOnlyLineChip(chipMode, decision?.decision, reasonLabel, {
+              rfqRef, currentRevisionNumber, promotedRevisionNumber,
+            });
+            // The label wraps rather than being cut off, so a skip reason is read in full.
+            const drawn = (
+              <Chip
+                size="small"
+                label={chip.label}
+                color={chip.color}
+                variant={chip.variant}
+                sx={{ maxWidth: '100%', height: 'auto', '& .MuiChip-label': { whiteSpace: 'normal', py: 0.25 } }}
+              />
+            );
+            return chip.tooltip ? <Tooltip describeChild title={chip.tooltip}>{drawn}</Tooltip> : drawn;
+          })() : (
             <ToggleButtonGroup
               exclusive
               size="small"
@@ -292,8 +371,9 @@ const LineRow = React.memo(function LineRow({
                     : (
                       <>
                         Nexora is not sure it read this line correctly.{' '}
+                        {/* Named for its line: the page's one "Check the document" is the next-step button. */}
                         <Link component="button" type="button" onClick={() => onOpenDocument(line)} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
-                          Check the document
+                          {`Check line ${label}`}
                         </Link>
                       </>
                     )}
@@ -326,8 +406,21 @@ const LinesTable: React.FC<LinesTableProps> = ({
   onBulkUnit,
   focusUnit,
   linesPerPage = LINES_PER_PAGE,
+  chipMode = 'choice',
+  rfqRef,
+  currentRevisionNumber,
+  promotedRevisionNumber,
 }) => {
   const skipReasons = React.useMemo(() => reasonCodes.filter((reason) => reason.appliesTo.includes('NoBid')), [reasonCodes]);
+  const reasonLabels = React.useMemo(
+    () => new Map(reasonCodes.map((reason) => [reason.code, reason.label?.trim() || null])),
+    [reasonCodes],
+  );
+  // Editable lines ask the question; read-only lines report an answer, and a request that became
+  // an RFQ reports what went into it.
+  const decisionHeader = !readOnly
+    ? 'Quote it?'
+    : chipMode === 'rfq' || chipMode === 'newer-revision' ? 'RFQ' : 'Choice';
   const unitCodes = React.useMemo(() => new Set(unitOptions.map((option) => option.code.toUpperCase())), [unitOptions]);
   const currencyCodes = React.useMemo(() => new Set(currencyOptions.map((option) => option.code.toUpperCase())), [currencyOptions]);
 
@@ -342,7 +435,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
   }, [lines.length, page, pageSize]);
   const visible = lines.length > pageSize ? lines.slice(page * pageSize, (page + 1) * pageSize) : lines;
 
-  // A bid list with no unit column: every quoted line lacks one. One picker sets them all, and
+  // A bid list with no unit column: every line marked to quote lacks one. One picker sets them all, and
   // only those — a line that already has a unit keeps it.
   const unitlessQuoted = unitOptions.length === 0 ? 0 : lines.filter((line) => {
     const decision = decisions[line.revisionLineId];
@@ -384,13 +477,13 @@ const LinesTable: React.FC<LinesTableProps> = ({
         data-testid="decide-bulk-unit"
         sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1, px: { xs: 2, sm: 3 }, py: 1.25, borderTop: 1, borderColor: 'divider', bgcolor: 'action.hover' }}
       >
-        <Typography variant="body2" sx={{ fontWeight: 700 }}>{unitlessQuoted} quoted lines need a unit.</Typography>
+        <Typography variant="body2" sx={{ fontWeight: 700 }}>{unitlessQuoted} lines marked to quote need a unit.</Typography>
         <FormControl size="small" error sx={{ minWidth: 180 }}>
           <Select
             value=""
             displayEmpty
             renderValue={() => <Box component="em" sx={{ color: 'text.secondary' }}>Unit for all {unitlessQuoted}</Box>}
-            inputProps={{ 'aria-label': `Unit for the ${unitlessQuoted} quoted lines without one` }}
+            inputProps={{ 'aria-label': `Unit for the ${unitlessQuoted} lines marked to quote without one` }}
             onChange={(event) => { if (event.target.value) onBulkUnit?.(String(event.target.value)); }}
           >
             {unitOptions.map((option) => (
@@ -424,11 +517,13 @@ const LinesTable: React.FC<LinesTableProps> = ({
             <TableCell sx={{ fontWeight: 700 }}>Item</TableCell>
             <TableCell sx={{ fontWeight: 700, width: 200 }}>Quantity</TableCell>
             <TableCell sx={{ fontWeight: 700, width: 140 }}>Price in</TableCell>
-            <TableCell sx={{ fontWeight: 700, width: 170 }} align="right">Quote it?</TableCell>
+            <TableCell sx={{ fontWeight: 700, width: 170 }} align="right">{decisionHeader}</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
-          {visible.map((line) => (
+          {visible.map((line) => {
+            const reasonCode = decisions[line.revisionLineId]?.reasonCode;
+            return (
             <LineRow
               key={line.revisionLineId}
               line={line}
@@ -441,8 +536,14 @@ const LinesTable: React.FC<LinesTableProps> = ({
               readOnly={readOnly}
               onChange={onChange}
               onOpenDocument={onOpenDocument}
+              reasonLabel={reasonCode ? reasonLabels.get(reasonCode) ?? null : null}
+              chipMode={chipMode}
+              rfqRef={rfqRef}
+              currentRevisionNumber={currentRevisionNumber}
+              promotedRevisionNumber={promotedRevisionNumber}
             />
-          ))}
+            );
+          })}
           {lines.length === 0 ? (
             <TableRow>
               <TableCell colSpan={4}>
