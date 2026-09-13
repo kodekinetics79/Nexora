@@ -11,9 +11,13 @@ import { NO_CONCERN_RATIONALE } from './decideRules';
  * assessment, the committed decision, the lifecycle qualification and the promotion, in order.
  */
 
-const auth = { user: { id: 7, isManager: true, isSuperAdmin: false, businessUnitId: 1 } };
+const auth: {
+  user: { id: number; isManager: boolean; isSuperAdmin: boolean; businessUnitId: number };
+  hasPermission: (moduleName: string, action?: string) => boolean;
+  stale: boolean;
+} = { user: { id: 7, isManager: true, isSuperAdmin: false, businessUnitId: 1 }, hasPermission: () => true, stale: false };
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ userData: auth.user, hasPermission: () => true }),
+  useAuth: () => ({ userData: auth.user, hasPermission: auth.hasPermission, permissionsStale: auth.stale, permissionsError: null }),
 }));
 
 const snack = vi.fn();
@@ -126,16 +130,17 @@ let record: LeadDecisionWorkbenchDTO;
 
 const renderPage = () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  const view = render(
+  const tree = () => (
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/procurement/leads/407/workbench']}>
         <Routes>
           <Route path="/procurement/leads/:id/workbench" element={<DecidePage />} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { ...view, client };
+  const view = render(tree());
+  return { ...view, client, rerenderPage: () => view.rerender(tree()) };
 };
 
 const pickOption = async (comboboxName: string | RegExp, optionName: string | RegExp) => {
@@ -155,7 +160,10 @@ const status = () => screen.getByRole('status', { name: 'Next step' });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sessionStorage.clear();
   auth.user = { id: 7, isManager: true, isSuperAdmin: false, businessUnitId: 1 };
+  auth.hasPermission = () => true;
+  auth.stale = false;
   record = baseWorkbench();
   getLead.mockResolvedValue({ id: 501, assignedToId: 7, assignedToFullName: 'Golden Salesperson', assignmentMethod: 'MANUAL', assignmentVersion: 1 });
   api.getWorkbench.mockImplementation(async () => structuredClone(record));
@@ -475,5 +483,143 @@ describe('one decision for the whole request', () => {
     // The button itself is the next step, not a grey "Create RFQ".
     expect(screen.queryByRole('button', { name: /Create RFQ|Save for a manager|Save for review/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'Assign an owner' })).toBeEnabled();
+  });
+});
+
+describe('a request that gives no unit', () => {
+  it('asks for the unit on the line, takes the rep to the picker, and the choice clears the step', async () => {
+    record = { ...baseWorkbench(), lines: [line({ id: 1, unitOfMeasure: null }), line({ id: 2 })] };
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    expect(status()).toHaveTextContent('The request gives no unit for line 00001. Choose it beside the quantity.');
+    expect(screen.getByText('not stated in the request')).toBeInTheDocument();
+
+    // One control named for the step — the button beside the sentence — not a second link.
+    fireEvent.click(screen.getByRole('button', { name: 'Choose the unit' }));
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Unit for line 00001' })).toHaveFocus());
+    await pickOption('Unit for line 00001', 'EA');
+    expect(status()).toHaveTextContent('Records the assessment, the decision and the RFQ together.');
+  });
+
+  it('sets one unit on every quoted line without one from a single picker', async () => {
+    record = { ...baseWorkbench(), lines: [1, 2, 3].map((id) => line({ id, unitOfMeasure: null })) };
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    expect(status()).toHaveTextContent('3 quoted lines need a unit. Choose one for all 3 above the lines, or line by line.');
+    fireEvent.click(screen.getByRole('button', { name: 'Choose the unit' }));
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Unit for the 3 quoted lines without one' })).toHaveFocus());
+
+    await pickOption('Unit for the 3 quoted lines without one', /^EA/);
+    for (const label of ['00001', '00002', '00003']) {
+      expect(screen.getByRole('combobox', { name: `Unit for line ${label}` })).toHaveTextContent('EA');
+    }
+    expect(status()).toHaveTextContent('Records the assessment, the decision and the RFQ together.');
+  });
+
+  it('keeps the unit the rep chose when the document check creates a new revision without one', async () => {
+    record = { ...baseWorkbench(), lines: [line({ id: 1, unitOfMeasure: null, verificationStatus: 'NEEDS_CHECK' }), line({ id: 2 })] };
+    const { client } = renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    await pickOption('Unit for line 00001', 'EA');
+    expect(status()).toHaveTextContent('Check line 00001 against the document and confirm it. The unit you chose goes with it.');
+
+    record = {
+      ...record,
+      leadRevisionId: 9002,
+      leadRevisionNumber: 2,
+      lines: [line({ id: 7, lineItemNo: '00001', unitOfMeasure: null, verificationStatus: 'NEEDS_CHECK' }), line({ id: 8, lineItemNo: '00002' })],
+    };
+    await client.invalidateQueries({ queryKey: ['lead-decision-workbench', 407] });
+    await screen.findByText('Revision 2');
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Unit for line 00001' })).toHaveTextContent('EA'));
+    expect(status()).toHaveTextContent('Check line 00001 against the document and confirm it. The unit you chose goes with it.');
+  });
+
+  it('lets a unit corrected on the new revision win over the earlier pick', async () => {
+    record = {
+      ...baseWorkbench(),
+      unitOptions: [{ code: 'EA', label: 'Each' }, { code: 'SET', label: 'Set' }],
+      lines: [line({ id: 1, unitOfMeasure: null, verificationStatus: 'NEEDS_CHECK' }), line({ id: 2 })],
+    };
+    const { client } = renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    await pickOption('Unit for line 00001', 'EA');
+
+    record = { ...record, leadRevisionId: 9002, leadRevisionNumber: 2, lines: [line({ id: 7, lineItemNo: '00001', unitOfMeasure: 'SET' }), line({ id: 8, lineItemNo: '00002' })] };
+    await client.invalidateQueries({ queryKey: ['lead-decision-workbench', 407] });
+    await screen.findByText('Revision 2');
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Unit for line 00001' })).toHaveTextContent('SET'));
+  });
+
+  it('writes what happened to the unit on a warned line, not a catalogue miss, and keeps it true as the unit is chosen', async () => {
+    record = { ...baseWorkbench(), lines: [line({ id: 1, unitOfMeasure: null, needsAttention: true, attentionReason: 'Unit of measure missing' }), line({ id: 2 })] };
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    expect(screen.getByRole('textbox', { name: 'How you handled it (line 00001)' })).toHaveValue('The request gave no unit; the unit is chosen on the line.');
+    await pickOption('Unit for line 00001', 'EA');
+    expect(screen.getByRole('textbox', { name: 'How you handled it (line 00001)' })).toHaveValue('The request gave no unit; quoted in EA.');
+  });
+
+  it('brings unsaved choices back onto the new revision an extraction approval created', async () => {
+    sessionStorage.setItem('nexora.lead-decision.407', JSON.stringify({
+      savedAt: '2026-09-12T08:00:00Z',
+      value: {
+        revisionId: 9001,
+        decisions: { '00001': { decision: 'Bid', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR' }, '00002': { decision: 'NoBid', reasonCode: 'NO_STOCK' } },
+        concern: { raised: false, codes: [], note: '' },
+      },
+    }));
+    record = {
+      ...baseWorkbench(),
+      leadRevisionId: 9002,
+      leadRevisionNumber: 2,
+      lines: [line({ id: 7, lineItemNo: '00001', unitOfMeasure: null }), line({ id: 8, lineItemNo: '00002' })],
+    };
+    renderPage();
+    await waitFor(() => expect(within(screen.getByRole('group', { name: 'Quote or skip line 00001' })).getByRole('button', { name: 'Quote' }))
+      .toHaveAttribute('aria-pressed', 'true'));
+    expect(within(screen.getByRole('group', { name: 'Quote or skip line 00002' })).getByRole('button', { name: 'Skip' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('combobox', { name: 'Unit for line 00001' })).toHaveTextContent('EA');
+    expect(snack).toHaveBeenCalledWith(expect.stringMatching(/^Restored the choices you had not saved yet/), { variant: 'info' });
+  });
+});
+
+describe('background work never tears down the decision', () => {
+  it('keeps the decision editable while the session re-reads its permissions', async () => {
+    const view = renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    expect(screen.getByRole('combobox', { name: 'Currency for line 00002' })).toBeInTheDocument();
+
+    // The minute timer fires: the snapshot is marked stale and every edit grant reads as withdrawn
+    // until the server answers.
+    auth.stale = true;
+    auth.hasPermission = (_moduleName, action = 'view') => action === 'view';
+    view.rerenderPage();
+
+    expect(screen.getByRole('combobox', { name: 'Currency for line 00002' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Quote all' })).toBeInTheDocument();
+    expect(status()).not.toHaveTextContent('Your role can view this request but not decide it.');
+  });
+
+  it('applies a settled revocation at once', async () => {
+    const view = renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    auth.stale = false;
+    auth.hasPermission = (_moduleName, action = 'view') => action === 'view';
+    view.rerenderPage();
+    expect(status()).toHaveTextContent('Your role can view this request but not decide it.');
+    expect(screen.queryByRole('combobox', { name: 'Currency for line 00002' })).toBeNull();
+  });
+
+  it('keeps the lines and the rep\'s choices when a background re-read fails', async () => {
+    const { client } = renderPage();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Quote or skip line 00001' })).getByRole('button', { name: 'Quote' }));
+    api.getWorkbench.mockRejectedValue(new Error('502 Bad Gateway'));
+    await client.invalidateQueries({ queryKey: ['lead-decision-workbench', 407] });
+
+    expect(await screen.findByText(/Couldn't refresh this request just now/, undefined, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.queryByText('This request could not be loaded')).toBeNull();
+    expect(within(screen.getByRole('group', { name: 'Quote or skip line 00001' })).getByRole('button', { name: 'Quote' }))
+      .toHaveAttribute('aria-pressed', 'true');
   });
 });

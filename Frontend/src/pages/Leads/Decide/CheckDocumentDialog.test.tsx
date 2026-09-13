@@ -25,7 +25,7 @@ vi.mock('../../../utils/authenticatedFile', () => ({
   downloadAuthenticatedFile: vi.fn(),
 }));
 
-import CheckDocumentDialog, { DEFAULT_CHECK_REASON } from './CheckDocumentDialog';
+import CheckDocumentDialog, { CHECK_LINES_PER_PAGE, DEFAULT_CHECK_REASON } from './CheckDocumentDialog';
 
 const line = (overrides: Partial<LeadDecisionLineDTO> & { id: number }): LeadDecisionLineDTO => ({
   revisionLineId: overrides.id * 10,
@@ -193,5 +193,76 @@ describe('CheckDocumentDialog', () => {
     renderDialog({ workbench: workbench({ evidence: [] }) });
     expect(await screen.findByText(/No document is on file for this request/)).toBeInTheDocument();
     expect(await screen.findByText('1 of 2 lines to check')).toBeInTheDocument();
+  });
+});
+
+describe('the unit in the check', () => {
+  it('opens with the unit the rep chose on the lines when the record has none, says so, and sends it', async () => {
+    const { onConfirmed } = renderDialog({ decisions: { 10: { decision: 'Bid', quantity: 3, unitOfMeasure: 'SET' } } });
+    await screen.findByText('1 of 2 lines to check');
+    expect(screen.getByRole('combobox', { name: 'Unit, line 00001' })).toHaveTextContent('SET');
+    expect(screen.getByText('you chose SET on the lines')).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Confirm what the document says' });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.submitReview).toHaveBeenCalled());
+    expect(api.submitReview.mock.calls[0][1].items[0]).toMatchObject({ id: 501, unitOfMeasure: 'SET' });
+    await waitFor(() => expect(onConfirmed).toHaveBeenCalled());
+    expect(onConfirmed.mock.calls[0][0]).toContainEqual(expect.objectContaining({ lineItemNo: '00001', unitOfMeasure: 'SET' }));
+  });
+
+  it('never lets a unit the tenant does not quote in be confirmed, and says the word beside the picker', async () => {
+    api.getById.mockResolvedValue({ ...lead, leadItems: [{ ...lead.leadItems[0], unitOfMeasure: 'Roll' }, lead.leadItems[1]] });
+    renderDialog({ workbench: workbench({ lines: [
+      line({ id: 1, description: 'Control module', verificationStatus: 'NEEDS_CHECK', unitOfMeasure: 'Roll', currency: null }),
+      line({ id: 2, description: 'Cable gland kit' }),
+    ] }) });
+    await screen.findByText('1 of 2 lines to check');
+    expect(screen.getByRole('combobox', { name: 'Unit, line 00001' })).toHaveTextContent('Unit');
+    expect(screen.getByText('as written: Roll — choose the unit you quote in')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm what the document says' })).toBeDisabled();
+    expect(screen.getByText(/Line 00001 needs a unit\./)).toBeInTheDocument();
+  });
+
+  it('sets one unit for every line to check that has none', async () => {
+    const lines = [1, 2, 3].map((id) => line({ id, description: `Item ${id}`, verificationStatus: 'NEEDS_CHECK', unitOfMeasure: null }));
+    api.getById.mockResolvedValue({
+      ...lead,
+      leadItems: [1, 2, 3].map((id) => ({ id: 500 + id, lineItemNo: `0000${id}`, productShortName: `Item ${id}`, quantity: 2, aiconfidence: 0.5 })),
+    });
+    renderDialog({ workbench: workbench({ lines }) });
+    await screen.findByText('3 of 3 lines to check');
+    await pickOption('Unit for the 3 lines to check without one', 'EA · Each');
+    for (const label of ['00001', '00002', '00003']) {
+      expect(screen.getByRole('combobox', { name: `Unit, line ${label}` })).toHaveTextContent('EA');
+    }
+    expect(screen.getByRole('button', { name: 'Confirm what the document says' })).toBeEnabled();
+  });
+
+  it('draws a long check a page at a time and takes the rep to the first line still missing something', async () => {
+    const count = CHECK_LINES_PER_PAGE + 5;
+    const lines = Array.from({ length: count }, (_item, index) => line({
+      id: index + 1,
+      description: `Item ${index + 1}`,
+      verificationStatus: 'NEEDS_CHECK',
+      unitOfMeasure: index === count - 1 ? null : 'EA',
+    }));
+    api.getById.mockResolvedValue({
+      ...lead,
+      leadItems: lines.map((item, index) => ({
+        id: 1000 + index, lineItemNo: item.lineItemNo, productShortName: `Item ${index + 1}`, quantity: 2,
+        unitOfMeasure: index === count - 1 ? undefined : 'EA', aiconfidence: 0.5,
+      })),
+    });
+    renderDialog({ workbench: workbench({ lines }) });
+    await screen.findByText(`${count} of ${count} lines to check`);
+    expect(screen.getByText(`Lines 1–${CHECK_LINES_PER_PAGE} of ${count} to check`)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'What they asked for, line 00001' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: `What they asked for, line 000${count}` })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Confirm what the document says' })).toBeDisabled();
+    expect(screen.getByText(new RegExp(`Line 000${count} needs a unit\\.`))).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: `Show line 000${count}` }));
+    expect(await screen.findByRole('combobox', { name: `Unit, line 000${count}` })).toBeInTheDocument();
   });
 });
