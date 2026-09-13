@@ -87,6 +87,34 @@ public static class CustomerNameNormalizer
     };
 
     /// <summary>
+    /// Initials a Saudi bid genuinely prints that are NOT a company. A customer called
+    /// "Arabian Refinery Engineering Associates" derives AREA, and an SEC delivery address reads
+    /// "SEC Materials West Plant-West Operating Area": without this list that customer is linked
+    /// to every SEC document at 0.85. Four families, all observed on real prints — words that
+    /// appear in an address or a site name, weekday and date shorthand, standards bodies and
+    /// material codes that fill item text, and the commercial abbreviations on every bid form.
+    /// </summary>
+    /// <summary>Exposed so the resolver's tests can state which words are refused and why.</summary>
+    public static bool IsAmbiguousAcronym(string? candidate) =>
+        !string.IsNullOrWhiteSpace(candidate) && AmbiguousAcronyms.Contains(candidate.Trim().ToUpperInvariant());
+
+    private static readonly HashSet<string> AmbiguousAcronyms = new(StringComparer.Ordinal)
+    {
+        "AREA", "GATE", "SITE", "CITY", "TOWN", "PLANT", "UNIT", "LINE", "MAIN", "ZONE", "BLOCK",
+        "EAST", "WEST", "NORTH", "SOUTH", "ROAD", "PORT", "BOX", "NEW", "OLD", "STORE", "YARD",
+        "ALL", "ONE", "TWO", "SET", "LOT", "EACH", "ITEM", "QTY", "REV", "SPEC", "NOTE", "PAGE",
+        "BID", "RFQ", "RFP", "RFI", "PO", "POE", "LPO", "TBA", "TBD", "NA", "ETA", "ETD",
+        "SAT", "SUN", "MON", "TUE", "WED", "THU", "FRI",
+        "MAN", "ACE", "CAN", "ARE", "ANY", "END", "OUR", "USE", "NET", "TOP", "LOW", "HIGH",
+        "KSA", "UAE", "GCC", "MENA", "ISO", "IEC", "API", "ASTM", "SAE", "ANSI", "ASME", "NACE",
+        "NPT", "PVC", "GRP", "HDPE", "LED", "AC", "DC", "SS", "CS",
+        "FOB", "CIF", "EXW", "DDP", "CFR", "CPT", "DAP", "VAT", "TAX", "USD", "SAR", "EUR",
+        // Placeholder names. A customer record called "Test" or "Demo" is scaffolding, and a
+        // one-word name is only distinctive when it is a trade name somebody actually trades under.
+        "TEST", "DEMO", "SAMPLE", "TRIAL", "TEMP", "DRAFT", "DUMMY", "NONE", "NULL", "MISC", "OTHER"
+    };
+
+    /// <summary>
     /// The initials a buyer writes instead of the name: "Saudi Electricity Company" -> "SEC",
     /// "Saline Water Conversion Corporation" -> "SWCC". Built from EVERY word of the name,
     /// legal words included, because that is how the acronym is formed in practice. Empty for
@@ -113,6 +141,12 @@ public static class CustomerNameNormalizer
         if (acronym.Length < 3 || acronym.Length > 6) return string.Empty;
         // "EST" or "INC" as initials would match every legal suffix on the page.
         if (NoiseTokens.Contains(acronym)) return string.Empty;
+        if (AmbiguousAcronyms.Contains(acronym)) return string.Empty;
+        // Fold keeps Arabic letters, and almost every Arabic company name opens with the definite
+        // article, so initials taken from Arabic tokens collide with one another and with nothing
+        // a buyer ever writes. Initials are a Latin-script convention; outside it, there are none.
+        foreach (var letter in acronym)
+            if (letter is < 'A' or > 'Z') return string.Empty;
         return acronym;
     }
 

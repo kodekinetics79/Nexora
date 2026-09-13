@@ -115,4 +115,17 @@ public sealed class CustomerNameNormalizerTests
             CustomerNameNormalizer.JaroWinkler("SAUDIELECTRICITY", "SAUDIELECTRICTY"),
             CustomerNameNormalizer.JaroWinkler("SAUDIELECTRICTY", "SAUDIELECTRICITY"), 6);
     }
+
+    [Theory]
+    [InlineData("Arabian Refinery Engineering Associates", "")]     // AREA is an address word
+    [InlineData("Gulf Arabian Trading Establishment", "")]          // GATE is on every Aramco gate
+    [InlineData("National Engineering Works", "")]                  // NEW is in "New Industrial City"
+    [InlineData("Saudi Advanced Technology", "")]                   // SAT is Site Acceptance Test
+    [InlineData("Saudi Electricity Company", "SEC")]                // still works
+    [InlineData("Saline Water Conversion Corporation", "SWCC")]     // still works
+    [InlineData("Royal Commission for Jubail and Yanbu", "RCJY")]   // connectors skipped
+    [InlineData("Saudi Aramco", "")]                                // two letters is anybody's letters
+    [InlineData("الشركة السعودية للكهرباء", "")]                      // initials are a Latin convention
+    public void Initials_are_refused_when_they_are_a_word_a_buyer_actually_writes(string name, string expected)
+        => Assert.Equal(expected, CustomerNameNormalizer.AcronymKey(name));
 }
