@@ -62,7 +62,7 @@ public sealed record CustomerAliasLearningResult(
 ///                       <see cref="CustomerResolutionPolicy.FreeMailAddressConfirmationsRequired"/> times, this decision
 ///                       included, whatever customer their pages name. The first decision for another customer makes the
 ///                       address nobody's and takes back whatever was learned for it, and the resolver and routing refuse the
-///                       address from the moment that decision stands (<see cref="HumanAddressDecisions"/>). A relay or a
+///                       address from the moment that decision stands (<see cref="HumanIdentityDecisions"/>). A relay or a
 ///                       system mailbox is never learned, and nothing at all is written before the count is reached
 ///   P3 exclusivity    — Email/ErpAccount/TaxRegistration are exclusive; on conflict SKIP, never steal
 ///   P4 multi-owner    — Alias/PortalAccount may point at several customers; the resolver then
@@ -94,10 +94,18 @@ public sealed record CustomerAliasLearningResult(
 ///   P12 reinforcement — a re-confirmation counts on every matching row but promotes only a row on this class's own
 ///                       shelves. A row a person entered keeps its grade, its confidence and its source: a person's "not
 ///                       verified" is never overridden by a reviewer's click
+///   P13 another's pick — a company name or a portal pair a person decides for one customer is no longer the fact of any
+///                       other customer that learned it: this class demotes those rows (counts kept, as P5 demotes) when it
+///                       runs on that decision, and the resolver and routing refuse them while the decision stands, whichever
+///                       screen recorded it (<see cref="HumanIdentityDecisions"/>). An Arabic-only name is also taken back from
+///                       the chosen customer while a decision for another customer carrying it stands, unless this page names
+///                       the chosen customer, because that name was trusted on "none for another" (the ASSUMPTION below). A
+///                       row a person entered is never touched
 ///
 /// ASSUMPTION, stated because the owner did not answer it and this is the recommendation he was given: an Arabic-only
 /// company name is trusted after two confirmations for the same customer with none for another, or at once when the
-/// document's header or address names that customer (<c>ArabicOnlyNameIsTheCustomersAsync</c>).
+/// document's header or address names that customer (<c>ArabicOnlyNameIsTheCustomersAsync</c>). "None for another" holds
+/// after the name is trusted as well as when it is learned (P13).
 /// </summary>
 /// <remarks>
 /// OBSERVATIONCOUNT IS HISTORY ONLY. Reinforcement increments it, a relink's demotion or expiry leaves it alone, and no
@@ -185,8 +193,9 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     public const string SkipAddressNotYetConfirmed = "addressNotYetConfirmed";
 
     /// <summary>
-    /// A relink took the trust off a domain, a company name or a portal pair of the previous customer: the row was demoted to
-    /// unverified, its counts and confidence kept, rather than expired. The skip reasons reach the review's correction metric,
+    /// A relink took the trust off a domain, a company name or a portal pair of the previous customer (P5), or a person's
+    /// decision for another customer took it off a company name or a portal pair that decision carries (P13): the row was
+    /// demoted to unverified, its counts and confidence kept, rather than expired. The skip reasons reach the review's correction metric,
     /// which is the only record a learned row's change has (the row carries no reason column). See P5.
     /// </summary>
     public const string SkipContradictedFactDemoted = "contradictedFactDemoted";
@@ -223,9 +232,10 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     public const int MaximumEarlierPrintsRead = 20;
 
     /// <summary>
-    /// Human decisions that carry a printed company name, read newest first to find every earlier pick of an Arabic-only name
-    /// by its name key (<see cref="CustomerNameNormalizer.LooseKey"/> cannot run in SQL). A tenant past it cannot be checked,
-    /// and the name is recorded for review. A human-paced read, on the one rare branch of a review that asks it.
+    /// Distinct (customer, printed company name) pairs of the tenant's human decisions read to find every pick of a name by its
+    /// name key (<see cref="CustomerNameNormalizer.LooseKey"/> cannot run in SQL): here for an Arabic-only name, and by the
+    /// resolver and routing for every learned name or portal pair (<see cref="HumanIdentityDecisions"/>). A tenant past it
+    /// cannot be checked: the name is recorded for review here, and every learned name or pair is refused there.
     /// </summary>
     public const int MaximumPrintedNameDecisionsRead = 20_000;
 
@@ -437,10 +447,26 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 // the recommendation he was given): trusted after two confirmations for this customer with none for
                 // another, or at once when the page's header or address names this customer. Only this direction: a
                 // Latin print of a customer recorded in Arabic is compared like any other print below.
-                if (await ArabicOnlyNameIsTheCustomersAsync(businessUnitId, lead, customerId, companyDisplay, aliasKey, pages, ct))
+                var carriers = await HumanIdentityDecisions.NameCarriersAsync(_db, businessUnitId, aliasKey, lead.Id, ct);
+                if (await ArabicOnlyNameIsTheCustomersAsync(businessUnitId, lead, customerId, companyDisplay, aliasKey, pages, carriers, ct))
+                {
                     proposals.Add(new Proposal(CustomerIdentifierType.Alias, aliasKey, companyDisplay, true, 0.90m));
+                }
                 else
+                {
+                    // P13, "WITH NONE FOR ANOTHER" HOLDS AFTER TRUST AS WELL AS AT LEARN TIME (the same ASSUMPTION). It was read
+                    // only when the name was first learned: confirmed twice for SEC, the alias stayed verified after a print
+                    // carrying it was picked or saved for Saudi Aramco, the next SEC link reinforced it, and the next Arabic
+                    // print linked SEC at 0.90 (the final check's Z1 and Z2). While such a decision stands, a trusted row this
+                    // class wrote for the name on the chosen customer is demoted, counts kept, and this decision files it
+                    // unverified. A tenant too large to check counts as decided for another.
+                    if ((carriers is null || carriers.Any(carrier => carrier.CustomerId != customerId))
+                        && await DemoteTrustedLearnedRowsAsync(
+                            businessUnitId, lead.Id, customerId, CustomerIdentifierType.Alias, aliasKey, ofChosenCustomer: true, setAside, ct) > 0
+                        && !skips.Contains(SkipContradictedFactDemoted))
+                        skips.Add(SkipContradictedFactDemoted);
                     FileAlias(SkipAliasInAnotherScriptNotYetCorroborated, "it is written only in Arabic and nothing yet corroborates it");
+                }
             }
             else if (!ResemblesCustomerName(companyDisplay, customerName))
             {
@@ -537,6 +563,16 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 }
             }
         }
+
+        // P13. THIS DECISION IS FOR A DIFFERENT CUSTOMER THAN ANY OTHER THAT LEARNED THIS NAME OR PAIR. Owner decision 2026-09-13,
+        // policy A, consistent with an address: a name or a portal pair a person decides for one customer is no longer another
+        // customer's fact. Only a relink FROM the customer that learned it used to take it back (P5), so a new SEC print a
+        // person linked to Saudi Aramco left SEC's learned name and portal pair trusted. Demoted, counts kept, after the gates
+        // above so that P11 still reads who held the pair when this review began. The resolver and routing refuse the same rows while this decision stands
+        // (HumanIdentityDecisions), which also covers the review screen's Save, where this class never runs.
+        if (await TakeBackWhatThisDecisionContradictsAsync(businessUnitId, lead.Id, customerId, aliasKey, portalPair?.Key, setAside, ct) > 0
+            && !skips.Contains(SkipContradictedFactDemoted))
+            skips.Add(SkipContradictedFactDemoted);
 
         // 4. The RFQ-number SHAPE. Suggestion-grade FOREVER (IsVerified = false): the
         //    learned-alias tier requires IsVerified, so a numbering convention can propose a
@@ -757,6 +793,69 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 string.Join(",", ids), previousCustomerId, leadId);
         }
         return trustTaken;
+    }
+
+    /// <summary>
+    /// P13. This decision is for <paramref name="customerId"/>, so a company name or a portal pair it carries is no longer the
+    /// fact of any OTHER customer that learned it (owner decision 2026-09-13, policy A, consistent with an address). Every such
+    /// trusted row on this class's own shelves is demoted and written through, as P5 demotes; a row a person entered is never
+    /// read. The next confirmation for that customer re-verifies a name or a pair only by the ordinary rules (P8, P11, P12),
+    /// and the resolver and routing refuse it while this decision stands (<see cref="HumanIdentityDecisions"/>).
+    /// </summary>
+    /// <returns>How many trusted rows were demoted.</returns>
+    private async Task<int> TakeBackWhatThisDecisionContradictsAsync(
+        long businessUnitId, long leadId, long customerId, string aliasKey, string? portalKey, HashSet<long> setAside,
+        CancellationToken ct)
+    {
+        var demoted = 0;
+        if (aliasKey.Length > 0)
+            demoted += await DemoteTrustedLearnedRowsAsync(
+                businessUnitId, leadId, customerId, CustomerIdentifierType.Alias, aliasKey, ofChosenCustomer: false, setAside, ct);
+        if (portalKey is { Length: > 0 })
+            demoted += await DemoteTrustedLearnedRowsAsync(
+                businessUnitId, leadId, customerId, CustomerIdentifierType.PortalAccount, portalKey, ofChosenCustomer: false, setAside, ct);
+        return demoted;
+    }
+
+    /// <summary>
+    /// Demotes the trusted rows (verified, or on the LeadReviewLearned shelf) this class wrote for one name or portal pair, on
+    /// the chosen customer or on every other one, to unverified on the unverified shelf, with ObservationCount, Confidence,
+    /// LastObservedOn and LearnedFromLeadId kept, and writes them through by id for the reason
+    /// <see cref="TakeBackWhatARelinkContradictsAsync"/> gives. Never a row a person entered, and never an expiry.
+    /// </summary>
+    private async Task<int> DemoteTrustedLearnedRowsAsync(
+        long businessUnitId, long leadId, long customerId, CustomerIdentifierType type, string value, bool ofChosenCustomer,
+        HashSet<long> setAside, CancellationToken ct)
+    {
+        var query = _db.Set<CustomerIdentifier>().IgnoreQueryFilters()
+            .Where(i => i.BusinessUnitId == businessUnitId
+                        && i.EffectiveTo == null
+                        && i.IdentifierType == type
+                        && i.NormalizedValue == value
+                        && LearnedSources.Contains(i.Source)
+                        && (i.IsVerified || i.Source == CustomerIdentifierSources.LeadReviewLearned));
+        query = ofChosenCustomer
+            ? query.Where(i => i.CustomerId == customerId)
+            : query.Where(i => i.CustomerId != customerId);
+        var trusted = await query.ToListAsync(ct);
+        if (trusted.Count == 0) return 0;
+
+        foreach (var row in trusted)
+        {
+            row.IsVerified = false;
+            row.Source = UnverifiedAliasSource;
+            setAside.Add(row.Id);
+        }
+        var ids = trusted.Select(row => row.Id).ToArray();
+        await _db.Set<CustomerIdentifier>().IgnoreQueryFilters()
+            .Where(i => i.BusinessUnitId == businessUnitId && ids.Contains(i.Id))
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(i => i.IsVerified, false)
+                .SetProperty(i => i.Source, UnverifiedAliasSource), ct);
+        _log?.LogInformation(
+            "Client alias learning demoted {IdentifierType} identifiers {IdentifierIds} to unverified on lead {LeadId}: a person's decision for another customer carries that value.",
+            type, string.Join(",", ids), leadId);
+        return trusted.Count;
     }
 
     /// <summary>
@@ -1154,19 +1253,10 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
 
     private static (string Key, string Display)? PortalAccountPair(Lead lead)
     {
-        var key = PortalAccountKey(lead.CustomerPortalNameExtracted, lead.SupplierAccountRefOnDocument);
+        var key = HumanIdentityDecisions.PortalPairKey(lead.CustomerPortalNameExtracted, lead.SupplierAccountRefOnDocument);
         if (key is null) return null;
         return (key,
             $"{lead.CustomerPortalNameExtracted!.Trim()} / {lead.SupplierAccountRefOnDocument!.Trim()}");
-    }
-
-    /// <summary>The stored "portal|our-vendor-code" key, the same one the resolver's S3 compares; null when either half is missing.</summary>
-    private static string? PortalAccountKey(string? portalName, string? supplierAccountRef)
-    {
-        if (string.IsNullOrWhiteSpace(portalName) || string.IsNullOrWhiteSpace(supplierAccountRef)) return null;
-        var portalKey = CustomerNameNormalizer.LooseKey(portalName);
-        var accountKey = RoutingValueNormalizer.Normalize(CustomerIdentifierType.ErpAccount, supplierAccountRef);
-        return portalKey.Length == 0 || accountKey.Length == 0 ? null : $"{portalKey}|{accountKey}";
     }
 
     /// <summary>
@@ -1361,11 +1451,14 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     /// with a double space, a trailing full stop or a tatweel was invisible, while LooseKey, under which the alias is stored
     /// and matched, reads them all as this name: the alias was verified on SEC and linked the Aramco pick's own spelling to SEC
     /// at 0.90 (the conformance round's C1 to C3). LooseKey cannot run in SQL, and no text filter in SQL is a safe stand-in (it
-    /// also drops diacritics and folds presentation forms), so every human decision carrying a company name is read, newest
-    /// first, up to <see cref="MaximumPrintedNameDecisionsRead"/>; a tenant past that cannot be checked, and nothing is trusted.
+    /// also drops diacritics and folds presentation forms), so the distinct spellings people decided are read and keyed through
+    /// <see cref="HumanIdentityDecisions.NameCarriersAsync"/>, up to <see cref="MaximumPrintedNameDecisionsRead"/> distinct
+    /// (customer, spelling) pairs; a tenant past that cannot be checked (<paramref name="carriers"/> is null), and nothing is
+    /// trusted. The same read takes a trusted name back while a decision for another customer stands (P13).
     /// </summary>
     private async Task<bool> ArabicOnlyNameIsTheCustomersAsync(
-        long businessUnitId, Lead lead, long customerId, string printed, string aliasKey, PageReader pages, CancellationToken ct)
+        long businessUnitId, Lead lead, long customerId, string printed, string aliasKey, PageReader pages,
+        IReadOnlyList<HumanIdentityDecisions.Carrier>? carriers, CancellationToken ct)
     {
         var book = await pages.BookAsync(ct);
         if (book is null) return false;
@@ -1376,24 +1469,21 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         if (pages.DocumentNamesAnotherCustomer(lead, customerId, book)) return false;
         if (pages.DocumentNamesChosenCustomer(lead, customerId, book)) return true;
 
-        var earlier = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
+        if (carriers is null || carriers.Count == 0 || carriers.Any(carrier => carrier.CustomerId != customerId)) return false;
+        var spellings = carriers.Select(carrier => carrier.Printed).Distinct(StringComparer.Ordinal).ToArray();
+        var decidedIds = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
             .Where(l => l.BusinessUnitId == businessUnitId
                         && l.Id != lead.Id
-                        && l.CustomerId != null
+                        && l.CustomerId == customerId
                         && HumanDecidedStatuses.Contains(l.CustomerMatchStatus)
-                        && l.CustomerCompanyNameExtracted != null)
+                        && l.CustomerCompanyNameExtracted != null
+                        && spellings.Contains(l.CustomerCompanyNameExtracted))
             .OrderByDescending(l => l.Id)
-            .Select(l => new { l.Id, CustomerId = l.CustomerId!.Value, l.CustomerCompanyNameExtracted })
-            .Take(MaximumPrintedNameDecisionsRead + 1)
-            .ToListAsync(ct);
-        if (earlier.Count > MaximumPrintedNameDecisionsRead) return false;
-        var decided = earlier
-            .Where(row => string.Equals(CustomerNameNormalizer.LooseKey(row.CustomerCompanyNameExtracted), aliasKey, StringComparison.Ordinal))
-            .ToList();
-        if (decided.Count == 0 || decided.Any(row => row.CustomerId != customerId)) return false;
+            .Select(l => l.Id)
+            .Take(MaximumEarlierPrintsRead)
+            .ToArrayAsync(ct);
 
-        var documents = await LoadEarlierDocumentsAsync(
-            businessUnitId, decided.Select(row => row.Id).Take(MaximumEarlierPrintsRead).ToArray(), ct);
+        var documents = await LoadEarlierDocumentsAsync(businessUnitId, decidedIds, ct);
         if (documents.Any(document => pages.DocumentNamesAnotherCustomer(document, customerId, book))) return false;
         return 1 + documents.Count >= _policy.FreeMailAddressConfirmationsRequired;
     }
@@ -1436,7 +1526,7 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
     /// <summary>
     /// P2, OWNER DECISION 2026-09-13, POLICY A: "A buyer's exact email address is learned once reps confirm it for the same
     /// customer twice, and never for anyone else." What people have said about one exact address, and nothing else, read
-    /// through <see cref="HumanAddressDecisions"/>: the leads whose envelope sender, sender column or printed buyer address is
+    /// through <see cref="HumanIdentityDecisions"/>: the leads whose envelope sender, sender column or printed buyer address is
     /// the address itself or ends in "&lt;address&gt;", under a human status, each counted for the customer it is linked to NOW.
     ///   E1 any earlier decision for another customer: nothing is learned, and every row this class learned for the address, on
     ///      any customer, is expired and written through. Its own EXISTS, filtered on the customer in SQL and never capped, so
@@ -1457,7 +1547,7 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
         long businessUnitId, Lead lead, long customerId, string address,
         HashSet<long> expiredIds, HashSet<long> setAside, DateTime now, CancellationToken ct)
     {
-        if (await HumanAddressDecisions.DecidedForAnotherCustomerAsync(_db, businessUnitId, address, customerId, lead.Id, ct))
+        if (await HumanIdentityDecisions.AddressDecidedForAnotherCustomerAsync(_db, businessUnitId, address, customerId, lead.Id, ct))
         {
             var taught = await _db.Set<CustomerIdentifier>().IgnoreQueryFilters()
                 .Where(i => i.BusinessUnitId == businessUnitId
@@ -1485,8 +1575,8 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
             return AddressReading.ConfirmedForAnotherCustomer;
         }
 
-        var earlier = await HumanAddressDecisions
-            .Carrying(_db.Leads.AsNoTracking().IgnoreQueryFilters(), businessUnitId, address)
+        var earlier = await HumanIdentityDecisions
+            .CarryingAddress(_db.Leads.AsNoTracking().IgnoreQueryFilters(), businessUnitId, address)
             .Where(l => l.Id != lead.Id && l.CustomerId == customerId)
             .OrderByDescending(l => l.Id)
             .Select(l => new

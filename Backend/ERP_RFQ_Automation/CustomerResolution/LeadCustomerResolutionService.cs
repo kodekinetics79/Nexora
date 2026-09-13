@@ -970,20 +970,28 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                 LiveIdentifiers().Where(i => i.IdentifierType == CustomerIdentifierType.RfqNumberPattern),
                 maxRfqPatternIdentifiers);
 
-        // A LEARNED ADDRESS A PERSON HAS SINCE DECIDED FOR ANOTHER CUSTOMER IS NOBODY'S. OWNER DECISION 2026-09-13, POLICY A:
-        // a buyer's exact address is learned once reps confirm it for the same customer twice, "and never for anyone else".
-        // The learner takes such an address back only when it next runs, and the review screen's Save records a decision
-        // without running it: k.lee@hdec.com, confirmed twice for Hyundai and then saved for Aramco, still linked the next
-        // message to Hyundai at 1.00. Only the taught rows for this page's own addresses are checked (one EXISTS each), and a
-        // row a person entered is never overruled. Routing asks the same question (HumanAddressDecisions).
-        var taughtAddresses = identifiers
-            .Where(i => HumanAddressDecisions.IsTaughtAddress(i.IdentifierType, i.Source)
-                        && addresses.Contains(i.NormalizedValue, StringComparer.Ordinal))
-            .Select(i => (i.Id, i.CustomerId, i.NormalizedValue))
+        // A LEARNED ADDRESS, COMPANY NAME OR PORTAL PAIR A PERSON HAS DECIDED FOR ANOTHER CUSTOMER IS NOBODY'S. OWNER DECISION
+        // 2026-09-13, POLICY A: a buyer's exact address is learned "never for anyone else", and a name or a portal pair that
+        // another customer's decision carries is no longer the first customer's fact (the learner demotes it, P5 and P13). The
+        // learner does that only when it next runs, and the review screen's Save records a decision without running it:
+        // k.lee@hdec.com, confirmed twice for Hyundai and then saved for Aramco, still linked the next message to Hyundai at
+        // 1.00; an Arabic-only name trusted for SEC still linked SEC at 0.90 after a print carrying it was saved for Aramco; and
+        // a relink saved on that screen left the rejected customer's learned name and portal pair linking. Only taught rows
+        // are checked (this page's own addresses, and every learned name or pair loaded), and a row a person entered is never
+        // overruled. Dropping a name or a pair here reads exactly as the learner's demotion would: no tier reads an unverified
+        // name or pair. THE COST: one read of the tenant's distinct decided printed names on a lead whose corpus holds a learned
+        // name, and one of portal pairs on a lead whose corpus holds a learned pair, each capped at
+        // HumanIdentityDecisions.MaximumDistinctDecisionsRead; past the cap every learned name (or pair) is refused. Routing
+        // asks the same question (HumanIdentityDecisions).
+        var taughtFacts = identifiers
+            .Where(i => HumanIdentityDecisions.IsTaughtFact(i.IdentifierType, i.Source)
+                        && (i.IdentifierType != CustomerIdentifierType.Email
+                            || addresses.Contains(i.NormalizedValue, StringComparer.Ordinal)))
+            .Select(i => (i.Id, i.CustomerId, i.IdentifierType, i.NormalizedValue))
             .ToList();
-        if (taughtAddresses.Count > 0)
+        if (taughtFacts.Count > 0)
         {
-            var contradicted = await HumanAddressDecisions.ContradictedAsync(_db, businessUnitId, taughtAddresses, ct);
+            var contradicted = await HumanIdentityDecisions.ContradictedAsync(_db, businessUnitId, taughtFacts, ct);
             identifiers.RemoveAll(i => contradicted.Contains(i.Id));
         }
 

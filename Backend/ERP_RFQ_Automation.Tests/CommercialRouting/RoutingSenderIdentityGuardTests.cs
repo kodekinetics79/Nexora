@@ -835,6 +835,78 @@ public sealed class RoutingSenderIdentityGuardTests
         Assert.Null(routed.AssignTo);
     }
 
+    [Theory]
+    [InlineData("الشركة السعودية للكهرباء", "الشركة السعودية للكهربـاء", CustomerIdentifierSources.LeadReviewLearned, true, false)]
+    // The control: nobody decided a print carrying the name for anyone else, and the learned alias links and routes.
+    [InlineData("الشركة السعودية للكهرباء", "الشركة السعودية للكهربـاء", CustomerIdentifierSources.LeadReviewLearned, false, true)]
+    // An alias a person entered is never overruled by people's decisions.
+    [InlineData("الشركة السعودية للكهرباء", "الشركة السعودية للكهربـاء", "MasterData", true, true)]
+    [InlineData("ALKAHRABA", "Alkahraba.", CustomerIdentifierSources.LeadReviewLearned, true, false)]
+    [InlineData("ALKAHRABA", "Alkahraba.", CustomerIdentifierSources.LeadReviewLearned, false, true)]
+    public async Task PolicyA_a_learned_name_a_person_has_since_decided_for_another_customer_neither_links_nor_routes(
+        string alias, string decidedSpelling, string source, bool decidedForAnother, bool links)
+    {
+        // OWNER DECISION 2026-09-13, policy A, and the stated ASSUMPTION for an Arabic-only name (trusted after two
+        // confirmations for the same customer with none for another). THE DEFECT (the final check's Z2, and the repair round's
+        // open item): the review screen's Save records a human decision without running the learner, so a learned alias of
+        // SEC stayed trusted after a print carrying that name was saved for Saudi Aramco: the next print linked SEC at 0.90,
+        // and a buyer signing with that name routed to SEC's owner. The decision is read by the name's key, so the Aramco
+        // print's own spelling (a tatweel, a full stop) counts.
+        using var db = new TestDb();
+        await SeedAsync(db, "extraction@pipeline.local", context =>
+        {
+            var lead = context.Leads.Local.Single(l => l.Id == LeadId);
+            lead.Rfqno = null;
+            lead.CustomerCompanyNameExtracted = alias;
+            context.EmailIngests.Local.Single(i => i.Id == 20_000 + LeadId).FromEmail = "extraction@pipeline.local";
+            context.Set<CustomerIdentifier>().Add(Identifier(7890, Sec, CustomerIdentifierType.Alias, alias, 0.90m, source));
+            foreach (var (id, customerId) in decidedForAnother
+                         ? new[] { (7901L, Sec), (7902L, Sec), (7903L, Aramco) }
+                         : new[] { (7901L, Sec), (7902L, Sec) })
+            {
+                var decided = Seed.Lead(context, id, Tenant, buyersName: null);
+                decided.Rfqno = null;
+                decided.Clientemail = null;
+                decided.CustomerCompanyNameExtracted = customerId == Aramco ? decidedSpelling : alias;
+                context.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail = "extraction@pipeline.local";
+                decided.ResolveCommercialIdentity(customerId, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+            }
+        }, buyersName: alias);
+
+        await using (var resolving = db.ContextFor(Tenant))
+        {
+            var lead = await resolving.Leads.Include(l => l.LeadItems).Include(l => l.EmailIngests)
+                .SingleAsync(l => l.Id == LeadId);
+            var resolved = await new LeadCustomerResolutionService(resolving).ResolveCoreAsync(Tenant, lead, CancellationToken.None);
+            if (links)
+            {
+                Assert.Equal(Sec, resolved.CustomerId);
+                Assert.Equal(CustomerMatchReasonCodes.LearnedAlias, resolved.ReasonCode);
+            }
+            else
+            {
+                Assert.NotEqual(Sec, resolved.CustomerId);
+                Assert.NotEqual(CustomerMatchReasonCodes.LearnedAlias, resolved.ReasonCode);
+            }
+        }
+
+        await using var context = await RoutingContextAsync(db);
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, $"route-name-{alias.Length}-{source}-{decidedForAnother}", $"corr-name-{alias.Length}-{source}-{decidedForAnother}"),
+            CancellationToken.None);
+        var routed = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        if (links)
+        {
+            Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+            Assert.Equal(SecOwner, result.SelectedUserId);
+            return;
+        }
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        Assert.Null(result.AssignmentId);
+        Assert.Null(routed.CustomerId);
+        Assert.Null(routed.AssignTo);
+    }
+
     private static CommercialRoutingApplicationService Service(ErpRfqAutomationContext context) =>
         new(context, new DeterministicRoutingEngine(), new RoutingPolicy());
 

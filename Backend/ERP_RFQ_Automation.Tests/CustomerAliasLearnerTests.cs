@@ -2570,7 +2570,7 @@ public sealed class CustomerAliasLearnerTests
         // at 1.00 on the next message".
         // THE COST, stated for the owner: two picks of Aramco on SEC's own prints from 57322@se.com.sa, with no decision for
         // SEC on that address, make the address Aramco's at 1.00 (ADV5.05a). The first decision for SEC on any lead carrying
-        // it, through any screen, makes the address nobody's again (HumanAddressDecisions).
+        // it, through any screen, makes the address nobody's again (HumanIdentityDecisions).
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         var learner = new CustomerAliasLearner(context);
@@ -2690,6 +2690,198 @@ public sealed class CustomerAliasLearnerTests
         Assert.False(alias.IsVerified);
         Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, alias.Source);
         Assert.Contains(CustomerAliasLearner.SkipAliasInAnotherScriptNotYetCorroborated, result.SkipReasons);
+    }
+
+    [Fact]
+    public async Task PolicyA_an_arabic_name_trusted_for_one_customer_is_taken_back_when_a_person_links_it_to_another()
+    {
+        // Owner decision 2026-09-13, policy A, with the ASSUMPTION it leaves open (the recommendation he was given): an
+        // Arabic-only company name is trusted after two confirmations for the same customer WITH NONE FOR ANOTHER. THE DEFECT
+        // (the final check's Z1): "none for another" was read only when the alias was first learned. Confirmed twice for SEC,
+        // the alias stayed verified after a person linked a third Arabic print to Saudi Aramco, a later SEC link reinforced
+        // it, and the next Arabic print still linked SEC at 0.90. Decisions {Aramco, SEC, SEC} left it untrusted while
+        // {SEC, SEC, Aramco} trusted it: the answer depended on the order people clicked in.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        foreach (var leadId in new long[] { 8612, 8613, 8614 })
+            await SeedArabicPrintAsync(db, leadId);
+        var learner = new CustomerAliasLearner(context);
+
+        foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
+        {
+            var confirmed = await LoadLeadAsync(context, leadId);
+            ArabicNamePrint(confirmed, Sec);
+            await learner.LearnFromReviewAsync(Tenant, confirmed, Sec, null, audit);
+            await context.SaveChangesAsync();
+        }
+        Assert.True(Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias && i.CustomerId == Sec).IsVerified);
+
+        var pick = await LoadLeadAsync(context, 8613);
+        ArabicNamePrint(pick, Aramco);
+        var pickResult = await learner.LearnFromReviewAsync(Tenant, pick, Aramco, null, 101);
+        await context.SaveChangesAsync();
+
+        var alias = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias && i.CustomerId == Sec);
+        Assert.False(alias.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, alias.Source);
+        Assert.Equal(2, alias.ObservationCount);
+        Assert.Contains(CustomerAliasLearner.SkipContradictedFactDemoted, pickResult.SkipReasons);
+        Assert.NotEqual(Sec, (await ResolveWithoutSavingAsync(db, 8612)).CustomerId);
+
+        // A later SEC link while the Aramco decision stands counts, and trusts nothing.
+        var later = await LoadLeadAsync(context, 8614);
+        ArabicNamePrint(later, Sec);
+        await learner.LearnFromReviewAsync(Tenant, later, Sec, null, 102);
+        await context.SaveChangesAsync();
+
+        alias = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias && i.CustomerId == Sec);
+        Assert.False(alias.IsVerified);
+        Assert.Equal(3, alias.ObservationCount);
+        Assert.NotEqual(Sec, (await ResolveWithoutSavingAsync(db, 8612)).CustomerId);
+    }
+
+    [Fact]
+    public async Task PolicyA_an_arabic_name_saved_for_another_customer_stops_linking_and_is_not_confirmed_back_while_that_decision_stands()
+    {
+        // Owner decision 2026-09-13, policy A, with the ASSUMPTION it leaves open (the recommendation he was given): an
+        // Arabic-only company name is trusted after two confirmations for the same customer WITH NONE FOR ANOTHER. THE DEFECT
+        // (the final check's Z2): the review screen's Save records a human decision without running the learner. After SEC's
+        // two confirmations a third Arabic print was SAVED for Saudi Aramco, nothing took the alias back, and the next Arabic
+        // print linked SEC at 0.90; a later SEC link then reinforced the alias to three observations, still verified.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        foreach (var leadId in new long[] { 8612, 8613, 8614 })
+            await SeedArabicPrintAsync(db, leadId);
+        var learner = new CustomerAliasLearner(context);
+
+        foreach (var (leadId, audit) in new[] { (8401L, 99L), (8402L, 100L) })
+        {
+            var confirmed = await LoadLeadAsync(context, leadId);
+            ArabicNamePrint(confirmed, Sec);
+            await learner.LearnFromReviewAsync(Tenant, confirmed, Sec, null, audit);
+            await context.SaveChangesAsync();
+        }
+
+        // Review Save for Aramco: the decision stands, the learner does not run.
+        var saved = await LoadLeadAsync(context, 8613);
+        ArabicNamePrint(saved, Aramco);
+        await context.SaveChangesAsync();
+
+        var outcome = await ResolveWithoutSavingAsync(db, 8612);
+        Assert.NotEqual(Sec, outcome.CustomerId);
+        Assert.NotEqual(CustomerMatchReasonCodes.LearnedAlias, outcome.ReasonCode);
+
+        // A later SEC link runs the learner while the saved Aramco decision stands: the alias is not left trusted.
+        var later = await LoadLeadAsync(context, 8614);
+        ArabicNamePrint(later, Sec);
+        var result = await learner.LearnFromReviewAsync(Tenant, later, Sec, null, 102);
+        await context.SaveChangesAsync();
+
+        var alias = Assert.Single(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Alias && i.CustomerId == Sec);
+        Assert.False(alias.IsVerified);
+        Assert.Equal(CustomerIdentifierSources.LeadReviewUnverified, alias.Source);
+        Assert.Equal(3, alias.ObservationCount);
+        Assert.Contains(CustomerAliasLearner.SkipContradictedFactDemoted, result.SkipReasons);
+        Assert.NotEqual(Sec, (await ResolveWithoutSavingAsync(db, 8612)).CustomerId);
+    }
+
+    [Theory]
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned, true, false)]
+    // The control: nobody decided the pair's print for anyone else, and the learned pair links SEC at 0.92.
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned, false, true)]
+    // A pair a person entered is never overruled by people's decisions.
+    [InlineData("MasterData", true, true)]
+    public async Task PolicyA_a_learned_portal_pair_whose_print_a_person_since_saved_for_another_customer_no_longer_links(
+        string source, bool savedForAnother, bool links)
+    {
+        // Owner decision 2026-09-13, policy A: a portal account is learned only when the document itself names the customer,
+        // and a relink takes back what the rejected customer learned from it (P5). THE DEFECT (the open item of the repair
+        // round): P5 runs only when the learner does, and the review screen's Save relinks a lead without running it. Lead
+        // 8402, an SEC e-bidding print carrying "MATERIALS E-BIDDING SYSTEM / 2004414", was saved for Saudi Aramco, and SEC's
+        // learned pair still linked the next pair-only print to SEC at 0.92.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var pair = ConfirmedFiftyTimes(CustomerIdentifierType.PortalAccount, "MATERIALS E BIDDING SYSTEM|2004414", 0.92m);
+        pair.Source = source;
+        context.Set<CustomerIdentifier>().Add(pair);
+        await using (var seed = db.ContextFor(null))
+        {
+            var next = Seed.Lead(seed, 8630, Tenant, buyersName: null);
+            next.Rfqno = null;
+            next.Clientemail = null;
+            next.CustomerPortalNameExtracted = "MATERIALS E-BIDDING SYSTEM";
+            next.SupplierAccountRefOnDocument = "2004414";
+            next.SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL";
+            seed.EmailIngests.Local.Single(i => i.Id == 20_000 + 8630).FromEmail = "extraction@pipeline.local";
+            await seed.SaveChangesAsync();
+        }
+        if (savedForAnother)
+        {
+            var relinked = await LoadLeadAsync(context, 8402);
+            relinked.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        }
+        await context.SaveChangesAsync();
+
+        var outcome = await ResolveWithoutSavingAsync(db, 8630);
+        if (links)
+        {
+            Assert.Equal(Sec, outcome.CustomerId);
+            Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+        }
+        else
+        {
+            Assert.Null(outcome.CustomerId);
+            Assert.NotEqual(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+        }
+    }
+
+    [Theory]
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned)]
+    // The control: rows a person entered keep their grade and their source.
+    [InlineData("MasterData")]
+    public async Task PolicyA_a_name_or_portal_pair_a_person_links_to_another_customer_is_demoted_on_the_customer_that_learned_it(string source)
+    {
+        // Owner decision 2026-09-13, policy A: a name or a portal pair people have decided for another customer is not the
+        // first customer's fact any more, consistent with an address. THE DEFECT: only a relink FROM the customer that learned
+        // a row took it back (P5). A new SEC print linked by a person to Saudi Aramco left SEC's learned name and pair
+        // verified. They are now demoted with their counts kept, as P5 demotes; a row a person entered is never touched.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var nameKey = CustomerNameNormalizer.LooseKey("Saudi Electricity Company");
+        foreach (var row in new[]
+                 {
+                     ConfirmedFiftyTimes(CustomerIdentifierType.PortalAccount, "MATERIALS E BIDDING SYSTEM|2004414", 0.92m),
+                     ConfirmedFiftyTimes(CustomerIdentifierType.Alias, nameKey, 0.90m)
+                 })
+        {
+            row.Source = source;
+            context.Set<CustomerIdentifier>().Add(row);
+        }
+        await context.SaveChangesAsync();
+        await using (var seed = db.ContextFor(null))
+        {
+            SecPortalPrint(Seed.Lead(seed, 8403, Tenant, buyersName: null));
+            seed.EmailIngests.Local.Single(i => i.Id == 20_000 + 8403).FromEmail = "57322@se.com.sa";
+            await seed.SaveChangesAsync();
+        }
+
+        var pick = await LoadLeadAsync(context, 8403);
+        pick.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        var result = await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, pick, Aramco, null, 101);
+        await context.SaveChangesAsync();
+
+        var learned = source == CustomerIdentifierSources.LeadReviewLearned;
+        var rows = await ActiveAsync(context);
+        foreach (var type in new[] { CustomerIdentifierType.Alias, CustomerIdentifierType.PortalAccount })
+        {
+            var row = Assert.Single(rows, i => i.CustomerId == Sec && i.IdentifierType == type);
+            Assert.Equal(50, row.ObservationCount);
+            Assert.Equal(!learned, row.IsVerified);
+            Assert.Equal(learned ? CustomerIdentifierSources.LeadReviewUnverified : source, row.Source);
+        }
+        Assert.DoesNotContain(rows, i => i.CustomerId == Aramco && i.IsVerified
+                                         && i.IdentifierType is CustomerIdentifierType.Alias or CustomerIdentifierType.PortalAccount);
+        Assert.Equal(learned, result.SkipReasons.Contains(CustomerAliasLearner.SkipContradictedFactDemoted));
     }
 
     [Fact]

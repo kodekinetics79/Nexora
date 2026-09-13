@@ -1434,18 +1434,20 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                  ((i.IdentifierType == CustomerIdentifierType.CustomerName || i.IdentifierType == CustomerIdentifierType.Alias) && names.Contains(i.NormalizedValue))))
             .ToListAsync(ct);
 
-        // A LEARNED ADDRESS A PERSON HAS SINCE DECIDED FOR ANOTHER CUSTOMER ROUTES NOBODY. OWNER DECISION 2026-09-13,
-        // POLICY A: a buyer's exact address is learned "never for anyone else". k.lee@hdec.com, confirmed twice for Hyundai
-        // and then saved for Aramco on the review screen (which does not run the learner), routed the next message to
-        // Hyundai's owner as a verified 1.00 match and wrote Hyundai onto the lead. The resolver's corpus loader drops the
-        // same rows; a row a person entered is never overruled.
-        var taughtAddresses = rows
-            .Where(i => CustomerResolution.HumanAddressDecisions.IsTaughtAddress(i.IdentifierType, i.Source))
-            .Select(i => (i.Id, i.CustomerId, i.NormalizedValue))
+        // A LEARNED ADDRESS OR COMPANY NAME A PERSON HAS DECIDED FOR ANOTHER CUSTOMER ROUTES NOBODY. OWNER DECISION 2026-09-13,
+        // POLICY A: a buyer's exact address is learned "never for anyone else", and a name another customer's decision carries
+        // is no longer the first customer's fact. k.lee@hdec.com, confirmed twice for Hyundai and then saved for Aramco on the
+        // review screen (which does not run the learner), routed the next message to Hyundai's owner as a verified 1.00 match
+        // and wrote Hyundai onto the lead; a learned SEC alias kept routing a buyer signing with that name to SEC's owner after
+        // a print carrying it was saved for Aramco. The resolver's corpus loader drops the same rows; a row a person entered is
+        // never overruled.
+        var taughtFacts = rows
+            .Where(i => CustomerResolution.HumanIdentityDecisions.IsTaughtFact(i.IdentifierType, i.Source))
+            .Select(i => (i.Id, i.CustomerId, i.IdentifierType, i.NormalizedValue))
             .ToList();
-        var contradicted = taughtAddresses.Count == 0
+        var contradicted = taughtFacts.Count == 0
             ? new HashSet<long>()
-            : await CustomerResolution.HumanAddressDecisions.ContradictedAsync(_db, businessUnitId, taughtAddresses, ct);
+            : await CustomerResolution.HumanIdentityDecisions.ContradictedAsync(_db, businessUnitId, taughtFacts, ct);
 
         // A RELAY'S OWN SENDING ADDRESS NAMES A BUYER ONLY WHERE A PERSON SAID SO. A relay address is
         // still let through as exact evidence above, because one mailbox a person registered is one
