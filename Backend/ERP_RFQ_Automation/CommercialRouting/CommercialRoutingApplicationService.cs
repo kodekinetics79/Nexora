@@ -98,10 +98,16 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 if (lead.AssignTo.HasValue)
                     throw new RoutingConflictException("Lead already has an owner. Use an explicit reassignment command.");
 
-                // Our names: the tenant's, and the vendor block this document prints (which names us).
-                string?[] selfNames = [tenantName, lead.SupplierNameOnDocument];
+                // Our names for the "ours" test on a sender: the tenant's own, and this document's vendor
+                // block only where it spells the tenant's. The vendor block is an extracted value and can
+                // hold the buyer's name: a Marafiq print read as vendor "MARAFIQ" made marafiq.com.sa ours,
+                // and Marafiq's registered address and domain were dropped here, so the lead routed
+                // NO_MATCH_EVIDENCE to the unassigned queue. The same names the resolver uses.
+                var selfNames = CustomerResolution.TenantSelfIdentity.DomainSelfNames([tenantName], lead.SupplierNameOnDocument);
                 var evidence = BuildEvidence(lead, selfDomains, selfNames, _identityPolicy.MinimumErpAccountLength);
-                var identifiers = await LoadMatchingIdentifiersAsync(businessUnitId, evidence, selfDomains, selfNames, ct);
+                var identifiers = await LoadMatchingIdentifiersAsync(
+                    businessUnitId, evidence, selfDomains, selfNames,
+                    CustomerResolution.IdentityDomainGuard.IsSystemMailbox(lead.Clientemail), ct);
 
                 // A customer a HUMAN has already confirmed on this lead is the strongest evidence
                 // that exists — stronger than any inferred email/domain identifier. It was being
@@ -1391,9 +1397,14 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     /// path sets IsVerified to true and leaves Source alone. Such a row would otherwise route the
     /// lead to that customer's owner and write the customer through at identifier grade.</para>
     /// </summary>
+    /// <param name="senderIsSystemMailbox">
+    /// The lead's sender is a mailbox no person reads (<see cref="CustomerResolution.IdentityDomainGuard.IsSystemMailbox"/>).
+    /// Its domain then matches only a Domain row a person entered, exactly as in the resolver's domain tier: a learned
+    /// etimad.gov.sa or coupa.com row on Saudi Aramco otherwise routed every SEC tender the portal carried to Aramco's owner.
+    /// </param>
     private async Task<List<CustomerIdentifier>> LoadMatchingIdentifiersAsync(
         long businessUnitId, Dictionary<CustomerIdentifierType, HashSet<string>> evidence,
-        IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames, CancellationToken ct)
+        IReadOnlySet<string> selfDomains, IReadOnlyCollection<string?> selfNames, bool senderIsSystemMailbox, CancellationToken ct)
     {
         var emails = Values(CustomerIdentifierType.Email)
             .Where(email => IsSenderAddressEvidence(email, selfDomains, selfNames)).ToArray();
@@ -1422,6 +1433,10 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         return rows
             .Where(i => i.IdentifierType != CustomerIdentifierType.Email
                         || CustomerResolution.IdentityDomainGuard.MayMatchExactAddress(i.NormalizedValue, i.Source))
+            // A system mailbox's domain names a buyer only where a person entered the Domain row (the resolver's S2).
+            .Where(i => i.IdentifierType != CustomerIdentifierType.Domain
+                        || !senderIsSystemMailbox
+                        || CustomerResolution.CustomerIdentifierSources.EnteredByAPerson.Contains(i.Source, StringComparer.Ordinal))
             .ToList();
 
         string[] Values(CustomerIdentifierType type) => evidence.TryGetValue(type, out var values) ? values.ToArray() : [];

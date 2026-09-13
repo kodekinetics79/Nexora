@@ -31,8 +31,10 @@ public sealed class RoutingSenderIdentityGuardTests
     private const long LeadId = 781;
     private const long Aramco = 7811;
     private const long Sec = 7812;
+    private const long Marafiq = 7813;
     private const long AramcoOwner = 7821;
     private const long SecOwner = 7822;
+    private const long MarafiqOwner = 7826;
 
     [Fact]
     public async Task A_legacy_relay_domain_row_does_not_write_a_customer_through_routing()
@@ -365,6 +367,179 @@ public sealed class RoutingSenderIdentityGuardTests
         Assert.Equal(CustomerMatchReasonCodes.ErpAccountExact, lead.CustomerMatchReasonCode);
     }
 
+    [Fact]
+    public async Task A_vendor_block_misread_as_the_buyer_does_not_discard_the_buyers_registered_address()
+    {
+        // C09: the extractor put MARAFIQ in the vendor block. Routing counted the vendor block among
+        // our names, so marafiq.com.sa spelled "us", Marafiq's registered address and domain were
+        // dropped, and the lead went to the unassigned queue instead of Marafiq's owner.
+        using var db = new TestDb();
+        await SeedAsync(db, "buyer@marafiq.com.sa", context =>
+        {
+            context.Leads.Local.Single(l => l.Id == LeadId).SupplierNameOnDocument = "MARAFIQ";
+            Seed.Customer(context, Marafiq, Tenant, "Marafiq");
+            context.Users.Add(User(MarafiqOwner, Tenant, "marafiq.owner@example.com"));
+            context.SaveChanges();
+            context.Set<CustomerOwnership>().Add(Ownership(7833, Marafiq, MarafiqOwner));
+            context.Set<CustomerIdentifier>().AddRange(
+                Identifier(7874, Marafiq, CustomerIdentifierType.Email, "buyer@marafiq.com.sa", 1.00m, source: "CustomerContact"),
+                Identifier(7875, Marafiq, CustomerIdentifierType.Domain, "marafiq.com.sa", 0.95m, source: "CustomerContact"));
+        });
+        await using var context = await RoutingContextAsync(db, MarafiqOwner);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-vendor-block-marafiq", "corr-vendor-block-marafiq"), CancellationToken.None);
+
+        Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+        Assert.Equal(MarafiqOwner, result.SelectedUserId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Equal(Marafiq, lead.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, lead.CustomerMatchReasonCode);
+        Assert.Equal(1.00m, lead.CustomerMatchConfidence);
+    }
+
+    [Fact]
+    public async Task A_vendor_block_that_names_the_buyer_does_not_discard_the_buyers_registered_domain()
+    {
+        // C39: vendor block "Saudi Aramco", sender on aramco.com, Aramco's domain on record.
+        using var db = new TestDb();
+        await SeedAsync(db, "buyer@aramco.com", context =>
+        {
+            context.Leads.Local.Single(l => l.Id == LeadId).SupplierNameOnDocument = "Saudi Aramco";
+            context.Set<CustomerIdentifier>().Add(
+                Identifier(7876, Aramco, CustomerIdentifierType.Domain, "aramco.com", 0.95m, source: "CustomerContact"));
+        });
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-vendor-block-aramco", "corr-vendor-block-aramco"), CancellationToken.None);
+
+        Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+        Assert.Equal(AramcoOwner, result.SelectedUserId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Equal(Aramco, lead.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderDomain, lead.CustomerMatchReasonCode);
+        Assert.Equal(0.95m, lead.CustomerMatchConfidence);
+    }
+
+    [Fact]
+    public async Task A_vendor_block_that_spells_our_own_name_still_keeps_a_colleagues_forward_out_of_routing()
+    {
+        // The other half of C09: our own name, printed however the vendor block prints it, is still us.
+        using var db = new TestDb();
+        await SeedAsync(db, "ahmed@alquraishi.com.sa", context =>
+        {
+            context.BusinessUnits.Find(Tenant)!.BusinessUnitName = "ALI ZAID AL-QURAISHI & PARTNERS";
+            context.Leads.Local.Single(l => l.Id == LeadId).SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL";
+            context.Set<CustomerIdentifier>().AddRange(
+                Identifier(7877, Sec, CustomerIdentifierType.Email, "ahmed@alquraishi.com.sa", 1.00m),
+                Identifier(7878, Sec, CustomerIdentifierType.Domain, "alquraishi.com.sa", 0.95m));
+        });
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-vendor-block-ours", "corr-vendor-block-ours"), CancellationToken.None);
+
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Null(lead.CustomerId);
+        Assert.Null(lead.AssignTo);
+    }
+
+    [Fact]
+    public async Task A_demo_login_on_a_customers_registered_domain_does_not_stop_that_customer_routing()
+    {
+        // C11: tenant 7's shape. A login zack@kodekinetics.com made kodekinetics.com ours, so Aramco's
+        // registered contact zahid@kodekinetics.com routed NO_MATCH_EVIDENCE.
+        using var db = new TestDb();
+        await SeedAsync(db, "zahid@kodekinetics.com", context =>
+        {
+            context.Users.Add(User(7827, Tenant, "zack@kodekinetics.com"));
+            Seed.Contact(context, 7881, Tenant, Aramco, "zahid@kodekinetics.com");
+            context.Set<CustomerIdentifier>().AddRange(
+                Identifier(7879, Aramco, CustomerIdentifierType.Email, "zahid@kodekinetics.com", 1.00m, source: "CustomerContact"),
+                Identifier(7880, Aramco, CustomerIdentifierType.Domain, "kodekinetics.com", 0.95m, source: "CustomerContact"));
+        });
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-demo-login-aramco", "corr-demo-login-aramco"), CancellationToken.None);
+
+        Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+        Assert.Equal(AramcoOwner, result.SelectedUserId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Equal(Aramco, lead.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, lead.CustomerMatchReasonCode);
+        Assert.Equal(1.00m, lead.CustomerMatchConfidence);
+    }
+
+    [Fact]
+    public async Task A_demo_login_on_a_customers_own_domain_does_not_stop_its_registered_address_routing()
+    {
+        // C11b: a login demo@se.com.sa, SEC's registered 57322@se.com.sa, nothing else.
+        using var db = new TestDb();
+        await SeedAsync(db, "57322@se.com.sa", context =>
+        {
+            context.Users.Add(User(7828, Tenant, "demo@se.com.sa"));
+            context.Set<CustomerIdentifier>().Add(
+                Identifier(7882, Sec, CustomerIdentifierType.Email, "57322@se.com.sa", 1.00m, source: "CustomerContact"));
+        });
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-demo-login-sec", "corr-demo-login-sec"), CancellationToken.None);
+
+        Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+        Assert.Equal(SecOwner, result.SelectedUserId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Equal(Sec, lead.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, lead.CustomerMatchReasonCode);
+    }
+
+    [Theory]
+    [InlineData("no-reply@etimad.gov.sa", CustomerIdentifierSources.LeadReviewLearned)]
+    [InlineData("do_not_reply@coupa.com", CustomerIdentifierSources.LeadReviewLearned)]
+    [InlineData("no-reply@etimad.gov.sa", "MigrationBackfill")]
+    public async Task A_learned_system_mailbox_on_an_unlisted_portal_host_does_not_route(string mailbox, string source)
+    {
+        // Neither host is on the relay list, so the learned row decided at 1.00 and routed to Aramco's owner.
+        using var db = new TestDb();
+        await SeedAsync(db, mailbox, context => context.Set<CustomerIdentifier>().Add(
+            Identifier(7883, Aramco, CustomerIdentifierType.Email, mailbox, 1.00m, source: source)));
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, $"route-system-mailbox-{source}", $"corr-system-mailbox-{source}"),
+            CancellationToken.None);
+
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        Assert.Null(result.AssignmentId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Null(lead.CustomerId);
+        Assert.Null(lead.AssignTo);
+    }
+
+    [Theory]
+    [InlineData("no-reply@etimad.gov.sa")]
+    [InlineData("do_not_reply@coupa.com")]
+    public async Task A_system_mailbox_a_person_registered_still_routes(string mailbox)
+    {
+        using var db = new TestDb();
+        await SeedAsync(db, mailbox, context => context.Set<CustomerIdentifier>().Add(
+            Identifier(7884, Sec, CustomerIdentifierType.Email, mailbox, 1.00m, source: CustomerIdentifierSources.MasterData)));
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-registered-system-mailbox", "corr-registered-system-mailbox"),
+            CancellationToken.None);
+
+        Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+        Assert.Equal(SecOwner, result.SelectedUserId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Equal(Sec, lead.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, lead.CustomerMatchReasonCode);
+    }
+
     private static void AddLine(ErpRfqAutomationContext context, long id, string? companyRef = null, string? portalId = null)
     {
         // Added with its lead id already set: the lead is saved, and fixing the item up through the
@@ -376,16 +551,85 @@ public sealed class RoutingSenderIdentityGuardTests
         context.Set<LeadItem>().Add(item);
     }
 
+    [Fact]
+    public async Task A_domain_our_own_vendor_name_spells_is_ours_to_the_resolver_and_to_routing_alike()
+    {
+        // THE SEAM. Routing and the resolver read one lead one step apart, and they asked "is this domain ours"
+        // with different names: routing with the configured name and the vendor block where it spells it, the
+        // resolver with the configured name alone. On "ALI ZAID AL-QURAISHI & PARTNERS ESOSA" from
+        // sales@esosa.com the resolver linked SEC at 0.95 and routing refused the same Domain row as our own
+        // mail. Both must answer the same way on the same lead.
+        using var db = new TestDb();
+        await SeedAsync(db, "sales@esosa.com", context =>
+        {
+            context.BusinessUnits.Find(Tenant)!.BusinessUnitName = "ALI ZAID AL-QURAISHI & PARTNERS";
+            context.Leads.Local.Single(l => l.Id == LeadId).SupplierNameOnDocument = "ALI ZAID AL-QURAISHI & PARTNERS ESOSA";
+            context.EmailIngests.Local.Single(i => i.Id == 20_000 + LeadId).FromEmail = "sales@esosa.com";
+            context.Set<CustomerIdentifier>().Add(
+                Identifier(7870, Sec, CustomerIdentifierType.Domain, "esosa.com", 0.95m, "CustomerContact"));
+        });
+
+        await using (var resolving = db.ContextFor(Tenant))
+        {
+            var lead = await resolving.Leads.Include(l => l.LeadItems).Include(l => l.EmailIngests)
+                .SingleAsync(l => l.Id == LeadId);
+            var resolved = await new LeadCustomerResolutionService(resolving).ResolveCoreAsync(Tenant, lead, CancellationToken.None);
+            Assert.Null(resolved.CustomerId);
+        }
+
+        await using var context = await RoutingContextAsync(db);
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, "route-vendor-spelled-domain", "corr-vendor-spelled-domain"), CancellationToken.None);
+
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        Assert.Null(result.AssignmentId);
+    }
+
+    [Theory]
+    [InlineData("no-reply@etimad.gov.sa", "etimad.gov.sa", CustomerIdentifierSources.LeadReviewLearned, false)]
+    [InlineData("do_not_reply@coupa.com", "coupa.com", CustomerIdentifierSources.LeadReviewLearned, false)]
+    [InlineData("no-reply@sap.com", "sap.com", CustomerIdentifierSources.LeadReviewLearned, false)]
+    // Controls: a rule a person entered, and a person's own mailbox on the host, still route.
+    [InlineData("no-reply@etimad.gov.sa", "etimad.gov.sa", CustomerIdentifierSources.MasterData, true)]
+    [InlineData("buyer@etimad.gov.sa", "etimad.gov.sa", CustomerIdentifierSources.LeadReviewLearned, true)]
+    public async Task A_domain_row_nobody_entered_does_not_route_what_a_system_mailbox_on_that_host_carries(
+        string sender, string domain, string source, bool routes)
+    {
+        // MUST STAY FIXED (W03.04, W03.05, W03.08), routing's half. The resolver's domain tier refuses a learned Domain
+        // row for a lead a system mailbox carried; routing read the same row as a verified 0.95 match, so the SEC
+        // tender went to Aramco's owner and Aramco was written onto the lead one step later.
+        using var db = new TestDb();
+        await SeedAsync(db, sender, context => context.Set<CustomerIdentifier>().Add(
+            Identifier(7880, Aramco, CustomerIdentifierType.Domain, domain, 0.95m, source)));
+        await using var context = await RoutingContextAsync(db);
+
+        var result = await Service(context).RouteLeadAsync(Tenant,
+            new RouteLeadCommand(LeadId, $"route-system-mailbox-{domain}-{routes}", $"corr-system-mailbox-{domain}-{routes}"),
+            CancellationToken.None);
+
+        if (routes)
+        {
+            Assert.Equal(CustomerMatchStatus.Matched, result.MatchStatus);
+            Assert.Equal(AramcoOwner, result.SelectedUserId);
+            return;
+        }
+        Assert.Equal("NO_MATCH_EVIDENCE", result.DecisionCode);
+        Assert.Null(result.CustomerId);
+        Assert.Null(result.AssignmentId);
+        var lead = await context.Leads.AsNoTracking().SingleAsync(l => l.Id == LeadId);
+        Assert.Null(lead.CustomerId);
+    }
+
     private static CommercialRoutingApplicationService Service(ErpRfqAutomationContext context) =>
         new(context, new DeterministicRoutingEngine(), new RoutingPolicy());
 
     /// <summary>A tenant-scoped context with both customer owners eligible for routing, so an
     /// outcome with no owner can only mean routing found no customer.</summary>
-    private static async Task<ErpRfqAutomationContext> RoutingContextAsync(TestDb db)
+    private static async Task<ErpRfqAutomationContext> RoutingContextAsync(TestDb db, params long[] additionalOwners)
     {
         var context = db.ContextFor(Tenant);
         var now = DateTime.UtcNow;
-        foreach (var userId in new[] { AramcoOwner, SecOwner })
+        foreach (var userId in new[] { AramcoOwner, SecOwner }.Concat(additionalOwners))
         {
             context.SalesRepProfiles.Add(new SalesRepProfile
             {

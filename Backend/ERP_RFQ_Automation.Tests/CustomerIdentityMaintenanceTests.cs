@@ -158,6 +158,62 @@ public sealed class CustomerIdentityMaintenanceTests
             };
     }
 
+    [Theory]
+    // A Saudi consumer ISP, a national one, a free-mail provider, and a procurement relay.
+    [InlineData("agent@sahara.com")]
+    [InlineData("agent@awalnet.net.sa")]
+    [InlineData("buyer.person@gmail.com")]
+    [InlineData("sec-tenders@bidnet.com")]
+    public async Task Synchronize_writes_only_the_exact_address_for_a_contact_on_a_shared_mail_domain(string email)
+    {
+        // A contact saved at agent@sahara.com wrote sahara.com as SEC's verified 0.95 Domain, and the
+        // next mail from any other Sahara subscriber, about any buyer, linked to SEC and routed there.
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, 41);
+        var customer = Customer(41, "CU00000041", "Saudi Electricity Company", "profile@se.com.sa");
+        db.Customers.Add(customer);
+        await db.SaveChangesAsync();
+        db.Contacts.Add(new Contact
+        {
+            BusinessUnitId = 41,
+            CustomerId = customer.Id,
+            FirstName = "Freight",
+            LastName = "Agent",
+            Email = email,
+            IsActive = true,
+            CreatedBy = "seed",
+            CreatedOn = DateTime.UtcNow,
+            ConcurrencyToken = Guid.NewGuid()
+        });
+        // The row an earlier sync wrote for that domain, which this sync must now expire.
+        var sharedDomain = RoutingValueNormalizer.DomainFromEmail(email)!;
+        db.Add(new CustomerIdentifier
+        {
+            BusinessUnitId = 41,
+            CustomerId = customer.Id,
+            IdentifierType = CustomerIdentifierType.Domain,
+            NormalizedValue = sharedDomain,
+            DisplayValue = sharedDomain,
+            IsVerified = true,
+            Confidence = 0.95m,
+            Source = "CustomerContact",
+            EffectiveFrom = DateTime.UtcNow.AddDays(-30)
+        });
+        await db.SaveChangesAsync();
+
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerProfile");
+        await db.SaveChangesAsync();
+
+        var active = await db.Set<CustomerIdentifier>().AsNoTracking()
+            .Where(i => i.BusinessUnitId == 41 && i.CustomerId == customer.Id && i.EffectiveTo == null)
+            .ToListAsync();
+        Assert.Contains(active, i => i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue == email);
+        Assert.DoesNotContain(active, i => i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == sharedDomain);
+        // The customer's own organisation domain, from its profile address, is still written.
+        Assert.Contains(active, i => i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == "se.com.sa");
+    }
+
     private static Customer Customer(long tenantId, string docId, string name, string email) => new()
     {
         Buid = tenantId,

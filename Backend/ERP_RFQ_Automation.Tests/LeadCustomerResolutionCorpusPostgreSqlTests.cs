@@ -459,11 +459,22 @@ public sealed class LeadCustomerResolutionCorpusPostgreSqlTests(PostgreSqlTestDa
                     });
                     break;
                 case "earlier human decision":
-                    var earlier = Seed.Lead(seed, 9_450_000L + suffix, tenant, buyersName: "Kim Lee");
-                    earlier.Clientemail = "Kim Lee <k.lee@hdec.com>";
-                    earlier.EmailIngestsId = null;
-                    earlier.ResolveCommercialIdentity(hyundai, null,
-                        LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+                    // Two different hdec.com mailboxes a person linked to Hyundai. One decision from another
+                    // mailbox is a fact about that mailbox, not the domain (T19; the resolver's R7, C05 and C44
+                    // rows): read as the domain's, it took every correctly named print away from its consignee.
+                    // This row held that single-decision shape until T19, which is why it now seeds two.
+                    foreach (var (id, from) in new[]
+                             {
+                                 (9_450_000L + suffix, "Kim Lee <k.lee@hdec.com>"),
+                                 (9_460_000L + suffix, "Min Park <m.park@hdec.com>")
+                             })
+                    {
+                        var earlier = Seed.Lead(seed, id, tenant, buyersName: "Kim Lee");
+                        earlier.Clientemail = from;
+                        earlier.EmailIngestsId = null;
+                        earlier.ResolveCommercialIdentity(hyundai, null,
+                            LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+                    }
                     break;
             }
             await seed.SaveChangesAsync();
@@ -474,7 +485,12 @@ public sealed class LeadCustomerResolutionCorpusPostgreSqlTests(PostgreSqlTestDa
 
         Assert.Null(outcome.CustomerId);
         Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
-        Assert.Equal(hyundai, outcome.Candidates[0].CustomerId);
+        if (record == "earlier human decision")
+            // Where earlier decisions are all that speak, the page's named consignee is offered first and the
+            // earlier pick below it (T19), so a rep is not steered into repeating it. Hyundai is still offered.
+            Assert.Contains(outcome.Candidates, c => c.CustomerId == hyundai);
+        else
+            Assert.Equal(hyundai, outcome.Candidates[0].CustomerId);
         var site = Assert.Single(outcome.Candidates, c => c.CustomerId == aramco);
         Assert.True(site.Confidence < 0.85m, $"Aramco was offered at {site.Confidence}, which is link strength.");
     }

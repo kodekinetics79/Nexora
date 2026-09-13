@@ -2103,6 +2103,725 @@ public sealed class CustomerIdentityResolverTests
         Assert.True(shipped.Confidence >= Policy.MinimumAutoLinkConfidence);
     }
 
+    // ── CORRECT LINKS THE HARDENING ROUND TOOK AWAY ───────────────────────────
+
+    [Fact]
+    public void A_misread_vendor_block_does_not_throw_away_the_buyers_registered_sender()
+    {
+        // THE DEFECT: the guard added the vendor block the document prints to the names that make a
+        // domain "ours". The extractor misread a Marafiq RFQ's vendor field as "MARAFIQ", so
+        // marafiq.com.sa became our own domain, the buyer's registered address and domain were thrown
+        // away before the exact tiers, and a lead that linked at 1.00 went UNRESOLVED. The same with
+        // "Saudi Aramco" in that field and aramco.com (0.95 before).
+        const long marafiq = OtherCustomer, aramco = ThirdCustomer;
+        var corpus = Corpus(
+            customers: [new(marafiq, "Marafiq"), new(aramco, "Saudi Aramco")],
+            identifiers:
+            [
+                new(1, marafiq, CustomerIdentifierType.Email, "buyer@marafiq.com.sa", true, 1m, "CustomerContact"),
+                new(2, marafiq, CustomerIdentifierType.Domain, "marafiq.com.sa", true, 0.95m, "CustomerContact"),
+                new(3, aramco, CustomerIdentifierType.Domain, "aramco.com", true, 0.95m, "CustomerContact"),
+            ]);
+
+        var marafiqRfq = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "buyer@marafiq.com.sa",
+            SupplierNameOnDocument = "MARAFIQ",
+        }, corpus, Policy);
+        Assert.Equal(marafiq, marafiqRfq.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, marafiqRfq.ReasonCode);
+        Assert.Equal(1.00m, marafiqRfq.Confidence);
+
+        var aramcoRfq = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 11,
+            SenderEmail = "buyer@aramco.com",
+            SupplierNameOnDocument = "Saudi Aramco",
+        }, corpus, Policy);
+        Assert.Equal(aramco, aramcoRfq.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderDomain, aramcoRfq.ReasonCode);
+        Assert.Equal(0.95m, aramcoRfq.Confidence);
+    }
+
+    [Theory]
+    [InlineData("Saudi Aramco Oil Company - Ras Tanura")]
+    [InlineData("Saudi Aramco Oil Co., Dhahran")]
+    public void The_customers_own_name_with_a_sector_word_and_a_legal_form_is_still_the_customer(string deliveryAddress)
+    {
+        // THE DEFECT: the longer-company-name rule counted any word after the name as another company's
+        // name word, so Aramco's own legal name written out ("Saudi Aramco Oil Company") read as a
+        // different company and a correct 0.88 link fell to a 0.70 offer.
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(customers: [new(OtherCustomer, "Saudi Aramco"), new(Sec, "Saudi Electricity Company")]), Policy);
+
+        Assert.Equal(OtherCustomer, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+        Assert.DoesNotContain("runs on", outcome.Explanation);
+    }
+
+    [Fact]
+    public void A_customer_whose_name_is_only_generic_words_links_where_the_page_writes_its_whole_name()
+    {
+        // THE DEFECT: the distinctiveness filter made a customer whose every name word is generic invisible.
+        // "Arabian Gulf International Company - Dammam Yard" is its own yard; it linked at 0.88, and after the
+        // filter the only name heard was DAMMAM, so the trading house named after the city was offered instead.
+        const long agic = OtherCustomer, alDammam = ThirdCustomer;
+        var corpus = Corpus(customers:
+        [
+            new(agic, "Arabian Gulf International Company"),
+            new(alDammam, "Al Dammam Trading Co."),
+            new(Sec, "Saudi Electricity Company"),
+        ]);
+        ClientResolutionOutcome At(string address) => CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", address, true)],
+        }, corpus, Policy);
+
+        var ownYard = At("Arabian Gulf International Company - Dammam Yard");
+        Assert.Equal(agic, ownYard.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, ownYard.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, ownYard.Confidence);
+
+        // A longer company that begins with the same generic words is another company: offered, not linked.
+        var anotherCompany = At("Arabian Gulf International Trading Co., Dammam");
+        Assert.Null(anotherCompany.CustomerId);
+        var offered = Assert.Single(anotherCompany.Candidates, candidate => candidate.CustomerId == agic);
+        Assert.True(offered.Confidence < Policy.MinimumAutoLinkConfidence,
+            $"{offered.CustomerName} was offered at {offered.Confidence}, which is link strength.");
+
+        // The generic words alone are a road, not the customer, and the customer is not even offered.
+        var road = At("Arabian Gulf Road, Dammam");
+        Assert.Null(road.CustomerId);
+        Assert.DoesNotContain(road.Candidates, candidate => candidate.CustomerId == agic);
+    }
+
+    [Fact]
+    public void Two_letter_initials_a_reviewer_taught_link_the_company_name_field_when_they_are_the_owners_alone()
+    {
+        // THE DEFECT: the exact learned-alias tier took the distinctiveness test, which wants a word of three
+        // letters, so "GE" taught for General Electric Saudi Arabia no longer linked a company-name field that
+        // says exactly "GE" (0.90 before), and the lead was left unresolved.
+        const long ge = OtherCustomer, gulfEngineering = ThirdCustomer;
+        CustomerIdentifierSnapshot[] taught = [Alias(1, ge, "GE")];
+        var fieldSaysGe = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            CustomerCompanyName = "GE",
+            Passages = [new DocumentPassage("company named on the document", "GE", true) { Role = PassageRole.BuyerHeader }],
+        };
+
+        var linked = CustomerIdentityResolver.Resolve(fieldSaysGe,
+            Corpus([new(ge, "General Electric Saudi Arabia"), new(Sec, "Saudi Electricity Company")], taught), Policy);
+        Assert.Equal(ge, linked.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedAlias, linked.ReasonCode);
+        Assert.Equal(Policy.LearnedAliasConfidence, linked.Confidence);
+
+        // Two letters another customer's name also begins with identify neither.
+        var shared = CustomerIdentityResolver.Resolve(fieldSaysGe,
+            Corpus([new(ge, "General Electric Saudi Arabia"), new(gulfEngineering, "Gulf Engineering Est")], taught), Policy);
+        Assert.Null(shared.CustomerId);
+        Assert.DoesNotContain(shared.Candidates, candidate => candidate.Confidence >= Policy.MinimumAutoLinkConfidence);
+
+        // Still never read inside a passage: "GE" in an address is anybody's two letters.
+        var inAddress = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 11,
+            Passages = [new DocumentPassage("delivery address", "GE Store, Dammam", true)],
+        }, Corpus([new(ge, "General Electric Saudi Arabia"), new(Sec, "Saudi Electricity Company")], taught), Policy);
+        Assert.Null(inAddress.CustomerId);
+    }
+
+    [Theory]
+    [InlineData("R7")]
+    [InlineData("C05")]
+    [InlineData("C44")]
+    public void One_earlier_decision_from_another_mailbox_on_the_domain_does_not_take_a_named_print_away(string shape)
+    {
+        // THE DEFECT: one person-linked lead from ANY address on the sender's domain tied the whole domain
+        // to that customer. Every later correctly named print from another mailbox fell to 0.70 with the
+        // earlier pick ranked FIRST, so one mis-click steered the next rep into repeating it.
+        const long rival = OtherCustomer;
+        var (evidence, customers, earlier, consignee) = shape switch
+        {
+            // SEC print from 57322@se.com.sa; a person once linked a lead from 59000@se.com.sa to Aramco.
+            "R7" => (new LeadClientEvidence
+                {
+                    BusinessUnitId = 1, LeadId = 10,
+                    SenderEmail = "57322@se.com.sa",
+                    Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+                },
+                new CustomerNameSnapshot[] { new(Sec, "Saudi Electricity Company"), new(rival, "Saudi Aramco") },
+                new PriorSenderResolution[] { new("59000@se.com.sa", rival) },
+                Sec),
+            // A folder-ingested SEC print carrying 57322@se.com.sa; a person linked a National Grid SA lead
+            // that printed a.otaibi@se.com.sa.
+            "C05" => (new LeadClientEvidence
+                {
+                    BusinessUnitId = 1, LeadId = 11,
+                    SenderEmail = "extraction@pipeline.local",
+                    DocumentBuyerEmail = "57322@se.com.sa",
+                    SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL",
+                    Passages =
+                    [
+                        new DocumentPassage("delivery address", "Saudi Electricity Company-JIZAN AREA", true),
+                        new DocumentPassage("storage location", "SEC Materials West Plant-West Operating Area", true),
+                    ],
+                },
+                new CustomerNameSnapshot[] { new(Sec, "Saudi Electricity Company"), new(rival, "National Grid SA") },
+                new PriorSenderResolution[] { new("a.otaibi@se.com.sa", rival) },
+                Sec),
+            // SABIC mail with SABIC's address; a person linked one SADAF lead from y.otaibi@sabic.com.
+            _ => (new LeadClientEvidence
+                {
+                    BusinessUnitId = 1, LeadId = 12,
+                    SenderEmail = "procurement@sabic.com",
+                    Passages = [new DocumentPassage("delivery address", "Saudi Basic Industries Corporation - Jubail", true)],
+                },
+                new CustomerNameSnapshot[] { new(ThirdCustomer, "Saudi Basic Industries Corporation"), new(rival, "Saudi Petrochemical Company (SADAF)") },
+                new PriorSenderResolution[] { new("y.otaibi@sabic.com", rival) },
+                ThirdCustomer),
+        };
+
+        var outcome = CustomerIdentityResolver.Resolve(evidence, Corpus(customers, priorSenders: earlier), Policy);
+
+        Assert.Equal(consignee, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Fact]
+    public void Earlier_decisions_speak_for_a_domain_from_this_mailbox_or_from_two_that_agree_and_the_named_consignee_is_offered_first()
+    {
+        // What the rule above keeps: this very mailbox's decision, or two different mailboxes that both chose
+        // the same other customer, still speak against the address. But the page's own name is offered first,
+        // because the earlier pick is what a person chose before, not what this page says.
+        const long aramco = OtherCustomer, ngsa = ThirdCustomer;
+        CustomerNameSnapshot[] customers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco"), new(ngsa, "National Grid SA")];
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "57322@se.com.sa",
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+        };
+        ClientResolutionOutcome After(params PriorSenderResolution[] earlier)
+            => CustomerIdentityResolver.Resolve(evidence, Corpus(customers, priorSenders: earlier), Policy);
+
+        var twoMailboxes = After(new("59000@se.com.sa", aramco), new("59001@se.com.sa", aramco));
+        Assert.Null(twoMailboxes.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, twoMailboxes.Status);
+        Assert.Equal(Sec, twoMailboxes.Candidates[0].CustomerId);
+        Assert.Equal(Policy.ShipToDemotedConfidence, twoMailboxes.Candidates[0].Confidence);
+        Assert.Contains("59000@se.com.sa and 59001@se.com.sa", twoMailboxes.Candidates[0].Explanation);
+        var earlierPick = Assert.Single(twoMailboxes.Candidates, candidate => candidate.CustomerId == aramco);
+        Assert.True(earlierPick.Confidence < twoMailboxes.Candidates[0].Confidence);
+
+        var thisMailbox = After(new PriorSenderResolution("57322@se.com.sa", aramco));
+        Assert.Null(thisMailbox.CustomerId);
+        Assert.Equal(Sec, thisMailbox.Candidates[0].CustomerId);
+        Assert.Contains(thisMailbox.Candidates, candidate => candidate.CustomerId == aramco);
+
+        // Two mailboxes that chose two different customers say nothing about whose domain it is.
+        var disagreeing = After(new("59000@se.com.sa", aramco), new("59001@se.com.sa", ngsa));
+        Assert.Equal(Sec, disagreeing.CustomerId);
+        Assert.Equal(Policy.NameInAddressConfidence, disagreeing.Confidence);
+    }
+
+    [Theory]
+    [InlineData("Dammam", "procurement@se.com.sa", "Saudi Electricity Company-DAMMAM", "Al Dammam Trading Co.")]
+    [InlineData("Jubail", "materials@se.com.sa", "Saudi Electricity Company-JUBAIL", "Jubail Trading Est")]
+    public void Lead_680_from_SECs_own_department_mailbox_signed_with_its_city_still_links(
+        string signedAs, string sender, string deliveryAddress, string cityNamedCustomer)
+    {
+        // PRODUCTION CONTROL, lead 680's shape from SEC's own mailbox "Dammam Procurement
+        // <procurement@se.com.sa>". The signature loses its function word and reads "Dammam", which is
+        // "Al Dammam Trading Co.", and that tie demoted SEC's own address to 0.70 with the trading house
+        // ranked first. The signature says only what the address already says: where SEC is.
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 680,
+            SenderEmail = sender,
+            SenderOrganisationName = signedAs,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(customers:
+        [
+            new(Sec, "Saudi Electricity Company"), new(OtherCustomer, cityNamedCustomer), new(ThirdCustomer, "Saudi Aramco"),
+        ]), Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Theory]
+    [InlineData("rt.project@hdec.com")]
+    [InlineData("contracts.rt@hdec.com")]
+    public void A_contractors_project_mailbox_signed_with_the_site_owners_name_does_not_outvote_the_contractors_contact(string sender)
+    {
+        // THE DEFECT: a signature tie counted as the consignee's own tie. Hyundai's project mailbox signed
+        // "Saudi Aramco Procurement" at hdec.com therefore cancelled Hyundai's real contact there, and Aramco
+        // auto-linked at 0.88 on its site address. The same lead from a bare procurement@hdec.com is offered
+        // with Hyundai first. A signature may add a rival; it never shields the consignee.
+        const long aramco = OtherCustomer, hyundai = ThirdCustomer;
+        CustomerNameSnapshot[] customers = [new(aramco, "Saudi Aramco"), new(hyundai, "Hyundai Engineering & Construction")];
+        DocumentPassage[] rasTanura = [new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)];
+
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = sender,
+            SenderOrganisationName = "Saudi Aramco",
+            Passages = rasTanura,
+        }, Corpus(customers, contacts: [new(1, hyundai, "k.lee@hdec.com", "K", "Lee")]), Policy);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Equal(hyundai, outcome.Candidates[0].CustomerId);
+        var site = Assert.Single(outcome.Candidates, candidate => candidate.CustomerId == aramco);
+        Assert.True(site.Confidence < Policy.MinimumAutoLinkConfidence, $"Aramco was offered at {site.Confidence}, which is link strength.");
+
+        // The site owner's own mailbox signed with its own short name, with nothing else tying the domain, still links.
+        var own = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 11,
+            SenderEmail = "buyer@aramco.com",
+            SenderOrganisationName = "Aramco",
+            Passages = rasTanura,
+        }, Corpus(customers), Policy);
+        Assert.Equal(aramco, own.CustomerId);
+        Assert.Equal(Policy.NameInAddressConfidence, own.Confidence);
+    }
+
+    [Theory]
+    [InlineData(true, "Saudi Electricity Company Main Store (DAMMAM)")]
+    [InlineData(true, "Saudi Electricity Company Substation (RIYADH)")]
+    [InlineData(true, "Saudi Electricity Company Central Warehouse (QASSIM)")]
+    [InlineData(false, "Saudi Aramco Abqaiq Plants (ABQP)")]
+    [InlineData(false, "Saudi Aramco Northern Area Oil Operations (NAOO)")]
+    [InlineData(false, "Saudi Aramco Terminal Operations (JUBAIL)")]
+    [InlineData(false, "Saudi Aramco Ras Tanura Refinery (RTRD)")]
+    public void An_address_ending_in_a_bracketed_city_or_site_code_is_still_the_customers_own_site(bool sec, string deliveryAddress)
+    {
+        // PRODUCTION CONTROL. The bracketed-trade-name rule took any capitalised bracketed word of four letters
+        // or more, after further name words, as another company's trade name. SEC and Aramco sites written
+        // with their city or site code in brackets fell from 0.88 to a 0.70 offer. A trade name abbreviates
+        // the run it closes and starts with its first letter (SATORP, SASREF); a city or site code does not.
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saudi Aramco")]), Policy);
+
+        Assert.Equal(sec ? Sec : OtherCustomer, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    // ── REPAIR ROUND 2026-09-13 ─────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(true, "Saudi Electricity Company Substation (SUDAIR)")]
+    [InlineData(true, "Saudi Electricity Company Sudair Substation (SUDAIR)")]
+    [InlineData(true, "Saudi Electricity Company Shuqaiq Plant (SHUQAIQ)")]
+    [InlineData(true, "Saudi Electricity Company Shoaiba Power Plant (SHOAIBA)")]
+    [InlineData(true, "Saudi Electricity Company Store (SAKAKA)")]
+    [InlineData(false, "Saudi Aramco Shaybah Producing Department (SHYB)")]
+    [InlineData(false, "Saudi Aramco Safaniya Onshore Producing (SFNY)")]
+    [InlineData(false, "Saudi Aramco Southern Area Oil Operations (SAOO)")]
+    [InlineData(false, "Saudi Aramco Shedgum Gas Plant (SHEDGUM)")]
+    [InlineData(false, "Saudi Aramco Safaniya (SAFANIYA)")]
+    [InlineData(false, "Saudi Aramco Shaybah (SHAYBAH)")]
+    [InlineData(false, "Saudi Aramco Material Supply (SAMS)")]
+    [InlineData(false, "Saudi Aramco Shaybah NGL (SNGL)")]
+    [InlineData(false, "Saudi Aramco Southern Area Producing (SAPD), Udhailiyah")]
+    [InlineData(false, "Saudi Aramco Shaybah Operations (SHYB)")]
+    public void A_site_whose_bracketed_code_starts_like_the_customers_name_is_still_the_customers_own_site(bool sec, string deliveryAddress)
+    {
+        // THE DEFECT (CTRL-bracketed-codes, the S half). A bracketed word was read as a joint venture's trade name
+        // whenever it began with the run's first letter, so every SEC and Saudi Aramco site whose name or code starts
+        // with S (Sudair, Shuqaiq, Shoaiba, Sakaka, Shaybah, Safaniya, Shedgum, Southern Area) fell from an 0.88 link
+        // to a 0.70 offer. Base linked all of them. A bracket that repeats a word of the run, or a run carrying a site
+        // or unit word, is the customer's own site.
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saudi Aramco")]), Policy);
+
+        Assert.Equal(sec ? Sec : OtherCustomer, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Theory]
+    [InlineData("Saudi Aramco Total Refining & Petrochemical (SATORP), Jubail")]
+    [InlineData("Saudi Aramco Jubail Refinery (SASREF), Jubail Industrial City")]
+    [InlineData("Saudi Aramco Mobil Refinery (SAMREF), Yanbu")]
+    public void A_joint_ventures_bracketed_trade_name_is_still_offered_after_the_site_rule(string deliveryAddress)
+    {
+        // The control for the rule above: a run with no site or unit word, closed by a trade name that repeats none of
+        // its words, is still another company's name, and the parent is offered, not applied.
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(customers: [new(OtherCustomer, "Saudi Aramco")]), Policy);
+
+        Assert.Null(outcome.CustomerId);
+        var aramco = Assert.Single(outcome.Candidates, candidate => candidate.CustomerId == OtherCustomer);
+        Assert.Equal(Policy.ShipToDemotedConfidence, aramco.Confidence);
+    }
+
+    private static LeadClientEvidence EBiddingPrint(params DocumentPassage[] passages) => new()
+    {
+        BusinessUnitId = 1, LeadId = 10,
+        CustomerPortalName = "MATERIALS E-BIDDING SYSTEM",
+        SupplierAccountRefOnDocument = "2004414",
+        SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL",
+        Passages = passages
+    };
+
+    private static CustomerIdentifierSnapshot EBiddingPair(long owner, string source) =>
+        new(1, owner, CustomerIdentifierType.PortalAccount, "MATERIALS E BIDDING SYSTEM|2004414", true, 0.92m, source);
+
+    [Theory]
+    [InlineData("delivery address", "Saudi Electricity Company-DAMMAM")]
+    [InlineData("storage location", "SEC Materials West Plant-West Operating Area")]
+    public void A_portal_pair_taught_to_one_customer_gives_way_to_a_page_that_names_another(string where, string text)
+    {
+        // THE DEFECT (T24 and W04.02, the root of the Aramco 55% incident). A pair a rep taught onto Saudi Aramco by
+        // repeating a wrong pick, or taught before the learner's portal guard existed, decided at 0.92 before any
+        // passage was read, over "Saudi Electricity Company-DAMMAM" in the address and over SEC's initials in the
+        // storage location. Base did the same. The page is heard now: the named customer is offered first and the
+        // earlier pick below it, and nothing is applied.
+        const long aramco = OtherCustomer;
+        var outcome = CustomerIdentityResolver.Resolve(
+            EBiddingPrint(new DocumentPassage(where, text, true)) with { RfqNumber = "C001832162" },
+            Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")],
+                identifiers:
+                [
+                    EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned),
+                    new(2, aramco, CustomerIdentifierType.RfqNumberPattern, @"^C\d{9}$", false, 0.50m, CustomerIdentifierSources.LeadReviewLearned),
+                ]), Policy);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Equal(Sec, outcome.Candidates[0].CustomerId);
+        Assert.Equal(Policy.ShipToDemotedConfidence, outcome.Candidates[0].Confidence);
+        var earlierPick = Assert.Single(outcome.Candidates, candidate => candidate.CustomerId == aramco);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, earlierPick.ReasonCode);
+        Assert.True(earlierPick.Confidence < outcome.Candidates[0].Confidence);
+    }
+
+    [Fact]
+    public void A_portal_pair_still_decides_where_the_page_agrees_names_nobody_or_a_person_entered_it()
+    {
+        const long aramco = OtherCustomer;
+        CustomerNameSnapshot[] customers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")];
+        var secAddress = new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true);
+
+        // PRODUCTION CONTROL: SEC's buyer-operated portal pair on SEC's own print.
+        var own = CustomerIdentityResolver.Resolve(EBiddingPrint(secAddress),
+            Corpus(customers, [EBiddingPair(Sec, CustomerIdentifierSources.LeadReviewLearned)]), Policy);
+        Assert.Equal(Sec, own.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, own.ReasonCode);
+        Assert.Equal(Policy.LearnedPortalAccountConfidence, own.Confidence);
+
+        foreach (var (outcome, why) in new[]
+        {
+            (CustomerIdentityResolver.Resolve(EBiddingPrint(new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)),
+                Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned)]), Policy), "the page names the pair's own customer"),
+            (CustomerIdentityResolver.Resolve(EBiddingPrint(),
+                Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned)]), Policy), "the page names nobody"),
+            (CustomerIdentityResolver.Resolve(EBiddingPrint(secAddress),
+                Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.MasterData)]), Policy), "a person entered the pair"),
+        })
+        {
+            Assert.True(outcome.CustomerId == aramco, why);
+            Assert.Equal(Policy.LearnedPortalAccountConfidence, outcome.Confidence);
+        }
+    }
+
+    [Theory]
+    [InlineData("etimad.gov.sa", "no-reply@etimad.gov.sa")]
+    [InlineData("coupa.com", "do_not_reply@coupa.com")]
+    [InlineData("sap.com", "no-reply@sap.com")]
+    public void A_domain_row_nobody_entered_does_not_link_what_a_system_mailbox_on_that_host_carries(string domain, string systemMailbox)
+    {
+        // MUST STAY FIXED (W03.04, W03.05, W03.08). S1 refuses a learned row on a system mailbox, but a learned Domain
+        // row for the host a portal sends from still linked every SEC print it carried to Saudi Aramco at 0.95, in both
+        // builds, because the relay list does not name etimad.gov.sa, coupa.com or sap.com and never will name every host.
+        const long aramco = OtherCustomer;
+        CustomerNameSnapshot[] customers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")];
+        ClientResolutionOutcome Mail(string sender, string source, string? printedBuyer = null) => CustomerIdentityResolver.Resolve(
+            new LeadClientEvidence
+            {
+                BusinessUnitId = 1, LeadId = 10, SenderEmail = sender, DocumentBuyerEmail = printedBuyer,
+                Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+            },
+            Corpus(customers, [new(1, aramco, CustomerIdentifierType.Domain, domain, true, 0.95m, source)]), Policy);
+
+        var learned = Mail(systemMailbox, CustomerIdentifierSources.LeadReviewLearned);
+        Assert.Equal(Sec, learned.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, learned.ReasonCode);
+        Assert.Equal(Policy.NameInAddressConfidence, learned.Confidence);
+
+        // A rule a person entered still decides, and a person's own mailbox on that host, on the envelope or printed on
+        // the page beside the system envelope, is still matched by the learned row.
+        foreach (var outcome in new[]
+        {
+            Mail(systemMailbox, CustomerIdentifierSources.MasterData),
+            Mail($"buyer@{domain}", CustomerIdentifierSources.LeadReviewLearned),
+            Mail(systemMailbox, CustomerIdentifierSources.LeadReviewLearned, printedBuyer: $"buyer@{domain}"),
+        })
+        {
+            Assert.Equal(aramco, outcome.CustomerId);
+            Assert.Equal(CustomerMatchReasonCodes.SenderDomain, outcome.ReasonCode);
+        }
+    }
+
+    [Theory]
+    [InlineData("Jubail", "Saudi Electricity Company - Riyadh PP9 Substation", "Jubail Trading Est")]
+    [InlineData("Dammam", "Saudi Electricity Company-JUBAIL", "Al Dammam Trading Co.")]
+    [InlineData("Dammam", "Saudi Electricity Company Eastern Operating Area, Riyadh", "Al Dammam Trading Co.")]
+    public void A_mailbox_signed_only_with_a_city_is_a_branch_whatever_city_the_address_names(
+        string signedAs, string deliveryAddress, string cityNamedCustomer)
+    {
+        // THE DEFECT (T27 residual, a regression against base). SEC's own "Jubail Procurement <procurement@se.com.sa>"
+        // signs "Jubail", which reads as "Jubail Trading Est". The signature was spared only where the address repeated
+        // its city, so an SEC print delivering to Riyadh was demoted to 0.70 with the trading house ranked first. Base
+        // linked SEC at 0.88. A signature made only of place or trade words is a branch or a department.
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 680,
+            SenderEmail = "procurement@se.com.sa",
+            SenderOrganisationName = signedAs,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(customers:
+        [
+            new(Sec, "Saudi Electricity Company"), new(OtherCustomer, cityNamedCustomer), new(ThirdCustomer, "Saudi Aramco"),
+        ]), Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+        Assert.DoesNotContain(outcome.Candidates, candidate => candidate.CustomerId == OtherCustomer);
+
+        // The control: a contractor's own signature still speaks for it (H14).
+        var contractor = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 11,
+            SenderEmail = "procurement@hdec.com",
+            SenderOrganisationName = "Hyundai E&C",
+            Passages = [new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)],
+        }, Corpus(customers: [new(OtherCustomer, "Saudi Aramco"), new(ThirdCustomer, "Hyundai Engineering & Construction")]), Policy);
+        Assert.Null(contractor.CustomerId);
+        Assert.Equal(ThirdCustomer, contractor.Candidates[0].CustomerId);
+    }
+
+    [Theory]
+    [InlineData("Rashid", PassageRole.ItemText, "nothing")]
+    [InlineData("RASHID", PassageRole.BuyerHeader, "nothing")]
+    [InlineData("Al-Rashid", PassageRole.ItemText, "nothing")]
+    [InlineData("Dammam Procurement", PassageRole.ItemText, "nothing")]
+    [InlineData("Ahmed Rashid, Procurement", PassageRole.BuyerHeader, "nothing")]
+    // Controls: a person's fuller name is still a mention, and the trading house's whole name on a relay still links.
+    [InlineData("Rashid Al-Otaibi", PassageRole.ItemText, "offered")]
+    [InlineData("Al-Rashid Trading", PassageRole.BuyerHeader, "linked")]
+    public void One_word_of_a_customers_name_alone_on_a_mailbox_is_a_person_or_a_department_not_that_customer(
+        string displayName, PassageRole role, string expected)
+    {
+        // THE DEFECT (the repair round's P2). The mailbox display name became a passage, and one word of a customer's
+        // name on it made that customer a candidate: "Rashid <rashid1987@gmail.com>" offered Al-Rashid Trading, SEC's
+        // own "Dammam Procurement" offered Al Dammam Trading above SEC's own earlier decision, and a relay's "RASHID"
+        // linked Al-Rashid Trading at 0.88. Base read nothing in any of them.
+        const long rashid = OtherCustomer, dammam = ThirdCustomer;
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage(DocumentPassage.SenderDisplayNameWhere, displayName, role != PassageRole.ItemText) { Role = role }],
+        }, Corpus(customers:
+        [
+            new(Sec, "Saudi Electricity Company"), new(rashid, "Al-Rashid Trading"), new(dammam, "Al Dammam Trading Co."),
+        ]), Policy);
+
+        switch (expected)
+        {
+            case "nothing":
+                Assert.Null(outcome.CustomerId);
+                Assert.Empty(outcome.Candidates);
+                break;
+            case "offered":
+                Assert.Null(outcome.CustomerId);
+                Assert.Equal(rashid, Assert.Single(outcome.Candidates).CustomerId);
+                break;
+            default:
+                Assert.Equal(rashid, outcome.CustomerId);
+                Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+                break;
+        }
+    }
+
+    [Theory]
+    [InlineData("Saudi Aramco", "ARAMCO", "ARAMCO Ras Tanura Refinery")]
+    [InlineData("Marafiq Power & Water Utility Company", "MARAFIQ", "MARAFIQ Yanbu Warehouse, Yanbu Al-Sinaiyah")]
+    [InlineData("Marafiq", "MARAFIQ", "MARAFIQ Yanbu Warehouse, Yanbu Al-Sinaiyah")]
+    public void A_one_word_name_a_reviewer_taught_links_where_it_opens_the_delivery_address(
+        string customerName, string taught, string deliveryAddress)
+    {
+        // THE DEFECT (A14.C22, LG13). "One word in an address names a place as often as a company" also caught a name a
+        // reviewer confirmed for exactly this customer, written as the first word of its own address, and base's 0.88
+        // link fell to a 0.70 offer.
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(
+            customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, customerName)],
+            identifiers: [Alias(1, OtherCustomer, taught)]), Policy);
+
+        Assert.Equal(OtherCustomer, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Theory]
+    [InlineData("Al Dammam Trading Co.", "DAMMAM", "DAMMAM Main Store")]                // a place word, taught or not
+    [InlineData("Saudi Aramco", "ARAMCO", "ARAMCO Services Company, Houston")]           // runs on into another company
+    [InlineData("Saudi Aramco", "ARAMCO", "Ras Tanura ARAMCO Refinery")]                 // does not open the address
+    [InlineData("Marafiq", null, "MARAFIQ Yanbu Warehouse, Yanbu Al-Sinaiyah")]         // nobody taught it
+    public void A_one_word_name_in_an_address_is_still_only_offered_otherwise(string customerName, string? taught, string deliveryAddress)
+    {
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            Passages = [new DocumentPassage("delivery address", deliveryAddress, true)],
+        }, Corpus(
+            customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, customerName)],
+            identifiers: taught is null ? [] : [Alias(1, OtherCustomer, taught)]), Policy);
+
+        Assert.Null(outcome.CustomerId);
+        var offered = Assert.Single(outcome.Candidates, candidate => candidate.CustomerId == OtherCustomer);
+        Assert.Equal(Policy.ShipToDemotedConfidence, offered.Confidence);
+    }
+
+    [Fact]
+    public void Initials_written_with_dots_in_the_company_name_field_are_the_customers_initials()
+    {
+        // THE DEFECT (LF03). "S.E.C." folds to the single letters "S E C", which no initials key contains, and the learner
+        // now refuses to teach "S E C" as naming nobody. SEC's own company-name field printed that way went from a 0.90
+        // link at base to NO_MATCH.
+        LeadClientEvidence Printed() => new()
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            CustomerCompanyName = "S.E.C.",
+            Passages = [new DocumentPassage("company named on the document", "S.E.C.", true) { Role = PassageRole.BuyerHeader }],
+        };
+
+        var outcome = CustomerIdentityResolver.Resolve(Printed(),
+            Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saudi Aramco")]), Policy);
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(Policy.NameAcronymInAddressConfidence, outcome.Confidence);
+
+        // Initials two customers share still name neither.
+        var shared = CustomerIdentityResolver.Resolve(Printed(),
+            Corpus(customers: [new(Sec, "Saudi Electricity Company"), new(OtherCustomer, "Saudi Engineering Company")]), Policy);
+        Assert.Null(shared.CustomerId);
+    }
+
+    [Theory]
+    [InlineData("learned address")]
+    [InlineData("earlier decision from this mailbox")]
+    [InlineData("earlier decisions from two system mailboxes")]
+    public void A_system_mailbox_nobody_entered_neither_links_nor_demotes_the_consignee_it_carries(string record)
+    {
+        // THE SEAM (T17 against the domain-tie read). A system mailbox names nobody: S1 refuses a learned
+        // no-reply@etimad.gov.sa row, and routing refuses it too. But the tie read beside the consignee check
+        // still took that same row, and any person's decision on a lead the mailbox carried, as a fact about
+        // who writes from etimad.gov.sa. The next SEC print through the portal fell to 0.70 with Saudi Aramco
+        // ranked first, because the portal once carried an Aramco job.
+        const long aramco = OtherCustomer;
+        const string relay = "no-reply@etimad.gov.sa";
+        CustomerNameSnapshot[] customers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")];
+        var corpus = record switch
+        {
+            "learned address" => Corpus(customers,
+                identifiers: [new(1, aramco, CustomerIdentifierType.Email, relay, true, 1m, CustomerIdentifierSources.LeadReviewLearned)]),
+            "earlier decision from this mailbox" => Corpus(customers, priorSenders: [new PriorSenderResolution(relay, aramco)]),
+            _ => Corpus(customers, priorSenders:
+                [new PriorSenderResolution(relay, aramco), new PriorSenderResolution("noreply@etimad.gov.sa", aramco)]),
+        };
+
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = relay,
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+        }, corpus, Policy);
+
+        Assert.Equal(Sec, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, outcome.ReasonCode);
+        Assert.Equal(Policy.NameInAddressConfidence, outcome.Confidence);
+    }
+
+    [Fact]
+    public void A_persons_mailbox_on_a_portals_host_still_speaks_for_the_domain()
+    {
+        // The control for the rule above: only the system mailbox is set aside. A learned address a person
+        // wrote from on the same host is a fact about the domain like any other, and still demotes.
+        const long aramco = OtherCustomer;
+        var outcome = CustomerIdentityResolver.Resolve(new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "no-reply@etimad.gov.sa",
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
+        }, Corpus([new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")],
+            identifiers: [new(1, aramco, CustomerIdentifierType.Email, "tenders.desk@etimad.gov.sa", true, 1m, CustomerIdentifierSources.LeadReviewLearned)]),
+            Policy);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Contains(outcome.Candidates, candidate => candidate.CustomerId == aramco);
+    }
+
+    [Fact]
+    public void A_vendor_block_that_is_our_own_name_makes_the_domain_it_spells_ours_exactly_as_routing_reads_it()
+    {
+        // THE SEAM (T09a against T09c). Routing asks TenantSelfIdentity.DomainSelfNames: the configured name,
+        // and the vendor block where it is a spelling of it. This Guard asked the configured name alone. A
+        // print whose vendor block reads "ALI ZAID AL-QURAISHI & PARTNERS ESOSA" from sales@esosa.com linked
+        // SEC here at 0.95 on SEC's Domain row, while routing refused the same row as our own mail and left the
+        // lead unassigned. A vendor block that is NOT our name still cannot make a domain ours.
+        const string tenant = "ALI ZAID AL-QURAISHI & PARTNERS";
+        var corpus = Corpus(
+            customers: [new(Sec, "Saudi Electricity Company")],
+            identifiers: [new(1, Sec, CustomerIdentifierType.Domain, "esosa.com", true, 0.95m, "CustomerContact")]);
+        LeadClientEvidence Printed(string vendorBlock) => new()
+        {
+            BusinessUnitId = 1, LeadId = 10,
+            SenderEmail = "sales@esosa.com",
+            SupplierNameOnDocument = vendorBlock,
+            TenantSelfNameKeys = [tenant]
+        };
+
+        const string ourSpelling = "ALI ZAID AL-QURAISHI & PARTNERS ESOSA";
+        Assert.True(TenantSelfIdentity.IsOurs("esosa.com", Array.Empty<string>(),
+            TenantSelfIdentity.DomainSelfNames([tenant], ourSpelling)));
+        var ours = CustomerIdentityResolver.Resolve(Printed(ourSpelling), corpus, Policy);
+        Assert.Null(ours.CustomerId);
+        Assert.NotEqual(CustomerMatchReasonCodes.SenderDomain, ours.ReasonCode);
+
+        var misread = CustomerIdentityResolver.Resolve(Printed("ESOSA"), corpus, Policy);
+        Assert.Equal(Sec, misread.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderDomain, misread.ReasonCode);
+    }
+
     private static CustomerIdentifierSnapshot Alias(long id, long customerId, string normalizedValue) =>
         new(id, customerId, CustomerIdentifierType.Alias, normalizedValue, true, 0.90m,
             CustomerIdentifierSources.LeadReviewLearned);

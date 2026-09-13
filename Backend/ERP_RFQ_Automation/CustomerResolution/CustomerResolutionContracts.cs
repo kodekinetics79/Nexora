@@ -70,8 +70,9 @@ public static class CustomerIdentifierSources
     /// Sources a PERSON typed or imported on purpose: the setup screen, the customer profile and its
     /// contacts, a customer import. What the platform inferred is not here: a reviewer's confirmation
     /// the learner turned into a row, or the migration backfill. Read where a value is trusted only if
-    /// somebody said so, which today is a procurement relay's own sending address
-    /// (<see cref="IdentityDomainGuard.MayMatchExactAddress"/>).
+    /// somebody said so: a procurement relay's or a system mailbox's own sending address
+    /// (<see cref="IdentityDomainGuard.MayMatchExactAddress"/>), and whether a customer is on record
+    /// with a staff login's domain (<see cref="TenantSelfIdentity.LoadSelfDomainsAsync"/>).
     /// </summary>
     public static readonly string[] EnteredByAPerson = [MasterData, "CustomerProfile", "CustomerContact", "CustomerImport"];
 }
@@ -138,7 +139,11 @@ public static class SyntheticIdentityGuard
         "duck.com", "awalnet.net.sa", "mail2world.com", "sina.cn", "inbox.lv", "seznam.cz", "wp.pl",
         "o2.pl", "interia.pl", "onet.pl", "libero.it", "virgilio.it", "orange.fr", "wanadoo.fr",
         "laposte.net", "bigpond.com", "optonline.net", "cox.net", "charter.net", "earthlink.net",
-        "juno.com", "rediff.com"
+        "juno.com", "rediff.com",
+        // Sahara Net, a Saudi consumer ISP: still an "organisation" on 2026-09-12, so a contact saved at
+        // agent@sahara.com wrote sahara.com as that customer's Domain and every other Sahara subscriber
+        // linked to it at 0.95.
+        "sahara.com"
     };
 
     public static bool IsSyntheticDomain(string? domain)
@@ -564,6 +569,63 @@ public static class IdentityDomainGuard
     }
 
     /// <summary>
+    /// Whether an Email identifier may match an address exactly. A row a person entered
+    /// (<see cref="CustomerIdentifierSources.EnteredByAPerson"/>) always may. Any other row may not
+    /// when the address is a procurement network's relay host, or when it is a system mailbox
+    /// (<see cref="IsSystemMailbox"/>) on any host at all.
+    ///
+    /// ordersender-prod@ansmtp.ariba.com delivers every Ariba buyer's RFQ, and the old learner minted it
+    /// as the Email of whichever buyer was confirmed first: a SABIC RFQ then linked to Saudi Aramco at
+    /// 1.00 in the resolver, and routing handed it to Aramco's owner, however plainly the page named
+    /// SABIC. Refusing learned rows on LISTED relay hosts closed that for Ariba and left it open
+    /// everywhere else: a learned no-reply@etimad.gov.sa or do_not_reply@coupa.com row still decided
+    /// at 1.00, because neither host is on the relay list and no list of hosts will ever be complete.
+    /// A mailbox nobody answers is the postman on whatever host it sits, so the local part decides
+    /// too. Rows the learner or the backfill wrote on such mailboxes become inert with no data job.
+    /// One predicate for the resolver and routing.
+    /// </summary>
+    public static bool MayMatchExactAddress(string? address, string? source)
+    {
+        if (CustomerIdentifierSources.EnteredByAPerson.Contains(source ?? string.Empty, StringComparer.Ordinal))
+            return true;
+        return !SyntheticIdentityGuard.IsPortalRelayDomain(DomainOf(address)) && !IsSystemMailbox(address);
+    }
+
+    /// <summary>
+    /// The local parts of a mailbox that no person reads: a platform's or a portal's sending address.
+    /// Compared as the WHOLE local part, case-insensitively, never as a substring, so a buyer's own
+    /// "noreply.desk@" or "procurement.notifications@" is somebody's mailbox and stays evidence.
+    /// </summary>
+    private static readonly HashSet<string> SystemMailboxLocalParts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply", "do_not_reply",
+        "notification", "notifications", "mailer-daemon"
+    };
+
+    /// <summary>A local-part prefix every SAP Ariba sending address carries ("ordersender-prod").</summary>
+    private const string OrderSenderPrefix = "ordersender";
+
+    /// <summary>
+    /// True when the address's whole local part is a system mailbox (<see cref="SystemMailboxLocalParts"/>)
+    /// or begins with "ordersender". Accepts a bare address or "Name &lt;address&gt;". False for anything
+    /// with no local part.
+    /// </summary>
+    public static bool IsSystemMailbox(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return false;
+        var value = address.Trim();
+        var at = value.LastIndexOf('@');
+        if (at <= 0) return false;
+        var local = value[..at];
+        var open = local.LastIndexOf('<');
+        if (open >= 0) local = local[(open + 1)..];
+        local = local.Trim().Trim('"', '\'').Trim();
+        if (local.Length == 0) return false;
+        return SystemMailboxLocalParts.Contains(local)
+               || local.StartsWith(OrderSenderPrefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// True only for a domain that can belong to one organisation that is not us. False for:
     /// nothing at all or a dotless or letterless host; Nexora's own ingestion placeholders
     /// (pipeline.local, system.com); a consumer mailbox provider (gmail.com, fastmail.com); a
@@ -575,19 +637,6 @@ public static class IdentityDomainGuard
     /// contractor's hdec.com is an organisation domain and is not Saudi Aramco's; whether a
     /// domain is tied to a particular customer is a separate question the caller must ask.
     /// </summary>
-    /// <summary>
-    /// Whether an Email identifier may match an address exactly. Always, except on a procurement
-    /// network's relay. ordersender-prod@ansmtp.ariba.com delivers every Ariba buyer's RFQ, and the old
-    /// learner minted it as the Email of whichever buyer was confirmed first: a SABIC RFQ then linked to
-    /// Saudi Aramco at 1.00 in the resolver, and routing handed it to Aramco's owner, however plainly the
-    /// page named SABIC. On a relay the only row that names one buyer is one a person put there
-    /// (<see cref="CustomerIdentifierSources.EnteredByAPerson"/>). Rows the learner or the backfill wrote
-    /// on relay hosts become inert with no data job. One predicate for the resolver and routing.
-    /// </summary>
-    public static bool MayMatchExactAddress(string? address, string? source)
-        => !SyntheticIdentityGuard.IsPortalRelayDomain(DomainOf(address))
-           || CustomerIdentifierSources.EnteredByAPerson.Contains(source ?? string.Empty, StringComparer.Ordinal);
-
     public static bool IsOrganisationDomain(string? domainOrAddress, IEnumerable<string>? selfDomains = null)
     {
         var domain = DomainOf(domainOrAddress);
@@ -710,6 +759,13 @@ public enum PassageRole
 public sealed record DocumentPassage(string Where, string Text, bool NamesTheBuyer)
 {
     /// <summary>
+    /// The <see cref="Where"/> of the passage made from the sender's mailbox display name. The resolver asks for
+    /// it by this value, because one word of a customer's name on a mailbox ("Rashid", "Dammam Procurement") is a
+    /// person or a department, not that customer, and must not be read as one.
+    /// </summary>
+    public const string SenderDisplayNameWhere = "the name on the sender's mailbox";
+
+    /// <summary>
     /// What this passage is doing on the page. Derived from <see cref="NamesTheBuyer"/> so
     /// every existing caller compiles and behaves exactly as before: a passage that "names
     /// the buyer" has always in practice meant a delivery address or a site, which is
@@ -790,6 +846,16 @@ public sealed record CustomerResolutionPolicy
     /// property of whichever tier happened to fire.
     /// </summary>
     public decimal MinimumAutoLinkConfidence { get; init; } = 0.85m;
+
+    /// <summary>
+    /// How many human decisions naming ONE customer, the current review included, make a consumer-mailbox
+    /// address (buyer.person@gmail.com) that customer's Email identifier, provided no decision names
+    /// another customer. Nothing is written before this count is reached, and the address is written
+    /// verified when it is (CustomerAliasLearner reads this setting). One is not enough: that is how Saudi Aramco came to own personal addresses at live.com from
+    /// a single confirmation each. And never a Domain, at any count: a free-mail domain is everybody's.
+    /// A sole trader on gmail who has been confirmed this many times is linked on the next message.
+    /// </summary>
+    public int FreeMailAddressConfirmationsRequired { get; init; } = 2;
 
     public decimal FuzzyMaximumConfidence { get; init; } = 0.85m;
     public decimal ExactNameSuggestionConfidence { get; init; } = 0.75m;

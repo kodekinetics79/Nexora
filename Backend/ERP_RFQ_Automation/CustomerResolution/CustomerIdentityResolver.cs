@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.Models;
@@ -93,6 +94,30 @@ public static class CustomerIdentityResolver
             return answer;
         }
 
+        // TWO LETTERS NAME A COMPANY ONLY WHERE THEY ARE ITS OWN INITIALS AND NOBODY ELSE'S. The exact
+        // learned-alias tier took the passage scan's distinctiveness test, which wants a word of three
+        // letters, so "GE" taught for General Electric Saudi Arabia stopped linking a company-name field
+        // that says exactly "GE" (0.90 before). The field must be those two capitals and nothing else, the
+        // letters must be the initials of the owner's first two name words, and no other customer on the
+        // books may carry the same initials: two letters shared by two customers identify neither.
+        Dictionary<string, int>? leadingInitialsCounts = null;
+        bool IsOwnersOwnTwoLetterInitials(CustomerIdentifierSnapshot identifier)
+        {
+            var key = identifier.NormalizedValue;
+            if (key.Length != 2 || !key.All(c => c is >= 'A' and <= 'Z')) return false;
+            var printed = (evidence.CustomerCompanyName ?? string.Empty).Where(char.IsLetter).ToArray();
+            if (printed.Length != 2 || !printed.All(c => c is >= 'A' and <= 'Z')) return false;
+            if (!names.TryGetValue(identifier.CustomerId, out var ownerName)
+                || !string.Equals(LeadingTwoWordInitials(ownerName), key, StringComparison.Ordinal)) return false;
+            leadingInitialsCounts ??= corpus.Customers
+                .GroupBy(customer => customer.CustomerId)
+                .Select(group => LeadingTwoWordInitials(group.First().Name))
+                .Where(initials => initials.Length == 2)
+                .GroupBy(initials => initials, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+            return leadingInitialsCounts.TryGetValue(key, out var owners) && owners == 1 && !SharedAcronyms().Contains(key);
+        }
+
         // ── S1 AUTHORITATIVE EXACT ────────────────────────────────────────────
         var authoritative = new List<Hit>();
         foreach (var identifier in corpus.Identifiers)
@@ -148,11 +173,21 @@ public static class CustomerIdentityResolver
         // guarded.Domains holds only domains IdentityDomainGuard accepts as an organisation's own,
         // and a row the learner demoted to LeadReviewUnverified, or a person marked unverified, is
         // skipped for the same reasons as at S1: it links at 0.95, which asks nobody.
+        //
+        // A SYSTEM MAILBOX IS THE POSTMAN ON WHATEVER HOST IT SITS, FOR A DOMAIN AS FOR AN ADDRESS. S1 refuses a
+        // learned no-reply@etimad.gov.sa row, but a learned Domain row etimad.gov.sa (or coupa.com, or sap.com
+        // for SAP Ariba's no-reply@sap.com) still linked every SEC print the portal carried to Saudi Aramco here
+        // at 0.95, because no list of relay hosts is ever complete. A domain that reaches this tier only through
+        // a system mailbox (IdentityDomainGuard.IsSystemMailbox) is matched only by a row a person entered; a
+        // person's own mailbox on the same host still matches every row, as before. Routing and the corpus
+        // loader ask the same question.
         var domainHits = corpus.Identifiers
             .Where(i => i.IdentifierType == CustomerIdentifierType.Domain
                         && i.IsVerified
                         && !IsUnverifiedLearned(i)
-                        && guarded.Domains.Contains(i.NormalizedValue))
+                        && guarded.Domains.Contains(i.NormalizedValue)
+                        && (guarded.PersonMailboxDomains.Contains(i.NormalizedValue)
+                            || CustomerIdentifierSources.EnteredByAPerson.Contains(i.Source, StringComparer.Ordinal)))
             .Select(i => new Hit(i.CustomerId, policy.DomainConfidence,
                 CustomerMatchReasonCodes.SenderDomain,
                 $"Shares the corporate sender domain {i.NormalizedValue}."))
@@ -181,7 +216,8 @@ public static class CustomerIdentityResolver
             // the alias taught on the first lead linked a Saudi Kayan RFQ to Saudi Aramco at 0.90.
             if (isNameType && guarded.NameKey.Length > 0 &&
                 string.Equals(identifier.NormalizedValue, guarded.NameKey, StringComparison.Ordinal) &&
-                CustomerNameDistinctiveness.HasDistinctiveToken(identifier.NormalizedValue) &&
+                (CustomerNameDistinctiveness.HasDistinctiveToken(identifier.NormalizedValue)
+                 || IsOwnersOwnTwoLetterInitials(identifier)) &&
                 // "SCC" taught for Saudi Cable linked the company-name field "SCC" at 0.90 here long after
                 // Saudi Ceramics, whose initials they also are, was added. See TaughtNameGivesWay.
                 !(IsTaught(identifier) && TaughtNameGivesWay(identifier.CustomerId, identifier.NormalizedValue)))
@@ -218,11 +254,35 @@ public static class CustomerIdentityResolver
                 }
                 learnedHits.Add(new Hit(identifier.CustomerId, policy.LearnedPortalAccountConfidence,
                     CustomerMatchReasonCodes.LearnedPortalAccount,
-                    $"Same portal vendor code {evidence.SupplierAccountRefOnDocument} on {evidence.CustomerPortalName}."));
+                    $"Same portal vendor code {evidence.SupplierAccountRefOnDocument} on {evidence.CustomerPortalName}.",
+                    Taught: IsTaught(identifier)));
             }
         }
+        // A TAUGHT PORTAL PAIR IS WHAT A PERSON PICKED BEFORE, AND THE PAGE IN FRONT OF US MAY SAY OTHERWISE (T24,
+        // the 55% incident). This tier decided before any passage was read, so a pair a rep taught onto Saudi Aramco
+        // (two pair-only mis-clicks, or a row taught before the learner's portal guard existed) linked every later
+        // SEC e-bidding print to Aramco at 0.92, over "Saudi Electricity Company-DAMMAM" in its address and over
+        // "SEC Materials West Plant" in its storage location. A decision resting only on taught pairs waits for the
+        // page: where a header or an address names a different customer at link strength, both are offered
+        // instead (see the passage tier). A pair a person entered, a taught alias, or a pair the page agrees with
+        // still decides here, and a page with no passages costs nothing.
+        Hit? taughtPairAwaitingThePage = null;
+        ClientResolutionOutcome? taughtPairOutcome = null;
         if (Decide(learnedHits, names, policy, out var learnedOutcome))
-            return WithContact(learnedOutcome!, guarded, corpus);
+        {
+            if (learnedOutcome!.CustomerId is long pairOwner
+                && guarded.Passages.Count > 0
+                && learnedHits.Where(hit => hit.CustomerId == pairOwner)
+                    .All(hit => hit.Taught && hit.ReasonCode == CustomerMatchReasonCodes.LearnedPortalAccount))
+            {
+                taughtPairAwaitingThePage = learnedHits.First(hit => hit.CustomerId == pairOwner);
+                taughtPairOutcome = learnedOutcome;
+            }
+            else
+            {
+                return WithContact(learnedOutcome!, guarded, corpus);
+            }
+        }
 
         // ── S4..S6 THE NAME THE BUYER WROTE, THEN SUGGESTION-ONLY SCANS ───────
         // A bare company-name field never links: two distinct Gulf legal entities routinely
@@ -243,10 +303,21 @@ public static class CustomerIdentityResolver
         {
             var namesToFind = new List<NameToFind>();
             var queued = new HashSet<(long, string, bool)>();
-            void Find(long customerId, string key, string display, bool initials, bool oneWordName, bool taught = false)
+            void Find(long customerId, string key, string display, bool initials, bool oneWordName, bool taught = false,
+                IReadOnlyList<string>? writtenWords = null)
             {
                 if (queued.Add((customerId, key, initials)))
-                    namesToFind.Add(new NameToFind(customerId, key, display, initials, oneWordName, taught));
+                {
+                    namesToFind.Add(new NameToFind(customerId, key, display, initials, oneWordName, taught, writtenWords));
+                }
+                else if (taught)
+                {
+                    // The customer's own one-word name taught back as an alias ("MARAFIQ" for a customer recorded as
+                    // Marafiq) was queued first as an untaught name and dropped here, so the taught rules never saw it.
+                    var at = namesToFind.FindIndex(existing => existing.CustomerId == customerId && existing.Initials == initials
+                                                               && string.Equals(existing.Key, key, StringComparison.Ordinal));
+                    if (at >= 0 && !namesToFind[at].Taught) namesToFind[at] = namesToFind[at] with { Taught = true };
+                }
             }
 
             // A DERIVED acronym that two customers share identifies neither: "Saudi Cable Company",
@@ -258,37 +329,47 @@ public static class CustomerIdentityResolver
             var derivedAcronyms = new Dictionary<string, long>(StringComparer.Ordinal);
             foreach (var customer in corpus.Customers)
             {
-                var acronym = CustomerNameNormalizer.AcronymKey(customer.Name);
+                var acronym = FactsOf(customer.Name).Initials;
                 if (acronym.Length > 0 && !sharedAcronyms.Contains(acronym))
                     derivedAcronyms.TryAdd(acronym, customer.CustomerId);
             }
 
             foreach (var customer in corpus.Customers)
             {
-                foreach (var spelling in NameSpellings(customer.Name))
+                // What the name yields is a pure function of the name, worked out once per name and remembered
+                // (FactsOf): above the name-scan cap this loop runs over two thousand customers on every lead.
+                var facts = FactsOf(customer.Name);
+                foreach (var spelling in facts.Spellings)
                 {
-                    var key = CustomerNameNormalizer.LooseKey(spelling);
-                    if (key.Length == 0) continue;
                     // Two words and eight characters was written for "Saudi Electricity Company" and it
                     // makes the commonest buyer names in the country invisible: SABIC, NEOM, Marafiq,
                     // Sadara, SATORP, SAMREF, Ma'aden. A Saudi buyer's trade name IS one word, and a
                     // one-word name of four characters or more that is not an ordinary word is as
                     // distinctive as any two-word one — "Marafiq" names exactly one company. What a
                     // one-word hit may DO is narrower than a full name; see the ship-to rule below.
+                    // (Scannable is that rule, worked out in FactsOf.)
+                    var key = spelling.Key;
                     var oneWord = !key.Contains(' ');
-                    var scannable = oneWord
-                        ? key.Length >= 4 && !CustomerNameNormalizer.IsAmbiguousAcronym(key)
-                        : key.Length >= 8;
                     // A name made only of words half the country carries ("Arabian International
                     // Company" keys to ARABIAN) would be found in every "Arabian Pipes Company" and
                     // "Arabian Gulf Road" on the page. The same test the taught-alias scan applies.
-                    if (scannable && CustomerNameDistinctiveness.HasDistinctiveToken(key) && !guarded.IsSelfName(key))
+                    if (!spelling.Scannable || guarded.IsSelfName(key)) continue;
+                    if (spelling.Distinctive)
                         Find(customer.CustomerId, key, customer.Name, initials: false, oneWordName: oneWord);
+                    // BUT A LONG NAME MADE OF GENERIC WORDS IS STILL A NAME WHEN IT IS WRITTEN OUT WHOLE. The
+                    // distinctiveness filter made "Arabian Gulf International Company" invisible, so its own
+                    // yard address stopped linking (0.88 before) and a trading house named after the city in
+                    // that address was offered instead. Its key is only "ARABIAN GULF" (LooseKey drops
+                    // INTERNATIONAL), which "Arabian Gulf Road" also carries, so such a name is heard only
+                    // where the page writes every word of it, and a run into further words ("... Trading Co.")
+                    // is another company. One- and two-word names and taught aliases keep the filter.
+                    else if (spelling.WrittenWords is { } written)
+                        Find(customer.CustomerId, key, customer.Name, initials: false, oneWordName: false, writtenWords: written);
                 }
                 // "SEC Materials West Plant" names Saudi Electricity Company by its initials, and
                 // nobody should have to teach the system that. Derived, never stored: it follows
                 // the customer's name wherever the name goes.
-                var initials = CustomerNameNormalizer.AcronymKey(customer.Name);
+                var initials = facts.Initials;
                 if (initials.Length > 0
                     && derivedAcronyms.TryGetValue(initials, out var initialsOwner)
                     && initialsOwner == customer.CustomerId
@@ -331,16 +412,41 @@ public static class CustomerIdentityResolver
                 Find(identifier.CustomerId, key, identifier.NormalizedValue, initials: false, oneWordName, taught: IsTaught(identifier));
             }
 
+            // A name is in a passage only if its first word is a whole word of that passage, so a name whose first word
+            // is nowhere on the page is never scanned, and each passage key is padded once rather than once per name.
+            // The same whole-word test as ContainsWholeWords. On the 1,500-line print with two thousand customers the
+            // scan compared every name with every one of 120 passages and allocated a string for each comparison.
+            var pageWords = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var guardedPassage in guarded.Passages)
+                foreach (var word in guardedPassage.Key.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    pageWords.Add(word);
+            var namesOnThePage = namesToFind.Where(name => pageWords.Contains(name.FirstWord)).ToList();
+
             var passageHits = new List<Hit>();
             for (var index = 0; index < guarded.Passages.Count; index++)
             {
                 var passage = guarded.Passages[index];
+                var paddedPassageKey = " " + passage.Key + " ";
                 // Item text is the only role where a name may be incidental; a header and an
                 // address are both statements about an organisation, and are scored alike.
                 var aboutTheBuyer = passage.Role is not PassageRole.ItemText;
-                foreach (var name in namesToFind)
+                var onTheMailbox = string.Equals(passage.Where, DocumentPassage.SenderDisplayNameWhere, StringComparison.Ordinal);
+                foreach (var name in namesOnThePage)
                 {
-                    if (!ContainsWholeWords(passage.Key, name.Key)) continue;
+                    if (!paddedPassageKey.Contains(name.PaddedKey, StringComparison.Ordinal)) continue;
+                    if (name.WrittenWords is not null && !WritesTheNameInFull(passage.Text, name.WrittenWords)) continue;
+                    // ONE WORD OF A NAME ON A MAILBOX IS A PERSON OR A DEPARTMENT. "Al-Rashid Trading" keys to RASHID and
+                    // "Al Dammam Trading Co." to DAMMAM, so "Rashid <rashid1987@gmail.com>" offered Al-Rashid Trading and
+                    // SEC's own "Dammam Procurement <procurement@se.com.sa>" offered Al Dammam Trading at 0.70, ranked
+                    // above SEC's own earlier confirmation of that very mailbox (0.65); a relay's "RASHID" even linked at
+                    // 0.88. Base read nothing there. On the mailbox such a name is not heard where the display name is
+                    // that one word alone, or the word is followed by a buying function ("Dammam Procurement", "Ahmed
+                    // Rashid, Procurement"), unless the display name is the customer's whole written name ("SABIC",
+                    // "Marafiq", "Al-Rashid Trading"). A person's fuller name ("Rashid Al-Otaibi") is still a mention.
+                    if (onTheMailbox && name.OneWordName
+                        && OneWordOnTheMailboxIsAPersonOrADepartment(
+                            passage.Text, name.Key, names.TryGetValue(name.CustomerId, out var ownName) ? ownName : null))
+                        continue;
                     var excerpt = passage.Text.Length <= 80 ? passage.Text : passage.Text[..80] + "…";
                     var confidence = name.Initials
                         ? (aboutTheBuyer ? policy.NameAcronymInAddressConfidence : policy.NameAcronymInItemTextConfidence)
@@ -350,7 +456,7 @@ public static class CustomerIdentityResolver
                         name.Initials
                             ? $"\"{name.Key}\", the initials of \"{name.Display}\", appears in the {passage.Where}: \"{excerpt}\"."
                             : $"\"{name.Display}\" appears in the {passage.Where}: \"{excerpt}\".",
-                        name.Key, index, name.OneWordName, name.Taught));
+                        name.Key, index, name.OneWordName, name.Taught, name.WrittenWords));
                 }
             }
 
@@ -411,7 +517,7 @@ public static class CustomerIdentityResolver
                     });
                     continue;
                 }
-                var longer = LongerCompanyName(passage.Text, hit.MatchedKey);
+                var longer = LongerCompanyName(passage.Text, hit.MatchedKey, hit.WrittenWords);
                 if (longer is not null)
                 {
                     consigneeOnly.Add(RunsOnIntoAnotherName(hit, longer, policy));
@@ -438,7 +544,15 @@ public static class CustomerIdentityResolver
                 // went AMBIGUOUS in any tenant with a trading house named after a city. A one-word
                 // name still LINKS from a header, where a company names itself ("MARAFIQ invites
                 // bidders"); in an address it is offered to a person, never applied for them.
-                if (hit.OneWordName)
+                //
+                // EXCEPT A NAME A REVIEWER TAUGHT, WRITTEN AS THE FIRST WORD OF THE ADDRESS. "ARAMCO Ras Tanura Refinery"
+                // and "MARAFIQ Yanbu Warehouse" open with a one-word alias a person confirmed for exactly that
+                // customer; base linked both at 0.88 and they fell to a 0.70 offer. That is the header rule
+                // (OneWordNameIsTheStatement) for an address: the word must open it, must not be a place or trade word
+                // (a taught "DAMMAM" or "YANBU" stays offered), and a taught name that gives way was already set aside
+                // above. The ordinary checks still follow: a run into a longer company name, or a page naming someone
+                // else, still only offers it. Untaught one-word names stay offered.
+                if (hit.OneWordName && !(hit.Taught && TaughtOneWordNameOpensTheAddress(passage.Text, hit.MatchedKey)))
                 {
                     consigneeOnly.Add(hit with
                     {
@@ -449,7 +563,7 @@ public static class CustomerIdentityResolver
                     continue;
                 }
 
-                var longer = LongerCompanyName(passage.Text, hit.MatchedKey);
+                var longer = LongerCompanyName(passage.Text, hit.MatchedKey, hit.WrittenWords);
                 if (longer is not null)
                 {
                     consigneeOnly.Add(RunsOnIntoAnotherName(hit, longer, policy));
@@ -459,7 +573,7 @@ public static class CustomerIdentityResolver
                 var customerName = names.TryGetValue(hit.CustomerId, out var known)
                     ? known
                     : $"Customer #{hit.CustomerId}";
-                var competition = claims.CompetesWith(hit.CustomerId, customerName, headerStatements, guarded.Passages, names, policy);
+                var competition = claims.CompetesWith(hit.CustomerId, customerName, passage.Key, headerStatements, guarded.Passages, names, policy);
                 if (competition is null)
                 {
                     namedInAddress.Add(hit);
@@ -473,10 +587,43 @@ public static class CustomerIdentityResolver
                 rivalOffers.AddRange(competition.Offers);
             }
         }
+        // THE TAUGHT PAIR MEETS THE PAGE (see S3). Where no header or address names a different customer at link
+        // strength, the pair decides as it always did. Where one does, neither is applied: the named customer is
+        // offered at the demoted ship-to strength and the pair's owner below it, because the pair is an earlier pick
+        // and a rep shown the earlier pick first repeats it (the same order CompetesWith gives earlier decisions).
+        Hit? taughtPairOffer = null;
+        if (taughtPairAwaitingThePage is not null)
+        {
+            var pairOwner = taughtPairAwaitingThePage.CustomerId;
+            var rival = namedInAddress.FirstOrDefault(hit => hit.CustomerId != pairOwner);
+            if (rival is null)
+                return WithContact(taughtPairOutcome!, guarded, corpus);
+
+            var ownerName = names.TryGetValue(pairOwner, out var knownOwner) ? knownOwner : $"Customer #{pairOwner}";
+            var rivalName = names.TryGetValue(rival.CustomerId, out var knownRival) ? knownRival : $"Customer #{rival.CustomerId}";
+            foreach (var hit in namedInAddress)
+                consigneeOnly.Add(hit with
+                {
+                    Confidence = policy.ShipToDemotedConfidence,
+                    Explanation = hit.CustomerId == pairOwner
+                        ? hit.Explanation
+                        : $"{hit.Explanation} But a reviewer taught this document's portal account to {ownerName}, " +
+                          "so it is offered rather than applied."
+                });
+            namedInAddress.Clear();
+            taughtPairOffer = taughtPairAwaitingThePage with
+            {
+                Confidence = Math.Min(policy.PriorSenderSuggestionConfidence, policy.ShipToDemotedConfidence),
+                Explanation = $"{taughtPairAwaitingThePage.Explanation} A reviewer taught that portal account to this " +
+                              $"client, but the page names {rivalName}, so it is offered rather than applied."
+            };
+        }
+
         if (Decide(namedInAddress, names, policy, out var namedOutcome))
             return WithContact(namedOutcome!, guarded, corpus);
 
         var suggestions = new List<Hit>();
+        if (taughtPairOffer is not null) suggestions.Add(taughtPairOffer);
         // A name in item text and a contradicted delivery address are both "offer it, do not
         // decide it", so they compete for one row per customer and the stronger statement wins.
         suggestions.AddRange(namedInText.Concat(consigneeOnly)
@@ -577,7 +724,8 @@ public static class CustomerIdentityResolver
         var shared = new HashSet<string>(StringComparer.Ordinal);
         foreach (var customer in customers)
         {
-            var acronym = CustomerNameNormalizer.AcronymKey(customer.Name);
+            // AcronymKey, remembered per name (FactsOf): the same initials, without folding every name again per lead.
+            var acronym = FactsOf(customer.Name).Initials;
             if (acronym.Length == 0) continue;
             if (!firstOwner.TryAdd(acronym, customer.CustomerId) && firstOwner[acronym] != customer.CustomerId)
                 shared.Add(acronym);
@@ -612,15 +760,17 @@ public static class CustomerIdentityResolver
     /// </summary>
     private static GuardedEvidence Guard(LeadClientEvidence evidence)
     {
-        var selfNames = evidence.TenantSelfNameKeys
+        var tenantNames = evidence.TenantSelfNameKeys
             .Select(CustomerNameNormalizer.LooseKey)
             .Where(key => key.Length > 0)
             .ToHashSet(StringComparer.Ordinal);
+        var selfNames = new HashSet<string>(tenantNames, StringComparer.Ordinal);
         var supplierKey = CustomerNameNormalizer.LooseKey(evidence.SupplierNameOnDocument);
         if (supplierKey.Length > 0) selfNames.Add(supplierKey);
 
         var addresses = new HashSet<string>(StringComparer.Ordinal);
         var domains = new HashSet<string>(StringComparer.Ordinal);
+        var personMailboxDomains = new HashSet<string>(StringComparer.Ordinal);
         AddAddress(evidence.SenderEmail);
         AddAddress(evidence.DocumentBuyerEmail);
 
@@ -653,7 +803,7 @@ public static class CustomerIdentityResolver
 
         var passages = evidence.Passages
             .Where(p => !string.IsNullOrWhiteSpace(p.Text))
-            .Select(p => new GuardedPassage(p.Where, p.Text.Trim(), CustomerNameNormalizer.LooseKey(p.Text), p.Role))
+            .Select(p => new GuardedPassage(p.Where, p.Text.Trim(), PassageKey(p.Text), p.Role))
             .Where(p => p.Key.Length > 0)
             .Take(200)
             .ToList();
@@ -669,7 +819,8 @@ public static class CustomerIdentityResolver
             portalAccountKey,
             CustomerNameNormalizer.LooseKey(evidence.BuyerPersonName),
             passages,
-            selfNames);
+            selfNames,
+            personMailboxDomains);
 
         bool IsSelfName(string key) => SelfIdentityGuard.IsSelfName(key, selfNames);
 
@@ -688,7 +839,20 @@ public static class CustomerIdentityResolver
             // linked every later forward from our own staff to one customer at 0.95. A domain whose
             // own name spells ours ("alquraishi.com.sa") is ours too, even when no user or mailbox
             // writes from it: the learner already refused it, and a legacy row on it linked here.
-            if (TenantSelfIdentity.IsOurs(domain, evidence.TenantSelfDomains, selfNames)) return;
+            //
+            // THE NAMES THAT MAKE A DOMAIN OURS ARE THE TENANT'S CONFIGURED NAMES, NOT THE VENDOR BLOCK
+            // THIS DOCUMENT PRINTS. The vendor block is an extraction, and extractions misread: a Marafiq
+            // RFQ whose vendor field came out as "MARAFIQ" made marafiq.com.sa "ours", threw away the
+            // buyer's registered address and domain, and a lead that linked at 1.00 went UNRESOLVED. The
+            // same with "Saudi Aramco" read into that field and aramco.com. A misread vendor block still
+            // cannot become a customer name (selfNames keeps it for that); it just cannot delete a sender.
+            //
+            // AND THE VENDOR BLOCK WHERE IT IS A SPELLING OF THOSE NAMES, exactly as routing, the corpus loader and
+            // the learner ask (TenantSelfIdentity.DomainSelfNames through the evidence overload). This Guard read
+            // the configured names alone while routing added "ALI ZAID AL-QURAISHI & PARTNERS ESOSA": mail from
+            // esosa.com linked SEC here at 0.95 on SEC's Domain row, and routing refused the same row as ours and
+            // sent the lead to the unassigned queue. One question, one answer.
+            if (TenantSelfIdentity.IsOurs(domain, evidence)) return;
 
             addresses.Add(address);
             // A shared consumer mailbox says nothing about an organisation, and neither does a
@@ -699,8 +863,29 @@ public static class CustomerIdentityResolver
             // address is still evidence (S1). One shared predicate decides, so this tier, the
             // learner and routing cannot disagree about which domains are an organisation's own.
             if (IdentityDomainGuard.IsOrganisationDomain(domain, evidence.TenantSelfDomains))
+            {
                 domains.Add(domain);
+                // Whether a person's mailbox, and not only a system mailbox, speaks for the domain (see S2).
+                if (!IdentityDomainGuard.IsSystemMailbox(address)) personMailboxDomains.Add(domain);
+            }
         }
+    }
+
+    /// <summary>
+    /// A passage's key. <see cref="CustomerNameNormalizer.LooseKey"/> folds initials written with dots ("S.E.C.")
+    /// into single letters ("S E C"), which no name or initials key contains, so SEC's own company-name field
+    /// stopped linking once the taught alias "S E C" was refused as naming nobody (0.90 at base, NO_MATCH after).
+    /// A key made only of two or more single letters is those initials run together. LooseKey itself is not
+    /// changed: stored keys depend on it.
+    /// </summary>
+    internal static string PassageKey(string? text)
+    {
+        var key = CustomerNameNormalizer.LooseKey(text);
+        if (key.Length < 3) return key;
+        var tokens = key.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return tokens.Length >= 2 && tokens.All(token => token.Length == 1 && token[0] is >= 'A' and <= 'Z')
+            ? string.Concat(tokens)
+            : key;
     }
 
     private static bool MatchesPerson(CustomerContactSnapshot contact, string buyerPersonKey)
@@ -855,6 +1040,11 @@ public static class CustomerIdentityResolver
     /// For a passage hit: the name came from a row the learner wrote, so it is checked again against
     /// the customers on the books before it may decide anything (see TaughtNameGivesWay in Resolve).
     /// </param>
+    /// <param name="WrittenWords">
+    /// For a passage hit on a customer name made only of generic words: every word of that name as it is
+    /// written, legal forms aside ("ARABIAN GULF INTERNATIONAL"). The page had to write all of them for the
+    /// hit to exist, and a run on into any other word is read as another company. Null for every other hit.
+    /// </param>
     private sealed record Hit(
         long CustomerId,
         decimal Confidence,
@@ -863,10 +1053,78 @@ public static class CustomerIdentityResolver
         string MatchedKey = "",
         int PassageIndex = -1,
         bool OneWordName = false,
-        bool Taught = false);
+        bool Taught = false,
+        IReadOnlyList<string>? WrittenWords = null);
 
     /// <summary>A name the passage scan looks for, and what kind of name it is.</summary>
-    private sealed record NameToFind(long CustomerId, string Key, string Display, bool Initials, bool OneWordName, bool Taught);
+    private sealed record NameToFind(
+        long CustomerId, string Key, string Display, bool Initials, bool OneWordName, bool Taught,
+        IReadOnlyList<string>? WrittenWords = null)
+    {
+        /// <summary>The key between spaces, built once, so matching it against each padded passage key allocates nothing.</summary>
+        public string PaddedKey { get; } = " " + Key + " ";
+
+        /// <summary>The key's first word, which must be a whole word of the page for the name to be anywhere on it.</summary>
+        public string FirstWord { get; } = Key.Split(' ', 2)[0];
+    }
+
+    /// <summary>Fewest written words a generic-only customer name needs before the scan reads it.</summary>
+    private const int MinimumWrittenGenericNameWords = 3;
+
+    /// <summary>Shortest a generic-only customer name may be, written out, before the scan reads it.</summary>
+    private const int MinimumWrittenGenericNameLength = 15;
+
+    /// <summary>
+    /// The words of a customer name made only of generic words, as it is written, with a leading article and
+    /// the legal-form words taken off: "Arabian Gulf International Company" is ARABIAN GULF INTERNATIONAL.
+    /// Null when that is fewer than <see cref="MinimumWrittenGenericNameWords"/> words or shorter than
+    /// <see cref="MinimumWrittenGenericNameLength"/> characters, which is too little to be anybody's name.
+    /// </summary>
+    private static IReadOnlyList<string>? WrittenNameWords(string spelling)
+    {
+        var words = PassageWords(spelling).Select(word => word.Key).ToList();
+        if (words.Count > 1 && LeadingArticleWords.Contains(words[0])) words.RemoveAt(0);
+        words.RemoveAll(LegalFormWords.Contains);
+        return words.Count >= MinimumWrittenGenericNameWords
+               && string.Join(' ', words).Length >= MinimumWrittenGenericNameLength
+            ? words
+            : null;
+    }
+
+    /// <summary>Whether the passage writes these words one after another, inside one field.</summary>
+    private static bool WritesTheNameInFull(string passageText, IReadOnlyList<string> writtenWords)
+    {
+        var words = PassageWords(passageText);
+        for (var start = 0; start + writtenWords.Count <= words.Count; start++)
+        {
+            var matched = 0;
+            while (matched < writtenWords.Count
+                   && string.Equals(words[start + matched].Key, writtenWords[matched], StringComparison.Ordinal)
+                   && (matched == 0 || !words[start + matched].BreakBefore))
+                matched++;
+            if (matched == writtenWords.Count) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The initials of the first two words of a name, articles and joining words aside: "General Electric Saudi
+    /// Arabia" is GE. Empty when the name has fewer than two such words.
+    /// </summary>
+    private static string LeadingTwoWordInitials(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+        var words = PassageWords(name)
+            .Select(word => word.Key)
+            .Where(key => key.Length > 0 && key[0] is >= 'A' and <= 'Z')
+            .ToList();
+        if (words.Count > 1 && LeadingArticleWords.Contains(words[0])) words.RemoveAt(0);
+        words.RemoveAll(InitialsJoiningWords.Contains);
+        return words.Count < 2 ? string.Empty : string.Concat(words[0][0], words[1][0]);
+    }
+
+    /// <summary>Words that never give a letter to a name's initials.</summary>
+    private static readonly HashSet<string> InitialsJoiningWords = new(StringComparer.Ordinal) { "AND", "OF", "THE", "FOR" };
 
     /// <summary>
     /// One statement off the document, already normalised. It carries the ROLE and not the old
@@ -887,7 +1145,8 @@ public static class CustomerIdentityResolver
         string? PortalAccountKey,
         string BuyerPersonKey,
         IReadOnlyList<GuardedPassage> Passages,
-        HashSet<string> SelfNameKeys)
+        HashSet<string> SelfNameKeys,
+        HashSet<string> PersonMailboxDomains)
     {
         public bool IsEmpty =>
             Addresses.Count == 0 && Domains.Count == 0 && AccountReferences.Count == 0 &&
@@ -905,6 +1164,56 @@ public static class CustomerIdentityResolver
     /// was, and the lead linked to Aramco. The bracket alone is not scanned: "(Riyadh)" or "(Branch)"
     /// is as often a note as a trade name.
     /// </summary>
+    /// <summary>What the passage tier reads off one spelling of a customer's name.</summary>
+    /// <param name="Key">The spelling's <see cref="CustomerNameNormalizer.LooseKey"/>, never empty.</param>
+    /// <param name="Scannable">One word of four characters or more that is not an ordinary word, or two words and eight characters.</param>
+    /// <param name="Distinctive">Scannable, and at least one word names one company (<see cref="CustomerNameDistinctiveness"/>).</param>
+    /// <param name="WrittenWords">For a scannable name of several generic words only: its words as written (<see cref="WrittenNameWords"/>).</param>
+    private sealed record SpellingFacts(string Key, bool Scannable, bool Distinctive, IReadOnlyList<string>? WrittenWords);
+
+    /// <summary>What the passage tier reads off one customer name: its spellings and its derived initials.</summary>
+    private sealed record NameFacts(string Initials, IReadOnlyList<SpellingFacts> Spellings);
+
+    /// <summary>
+    /// Name facts already worked out, by the exact name as recorded. Every fact is a pure function of the name, so a
+    /// remembered one is the same answer whichever tenant or lead asks. Above the name-scan cap the passage tier and the
+    /// corpus loader read thousands of customer names on every lead, and folding each of them several times over was
+    /// most of the time a resolution took (the PERF finding). Bounded, and simply emptied when full.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, NameFacts> RememberedNameFacts = new(StringComparer.Ordinal);
+
+    private const int MaximumRememberedNames = 200_000;
+
+    private static NameFacts FactsOf(string? name)
+    {
+        var raw = name ?? string.Empty;
+        if (RememberedNameFacts.TryGetValue(raw, out var known)) return known;
+
+        var spellings = new List<SpellingFacts>(2);
+        foreach (var spelling in NameSpellings(raw))
+        {
+            var key = CustomerNameNormalizer.LooseKey(spelling);
+            if (key.Length == 0) continue;
+            var oneWord = !key.Contains(' ');
+            var scannable = oneWord
+                ? key.Length >= 4 && !CustomerNameNormalizer.IsAmbiguousAcronym(key)
+                : key.Length >= 8;
+            var distinctive = scannable && CustomerNameDistinctiveness.HasDistinctiveToken(key);
+            var written = scannable && !distinctive && !oneWord ? WrittenNameWords(spelling) : null;
+            spellings.Add(new SpellingFacts(key, scannable, distinctive, written));
+        }
+        var facts = new NameFacts(CustomerNameNormalizer.AcronymKey(raw), spellings);
+        if (RememberedNameFacts.Count >= MaximumRememberedNames) RememberedNameFacts.Clear();
+        RememberedNameFacts.TryAdd(raw, facts);
+        return facts;
+    }
+
+    /// <summary>
+    /// <see cref="CustomerNameNormalizer.AcronymKey"/> of a customer name, remembered per name. The corpus loader builds
+    /// its tenant-wide initials index with this, so the loader and the resolver read initials the same way.
+    /// </summary>
+    internal static string DerivedInitials(string? name) => FactsOf(name).Initials;
+
     private static IEnumerable<string> NameSpellings(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) yield break;
@@ -964,7 +1273,7 @@ public static class CustomerIdentityResolver
                     (other.MatchedKey.Length > hit.MatchedKey.Length
                      && ContainsWholeWords(other.MatchedKey, hit.MatchedKey))
                     || (hit.OneWordName && !other.OneWordName && other.CustomerId != hit.CustomerId
-                        && LongerCompanyName(passages[other.PassageIndex].Text, other.MatchedKey) is null));
+                        && LongerCompanyName(passages[other.PassageIndex].Text, other.MatchedKey, other.WrittenWords) is null));
                 if (!shadowed) kept.Add(hit);
             }
         }
@@ -998,7 +1307,12 @@ public static class CustomerIdentityResolver
     ///
     /// Returns the longer name as the page wrote it, or null when the name stands on its own.
     /// </summary>
-    internal static string? LongerCompanyName(string passageText, string nameKey)
+    /// <param name="ownWords">
+    /// For a name made only of generic words: every word of it as written. Then a word LooseKey strips
+    /// that is NOT one of these ("TRADING" after "Arabian Gulf International") is another name word too,
+    /// because for such a name the stripped words are all that tell two companies apart.
+    /// </param>
+    internal static string? LongerCompanyName(string passageText, string nameKey, IReadOnlyList<string>? ownWords = null)
     {
         var name = nameKey.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (name.Length == 0 || string.IsNullOrWhiteSpace(passageText)) return null;
@@ -1024,6 +1338,8 @@ public static class CustomerIdentityResolver
             string? runsOnInto = null;
             var sawAnotherNameWord = false;
             var crossedDash = false;
+            // The words after the name, so a bracket can be asked whether it repeats one or closes a site's name.
+            var runWords = new List<string>();
             for (var index = next; index < words.Count && index < next + MaximumNameRunWords; index++)
             {
                 var word = words[index];
@@ -1037,7 +1353,7 @@ public static class CustomerIdentityResolver
                     // site code ("(RTR)") or the customer's own initials straight after its name ("Saudi
                     // Electricity Company (SEC)") is not.
                     if (word.BracketBefore && sawAnotherNameWord && !crossedDash
-                        && IsBracketedTradeName(passageText, word, out var closesAt))
+                        && IsBracketedTradeName(passageText, word, words[start], runWords, out var closesAt))
                     {
                         runsOnInto = passageText[words[start].Start..closesAt];
                         break;
@@ -1052,6 +1368,7 @@ public static class CustomerIdentityResolver
                     if (!word.DashBefore || crossedDash || sawAnotherNameWord || name.Length < 2) break;
                     crossedDash = true;
                 }
+                runWords.Add(word.Key);
                 if (LegalFormWords.Contains(word.Key))
                 {
                     if (!sawAnotherNameWord) continue;
@@ -1059,7 +1376,15 @@ public static class CustomerIdentityResolver
                     break;
                 }
                 if (word.StopsNameRun) break;
-                if (!IsNoiseWord(word.Key)) sawAnotherNameWord = true;
+                if (IsNoiseWord(word.Key))
+                {
+                    if (ownWords is not null && !ownWords.Contains(word.Key, StringComparer.Ordinal)) sawAnotherNameWord = true;
+                }
+                // A SECTOR WORD SAYS WHAT THE CUSTOMER DOES, NOT WHO ELSE IS NAMED. "Saudi Aramco Oil Company -
+                // Ras Tanura" and "Saudi Aramco Oil Co., Dhahran" are Aramco's own legal name written out, and
+                // read as another company they dropped a correct 0.88 link to a 0.70 offer. Only these few:
+                // CHEMICAL, PETROCHEMICAL and REFINING are real joint-venture name words (SATORP, SADAF).
+                else if (!SectorWords.Contains(word.Key)) sawAnotherNameWord = true;
             }
 
             if (runsOnInto is null) return null;
@@ -1070,6 +1395,12 @@ public static class CustomerIdentityResolver
 
     private const int MaximumNameRunWords = 6;
 
+    /// <summary>Sector words that follow a customer's own name without making it another company's.</summary>
+    private static readonly HashSet<string> SectorWords = new(StringComparer.Ordinal)
+    {
+        "OIL", "GAS", "ELECTRICITY", "ELECTRIC", "POWER", "WATER", "ENERGY"
+    };
+
     /// <summary>Shortest bracketed word read as a trade name; "(RTR)" and "(KSA)" are site and country codes.</summary>
     private const int MinimumBracketedTradeNameLength = 4;
 
@@ -1077,18 +1408,94 @@ public static class CustomerIdentityResolver
     /// Whether the word right after an opening bracket is a trade name closing a company name: capital
     /// letters only, at least <see cref="MinimumBracketedTradeNameLength"/> of them, not an ordinary
     /// address or form word ("(EAST)", "(AREA)"), and immediately closed by the bracket.
+    ///
+    /// AND IT MUST BEGIN WITH THE LETTER THE RUN BEGINS WITH. A trade name abbreviates the name it closes:
+    /// SATORP, SASREF and SAMREF all start with the S of "Saudi". A city or a site code does not: "Saudi
+    /// Electricity Company Main Store (DAMMAM)" and "Saudi Aramco Abqaiq Plants (ABQP)" are the customer's
+    /// own site, and read as another company's trade name they fell from a 0.88 link to a 0.70 offer.
+    /// (A stricter "its letters come in order from the run's initials" test would lose SASREF, which is
+    /// Saudi Aramco Shell Refinery and not spelled by "Saudi Aramco Jubail Refinery".)
     /// </summary>
-    private static bool IsBracketedTradeName(string passageText, PassageWord word, out int closesAt)
+    /// <param name="runWords">The words between the customer's name and the bracket.</param>
+    private static bool IsBracketedTradeName(
+        string passageText, PassageWord word, PassageWord runStart, IReadOnlyList<string> runWords, out int closesAt)
     {
         closesAt = -1;
         var raw = passageText[word.Start..word.End];
         if (raw.Length < MinimumBracketedTradeNameLength || !raw.All(c => c is >= 'A' and <= 'Z')) return false;
+        if (runStart.Key.Length == 0 || raw[0] != runStart.Key[0]) return false;
         if (CustomerNameNormalizer.IsAmbiguousAcronym(raw) || !CustomerNameDistinctiveness.HasDistinctiveToken(raw)) return false;
+        // NOR A SITE'S OWN CODE THAT HAPPENS TO START WITH THE SAME LETTER. Saudi Aramco and SEC sites whose names
+        // begin with S ("Saudi Aramco Shaybah (SHAYBAH)", "Saudi Aramco Shaybah Producing Department (SHYB)",
+        // "Saudi Electricity Company Sudair Substation (SUDAIR)") read as a joint venture's trade name and fell from
+        // an 0.88 link to a 0.70 offer. A bracket that repeats a word already in the run is that place written again,
+        // and a run carrying a site or organisation-unit word (PLANT, DEPARTMENT, SUBSTATION ...) names a site, not a
+        // company. The joint-venture runs this rule exists for ("Total Refining & Petrochemical", "Jubail Refinery",
+        // "Mobil Refinery Company") carry neither.
+        if (runWords.Contains(word.Key, StringComparer.Ordinal) || runWords.Any(SiteUnitWords.Contains)) return false;
         var after = word.End;
         while (after < passageText.Length && passageText[after] == ' ') after++;
         if (after >= passageText.Length || passageText[after] is not (')' or ']')) return false;
         closesAt = after + 1;
         return true;
+    }
+
+    /// <summary>Words that make a run of words after a customer's name a site or a unit of that customer.</summary>
+    private static readonly HashSet<string> SiteUnitWords = new(StringComparer.Ordinal)
+    {
+        "PLANT", "PLANTS", "DEPARTMENT", "DEPT", "OPERATIONS", "OPERATION", "OPERATING", "AREA", "STORE", "STORES",
+        "SUBSTATION", "STATION", "PRODUCING", "FACILITY", "FACILITIES", "SUPPLY", "NGL", "GAS", "POWER", "ONSHORE",
+        "OFFSHORE", "WAREHOUSE", "TERMINAL", "PROCESSING", "BRANCH", "SITE", "YARD"
+    };
+
+    /// <summary>
+    /// Whether one word of a customer's name, read off a mailbox display name, speaks only as a person or a department:
+    /// the display name is that word alone once a leading article and buying-function words are taken off ("Rashid",
+    /// "RASHID", "Dammam Procurement"), or the word is directly followed by a buying function ("Ahmed Rashid,
+    /// Procurement"). Never where the display name is the customer's whole written name ("SABIC Procurement" for a
+    /// customer recorded as SABIC). A fuller person's name ("Rashid Al-Otaibi") is neither, and stays a mention.
+    /// </summary>
+    private static bool OneWordOnTheMailboxIsAPersonOrADepartment(string displayName, string nameKey, string? customerName)
+    {
+        if (MailboxNameIsTheWholeName(displayName, customerName)) return false;
+        var words = PassageWords(displayName).Select(word => word.Key).ToList();
+        if (words.Count > 1 && LeadingArticleWords.Contains(words[0])) words.RemoveAt(0);
+        if (words.Count(word => !LeadCustomerResolutionService.SignatureFunctionWords.Contains(word)) <= 1) return true;
+        var at = words.IndexOf(nameKey);
+        return at >= 0 && at + 1 < words.Count && LeadCustomerResolutionService.SignatureFunctionWords.Contains(words[at + 1]);
+    }
+
+    /// <summary>
+    /// Whether a mailbox display name is a customer's whole written name: the same words, a leading article, legal
+    /// forms and buying-function words aside ("SABIC Procurement" is SABIC; "Rashid" is not "Al-Rashid Trading").
+    /// </summary>
+    private static bool MailboxNameIsTheWholeName(string displayName, string? customerName)
+    {
+        if (string.IsNullOrWhiteSpace(customerName)) return false;
+        var written = OwnWords(displayName, dropFunctionWords: true);
+        return written.Count > 0 && written.SequenceEqual(OwnWords(customerName, dropFunctionWords: false), StringComparer.Ordinal);
+
+        static List<string> OwnWords(string text, bool dropFunctionWords)
+        {
+            var words = PassageWords(text).Select(word => word.Key).ToList();
+            if (words.Count > 1 && LeadingArticleWords.Contains(words[0])) words.RemoveAt(0);
+            words.RemoveAll(LegalFormWords.Contains);
+            if (dropFunctionWords) words.RemoveAll(LeadCustomerResolutionService.SignatureFunctionWords.Contains);
+            return words;
+        }
+    }
+
+    /// <summary>
+    /// Whether a taught one-word name opens an address ("ARAMCO Ras Tanura Refinery"), after an article, and is not a
+    /// place or trade word (<see cref="CustomerAliasLearner.SectorAndPlaceWords"/>), which names a site as often as a company.
+    /// </summary>
+    private static bool TaughtOneWordNameOpensTheAddress(string passageText, string nameKey)
+    {
+        if (CustomerAliasLearner.SectorAndPlaceWords.Contains(nameKey)) return false;
+        var words = PassageWords(passageText);
+        var index = 0;
+        if (index < words.Count && LeadingArticleWords.Contains(words[index].Key)) index++;
+        return index < words.Count && string.Equals(words[index].Key, nameKey, StringComparison.Ordinal);
     }
 
     /// <summary>Articles that can stand in front of a name at the start of a sentence ("Al Marafiq", "The SABIC").</summary>
@@ -1242,7 +1649,33 @@ public static class CustomerIdentityResolver
         private readonly HashSet<long> _nameOwners;
         private readonly IReadOnlyList<DomainTie> _domainTies;
 
-        private sealed record DomainTie(string Domain, long CustomerId, string Why);
+        /// <summary>What kind of fact ties a mail domain to a customer, because they are not worth the same.</summary>
+        private enum TieKind
+        {
+            /// <summary>A contact a person entered, or a verified address registered to the customer.</summary>
+            Record,
+            /// <summary>An earlier lead a person resolved, from the very address on this page.</summary>
+            DecisionFromThisMailbox,
+            /// <summary>An earlier lead a person resolved, from a different address on the same domain.</summary>
+            DecisionFromAnotherMailbox,
+            /// <summary>The organisation the sender's mailbox is signed with.</summary>
+            Signature
+        }
+
+        /// <param name="Address">For a decision: the address the earlier lead came from or printed.</param>
+        /// <param name="SignatureWords">For a signature: its distinctive words.</param>
+        private sealed record DomainTie(
+            string Domain, long CustomerId, string Why, TieKind Kind,
+            string Address = "", IReadOnlyList<string>? SignatureWords = null)
+        {
+            public bool IsDecision => Kind is TieKind.DecisionFromThisMailbox or TieKind.DecisionFromAnotherMailbox;
+        }
+
+        /// <summary>
+        /// Distinct addresses on one domain that must carry a person's decisions, all for the same other
+        /// customer, before those decisions speak for the domain on a page from a different address.
+        /// </summary>
+        private const int MailboxesThatMakeADecisionTheDomains = 2;
 
         private PageIdentityClaims(string? buyerNameOnDocument, HashSet<long> nameOwners, IReadOnlyList<DomainTie> domainTies)
         {
@@ -1296,21 +1729,40 @@ public static class CustomerIdentityResolver
                     if (!SameDomain(contact.Email, domain)) continue;
                     var who = $"{contact.FirstName} {contact.LastName}".Trim();
                     if (who.Length == 0) who = contact.Email!.Trim();
-                    ties.Add(new DomainTie(domain, contact.CustomerId, $"{who}, a contact on {NameOf(contact.CustomerId)}, writes from it"));
+                    ties.Add(new DomainTie(domain, contact.CustomerId, $"{who}, a contact on {NameOf(contact.CustomerId)}, writes from it", TieKind.Record));
                 }
+                // AN EARLIER DECISION IS A FACT ABOUT ONE MAILBOX. Read as a fact about the whole domain, one
+                // person-linked lead from 59000@se.com.sa to Saudi Aramco demoted every later SEC print from
+                // 57322@se.com.sa to 0.70 and ranked Aramco FIRST, so one mis-click steered the next rep into
+                // repeating it. The kind is kept here; CompetesWith decides what a decision may say.
+                //
+                // NOT A SYSTEM MAILBOX'S. no-reply@etimad.gov.sa carries every buyer's tender on that portal, so a
+                // person linking the Aramco job it carried says who that job was for, not who the mailbox is. Read
+                // as "this mailbox's decision", one Aramco pick demoted the next SEC print through the same relay
+                // to 0.70. The mailbox names nobody (IdentityDomainGuard.IsSystemMailbox), which is why S1 will not
+                // match a learned row on it either.
                 foreach (var prior in corpus.PriorSenderResolutions)
-                    if (SameDomain(prior.SenderEmail, domain))
+                    if (SameDomain(prior.SenderEmail, domain) && !IdentityDomainGuard.IsSystemMailbox(prior.SenderEmail))
+                    {
+                        var address = prior.SenderEmail.Trim().ToLowerInvariant();
                         ties.Add(new DomainTie(domain, prior.CustomerId,
-                            $"an earlier lead from {prior.SenderEmail} was resolved to {NameOf(prior.CustomerId)} by a person"));
+                            $"an earlier lead from {prior.SenderEmail} was resolved to {NameOf(prior.CustomerId)} by a person",
+                            guarded.Addresses.Contains(address) ? TieKind.DecisionFromThisMailbox : TieKind.DecisionFromAnotherMailbox,
+                            address));
+                    }
                 foreach (var identifier in corpus.Identifiers)
                     // Only a fact ties: the same test S1 applies, and the one the learner uses for
                     // "another customer already writes from this domain".
+                    // S1 also refuses a row nobody entered on a system mailbox (MayMatchExactAddress), and so must
+                    // this: a learned no-reply@etimad.gov.sa on Aramco matched nothing at S1 and still demoted an SEC
+                    // print through the same relay to 0.70, with Aramco ranked first.
                     if (identifier.IdentifierType == CustomerIdentifierType.Email
                         && identifier.IsVerified
                         && !IsUnverifiedLearned(identifier)
+                        && IdentityDomainGuard.MayMatchExactAddress(identifier.NormalizedValue, identifier.Source)
                         && SameDomain(identifier.NormalizedValue, domain))
                         ties.Add(new DomainTie(domain, identifier.CustomerId,
-                            $"{identifier.NormalizedValue} is registered to {NameOf(identifier.CustomerId)}"));
+                            $"{identifier.NormalizedValue} is registered to {NameOf(identifier.CustomerId)}", TieKind.Record));
             }
 
             // THE ORGANISATION THE SENDER'S MAILBOX IS SIGNED WITH (#14). Hyundai E&C mails from hdec.com
@@ -1319,14 +1771,27 @@ public static class CustomerIdentityResolver
             // never offered. The mailbox says "Hyundai E&C Procurement". When that signature, on the
             // sender's own organisation domain, reads as exactly one customer by the learner's name tiers,
             // it ties the domain to that customer like a contact would. It can only demote a consignee and
-            // offer the writer; a signature that reads as the consignee itself changes nothing.
-            if (!string.IsNullOrWhiteSpace(evidence.SenderOrganisationName))
+            // offer the writer. It is never the consignee's OWN tie (see CompetesWith): an EPC project mailbox
+            // signed "Saudi Aramco Procurement" at hdec.com is still Hyundai's mailbox, and it must not
+            // outvote Hyundai's real contact there.
+            //
+            // A SIGNATURE MADE ONLY OF PLACE OR TRADE WORDS IS A BRANCH OR A DEPARTMENT, NOT AN ORGANISATION (T27). SEC's
+            // own "Jubail Procurement <procurement@se.com.sa>" signs "Jubail", which reads as "Jubail Trading Est", and
+            // "Dammam Procurement" reads as "Al Dammam Trading Co.". The containment rule in CompetesWith spared such a
+            // signature only where the address repeated its city, so with "Saudi Electricity Company - Riyadh PP9
+            // Substation" in the address the trading house was ranked first and SEC's own site fell to 0.70 (base
+            // linked it at 0.88). A signature whose every distinctive word is a place or trade word
+            // (CustomerAliasLearner.SectorAndPlaceWords) ties nothing. "Hyundai E&C" still does.
+            var signatureWords = CustomerNameDistinctiveness.DistinctiveTokens(evidence.SenderOrganisationName);
+            if (signatureWords.Any(word => !CustomerAliasLearner.SectorAndPlaceWords.Contains(word)))
             {
                 var senderDomain = RoutingValueNormalizer.DomainFromEmail(evidence.SenderEmail?.Trim().ToLowerInvariant());
                 if (!string.IsNullOrWhiteSpace(senderDomain) && guarded.Domains.Contains(senderDomain)
                     && readings().ReadsAsExactlyOne(evidence.SenderOrganisationName!) is { } signer)
                     ties.Add(new DomainTie(senderDomain, signer,
-                        $"the mailbox is signed \"{evidence.SenderOrganisationName!.Trim()}\", which reads as {NameOf(signer)}"));
+                        $"the mailbox is signed \"{evidence.SenderOrganisationName!.Trim()}\", which reads as {NameOf(signer)}",
+                        TieKind.Signature,
+                        SignatureWords: CustomerNameDistinctiveness.DistinctiveTokens(evidence.SenderOrganisationName)));
             }
 
             return new PageIdentityClaims(
@@ -1344,9 +1809,11 @@ public static class CustomerIdentityResolver
         /// What on this page names a different customer as the buyer, in the words a rep would use,
         /// or null when nothing does.
         /// </summary>
+        /// <param name="consigneePassageKey">The key of the passage that names this consignee.</param>
         public Competition? CompetesWith(
             long customerId,
             string customerName,
+            string consigneePassageKey,
             IReadOnlyList<Hit> headerStatements,
             IReadOnlyList<GuardedPassage> passages,
             IReadOnlyDictionary<long, string> names,
@@ -1369,19 +1836,62 @@ public static class CustomerIdentityResolver
                     []);
 
             // A domain speaks against this consignee only when it is tied to somebody else and to
-            // nobody on this customer's own records.
-            if (_domainTies.Count == 0 || _domainTies.Any(tie => tie.CustomerId == customerId)) return null;
-            var rival = _domainTies[0];
+            // nobody on this customer's own records. A signature is never one of those records: it may
+            // add a rival, it never shields the consignee (an EPC mailbox signed with the site owner's
+            // name is still the contractor's mailbox).
+            if (_domainTies.Any(tie => tie.CustomerId == customerId && tie.Kind != TieKind.Signature)) return null;
+            var rivals = _domainTies.Where(tie => tie.CustomerId != customerId && Speaks(tie)).ToList();
+            if (rivals.Count == 0) return null;
+            var rival = rivals[0];
             // The organisation actually writing is offered too, ranked above the site owner: on an
             // EPC enquiry it is the buyer, and a rep shown only the consignee would pick the wrong one.
-            var offers = _domainTies
+            // Not where earlier decisions are all that speak: they are what a person chose before, and a
+            // rep shown the earlier pick first repeats it, so it is offered below the named consignee.
+            var offers = rivals
                 .GroupBy(tie => tie.CustomerId)
-                .Select(group => group.First())
-                .Select(tie => new Hit(tie.CustomerId, policy.ShipToDemotedConfidence,
-                    CustomerMatchReasonCodes.SenderDomain,
-                    $"This document is from {tie.Domain}, and {tie.Why}."))
+                .Select(group =>
+                {
+                    var onlyDecisions = group.All(tie => tie.IsDecision);
+                    var strongest = group.FirstOrDefault(tie => !tie.IsDecision) ?? group.First();
+                    return onlyDecisions
+                        ? new Hit(group.Key, Math.Min(policy.PriorSenderSuggestionConfidence, policy.ShipToDemotedConfidence),
+                            CustomerMatchReasonCodes.PriorSender,
+                            $"This document is from {strongest.Domain}, and {WhyOf(strongest)}.")
+                        : new Hit(group.Key, policy.ShipToDemotedConfidence,
+                            CustomerMatchReasonCodes.SenderDomain,
+                            $"This document is from {strongest.Domain}, and {WhyOf(strongest)}.");
+                })
                 .ToList();
-            return new Competition($"But this document is from {rival.Domain}, which is not {customerName}: {rival.Why}.", offers);
+            return new Competition($"But this document is from {rival.Domain}, which is not {customerName}: {WhyOf(rival)}.", offers);
+
+            bool Speaks(DomainTie tie) => tie.Kind switch
+            {
+                // A MAILBOX SIGNED WITH A WORD THE ADDRESS ALREADY SAYS IS DESCRIBING THE SITE, NOT NAMING A
+                // BUYER. SEC's own department mailbox "Dammam Procurement <procurement@se.com.sa>" is signed
+                // "Dammam", which reads as "Al Dammam Trading Co.", and that tie demoted lead 680's own
+                // "Saudi Electricity Company-DAMMAM" to 0.70 with the trading house ranked first. When every
+                // distinctive word of the signature is already in the consignee's own passage, the signature
+                // adds nothing the address did not say. "Hyundai E&C" is not in "Saudi Aramco Ras Tanura
+                // Refinery", so the contractor's signature still speaks.
+                TieKind.Signature => !(tie.SignatureWords ?? []).All(word => ContainsWholeWords(consigneePassageKey, word)),
+                // Another mailbox's decision speaks for the domain only when at least two different addresses
+                // on it carry decisions and every one of them chose this rival.
+                TieKind.DecisionFromAnotherMailbox => DecisionsOn(tie.Domain) is var decisions
+                                                      && decisions.All(decision => decision.CustomerId == tie.CustomerId)
+                                                      && decisions.Select(decision => decision.Address).Distinct(StringComparer.Ordinal).Count()
+                                                         >= MailboxesThatMakeADecisionTheDomains,
+                _ => true
+            };
+
+            List<DomainTie> DecisionsOn(string domain)
+                => _domainTies.Where(tie => tie.IsDecision && string.Equals(tie.Domain, domain, StringComparison.Ordinal)).ToList();
+
+            string WhyOf(DomainTie tie)
+            {
+                if (tie.Kind != TieKind.DecisionFromAnotherMailbox) return tie.Why;
+                var addresses = DecisionsOn(tie.Domain).Select(decision => decision.Address).Distinct(StringComparer.Ordinal).ToList();
+                return $"earlier leads from {string.Join(" and ", addresses)} were each resolved to {NameOf(tie.CustomerId)} by a person";
+            }
 
             string NameOf(long id) => names.TryGetValue(id, out var name) ? name : $"Customer #{id}";
         }

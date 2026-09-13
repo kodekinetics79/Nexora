@@ -271,12 +271,25 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         // — and this method kept the address and discarded the words in front of it. It is kept
         // now, and SenderDisplayName decides what it is allowed to say: read after the tenant's
         // own domains are known, because a rep forwarding a bid puts OUR name on it.
-        var selfNames = new List<string>();
-        if (!string.IsNullOrWhiteSpace(businessUnitName)) selfNames.Add(businessUnitName!);
+        //
+        // WHO "WE" ARE IS TWO LISTS, AND THEY ARE NOT THE SAME LIST (T09c). The tenant's configured
+        // name says which MAILBOXES are ours: a domain that spells it is a colleague's. The vendor block
+        // the document prints says which NAMES are ours, and nothing about addresses, because it is read
+        // off the page by an extractor that can be wrong. Both lived in one list, and that list became
+        // the evidence's TenantSelfNameKeys and the self test on the envelope: a Marafiq RFQ whose vendor
+        // block was misread as "MARAFIQ" made marafiq.com.sa "ours", so buyer@marafiq.com.sa, registered
+        // on Marafiq, resolved to NO_EVIDENCE where the same message with the field empty linked at 1.00.
+        // The vendor block still reaches the resolver on its own field, which suppresses it as a name.
+        // The vendor block still counts for addresses where it IS a spelling of the configured name
+        // (TenantSelfIdentity.DomainSelfNames), the one rule routing, the resolver's Guard and the learner ask.
+        var tenantNames = new List<string>();
+        if (!string.IsNullOrWhiteSpace(businessUnitName)) tenantNames.Add(businessUnitName!);
+        var domainSelfNames = TenantSelfIdentity.DomainSelfNames(tenantNames, lead.SupplierNameOnDocument);
+        var selfNames = new List<string>(tenantNames);
         if (!string.IsNullOrWhiteSpace(lead.SupplierNameOnDocument)) selfNames.Add(lead.SupplierNameOnDocument!);
 
-        var envelope = SenderDisplayName(ingestFrom, tenantSelfDomains, selfNames);
-        if (envelope.Name is null) envelope = SenderDisplayName(lead.Clientemail, tenantSelfDomains, selfNames);
+        var envelope = SenderDisplayName(ingestFrom, tenantSelfDomains, domainSelfNames);
+        if (envelope.Name is null) envelope = SenderDisplayName(lead.Clientemail, tenantSelfDomains, domainSelfNames);
         var senderDisplayName = envelope.Name;
 
         // The direction-of-trade firewall, applied to the two passages that come off the
@@ -295,8 +308,8 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             ingestSubject = null;
 
         // The organisation the mailbox is signed with, read by the same rules as the display name.
-        var senderOrganisation = SenderOrganisationName(ingestFrom, tenantSelfDomains, selfNames)
-                                 ?? SenderOrganisationName(lead.Clientemail, tenantSelfDomains, selfNames);
+        var senderOrganisation = SenderOrganisationName(ingestFrom, tenantSelfDomains, domainSelfNames)
+                                 ?? SenderOrganisationName(lead.Clientemail, tenantSelfDomains, domainSelfNames);
         if (SelfIdentityGuard.IsSelfName(CustomerNameNormalizer.LooseKey(senderOrganisation), selfNameKeys))
             senderOrganisation = null;
 
@@ -322,7 +335,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             BuyerPersonName = lead.BuyersName,
             SenderOrganisationName = senderOrganisation,
             Passages = Passages(lead, senderDisplayName, ingestSubject, envelope.Role),
-            TenantSelfNameKeys = selfNames,
+            TenantSelfNameKeys = tenantNames,
             TenantSelfDomains = tenantSelfDomains
         };
     }
@@ -414,19 +427,20 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     /// site, but a consignee is a fact about delivery and not about who is paying — see
     /// <see cref="PassageRole.ShipTo"/>.
     ///
-    /// "End user", "Client", "Customer" and "Project owner" live here and not among the headers.
-    /// On an EPC contractor's requisition those columns name the project owner: Hyundai E&amp;C
-    /// mails from hdec.com and prints "End User: Saudi Aramco" on every line. As a header that
-    /// cell skipped the consignee check and linked the lead to Aramco at 0.88; the same page
-    /// without the column was correctly offered at 0.70 with "this document is from hdec.com".
-    /// As a ship-to it is still link strength on the buyer's own print, where nothing on the page
-    /// names anybody else.
+    /// "END USER", "CLIENT", "CUSTOMER" AND "PROJECT OWNER" ARE NOT HERE, AND NOT AMONG THE HEADERS.
+    /// On a contractor's requisition those columns name the project owner, not a party the goods go
+    /// to or the party paying. As a header (#10) "End User: Saudi Aramco" on Hyundai E&amp;C's hdec.com
+    /// requisition skipped the consignee check and linked Aramco at 0.88. As a ship-to (T10) it was
+    /// still link strength: Al-Babtain delivering to its own yard with "Client: Saudi Electricity
+    /// Company" on the line put SEC beside Al-Babtain at 0.88 and the lead went AMBIGUOUS, where the
+    /// yard alone links Al-Babtain. They are item text: offered to a rep, never linking and never
+    /// demoting. A label that also says where the goods go ("Ship-to customer", "Customer plant",
+    /// "End user site") is still a ship-to by that word.
     /// </summary>
     private static readonly string[] ShipToLabelWords =
     [
         "location", "deliver", "ship", "site", "plant", "consignee", "receiving", "warehouse",
-        "depot", "substation", "works", "area", "region",
-        "end user", "enduser", "client", "customer", "project owner"
+        "depot", "substation", "works", "area", "region"
     ];
 
     /// <summary>
@@ -532,7 +546,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         // apart. The subject is written by a person too, but it as often names a third party as
         // the sender ("re: Aramco spec for your SEC bid"), so it is worth no more than any other
         // incidental mention.
-        Add("the name on the sender's mailbox", senderDisplayName, senderDisplayNameRole);
+        Add(DocumentPassage.SenderDisplayNameWhere, senderDisplayName, senderDisplayNameRole);
         Add("the e-mail subject", emailSubject, PassageRole.ItemText);
         Add("delivery address", lead.DeliveryLocation, PassageRole.ShipTo);
         foreach (var item in lead.LeadItems ?? [])
@@ -614,8 +628,10 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     /// (<see cref="TenantSelfIdentity.LoadSelfDomainsAsync"/>).
     /// </param>
     /// <param name="tenantSelfNames">
-    /// The tenant's own names (business unit, the document's vendor block). A domain whose name spells
-    /// one of them is ours too (<see cref="TenantSelfIdentity.IsOurs(string?, IEnumerable{string}?, IEnumerable{string?}?)"/>),
+    /// The tenant's configured names (the business unit's), and the document's vendor block only where it
+    /// is a spelling of one of them (<see cref="TenantSelfIdentity.DomainSelfNames"/>). Never the vendor block
+    /// as extracted: a misread one made the buyer's own domain ours (T09c). A domain whose
+    /// name spells one of them is ours too (<see cref="TenantSelfIdentity.IsOurs(string?, IEnumerable{string}?, IEnumerable{string?}?)"/>),
     /// which is how the resolver's Guard now reads it; without them this answered from the domain list
     /// alone and a colleague with no Nexora login still put his name on the page.
     /// </param>
@@ -660,7 +676,11 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         if (name is null || role != PassageRole.ItemText) return null;
         var domain = RoutingValueNormalizer.DomainFromEmail(ParseAddress(from));
         if (!IdentityDomainGuard.IsOrganisationDomain(domain, selfDomains)) return null;
-        if (LooksLikeAPersonsName(name)) return null;
+        // ONE WORD STILL SIGNS HERE (T04). The one-word person reading exists for the relay header,
+        // where the error is a link. A signature can only demote a consignee and offer the writer, so the
+        // error on this side is the opposite one: "Hyundai <procurement@hdec.com>" read as a person would
+        // let Aramco link on its site address at 0.88. A doubtful word keeps asking a person.
+        if (LooksLikeAPersonsName(name) && !IsOneWord(name)) return null;
 
         var kept = name
             .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -674,7 +694,7 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     /// own name is left. Narrower than <see cref="OrganisationNameWords"/> on purpose: SERVICES, SUPPLY,
     /// SYSTEM or NETWORK are part of many company names ("Aramco Services Company") and stay on.
     /// </summary>
-    private static readonly HashSet<string> SignatureFunctionWords = new(StringComparer.Ordinal)
+    internal static readonly HashSet<string> SignatureFunctionWords = new(StringComparer.Ordinal)
     {
         "PROCUREMENT", "PURCHASING", "PURCHASE", "TENDER", "TENDERS", "TENDERING", "SOURCING",
         "CONTRACTS", "CONTRACTING", "BIDS", "BIDDING", "RFQ", "RFP", "NOTIFICATION", "NOTIFICATIONS",
@@ -717,12 +737,19 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     /// <summary>
     /// Whether a mailbox display name reads as a person rather than an organisation.
     ///
-    /// Two shapes are a person. "Rashid Al-Otaibi via Coupa" — a portal names the individual who
-    /// acted through it. And a Firstname Lastname shape: two to four words made only of letters
-    /// (hyphen, apostrophe and dot allowed inside), none of them an organisation word and none an
-    /// acronym written in capitals inside a mixed-case name ("SEC Procurement"). A single word
-    /// ("SABIC"), anything with a digit or an ampersand ("Hyundai E&amp;C"), and five words or
-    /// more are not a person's name.
+    /// Three shapes are a person. "Rashid Al-Otaibi via Coupa" — a portal names the individual who
+    /// acted through it. A Firstname Lastname shape: two to four words made only of letters (hyphen,
+    /// apostrophe and dot allowed inside), none of them an organisation word and none an acronym
+    /// written in capitals inside a mixed-case name ("SEC Procurement"). And ONE word in mixed case
+    /// made only of letters with no organisation word in it ("Rashid", "Al-Rashid").
+    ///
+    /// THE ONE WORD (T04). A single word was never a person, so "Rashid &lt;noreply@ansmtp.ariba.com&gt;"
+    /// was a relay header, and "Rashid" is the whole one-word key of Al-Rashid Trading: the header was
+    /// the statement, and the lead linked to the trading house at 0.88 on a buyer's first name. A word
+    /// written entirely in capitals ("SABIC", "SEC") is an organisation's initials and stays one.
+    /// THE COST: a mixed-case one-word trade name on a relay ("Marafiq &lt;...ariba...&gt;") is offered at
+    /// 0.70 instead of linking, and so is any single word in a script with no capitals. Anything with a
+    /// digit or an ampersand ("Hyundai E&amp;C"), and five words or more, are not a person's name.
     /// </summary>
     internal static bool LooksLikeAPersonsName(string? displayName)
     {
@@ -731,7 +758,8 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             (char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (tokens.Any(token => string.Equals(token, "via", StringComparison.OrdinalIgnoreCase)))
             return true;
-        if (tokens.Length is < 2 or > 4) return false;
+        if (tokens.Length == 1) return IsOneWordPersonsName(tokens[0]);
+        if (tokens.Length > 4) return false;
 
         var writtenInCapitals = displayName.Where(char.IsLetter).All(char.IsUpper);
         foreach (var raw in tokens)
@@ -747,6 +775,22 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         }
         return true;
     }
+
+    /// <summary>One word read as a person: see <see cref="LooksLikeAPersonsName"/>.</summary>
+    private static bool IsOneWordPersonsName(string raw)
+    {
+        var token = raw.Trim('.', ',', '(', ')', '"', '\'');
+        if (token.Length == 0) return false;
+        if (!token.All(c => char.IsLetter(c) || c is '-' or '\'' or '.' or '’')) return false;
+        var letters = token.Where(char.IsLetter).ToArray();
+        if (letters.Length == 0 || letters.All(char.IsUpper)) return false;
+        foreach (var part in token.Split(['-', '\'', '.', '’'], StringSplitOptions.RemoveEmptyEntries))
+            if (OrganisationNameWords.Contains(part.ToUpperInvariant())) return false;
+        return true;
+    }
+
+    private static bool IsOneWord(string name)
+        => name.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length == 1;
 
     /// <summary>
     /// RFC-parses an address out of either shape ("Name &lt;a@b&gt;" or "a@b") and lowercases it.
@@ -780,6 +824,9 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .Select(RoutingValueNormalizer.DomainFromEmail)
             // The same domains the resolver's Guard keeps: a relay's, a free-mail provider's or
             // our own Domain row can never match there, so it is not worth a read here.
+            // Ours by the tenant's configured names, and the vendor block only where it spells one of them
+            // (T09c): a vendor block misread as the buyer's name must not keep the buyer's own Domain rows out
+            // of the corpus. The evidence overload, so this loader and the Guard cannot ask two ways.
             .Where(d => IdentityDomainGuard.IsOrganisationDomain(d, evidence.TenantSelfDomains)
                         && !TenantSelfIdentity.IsOurs(d, evidence))
             .Select(d => d!).Distinct().ToArray();
@@ -847,12 +894,26 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
                 if (loadedIdentifierIds.Add(row.Id)) identifiers.Add(row);
         }
 
+        // A domain only a system mailbox on the page reaches is matched only by a Domain row a person entered, the
+        // resolver's S2 rule; the rows it would refuse are not read. See CustomerIdentityResolver's domain tier.
+        var personDomains = addresses
+            .Where(address => !IdentityDomainGuard.IsSystemMailbox(address))
+            .Select(RoutingValueNormalizer.DomainFromEmail)
+            .Where(domain => domain is not null && domains.Contains(domain))
+            .Select(domain => domain!)
+            .Distinct()
+            .ToArray();
+        var systemOnlyDomains = domains.Except(personDomains).ToArray();
+        var enteredByAPerson = CustomerIdentifierSources.EnteredByAPerson;
+
         // The authoritative classes: a value that identifies ONE organisation outright.
         if (addresses.Length + domains.Length + accounts.Length + taxRegistrations.Length > 0)
             await LoadIdentifiersAsync(
                 LiveIdentifiers().Where(i =>
                     (i.IdentifierType == CustomerIdentifierType.Email && addresses.Contains(i.NormalizedValue)) ||
-                    (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)) ||
+                    (i.IdentifierType == CustomerIdentifierType.Domain && personDomains.Contains(i.NormalizedValue)) ||
+                    (i.IdentifierType == CustomerIdentifierType.Domain && systemOnlyDomains.Contains(i.NormalizedValue)
+                     && enteredByAPerson.Contains(i.Source)) ||
                     (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
                     (i.IdentifierType == CustomerIdentifierType.TaxRegistration && taxRegistrations.Contains(i.NormalizedValue))),
                 maxAuthoritativeIdentifiers);
@@ -1064,7 +1125,9 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             var byAcronym = new Dictionary<string, HashSet<long>>(StringComparer.Ordinal);
             foreach (var customer in list)
             {
-                var acronym = CustomerNameNormalizer.AcronymKey(customer.Name);
+                // The resolver's remembered initials: the same AcronymKey, worked out once per name, because above
+                // the cap this reads every customer in the tenant on every lead.
+                var acronym = CustomerIdentityResolver.DerivedInitials(customer.Name);
                 if (acronym.Length == 0) continue;
                 if (!byAcronym.TryGetValue(acronym, out var owners))
                     byAcronym[acronym] = owners = [];
@@ -1211,6 +1274,21 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         return contacts;
     }
 
+    /// <summary>
+    /// Every status <see cref="LeadCustomerMatchStatuses.IsHumanDecided"/> accepts, as a list SQL can
+    /// filter on. The prior-sender reads capped FIRST and kept human decisions after (T08): on a domain
+    /// with 205 newer machine links, the consignee's own older human decision fell past the cap, its tie
+    /// was lost, and a sibling's contact demoted it. Filtering in the WHERE makes the cap count only rows
+    /// that can be evidence.
+    /// </summary>
+    internal static readonly string[] HumanDecidedStatuses =
+    [
+        LeadCustomerMatchStatuses.Confirmed,
+        LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved,
+        "CUSTOMER_CONFIRMED",
+        "VERIFIED"
+    ];
+
     private async Task<List<PriorSenderResolution>> LoadPriorSenderResolutionsAsync(
         long businessUnitId, long leadId, string[] addresses, string[] organisationDomains, CancellationToken ct)
     {
@@ -1230,16 +1308,17 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             var bracketed = atDomain + ">";
             var rows = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
                 .Where(l => l.BusinessUnitId == businessUnitId && l.Id != leadId && l.CustomerId != null
+                            && HumanDecidedStatuses.Contains(l.CustomerMatchStatus)
                             && ((l.Clientemail != null
                                  && (l.Clientemail.ToLower().EndsWith(atDomain) || l.Clientemail.ToLower().EndsWith(bracketed)))
                                 || (l.CustomerBuyerEmailExtracted != null
                                     && (l.CustomerBuyerEmailExtracted.ToLower().EndsWith(atDomain)
                                         || l.CustomerBuyerEmailExtracted.ToLower().EndsWith(bracketed)))))
                 .OrderByDescending(l => l.Id)
-                .Select(l => new { l.Clientemail, l.CustomerBuyerEmailExtracted, CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus })
+                .Select(l => new { l.Clientemail, l.CustomerBuyerEmailExtracted, CustomerId = l.CustomerId!.Value })
                 .Take(CustomerAliasLearner.MaximumDomainEvidenceRead)
                 .ToListAsync(ct);
-            foreach (var row in rows.Where(row => LeadCustomerMatchStatuses.IsHumanDecided(row.CustomerMatchStatus)))
+            foreach (var row in rows)
             {
                 foreach (var raw in new[] { row.Clientemail, row.CustomerBuyerEmailExtracted })
                 {
@@ -1257,22 +1336,22 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     private async Task<List<PriorSenderResolution>> LoadExactPriorSenderResolutionsAsync(
         long businessUnitId, long leadId, string[] addresses, CancellationToken ct)
     {
-
         var rows = await _db.Leads.AsNoTracking().IgnoreQueryFilters()
+            // Only a HUMAN-resolved precedent is worth suggesting from; suggesting from an earlier
+            // machine guess would let one mistake propagate through the corpus. Filtered here, before
+            // the cap, so 200 machine links cannot hide the person's decision (T08).
             .Where(l => l.BusinessUnitId == businessUnitId && l.Id != leadId
                         && l.CustomerId != null && l.Clientemail != null
+                        && HumanDecidedStatuses.Contains(l.CustomerMatchStatus)
                         && addresses.Contains(l.Clientemail.ToLower()))
             // Ordered for the same reason as every other corpus read: an unordered LIMIT lets
             // the database choose which precedents this lead gets to see.
             .OrderBy(l => l.Id)
-            .Select(l => new { Email = l.Clientemail!, CustomerId = l.CustomerId!.Value, l.CustomerMatchStatus })
+            .Select(l => new { Email = l.Clientemail!, CustomerId = l.CustomerId!.Value })
             .Take(200)
             .ToListAsync(ct);
 
-        // Only a HUMAN-resolved precedent is worth suggesting from; suggesting from an
-        // earlier machine guess would let one mistake propagate through the corpus.
         return rows
-            .Where(row => LeadCustomerMatchStatuses.IsHumanDecided(row.CustomerMatchStatus))
             .Select(row => new PriorSenderResolution(row.Email.Trim().ToLowerInvariant(), row.CustomerId))
             .Distinct()
             .ToList();

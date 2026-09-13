@@ -1,6 +1,8 @@
+using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.CustomerResolution;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -214,6 +216,9 @@ public sealed class CustomerIdentityContractsTests
     [InlineData("wp.pl")]
     [InlineData("bigpond.com")]
     [InlineData("optonline.net")]
+    // Sahara Net, a Saudi consumer ISP, was the one provider named on 2026-09-12 still missing.
+    [InlineData("sahara.com")]
+    [InlineData("agent@sahara.com")]
     public void A_consumer_mailbox_provider_is_free_mail(string domain)
     {
         // The list was closed at twenty-one first labels. A freight agent forwarding an SEC bid
@@ -361,6 +366,93 @@ public sealed class CustomerIdentityContractsTests
         Assert.Equal(expected, IdentityDomainGuard.DomainOf(input));
     }
 
+    // ── system mailboxes ─────────────────────────────────────────────────────
+
+    [Theory]
+    // Portal hosts that are not on the relay list, which will never be complete.
+    [InlineData("no-reply@etimad.gov.sa")]
+    [InlineData("do_not_reply@coupa.com")]
+    [InlineData("noreply@tenders.example.org")]
+    [InlineData("NoReply@Aramco.com")]
+    [InlineData("donotreply@se.com.sa")]
+    [InlineData("do-not-reply@sabic.com")]
+    [InlineData("no_reply@marafiq.com.sa")]
+    [InlineData("notification@tenders.example.net")]
+    [InlineData("notifications@supplier.coupa.com")]
+    [InlineData("mailer-daemon@hdec.com")]
+    [InlineData("ordersender-prod@ansmtp.ariba.com")]
+    [InlineData("ordersender@unlisted-network.com")]
+    [InlineData("Etimad <no-reply@etimad.gov.sa>")]
+    public void A_system_mailbox_nobody_registered_never_matches_as_an_exact_address(string address)
+    {
+        // A learned no-reply@etimad.gov.sa row on Aramco decided at S1 at 1.00 and routed there, whatever
+        // company the page named, because only LISTED relay hosts refused learned rows.
+        Assert.True(IdentityDomainGuard.IsSystemMailbox(address));
+        Assert.False(IdentityDomainGuard.MayMatchExactAddress(address, CustomerIdentifierSources.LeadReviewLearned));
+        Assert.False(IdentityDomainGuard.MayMatchExactAddress(address, "MigrationBackfill"));
+        Assert.False(IdentityDomainGuard.MayMatchExactAddress(address, null));
+    }
+
+    [Theory]
+    [InlineData("no-reply@etimad.gov.sa", CustomerIdentifierSources.MasterData)]
+    [InlineData("do_not_reply@coupa.com", "CustomerContact")]
+    [InlineData("ordersender-prod@ansmtp.ariba.com", "CustomerProfile")]
+    [InlineData("noreply@sabic.com", "CustomerImport")]
+    public void A_system_mailbox_a_person_registered_still_matches(string address, string source)
+        => Assert.True(IdentityDomainGuard.MayMatchExactAddress(address, source));
+
+    [Theory]
+    // The WHOLE local part decides, never a substring: these are people and desks.
+    [InlineData("noreply.desk@sabic.com")]
+    [InlineData("procurement.notifications@se.com.sa")]
+    [InlineData("buyer-noreply@aramco.com")]
+    [InlineData("order.sender@aramco.com")]
+    [InlineData("replies@marafiq.com.sa")]
+    [InlineData("buyer.person@gmail.com")]
+    [InlineData("57322@se.com.sa")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void An_ordinary_mailbox_learned_from_a_review_still_matches(string? address)
+    {
+        Assert.False(IdentityDomainGuard.IsSystemMailbox(address));
+        if (!string.IsNullOrEmpty(address))
+            Assert.True(IdentityDomainGuard.MayMatchExactAddress(address, CustomerIdentifierSources.LeadReviewLearned));
+    }
+
+    [Theory]
+    [InlineData("no-reply@etimad.gov.sa")]
+    [InlineData("do_not_reply@coupa.com")]
+    public void A_learned_system_mailbox_on_an_unlisted_portal_host_does_not_decide_the_customer(string mailbox)
+    {
+        const long aramco = 8801, sabic = 8802;
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 17, SenderEmail = mailbox,
+            CustomerCompanyName = "Saudi Basic Industries Corporation",
+            Passages =
+            [
+                new DocumentPassage("company named on the document", "Saudi Basic Industries Corporation", true) { Role = PassageRole.BuyerHeader },
+                new DocumentPassage("delivery address", "Saudi Basic Industries Corporation - Jubail", true)
+            ]
+        };
+        ClientResolutionCorpus Corpus(string source) => new()
+        {
+            Customers = [new(aramco, "Saudi Aramco"), new(sabic, "Saudi Basic Industries Corporation")],
+            Identifiers = [new(1, aramco, CustomerIdentifierType.Email, mailbox, true, 1m, source)]
+        };
+
+        var learned = CustomerIdentityResolver.Resolve(evidence, Corpus(CustomerIdentifierSources.LeadReviewLearned), new CustomerResolutionPolicy());
+        Assert.Equal(sabic, learned.CustomerId);
+        Assert.DoesNotContain(learned.Candidates, c => c.CustomerId == aramco);
+
+        // The same address a person registered on Aramco is still Aramco's exact address.
+        var registered = CustomerIdentityResolver.Resolve(evidence with { CustomerCompanyName = null, Passages = [] },
+            Corpus(CustomerIdentifierSources.MasterData), new CustomerResolutionPolicy());
+        Assert.Equal(aramco, registered.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, registered.ReasonCode);
+        Assert.Equal(1.00m, registered.Confidence);
+    }
+
     // ── identifier sources ───────────────────────────────────────────────────
 
     [Fact]
@@ -426,6 +518,164 @@ public sealed class CustomerIdentityContractsTests
             domains.OrderBy(d => d, StringComparer.Ordinal).ToArray());
         Assert.True(domains.Contains("ALQURAISHI.COM.SA"));   // compared case-insensitively
     }
+
+    [Fact]
+    public void A_staff_domain_a_customer_is_on_record_with_is_not_ours_but_a_mailbox_domain_always_is()
+    {
+        // A demo login zack@kodekinetics.com made kodekinetics.com ours, and Aramco's registered
+        // zahid@kodekinetics.com (1.00) and kodekinetics.com (0.95) were thrown away everywhere.
+        var domains = TenantSelfIdentity.SelfDomainsFrom(
+            ["rfq@alquraishi.com"],
+            ["ahmed@alquraishi.com.sa", "zack@kodekinetics.com", "demo@se.com.sa", "desk@alquraishi.com", "impl@hdec.com"],
+            customerHeldDomains: ["kodekinetics.com", "57322@se.com.sa", "alquraishi.com", "ksa.hdec.com", null, "  "]);
+
+        Assert.Equal(
+            new[] { "alquraishi.com", "alquraishi.com.sa" },
+            domains.OrderBy(d => d, StringComparer.Ordinal).ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_login_on_a_domain_a_person_registered_on_a_customer_is_not_ours(bool requestScoped)
+    {
+        using var db = new TestDb();
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, SelfTenant);
+            Seed.EnsureBusinessUnit(seed, NeighbourTenant);
+            seed.EmailConfigurations.Add(Mailbox(SelfTenant, "rfq@alquraishi.com"));
+            seed.Users.AddRange(
+                StaffUser("ahmed@alquraishi.com.sa", SelfTenant, active: true),   // held only by a LEARNED row: ours
+                StaffUser("zack@kodekinetics.com", SelfTenant, active: true),     // a contact's registered Email: not ours
+                StaffUser("demo@se.com.sa", SelfTenant, active: true),            // an administrator's Email row: not ours
+                StaffUser("consultant@hdec.com", SelfTenant, active: true),       // an active contact alone: not ours
+                StaffUser("desk@alquraishi.com", SelfTenant, active: true),       // the mailbox domain: always ours
+                StaffUser("old@formercustomer.com", SelfTenant, active: true),    // an inactive customer's contact: ours
+                StaffUser("temp@unverified.com", SelfTenant, active: true),       // a row a person unverified: ours
+                StaffUser("staff@expired.com", SelfTenant, active: true),         // an expired row: ours
+                StaffUser("impl@neighbourcustomer.com", SelfTenant, active: true));// another tenant's customer: ours
+            Seed.Customer(seed, 891001, SelfTenant, "Saudi Aramco");
+            Seed.Customer(seed, 891002, SelfTenant, "Saudi Electricity Company");
+            Seed.Customer(seed, 891003, SelfTenant, "Hyundai E&C");
+            Seed.Customer(seed, 891004, SelfTenant, "Former Customer").IsActive = false;
+            Seed.Customer(seed, 892001, NeighbourTenant, "Neighbour's Customer");
+            await seed.SaveChangesAsync();
+
+            Seed.Contact(seed, 891101, SelfTenant, 891003, "  K.Lee@HDEC.com ");
+            Seed.Contact(seed, 891102, SelfTenant, 891004, "buyer@formercustomer.com");
+            seed.Set<CustomerIdentifier>().AddRange(
+                Row(SelfTenant, 891001, CustomerIdentifierType.Email, "zahid@kodekinetics.com", "CustomerContact"),
+                Row(SelfTenant, 891002, CustomerIdentifierType.Email, "57322@se.com.sa", CustomerIdentifierSources.MasterData),
+                Row(SelfTenant, 891002, CustomerIdentifierType.Domain, "alquraishi.com.sa", CustomerIdentifierSources.LeadReviewLearned),
+                Row(SelfTenant, 891002, CustomerIdentifierType.Email, "ahmed@alquraishi.com.sa", "MigrationBackfill"),
+                Row(SelfTenant, 891002, CustomerIdentifierType.Domain, "alquraishi.com", CustomerIdentifierSources.MasterData),
+                Row(SelfTenant, 891001, CustomerIdentifierType.Email, "temp.buyer@unverified.com", CustomerIdentifierSources.MasterData, verified: false),
+                Row(SelfTenant, 891001, CustomerIdentifierType.Domain, "expired.com", CustomerIdentifierSources.MasterData, expired: true),
+                Row(NeighbourTenant, 892001, CustomerIdentifierType.Domain, "neighbourcustomer.com", CustomerIdentifierSources.MasterData));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(requestScoped ? SelfTenant : null);
+        var selfDomains = await TenantSelfIdentity.LoadSelfDomainsAsync(context, SelfTenant);
+
+        Assert.Equal(
+            new[] { "alquraishi.com", "alquraishi.com.sa", "expired.com", "formercustomer.com", "neighbourcustomer.com", "unverified.com" },
+            selfDomains.OrderBy(d => d, StringComparer.Ordinal).ToArray());
+    }
+
+    [Theory]
+    // C11: a demo login on the domain of Aramco's registered contact.
+    [InlineData("zack@kodekinetics.com", "Zahid Khan <zahid@kodekinetics.com>", "zahid@kodekinetics.com", true)]
+    // C11b: a demo login on SEC's own domain; SEC's registered address, and no document text at all.
+    [InlineData("demo@se.com.sa", "57322@se.com.sa", "57322@se.com.sa", false)]
+    public async Task A_login_on_a_customers_registered_domain_does_not_stop_that_customer_resolving(
+        string login, string from, string registered, bool contactAndDomain)
+    {
+        const long tenant = 8930, customer = 893001, leadId = 893011;
+        using var db = new TestDb();
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenant);
+            Seed.Customer(seed, customer, tenant, "Saudi Aramco");
+            seed.Users.Add(StaffUser(login, tenant, active: true));
+            var lead = Seed.Lead(seed, leadId, tenant, buyersName: null);
+            lead.Rfqno = null;
+            lead.Clientemail = registered;
+            seed.EmailIngests.Local.Single(i => i.Id == 20_000 + leadId).FromEmail = from;
+            await seed.SaveChangesAsync();
+
+            seed.Set<CustomerIdentifier>().Add(Row(tenant, customer, CustomerIdentifierType.Email, registered, "CustomerContact"));
+            if (contactAndDomain)
+            {
+                Seed.Contact(seed, 893101, tenant, customer, registered);
+                seed.Set<CustomerIdentifier>().Add(Row(tenant, customer, CustomerIdentifierType.Domain,
+                    IdentityDomainGuard.DomainOf(registered)!, "CustomerContact"));
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(tenant);
+        var stored = await context.Leads.IgnoreQueryFilters()
+            .Include(l => l.LeadItems).Include(l => l.EmailIngests)
+            .SingleAsync(l => l.Id == leadId);
+        var outcome = await new LeadCustomerResolutionService(context).ResolveCoreAsync(tenant, stored, CancellationToken.None);
+
+        Assert.Equal(customer, outcome.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.SenderEmailExact, outcome.ReasonCode);
+        Assert.Equal(1.00m, outcome.Confidence);
+    }
+
+    [Fact]
+    public void The_documents_vendor_block_never_makes_a_buyers_domain_ours()
+    {
+        // C09: the vendor block was read as "MARAFIQ", and marafiq.com.sa became ours: Marafiq's
+        // registered address and domain were thrown away and the lead came back with no customer.
+        var marafiqPrint = new LeadClientEvidence
+        {
+            SupplierNameOnDocument = "MARAFIQ",
+            TenantSelfNameKeys = [CustomerNameNormalizer.LooseKey("ALI ZAID AL-QURAISHI & PARTNERS")],
+            TenantSelfDomains = ["rfq@alquraishi.com"]
+        };
+
+        Assert.False(TenantSelfIdentity.IsOurs("marafiq.com.sa", marafiqPrint));
+        Assert.False(TenantSelfIdentity.IsOurs("buyer@marafiq.com.sa", marafiqPrint));
+        // C39: the same with Aramco.
+        Assert.False(TenantSelfIdentity.IsOurs("buyer@aramco.com", marafiqPrint with { SupplierNameOnDocument = "Saudi Aramco" }));
+        // The tenant's own name still spells its staff domain, and its mailbox domain is still ours.
+        Assert.True(TenantSelfIdentity.IsOurs("alquraishi.com.sa", marafiqPrint));
+        Assert.True(TenantSelfIdentity.IsOurs("ahmed@alquraishi.com.sa", marafiqPrint));
+        Assert.True(TenantSelfIdentity.IsOurs("sales.desk@alquraishi.com", marafiqPrint));
+    }
+
+    [Fact]
+    public void A_vendor_block_joins_our_names_only_when_it_spells_the_tenants_own_name()
+    {
+        Assert.Equal(
+            new[] { "ALI ZAID AL-QURAISHI & PARTNERS" },
+            TenantSelfIdentity.DomainSelfNames(["ALI ZAID AL-QURAISHI & PARTNERS", null, "  "], "MARAFIQ"));
+        Assert.Equal(
+            new[] { "ALI ZAID AL-QURAISHI & PARTNERS", "ALI ZAID AL-QURAISHI&PARTNERS EL" },
+            TenantSelfIdentity.DomainSelfNames(["ALI ZAID AL-QURAISHI & PARTNERS"], "ALI ZAID AL-QURAISHI&PARTNERS EL"));
+        // With no configured name there is nothing for the vendor block to be a spelling of.
+        Assert.Empty(TenantSelfIdentity.DomainSelfNames([null, ""], "ALI ZAID AL-QURAISHI&PARTNERS EL"));
+    }
+
+    private static CustomerIdentifier Row(
+        long businessUnitId, long customerId, CustomerIdentifierType type, string value, string source,
+        bool verified = true, bool expired = false) => new()
+    {
+        BusinessUnitId = businessUnitId,
+        CustomerId = customerId,
+        IdentifierType = type,
+        NormalizedValue = RoutingValueNormalizer.Normalize(type, value),
+        DisplayValue = value,
+        IsVerified = verified,
+        Confidence = type == CustomerIdentifierType.Email ? 1m : 0.95m,
+        Source = source,
+        EffectiveFrom = DateTime.UtcNow.AddDays(-30),
+        EffectiveTo = expired ? DateTime.UtcNow.AddDays(-1) : null
+    };
 
     private static EmailConfiguration Mailbox(long businessUnitId, string address) => new()
     {
@@ -591,5 +841,15 @@ public sealed class CustomerIdentityContractsTests
         Assert.True(policy.ShipToDemotedConfidence < policy.MinimumAutoLinkConfidence);
         Assert.True(policy.NameInItemTextConfidence < policy.MinimumAutoLinkConfidence);
         Assert.True(policy.ExactNameSuggestionConfidence < policy.MinimumAutoLinkConfidence);
+    }
+
+    [Fact]
+    public void A_free_mail_buyer_becomes_an_identity_only_after_more_than_one_human_decision()
+    {
+        // One confirmation each gave Saudi Aramco personal live.com addresses; none at all left a sole
+        // trader confirmed twice on gmail a 0.65 suggestion forever. The number is policy, and it is two.
+        var policy = new CustomerResolutionPolicy();
+        Assert.Equal(2, policy.FreeMailAddressConfirmationsRequired);
+        Assert.True(policy.FreeMailAddressConfirmationsRequired > 1);
     }
 }

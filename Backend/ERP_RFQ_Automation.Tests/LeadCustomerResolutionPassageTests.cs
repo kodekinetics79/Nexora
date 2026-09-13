@@ -76,14 +76,21 @@ public sealed class LeadCustomerResolutionPassageTests
     // A label that speaks both vocabularies is a ship-to: reading a consignee as the buyer is
     // the expensive mistake, and a header outranks the address.
     [InlineData("Ship-to customer", PassageRole.ShipTo)]
-    // #10. On an EPC contractor's requisition these name the project owner, not the buyer. This
-    // row read "End user" as a header, which enshrined the defect: a header skips the consignee
-    // check, so "End User: Saudi Aramco" on a hdec.com requisition linked Aramco at 0.88.
-    [InlineData("End user", PassageRole.ShipTo)]
-    [InlineData("END_USER", PassageRole.ShipTo)]
-    [InlineData("Client", PassageRole.ShipTo)]
-    [InlineData("Customer", PassageRole.ShipTo)]
-    [InlineData("Project owner", PassageRole.ShipTo)]
+    // #10 and T10. On a contractor's requisition these name the project owner, not the buyer and not
+    // where the goods go. This row first read "End user" as a header (a header skips the consignee
+    // check, so "End User: Saudi Aramco" on a hdec.com requisition linked Aramco at 0.88), and then
+    // these five rows read ShipTo, which enshrined the second defect: a ship-to is still link strength,
+    // so "Client: Saudi Electricity Company" beside Al-Babtain's own yard made the lead AMBIGUOUS where
+    // the yard alone links Al-Babtain. They are item text: offered, never linking, never demoting.
+    [InlineData("End user", PassageRole.ItemText)]
+    [InlineData("END_USER", PassageRole.ItemText)]
+    [InlineData("Client", PassageRole.ItemText)]
+    [InlineData("Customer", PassageRole.ItemText)]
+    [InlineData("Project owner", PassageRole.ItemText)]
+    // The same words beside a word that says where the goods go are still a ship-to.
+    [InlineData("Customer plant", PassageRole.ShipTo)]
+    [InlineData("End user site", PassageRole.ShipTo)]
+    [InlineData("Client delivery location", PassageRole.ShipTo)]
     // #4. Columns of people. A person's surname is very often a one-word trade name here.
     [InlineData("Requisitioner", PassageRole.ItemText)]
     [InlineData("Buyer", PassageRole.ItemText)]
@@ -169,7 +176,9 @@ public sealed class LeadCustomerResolutionPassageTests
         // every line. Hyundai is on the books with an address at hdec.com, so the page's sender
         // speaks against Aramco: without the column the lead is offered, never linked. With the
         // column read as a header it linked Aramco at 0.88, because a header never asks whether the
-        // page names somebody else. As a ship-to it is asked, like the delivery address beside it.
+        // page names somebody else. It was then read as a ship-to, and this test asserted that role,
+        // which enshrined T10 (a ship-to links on a contractor's own print, see the Al-Babtain theory
+        // below). It is item text now; the outcome this test exists for is unchanged.
         const long aramco = 1, hyundai = 2;
         var policy = new CustomerResolutionPolicy();
         var lead = LeadWith(lead =>
@@ -195,14 +204,54 @@ public sealed class LeadCustomerResolutionPassageTests
                 "k.lee@hdec.com", true, 1m, "CustomerProfile")]
         };
 
-        Assert.Equal(PassageRole.ShipTo, Assert.Single(evidence.Passages, p => p.Text == "Saudi Aramco").Role);
+        Assert.Equal(PassageRole.ItemText, Assert.Single(evidence.Passages, p => p.Text == "Saudi Aramco").Role);
         var outcome = CustomerIdentityResolver.Resolve(evidence, corpus, policy);
 
         Assert.Null(outcome.CustomerId);
         Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        Assert.Equal(hyundai, outcome.Candidates[0].CustomerId);
         var offered = Assert.Single(outcome.Candidates, c => c.CustomerId == aramco);
         Assert.True(offered.Confidence < policy.NameInAddressConfidence,
             $"Aramco was offered at {offered.Confidence}, which is link strength.");
+    }
+
+    [Theory]
+    [InlineData("Client")]
+    [InlineData("End User")]
+    [InlineData("Customer")]
+    [InlineData("Project Owner")]
+    public void A_project_owner_column_on_a_contractors_own_print_does_not_take_the_lead_from_the_contractor(string label)
+    {
+        // T10 (C15). Al-Babtain delivers to its own yard and prints the project owner on the line. With the
+        // owner column read as a ship-to, "Saudi Electricity Company" stood beside Al-Babtain's yard at link
+        // strength and the lead went AMBIGUOUS, asking a rep to choose between the contractor and a party
+        // that is buying nothing on this print. Before owner columns were read at all it linked Al-Babtain.
+        const long sec = 1, babtain = 2;
+        var lead = LeadWith(lead =>
+        {
+            lead.DeliveryLocation = "Al-Babtain Power & Telecommunication Company, Riyadh 2nd Industrial City";
+            lead.LeadItems.Add(new LeadItem
+            {
+                ItemText = "CABLE LUG 240MM2",
+                ExtraFields = ExtraFieldsJson.Serialize(new Dictionary<string, string> { [label] = "Saudi Electricity Company" })
+            });
+        });
+        var evidence = new LeadClientEvidence
+        {
+            BusinessUnitId = 1, LeadId = 1,
+            Passages = LeadCustomerResolutionService.Passages(lead)
+        };
+        var corpus = new ClientResolutionCorpus
+        {
+            Customers = [new CustomerNameSnapshot(sec, "Saudi Electricity Company"),
+                         new CustomerNameSnapshot(babtain, "Al-Babtain Power & Telecommunication Company")]
+        };
+
+        var outcome = CustomerIdentityResolver.Resolve(evidence, corpus, new CustomerResolutionPolicy());
+
+        Assert.Equal(babtain, outcome.CustomerId);
+        Assert.StartsWith(LeadCustomerMatchStatuses.AutoMatched, outcome.Status);
+        Assert.Equal(0.88m, outcome.Confidence);
     }
 
     [Theory]
@@ -409,6 +458,12 @@ public sealed class LeadCustomerResolutionPassageTests
     [InlineData("Rashid Al-Otaibi via Coupa <do_not_reply@coupahost.com>", "Rashid Al-Otaibi via Coupa", PassageRole.ItemText)]
     [InlineData("Rashid Al-Otaibi <ordersender-prod@ansmtp.ariba.com>", "Rashid Al-Otaibi", PassageRole.ItemText)]
     [InlineData("Microsoft Teams <noreply@email.teams.microsoft.com>", "Microsoft Teams", PassageRole.ItemText)]
+    // T04. One mixed-case word on a relay is a first or family name as often as a trade name, and
+    // "Rashid" is the whole one-word key of Al-Rashid Trading: as a header it linked that trading house
+    // at 0.88. Initials in capitals and a name carrying a legal-form or sector word are still headers.
+    [InlineData("Rashid <noreply@ansmtp.ariba.com>", "Rashid", PassageRole.ItemText)]
+    [InlineData("SABIC <noreply@ansmtp.ariba.com>", "SABIC", PassageRole.BuyerHeader)]
+    [InlineData("Al-Rashid Trading <noreply@ansmtp.ariba.com>", "Al-Rashid Trading", PassageRole.BuyerHeader)]
     // A person's own mailbox: the name is kept as a mention, never as a statement about the buyer.
     [InlineData("\"Rashid Al-Otaibi\" <r.otaibi@se.com.sa>", "Rashid Al-Otaibi", PassageRole.ItemText)]
     // A rep forwarding a bid from the tenant's own domain: the name on it is ours.
@@ -436,6 +491,9 @@ public sealed class LeadCustomerResolutionPassageTests
     [InlineData("Rashid Al-Otaibi <r.otaibi@hdec.com>", null)]
     // Nothing left once the function is taken off.
     [InlineData("Procurement <procurement@sabic.com>", null)]
+    // T04 reads one mixed-case word as a person on a relay header, where the error is a link. Here the
+    // error is the other one (a signature only demotes a consignee), so one word still signs.
+    [InlineData("Hyundai <procurement@hdec.com>", "Hyundai")]
     // A relay's display name is already a header; a consumer mailbox names a person; ours names us.
     [InlineData("Saudi Aramco <ordersender-prod@ansmtp.ariba.com>", null)]
     [InlineData("Hyundai E&C <hyundai.ksa@gmail.com>", null)]
@@ -478,6 +536,14 @@ public sealed class LeadCustomerResolutionPassageTests
     [InlineData("SEC Procurement", false)]
     [InlineData("NEOM Tenders", false)]
     [InlineData("SABIC", false)]
+    // T04. One word in mixed case, letters only, no organisation word: a person. "Marafiq" is the cost,
+    // offered at 0.70 on a relay instead of linking. Initials in capitals and function words are not.
+    [InlineData("Rashid", true)]
+    [InlineData("Al-Rashid", true)]
+    [InlineData("Marafiq", true)]
+    [InlineData("SEC", false)]
+    [InlineData("Tenders", false)]
+    [InlineData("Aramco2", false)]
     [InlineData("Hyundai E&C", false)]
     [InlineData("Ma'aden Procurement", false)]
     [InlineData("Sadara Chemical Company", false)]

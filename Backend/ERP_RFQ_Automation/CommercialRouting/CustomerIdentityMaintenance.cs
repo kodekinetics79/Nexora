@@ -146,8 +146,15 @@ public static class CustomerIdentityMaintenance
         void AddEmail(string? value, string identitySource)
         {
             Add(CustomerIdentifierType.Email, value, true, 1m, identitySource);
+            // A saved contact vouches for its own mailbox. Its DOMAIN is written only when that domain
+            // could belong to one organisation: a contact at a consumer provider or ISP (gmail.com,
+            // sahara.com), on a procurement relay (bidnet.com) or on a placeholder host names a person,
+            // and a verified 0.95 Domain row for it linked every other sender on that provider, for
+            // any buyer, to this customer. A row an earlier sync wrote for such a domain is no longer
+            // expected, so this sync expires it.
             var domain = RoutingValueNormalizer.DomainFromEmail(value);
-            Add(CustomerIdentifierType.Domain, domain, true, 0.95m, identitySource);
+            if (CustomerResolution.IdentityDomainGuard.IsOrganisationDomain(domain))
+                Add(CustomerIdentifierType.Domain, domain, true, 0.95m, identitySource);
         }
 
         void Add(CustomerIdentifierType type, string? value, bool verified, decimal confidence, string identitySource)
