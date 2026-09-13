@@ -345,6 +345,26 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resolve catalogue product' })).not.toBeInTheDocument());
   });
 
+  it('lets the user decline for now, leaving the line untouched and marked so they can come back', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
+    expect(await screen.findByText('MPN-1 is not in your catalogue yet.')).toBeInTheDocument();
+    expect(screen.getByText(/can still be quoted by hand, but it cannot be stock-checked or sent to suppliers/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add to catalogue and use it' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resolve catalogue product' })).not.toBeInTheDocument());
+    expect(createProduct).not.toHaveBeenCalled();
+    expect(resolveLineProduct).not.toHaveBeenCalled();
+    expect(screen.getByText('Not in catalogue')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resolve catalogue product' })).toBeInTheDocument();
+  });
+
   it('does not offer the add step without Products:create, but still says the part is missing', async () => {
     testAccess.denied.add('Products:create');
     getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));

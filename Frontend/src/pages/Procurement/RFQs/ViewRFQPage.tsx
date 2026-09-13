@@ -1177,20 +1177,33 @@ const ViewRFQPage: React.FC = () => {
               }}
             />
             {catalogueMiss && (
-              <Alert
-                severity="info"
-                icon={<AddIcon fontSize="inherit" />}
-                action={canAddToCatalogue ? (
-                  <Button color="inherit" size="small" variant="outlined" sx={{ whiteSpace: 'nowrap', fontWeight: 800 }}
-                    onClick={() => addToCatalogueMutation.mutate()} disabled={addToCatalogueMutation.isPending}>
-                    {addToCatalogueMutation.isPending ? 'Adding…' : 'Add to catalogue and use it'}
-                  </Button>
-                ) : undefined}
-              >
+              // Two explicit answers, not one button and a Cancel. "Not now" is a legitimate
+              // choice: the line can still go on the quote and be priced by hand; only the stock
+              // check and supplier outreach wait for the entry, and the same button on the row
+              // brings the user back.
+              <Alert severity="info" icon={<AddIcon fontSize="inherit" />}>
                 <AlertTitle>{resolutionPartNumber || 'This part'} is not in your catalogue yet.</AlertTitle>
                 {canAddToCatalogue
-                  ? `You are quoting this line, so it needs a catalogue entry. This adds "${(resolutionDescription || resolutionPartNumber).slice(0, 100)}" as a product and uses it for this line. You can complete the record under Products later.`
+                  ? `Add it now to check stock and ask suppliers, or leave it for later. Adding creates "${(resolutionDescription || resolutionPartNumber).slice(0, 100)}" as a product and uses it for this line; the record can be completed under Products later.`
                   : 'Ask someone with Products create rights to add it, then choose it here.'}
+                <Typography variant="body2" sx={{ mt: 1 }}>
+                  Without the entry this line can still be quoted by hand, but it cannot be stock-checked or sent to suppliers. You can come back any time from the same button on the line.
+                </Typography>
+                <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
+                  {canAddToCatalogue && (
+                    <Button color="inherit" size="small" variant="outlined" sx={{ whiteSpace: 'nowrap', fontWeight: 800 }}
+                      onClick={() => addToCatalogueMutation.mutate()} disabled={addToCatalogueMutation.isPending}>
+                      {addToCatalogueMutation.isPending ? 'Adding…' : 'Add to catalogue and use it'}
+                    </Button>
+                  )}
+                  <Button color="inherit" size="small" disabled={addToCatalogueMutation.isPending}
+                    onClick={() => {
+                      closeProductResolution();
+                      enqueueSnackbar(`${resolutionPartNumber || 'This line'} left out of the catalogue for now. It stays marked "Not in catalogue"; use "Resolve catalogue product" on the line when you are ready.`, { variant: 'info' });
+                    }}>
+                    Not now
+                  </Button>
+                </Stack>
               </Alert>
             )}
             <TextField
