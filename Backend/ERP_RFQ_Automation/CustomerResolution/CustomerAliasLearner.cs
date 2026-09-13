@@ -443,7 +443,8 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                 skips.Add(SkipPersonalOrRelayAddress);
             }
             else if (tie.CustomerAddresses.Contains(address)
-                     || (tie.TiedToCustomer && !tie.ClaimedByAnotherCustomer(exceptAddress: address)))
+                     || ((tie.TiedToCustomer || tie.ConfirmedAddresses.Contains(address))
+                         && !tie.ClaimedByAnotherCustomer(exceptAddress: address)))
             {
                 proposals.Add(new Proposal(CustomerIdentifierType.Email, address, address, true, 1.00m));
             }
@@ -938,34 +939,6 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
             }
         }
 
-        // A FACT A RELINK DEMOTED IS STILL THIS CUSTOMER'S RECORD (T25). One mis-click relink demotes an Email or a
-        // Domain that other decisions confirmed many times, so that it stops auto-linking at once, and "the next
-        // confirmation for its customer promotes it back". For a portal pair or an alias it did. For the mailbox it
-        // could not: this read skipped the demoted rows, the relink's own decision for the other customer then
-        // vetoed the domain, and two SEC confirmations from 57322@se.com.sa left SEC's fifty-times-confirmed
-        // address and domain on the unverified shelf, so SEC's mail went from 1.00 to a 0.65 tie with Aramco. A row
-        // this class demoted keeps the confidence it was trusted at (a row filed unverified never rises above
-        // UnverifiedFilingConfidence) and was confirmed more than once, and it ties the domain back to its own
-        // customer. Another customer's verified hold still refuses it (ClaimedByAnotherCustomer).
-        if (!tie.TiedToCustomer)
-        {
-            var demoted = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
-                .Where(i => i.BusinessUnitId == businessUnitId
-                            && i.CustomerId == customerId
-                            && i.EffectiveTo == null
-                            && !i.IsVerified
-                            && i.Source == UnverifiedAliasSource
-                            && i.ObservationCount > 1
-                            && i.Confidence > UnverifiedFilingConfidence
-                            && ((i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == domain)
-                                || (i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue.EndsWith(atDomain))))
-                .OrderBy(i => i.Id)
-                .Select(i => i.Id)
-                .Take(1)
-                .ToListAsync(ct);
-            if (demoted.Count > 0) tie.TiedToCustomer = true;
-        }
-
         if (!tie.TiedToCustomer && DomainLabelSpellsCustomerName(domain, customerName))
             tie.TiedToCustomer = true;
 
@@ -1017,14 +990,23 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
             // never be relinked and no correction ever takes its decision back. That one decision vetoed se.com.sa for
             // SEC for ever: every later correct SEC confirmation left the domain unverified and wrote no address, and
             // SEC's next mail was UNRESOLVED or a 0.65 tie with Aramco. A decision for another customer whose own page
-            // printed THIS customer as the buying organisation, and not the customer picked, is a wrong pick rather
-            // than a sign the domain carries several buyers' mail. It stops vetoing once this customer has at least
-            // the corroboration a consumer mailbox needs (FreeMailAddressConfirmationsRequired decisions, this one
-            // included, none on a page naming another organisation) and more of them than there are such picks. A
-            // decision on a page that names nobody, or names its own customer, still vetoes: that is the EPC case.
+            // printed THIS customer as the buying organisation, and not the customer picked, is set aside as a wrong
+            // pick once this customer has at least the corroboration a consumer mailbox needs
+            // (FreeMailAddressConfirmationsRequired decisions, this one included, none on a page naming another
+            // organisation) and more of them than there are such picks. A decision on a page that names nobody, or
+            // names its own customer, still vetoes: that is the EPC case.
+            //
+            // A PICK SET ASIDE UNLOCKS THE CONFIRMED ADDRESS, NEVER THE DOMAIN. An EPC contractor's requisition prints
+            // the site owner in its company field too. Hyundai's k.lee@hdec.com printed "Saudi Aramco" and his own
+            // address; reps picked Hyundai once and Aramco twice, the Hyundai pick was set aside, and the second Aramco
+            // pick wrote hdec.com as Aramco's verified 0.95 Domain, so every later hdec.com mailbox linked Aramco before
+            // its page was read. Whether a pick was a mis-click or the contractor's own job cannot be told from here.
+            // So while a person's decision for another customer from the domain stands, the domain stays unverified,
+            // and only the address the confirmations printed is released (ConfirmedAddresses).
             var againstOwnPage = decided
                 .Where(row => row.CustomerId != customerId && ResemblesCustomerName(row.CustomerCompanyNameExtracted, customerName))
                 .ToList();
+            var confirmations = 0;
             if (againstOwnPage.Count > 0 && !documentNamesSomebodyElse)
             {
                 var pickedIds = againstOwnPage.Select(row => row.CustomerId).Distinct().ToArray();
@@ -1036,14 +1018,20 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
                     .Where(row => !ResemblesCustomerName(
                         row.CustomerCompanyNameExtracted, pickedNames.FirstOrDefault(c => c.Id == row.CustomerId)?.Name))
                     .ToList();
-                var confirmations = 1 + decided.Count(row =>
+                confirmations = 1 + decided.Count(row =>
                     row.CustomerId == customerId
                     && !NamesAnOrganisationOtherThan(row.CustomerCompanyNameExtracted, customerName, selfNameKeys));
-                if (againstOwnPage.Count > 0
-                    && confirmations >= _policy.FreeMailAddressConfirmationsRequired
-                    && confirmations > againstOwnPage.Count)
-                    decided = decided.Where(row => !againstOwnPage.Contains(row)).ToList();
             }
+            else
+            {
+                againstOwnPage.Clear();
+            }
+            // Every person's decision from the domain that still stands is for this customer.
+            var noOtherDecisionStands = decided.All(row => row.CustomerId == customerId);
+            // The only decisions for another customer are picks against their own page.
+            var onlyMisClicksStandAgainst = againstOwnPage.Count > 0
+                && decided.All(row => row.CustomerId == customerId || againstOwnPage.Contains(row));
+
             // THE ENVELOPE NEVER VOUCHES FOR ITSELF. Any earlier human decision from a mailbox on the
             // domain used to tie it, read off the envelope sender. So an intermediary that forwarded the
             // same buyer's bids twice vouched for its own domain: a colleague with no Nexora login on a
@@ -1056,12 +1044,77 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
             // makes this more careful. The document's company-name field is asked too, on this lead and
             // on the vouching one: a Hyundai requisition that prints its own buyer's address is still
             // Hyundai's mailbox, whoever the site belongs to.
-            if (!documentNamesSomebodyElse
-                && decided.Count > 0
-                && decided.All(row => row.CustomerId == customerId)
-                && decided.Any(row => PrintsAnAddressOn(row.CustomerBuyerEmailExtracted, domain)
-                                      && !NamesAnOrganisationOtherThan(row.CustomerCompanyNameExtracted, customerName, selfNameKeys)))
-                tie.TiedToCustomer = true;
+            var printedVouchers = decided
+                .Where(row => row.CustomerId == customerId
+                              && PrintsAnAddressOn(row.CustomerBuyerEmailExtracted, domain)
+                              && !NamesAnOrganisationOtherThan(row.CustomerCompanyNameExtracted, customerName, selfNameKeys))
+                .ToList();
+            if (!documentNamesSomebodyElse && printedVouchers.Count > 0)
+            {
+                if (noOtherDecisionStands)
+                {
+                    tie.TiedToCustomer = true;
+                }
+                else if (onlyMisClicksStandAgainst
+                         && confirmations >= _policy.FreeMailAddressConfirmationsRequired
+                         && confirmations > againstOwnPage.Count)
+                {
+                    foreach (var row in printedVouchers)
+                    {
+                        var printed = LeadCustomerResolutionService.ParseAddress(row.CustomerBuyerEmailExtracted);
+                        if (printed is not null) tie.ConfirmedAddresses.Add(printed);
+                    }
+                }
+            }
+
+            // A FACT A RELINK DEMOTED IS STILL THIS CUSTOMER'S RECORD (T25). One mis-click relink demotes an Email or a
+            // Domain that other decisions confirmed many times, so that it stops auto-linking at once, and "the next
+            // confirmation for its customer promotes it back". For a portal pair or an alias it did. For the mailbox it
+            // could not: the relink's own decision for the other customer vetoed the domain, and SEC's
+            // fifty-times-confirmed address and domain stayed on the unverified shelf. A row this class demoted keeps the
+            // confidence it was trusted at (a row filed unverified never rises above UnverifiedFilingConfidence) and was
+            // confirmed more than once, and it vouches for its own customer.
+            //
+            // IT VOUCHES, IT DOES NOT OVERRULE. It used to tie the domain before any decision was read. So when a person
+            // CORRECTLY relinked an agent's Ras Tanura job from SEC to Saudi Aramco, the demoted rows gave gulfagency.com
+            // back to SEC on the next SEC confirmation from any mailbox there, and the agent's next Aramco job linked SEC
+            // at 0.95. It now obeys the same veto as a printed address: every standing decision is for this customer, or
+            // the only others are picks against their own page that the record's own confirmations outnumber. Past such a
+            // pick only a record that held the DOMAIN gets the domain back; one that held addresses gets those back.
+            if (!tie.TiedToCustomer && !documentNamesSomebodyElse)
+            {
+                var demoted = await _db.Set<CustomerIdentifier>().AsNoTracking().IgnoreQueryFilters()
+                    .Where(i => i.BusinessUnitId == businessUnitId
+                                && i.CustomerId == customerId
+                                && i.EffectiveTo == null
+                                && !i.IsVerified
+                                && i.Source == UnverifiedAliasSource
+                                && i.ObservationCount > 1
+                                && i.Confidence > UnverifiedFilingConfidence
+                                && ((i.IdentifierType == CustomerIdentifierType.Domain && i.NormalizedValue == domain)
+                                    || (i.IdentifierType == CustomerIdentifierType.Email && i.NormalizedValue.EndsWith(atDomain))))
+                    .OrderBy(i => i.Id)
+                    .Select(i => new { i.IdentifierType, i.NormalizedValue, i.ObservationCount })
+                    .Take(MaximumDomainEvidenceRead)
+                    .ToListAsync(ct);
+                if (demoted.Count > 0)
+                {
+                    var recordConfirmations = Math.Max(confirmations, 1 + demoted.Max(row => row.ObservationCount));
+                    if (noOtherDecisionStands)
+                    {
+                        tie.TiedToCustomer = true;
+                    }
+                    else if (onlyMisClicksStandAgainst
+                             && recordConfirmations >= _policy.FreeMailAddressConfirmationsRequired
+                             && recordConfirmations > againstOwnPage.Count)
+                    {
+                        if (demoted.Any(row => row.IdentifierType == CustomerIdentifierType.Domain))
+                            tie.TiedToCustomer = true;
+                        else
+                            foreach (var row in demoted) tie.ConfirmedAddresses.Add(row.NormalizedValue);
+                    }
+                }
+            }
         }
 
         return tie;
@@ -1523,6 +1576,13 @@ public sealed class CustomerAliasLearner : ICustomerAliasLearner
 
         /// <summary>Exact addresses a person put on the chosen customer at this domain.</summary>
         public HashSet<string> CustomerAddresses { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Addresses people confirmed for the chosen customer where the only decisions against it are picks set aside as
+        /// mis-clicks (T26), or that a record a relink demoted held (T25). Each may be learned as an Email; they never
+        /// tie the domain.
+        /// </summary>
+        public HashSet<string> ConfirmedAddresses { get; } = new(StringComparer.Ordinal);
 
         /// <summary>Another customer's hold on the domain; Address is null for a whole-domain row.</summary>
         public List<(long CustomerId, string? Address)> OtherCustomerFacts { get; } = [];

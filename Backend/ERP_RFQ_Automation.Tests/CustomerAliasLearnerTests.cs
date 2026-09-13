@@ -1542,13 +1542,15 @@ public sealed class CustomerAliasLearnerTests
     [InlineData(true)]
     // The control: a pick on a page that names nobody is the EPC shape, and it still vetoes the domain.
     [InlineData(false)]
-    public async Task P10_a_wrong_pick_against_its_own_page_stops_vetoing_the_domain_once_the_right_customer_is_confirmed_twice(
+    public async Task P10_a_wrong_pick_against_its_own_page_stops_vetoing_the_address_once_the_right_customer_is_confirmed_twice(
         bool pickNamedTheRightCustomer)
     {
         // THE DEFECT (T26 residual). One SEC print from 57322@se.com.sa, its company-name field "Saudi Electricity
         // Company", was linked to Saudi Aramco and converted, so it can never be relinked. That single decision vetoed
         // se.com.sa for SEC for ever: two correct SEC confirmations later the domain was still unverified, no address
-        // was written, and SEC's next plain mail was UNRESOLVED.
+        // was written, and SEC's next plain mail was UNRESOLVED. The set-aside pick releases the confirmed address only:
+        // the domain stays unverified while that Aramco decision stands, because an EPC contractor's requisition prints
+        // the site owner in its company field too (P10_an_EPC_contractors_domain_is_not_written_...).
         using var db = new TestDb();
         await using var context = await SeedAsync(db);
         await using (var seed = db.ContextFor(null))
@@ -1585,10 +1587,126 @@ public sealed class CustomerAliasLearnerTests
         await context.SaveChangesAsync();
 
         var rows = await ActiveAsync(context);
-        Assert.Equal(pickNamedTheRightCustomer, rows.Any(i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Domain
-                                                               && i.NormalizedValue == "se.com.sa" && i.IsVerified));
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain
+                                         && i.NormalizedValue == "se.com.sa" && i.IsVerified);
         Assert.Equal(pickNamedTheRightCustomer, rows.Any(i => i.CustomerId == Sec && i.IdentifierType == CustomerIdentifierType.Email
                                                                && i.NormalizedValue == "57322@se.com.sa" && i.IsVerified));
+    }
+
+    private const string RasTanura = "Saudi Aramco Ras Tanura Refinery";
+
+    [Fact]
+    public async Task P5_a_correct_relink_off_an_agents_domain_is_not_undone_by_the_old_customers_next_confirmation()
+    {
+        // THE DEFECT (T25 over-reach, probe J1). SEC had learned agent1@gulfagency.com and the whole gulfagency.com domain
+        // from three confirmations. A person rightly relinked agent1's Ras Tanura job to Saudi Aramco, which demoted both
+        // rows. The demoted rows then tied the domain back to SEC before anyone's decisions were read, so ONE SEC
+        // confirmation from another mailbox there wrote gulfagency.com back as SEC's verified 0.95 Domain, and agent3's
+        // next Ras Tanura job linked SEC at 0.95 whatever its page said. Base asked a person; this linked the wrong client.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            foreach (var (id, sender, delivery) in new (long, string, string?)[]
+                     {
+                         (8630, "Agent One <agent1@gulfagency.com>", RasTanura),
+                         (8631, "Agent Two <agent2@gulfagency.com>", "Saudi Electricity Company-DAMMAM"),
+                         (8632, "Agent Three <agent3@gulfagency.com>", RasTanura),
+                         (8633, "Agent Three <agent3@gulfagency.com>", null),
+                     })
+            {
+                var lead = Seed.Lead(seed, id, Tenant, buyersName: null);
+                lead.Rfqno = null;
+                lead.Clientemail = LeadCustomerResolutionService.ParseAddress(sender);
+                lead.DeliveryLocation = delivery;
+                seed.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail = sender;
+            }
+            await seed.SaveChangesAsync();
+        }
+        var address = ConfirmedFiftyTimes(CustomerIdentifierType.Email, "agent1@gulfagency.com", 1.00m);
+        var domain = ConfirmedFiftyTimes(CustomerIdentifierType.Domain, "gulfagency.com", 0.95m);
+        address.ObservationCount = domain.ObservationCount = 3;
+        context.Set<CustomerIdentifier>().AddRange(address, domain);
+        await context.SaveChangesAsync();
+        var learner = new CustomerAliasLearner(context);
+
+        var relinked = await LoadLeadAsync(context, 8630);
+        relinked.AutoResolveCommercialIdentity(Sec, null, CustomerMatchReasonCodes.SenderEmailExact, 1.00m, "machine", DateTime.UtcNow);
+        relinked.ResolveCommercialIdentity(Aramco, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        await learner.LearnFromReviewAsync(Tenant, relinked, Aramco, Sec, 101);
+        await context.SaveChangesAsync();
+        var afterTheRelink = await ResolveWithoutSavingAsync(db, 8632);
+        Assert.Equal(Aramco, afterTheRelink.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, afterTheRelink.ReasonCode);
+
+        await ConfirmAsync(context, learner, 8631, Sec, 102);
+
+        var rows = await ActiveAsync(context);
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Domain
+                                         && i.NormalizedValue == "gulfagency.com" && i.IsVerified);
+        Assert.DoesNotContain(rows, i => i.IdentifierType == CustomerIdentifierType.Email
+                                         && i.NormalizedValue == "agent2@gulfagency.com" && i.IsVerified);
+        var nextRasTanuraJob = await ResolveWithoutSavingAsync(db, 8632);
+        Assert.Equal(Aramco, nextRasTanuraJob.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.NameInDocument, nextRasTanuraJob.ReasonCode);
+        Assert.NotEqual(Sec, (await ResolveWithoutSavingAsync(db, 8633)).CustomerId);
+    }
+
+    [Theory]
+    [InlineData("Saudi Aramco", Hyundai, Aramco, Aramco)]
+    [InlineData("Saudi Aramco", Aramco, Hyundai, Aramco)]
+    // The control: a company field that names nobody always vetoed, before and after.
+    [InlineData(null, Hyundai, Aramco, Aramco)]
+    public async Task P10_an_EPC_contractors_domain_is_not_written_as_the_site_owners_when_one_pick_is_set_aside_as_a_mis_click(
+        string? companyField, long firstPick, long secondPick, long thirdPick)
+    {
+        // THE DEFECT (T26 over-reach, probe D1). Hyundai's requisitions from k.lee@hdec.com print the site owner, "Saudi
+        // Aramco", in the company field and Hyundai's own buyer address. Reps picked Hyundai once and Aramco twice. The
+        // Hyundai pick was set aside as "against its own page", and the second Aramco pick wrote hdec.com as Aramco's
+        // verified 0.95 Domain. Every later hdec.com mailbox then linked Aramco at 0.95 before the page was read, J Park's
+        // SEC job included. A set-aside pick may unlock the confirmed address; it never unlocks the domain while a
+        // person's decision for another customer from that domain stands.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, Hyundai, Tenant, "Hyundai Engineering & Construction");
+            foreach (var id in new long[] { 8640, 8641, 8642, 8643, 8644 })
+            {
+                var requisition = id <= 8642;
+                var lead = Seed.Lead(seed, id, Tenant, buyersName: null);
+                lead.Rfqno = null;
+                lead.Clientemail = requisition ? "k.lee@hdec.com" : "j.park@hdec.com";
+                seed.EmailIngests.Local.Single(i => i.Id == 20_000 + id).FromEmail =
+                    requisition ? "K Lee <k.lee@hdec.com>" : "J Park <j.park@hdec.com>";
+                if (requisition)
+                {
+                    lead.DeliveryLocation = RasTanura;
+                    lead.CustomerCompanyNameExtracted = companyField;
+                    lead.CustomerBuyerEmailExtracted = "k.lee@hdec.com";
+                }
+                else if (id == 8643)
+                {
+                    lead.DeliveryLocation = "Saudi Electricity Company-DAMMAM";
+                }
+            }
+            await seed.SaveChangesAsync();
+        }
+        var learner = new CustomerAliasLearner(context);
+
+        var picks = new[] { firstPick, secondPick, thirdPick };
+        for (var i = 0; i < picks.Length; i++)
+            await ConfirmAsync(context, learner, 8640 + i, picks[i], 99 + i);
+
+        Assert.DoesNotContain(await ActiveAsync(context), i => i.IdentifierType == CustomerIdentifierType.Domain
+                                                                && i.NormalizedValue == "hdec.com" && i.IsVerified);
+        // The address K Lee's Aramco confirmations printed may still be released: nothing here tells this apart from
+        // the 57322@se.com.sa case above. That Aramco address makes Park's SEC job an offer with SEC on it rather than
+        // a link, which is the owner's call. What must never happen is a link to Aramco off the domain.
+        var parksSecJob = await ResolveWithoutSavingAsync(db, 8643);
+        Assert.NotEqual(Aramco, parksSecJob.CustomerId);
+        Assert.Contains(parksSecJob.Candidates, candidate => candidate.CustomerId == Sec);
+        Assert.NotEqual(Aramco, (await ResolveWithoutSavingAsync(db, 8644)).CustomerId);
     }
 
     /// <summary>Seeds Hyundai and four plain messages: three from K Lee's mailbox at hdec.com, one from a colleague there.</summary>
