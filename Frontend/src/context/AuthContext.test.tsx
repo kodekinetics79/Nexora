@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import {
   AuthProvider,
   PERMISSION_SCHEMA_VERSION,
+  PERMISSIONS_RETRY_DELAYS_MS,
   PERMISSIONS_STALE_MS,
   useAuth,
   type Permission,
@@ -286,7 +287,10 @@ describe('AuthContext', () => {
     expect(screen.getByTestId('delete')).toHaveTextContent('false');
   });
 
-  it('activeTab_revalidatesAtExpiry_andSuppressesMutationsWhileRefreshIsPending', async () => {
+  it('activeTab_revalidatesAtExpiry_andKeepsConfirmedGrantsWhileRefreshIsPending', async () => {
+    // The scheduled re-check used to mark the snapshot stale BEFORE asking, so every create/edit
+    // answer was false for the ~1 s the request was in flight. Once a minute that unmounted the
+    // upload, quote, order and shipment screens and turned the lead decision screen to read-only.
     vi.useFakeTimers();
     localStorage.setItem('token', TOKEN);
     let resolveRefresh: (value: unknown) => void = () => {};
@@ -304,20 +308,132 @@ describe('AuthContext', () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(PERMISSIONS_STALE_MS); });
 
+    // The re-check is in flight, and the grants the server confirmed a minute ago still stand.
     expect(getMyPermissions).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+    expect(screen.getByTestId('stale')).toHaveTextContent('false');
     expect(screen.getByTestId('view')).toHaveTextContent('true');
-    expect(screen.getByTestId('edit')).toHaveTextContent('false');
+    expect(screen.getByTestId('edit')).toHaveTextContent('true');
 
+    // A revocation still lands within the freshness window: the server's answer replaces the grants.
     await act(async () => {
       resolveRefresh(mePayload({
-        permissions: [permission({ moduleName: 'Users', canView: true, canEdit: true })],
+        permissions: [permission({ moduleName: 'Users', canView: true, canEdit: false })],
       }));
       await Promise.resolve();
     });
 
     expect(screen.getByTestId('stale')).toHaveTextContent('false');
+    expect(screen.getByTestId('edit')).toHaveTextContent('false');
+    expect(screen.getByTestId('view')).toHaveTextContent('true');
+    vi.useRealTimers();
+  });
+
+  it('scheduledRecheckWithNoAnswer_keepsConfirmedGrants_andRetriesWithoutWaitingForFocus', async () => {
+    // A backend deploy answers the preflight with 502 for 10-30 s. The failure used to set stale
+    // AND stop the 60 s timer (it was only re-armed by a success), so create/edit screens stayed
+    // blank until the window happened to regain focus.
+    vi.useFakeTimers();
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions
+      .mockResolvedValueOnce(mePayload({
+        permissions: [permission({ moduleName: 'Users', canView: true, canEdit: true })],
+      }))
+      .mockRejectedValueOnce({ isAxiosError: true, code: 'ERR_NETWORK', message: 'Network Error', request: {} })
+      .mockResolvedValueOnce(mePayload({
+        permissions: [permission({ moduleName: 'Users', canView: true, canEdit: true })],
+      }));
+
+    renderAuth();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PERMISSIONS_STALE_MS); });
+
+    expect(getMyPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('stale')).toHaveTextContent('false');
+    expect(screen.getByTestId('error')).toHaveTextContent('none');
     expect(screen.getByTestId('edit')).toHaveTextContent('true');
+
+    // No focus event: the next attempt is scheduled on its own.
+    await act(async () => { await vi.advanceTimersByTimeAsync(PERMISSIONS_RETRY_DELAYS_MS[0]); });
+
+    expect(getMyPermissions).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('edit')).toHaveTextContent('true');
+    vi.useRealTimers();
+  });
+
+  it('scheduledRecheckRefused_withdrawsMutationControls', async () => {
+    // A refusal is an answer, not an outage: it still fails closed and says why.
+    vi.useFakeTimers();
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions
+      .mockResolvedValueOnce(mePayload({
+        permissions: [permission({ moduleName: 'Users', canView: true, canEdit: true })],
+      }))
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        message: 'Request failed with status code 403',
+        config: { url: '/api/User/me/permissions', method: 'get' },
+        response: { status: 403, data: { message: 'Permission denied' } },
+      });
+
+    renderAuth();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PERMISSIONS_STALE_MS); });
+
+    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+    expect(screen.getByTestId('error')).not.toHaveTextContent('none');
+    expect(screen.getByTestId('edit')).toHaveTextContent('false');
+    expect(screen.getByTestId('view')).toHaveTextContent('true');
+    vi.useRealTimers();
+  });
+
+  it('firstReadFailure_retriesOnItsOwn_andRecovers', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions
+      .mockRejectedValueOnce({ isAxiosError: true, code: 'ERR_NETWORK', message: 'Network Error', request: {} })
+      .mockResolvedValueOnce(mePayload({
+        permissions: [permission({ moduleName: 'Users', canView: true, canCreate: true })],
+      }));
+
+    renderAuth();
+    await act(async () => { await Promise.resolve(); });
+
+    // Never confirmed this session, so it fails closed and explains.
+    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+    expect(screen.getByTestId('error')).not.toHaveTextContent('none');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(PERMISSIONS_RETRY_DELAYS_MS[0]); });
+
+    expect(getMyPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('stale')).toHaveTextContent('false');
+    expect(screen.getByTestId('error')).toHaveTextContent('none');
+    expect(screen.getByTestId('create')).toHaveTextContent('true');
+    vi.useRealTimers();
+  });
+
+  it('identicalRecheck_doesNotRerenderAnythingThatReadsTheSession', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('token', TOKEN);
+    const answer = () => mePayload({
+      permissions: [permission({ moduleName: 'Users', canView: true, canEdit: true })],
+      entitlements: ['capability.full-navigation'],
+    });
+    getMyPermissions.mockResolvedValueOnce(answer()).mockResolvedValueOnce(answer());
+    let renders = 0;
+    const Counter = () => {
+      useAuth();
+      renders += 1;
+      return null;
+    };
+
+    render(<AuthProvider><Counter /></AuthProvider>);
+    await act(async () => { await Promise.resolve(); });
+    const settled = renders;
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(PERMISSIONS_STALE_MS); });
+
+    expect(getMyPermissions).toHaveBeenCalledTimes(2);
+    expect(renders).toBe(settled);
     vi.useRealTimers();
   });
 

@@ -38,6 +38,7 @@ import {
   Undo as ReprocessIcon,
 } from '@mui/icons-material';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import RefreshFailedNotice from '../../components/common/RefreshFailedNotice';
 import { EmptyState, LoadingState } from '../../platform/components/States';
 import { useAuth } from '../../context/AuthContext';
 import { INBOX_ROOT } from '../../components/layout/navCatalog';
@@ -484,6 +485,12 @@ export default function InboundMailTriagePage() {
         page,
         pageSize: PAGE_SIZE,
       }),
+    // Paging within a tab keeps the current rows on screen until the next page arrives, instead of
+    // swapping the table for a loading panel. A different TAB never borrows another tab's rows.
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[1] === activeTab.key ? previousData : undefined,
+    // The page renders its own failure panel; a background re-read that misses raises no toast.
+    meta: { silenceGlobalError: true },
     // The assembler finishes on its own clock. While anything is in flight the list re-reads
     // itself, so "still assembling" resolves without the rep having to guess and press Refresh.
     refetchInterval: (activeQuery) =>
@@ -662,6 +669,18 @@ export default function InboundMailTriagePage() {
   };
 
   const unavailable = query.isError && isTriageUnavailable(query.error);
+  /** The list loaded at least once; a later failure keeps these rows on screen. */
+  const listLoaded = query.data !== undefined;
+  /** Busy only for a refresh the reader asked for — never for the automatic 15 s assembly poll. */
+  const [manualRefreshing, setManualRefreshing] = useState(false);
+  const refreshNow = async () => {
+    setManualRefreshing(true);
+    try {
+      await query.refetch();
+    } finally {
+      setManualRefreshing(false);
+    }
+  };
 
   return (
     <Box sx={{ maxWidth: 1500, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -706,9 +725,9 @@ export default function InboundMailTriagePage() {
           </Button>
           <Button
             variant="outlined"
-            startIcon={<RefreshIcon />}
-            onClick={() => void query.refetch()}
-            disabled={query.isFetching}
+            startIcon={manualRefreshing ? <CircularProgress size={18} color="inherit" /> : <RefreshIcon />}
+            onClick={() => void refreshNow()}
+            disabled={manualRefreshing}
           >
             Refresh
           </Button>
@@ -892,7 +911,11 @@ export default function InboundMailTriagePage() {
           />
         )}
 
-        {query.isError && !unavailable && (
+        {query.isError && !unavailable && listLoaded && (
+          <RefreshFailedNotice updatedAt={query.dataUpdatedAt} retryHint="Press Refresh to try again." />
+        )}
+
+        {query.isError && !unavailable && !listLoaded && (
           <ApiErrorNotice
             error={query.error}
             fallbackMessage="Inbound mail decisions could not be loaded. Nothing was changed — try again."
@@ -904,7 +927,7 @@ export default function InboundMailTriagePage() {
             The mailboxes are read before anything comforting is said: when nothing is being
             COLLECTED, "nothing is being hidden from you" is precisely backwards — everything is
             hidden, sitting unread in a mailbox nobody is polling. */}
-        {!query.isLoading && !query.isError && rows.length === 0 && mailboxObstacle && (
+        {listLoaded && !unavailable && rows.length === 0 && mailboxObstacle && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             <AlertTitle sx={{ fontWeight: 800 }}>{mailboxObstacle.title}</AlertTitle>
             <Typography variant="body2">{mailboxObstacle.message}</Typography>
@@ -921,11 +944,11 @@ export default function InboundMailTriagePage() {
           </Alert>
         )}
 
-        {!query.isLoading && !query.isError && rows.length === 0 && !mailboxObstacle && (
+        {listLoaded && !unavailable && rows.length === 0 && !mailboxObstacle && (
           <EmptyState title={activeTab.emptyTitle} message={activeTab.emptyMessage} icon={<InboxIcon sx={{ fontSize: 44 }} />} />
         )}
 
-        {!query.isError && rows.length > 0 && (
+        {!unavailable && rows.length > 0 && (
           <>
             <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
               <Table size="small" aria-label={`Messages ${activeTab.label.toLowerCase()}`} sx={{ minWidth: 1260 }}>
@@ -1491,10 +1514,10 @@ export default function InboundMailTriagePage() {
                   ? `Page ${page} — ${rows.length} message${rows.length === 1 ? '' : 's'} shown`
                   : `Page ${page} — showing ${rows.length} of ${totalCount}`}
               </Typography>
-              <Button size="small" disabled={page <= 1 || query.isFetching} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+              <Button size="small" disabled={page <= 1 || query.isPlaceholderData} onClick={() => setPage((value) => Math.max(1, value - 1))}>
                 Previous
               </Button>
-              <Button size="small" disabled={!hasNextPage || query.isFetching} onClick={() => setPage((value) => value + 1)}>
+              <Button size="small" disabled={!hasNextPage || query.isPlaceholderData} onClick={() => setPage((value) => value + 1)}>
                 Next
               </Button>
             </Stack>

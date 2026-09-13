@@ -205,7 +205,8 @@ export default function SalesTodayPage() {
   const [acknowledgementKey, setAcknowledgementKey] = useState('');
   const acknowledgementReasonInputRef = useRef<HTMLTextAreaElement>(null);
   const period = useMemo(reportingWindow, []);
-  const query = useQuery({ queryKey: ['commercial-intelligence', 'sales-today'], queryFn: commercialIntelligenceService.getSalesToday, refetchInterval: 60_000 });
+  // Self-refreshing, and it renders its own failure: no toast for a background re-read.
+  const query = useQuery({ queryKey: ['commercial-intelligence', 'sales-today'], queryFn: commercialIntelligenceService.getSalesToday, refetchInterval: 60_000, meta: { silenceGlobalError: true } });
   const priorities = useQuery({
     queryKey: ['opportunity-priorities', priorityPage],
     queryFn: () => opportunityPriorityService.getPriorities(priorityPage, priorityPageSize),
@@ -340,7 +341,7 @@ export default function SalesTodayPage() {
     </Stack>
 
     <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Attention queue</Typography>
-    <QueryState loading={query.isLoading} error={query.isError} empty={!items.length} onRetry={() => void query.refetch()} emptyText="Nothing requires sales attention right now.">
+    <QueryState loading={query.isLoading} error={query.isError} hasData={query.data !== undefined} updatedAt={query.dataUpdatedAt} empty={!items.length} onRetry={() => void query.refetch()} emptyText="Nothing requires sales attention right now.">
       <ResponsiveTable label="Sales attention queue"><Table size="small"><TableHead><TableRow><TableCell>Priority</TableCell><TableCell>Reference</TableCell><TableCell>Customer</TableCell><TableCell>Owner</TableCell><TableCell>Why it needs attention</TableCell><TableCell>Due</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>
         {items.map(item => { const target = item.recordType.toLowerCase() === 'quote' ? `/sales/quotes/view/${item.recordId}` : item.recordType.toLowerCase() === 'lead' ? `/procurement/leads/view/${item.recordId}` : item.nexoraSerial ? `/commercial-cases?search=${encodeURIComponent(item.nexoraSerial)}` : null; return <TableRow hover key={`${item.recordType}-${item.id}`}><TableCell><Chip size="small" label={item.priority} color={item.priority.toLowerCase() === 'critical' ? 'error' : 'warning'} /></TableCell><TableCell>{item.nexoraSerial || item.reference}</TableCell><TableCell>{item.customerName || 'Customer unresolved'}</TableCell><TableCell>{item.ownerName || 'Unassigned'}</TableCell><TableCell>{item.reason}</TableCell><TableCell>{formatDateTime(item.dueAt)}</TableCell><TableCell align="right">{target && <Button size="small" endIcon={<OpenInNew />} onClick={() => navigate(target)}>Open</Button>}</TableCell></TableRow>; })}
       </TableBody></Table></ResponsiveTable>

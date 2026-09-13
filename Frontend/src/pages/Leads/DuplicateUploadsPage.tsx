@@ -21,6 +21,7 @@ import {
 import { OpenInNew, Refresh } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import RefreshFailedNotice from '../../components/common/RefreshFailedNotice';
 import { useAuth } from '../../context/AuthContext';
 import { statusLabel } from '../../utils/statusLabels';
 
@@ -37,9 +38,13 @@ export default function DuplicateUploadsPage() {
   const canCreateLeads = hasPermission('Leads', 'create');
   const [sortKey, setSortKey] = useState<SortKey>('ingestedAt');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  /** Busy only for a refresh the reader asked for — never for the automatic 5 s poll. */
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const query = useQuery({
     queryKey: ['duplicate-uploads'],
     queryFn: leadService.getDuplicateUploads,
+    // This page renders its own failure; a missed background poll raises no toast.
+    meta: { silenceGlobalError: true },
     refetchInterval: (state) => state.state.data?.some((row) =>
       row.duplicateType === 'EXACT_DUPLICATE_PENDING_SECURITY'
       || row.duplicateType === 'DUPLICATE_RESCAN_REQUIRED'
@@ -72,8 +77,18 @@ export default function DuplicateUploadsPage() {
     </TableSortLabel>
   );
 
+  const refreshNow = async () => {
+    setManualRefreshing(true);
+    try {
+      await query.refetch();
+    } finally {
+      setManualRefreshing(false);
+    }
+  };
+
   if (query.isLoading) return <Box sx={{ p: 4, textAlign: 'center' }}><CircularProgress /></Box>;
-  if (query.isError) return (
+  // Only a list that never loaded is replaced by the error; a failed poll keeps the rows on screen.
+  if (query.isError && query.data === undefined) return (
     <ApiErrorNotice
       error={query.error}
       fallbackMessage="Duplicate uploads could not be loaded. Nothing was changed — try again."
@@ -90,10 +105,12 @@ export default function DuplicateUploadsPage() {
             Exact file copies and business duplicates, including uploads awaiting security verification.
           </Typography>
         </Box>
-        <Button variant="outlined" startIcon={<Refresh />} onClick={() => query.refetch()} disabled={query.isFetching}>
+        <Button variant="outlined" startIcon={manualRefreshing ? <CircularProgress size={16} /> : <Refresh />} onClick={() => void refreshNow()} disabled={manualRefreshing}>
           Refresh
         </Button>
       </Stack>
+
+      {query.isError && <RefreshFailedNotice updatedAt={query.dataUpdatedAt} retryHint="Press Refresh to try again." />}
 
       {retryMutation.isError && (
         <ApiErrorNotice

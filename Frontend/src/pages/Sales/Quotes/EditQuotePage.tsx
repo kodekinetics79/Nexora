@@ -1,5 +1,5 @@
 import { alpha } from '@mui/material/styles';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import {
@@ -107,6 +107,16 @@ const EditQuotePage: React.FC = () => {
     enabled: !!id
   });
 
+  /**
+   * The quote the form was last filled from. The form is filled from the server copy ONCE per quote.
+   *
+   * This effect used to copy the server copy into every field whenever the query's data changed —
+   * a reconnect after a Wi-Fi blip, or the re-read after "Restore" on a recovered draft — which
+   * silently replaced every price, quantity and remark the rep had typed. After the first fill the
+   * form is the rep's; Save sends it and leaves the page.
+   */
+  const seededQuoteIdRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (quote) {
       if (quote.statusValue?.toUpperCase() === 'ORDERED') {
@@ -114,6 +124,8 @@ const EditQuotePage: React.FC = () => {
           navigate(`/sales/quotes/view/${id}`);
           return;
       }
+      if (seededQuoteIdRef.current === quote.id) return;
+      seededQuoteIdRef.current = quote.id;
       setQuoteNo(quote.quoteNo);
       setCustomerId(quote.customerId || null);
       setQuoteDate(quote.quoteDate ? quote.quoteDate.split('T')[0] : '');

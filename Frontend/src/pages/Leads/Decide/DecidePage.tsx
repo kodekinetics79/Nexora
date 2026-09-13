@@ -59,28 +59,67 @@ import LinesTable from './LinesTable';
 import CheckDocumentDialog, { type ConfirmedLine } from './CheckDocumentDialog';
 import { decisionLabel } from '../decisionRead';
 import {
+  applyUnitToUnitless,
   buildFitRequest,
   buildParticipationRequest,
+  carryChoices,
   concernFromSaved,
   CONCERN_LABELS,
   criterionCodes,
   daysUntil,
+  decisionsByLineKey,
+  decisionsFromLineKeys,
   dueSentence,
   fitMatchesSaved,
+  keepTenantUnits,
+  lineKeys,
   lineLabel,
   newId,
   nextThing,
   normalizeConcern,
-  normalizeDecisions,
   qualificationTransition,
   TERMINAL_BLOCKERS,
+  withAcknowledgement,
   type ConcernState,
-  QUOTED_AS_READ_NOTE,
+  type NextAction,
 } from './decideRules';
 
 type Mode = 'rfq' | 'draft' | 'decline';
 
-interface FormValue { decisions: DecisionMap; concern: ConcernState }
+/**
+ * What the unsaved-work guard compares and keeps. Choices are keyed by line number, not by this
+ * revision's line ids, so a draft left behind when the rep went to approve the extraction still
+ * lands on the right lines of the new revision that approval creates.
+ */
+interface FormValue { revisionId: number; decisions: Record<string, EditableLineDecision>; concern: ConcernState }
+
+const formOf = (
+  workbench: Pick<LeadDecisionWorkbenchDTO, 'leadRevisionId' | 'lines'> | undefined,
+  decisions: DecisionMap,
+  concern: ConcernState,
+): FormValue => ({
+  revisionId: workbench?.leadRevisionId ?? 0,
+  decisions: workbench ? decisionsByLineKey(workbench.lines, decisions) : {},
+  concern: normalizeConcern(concern),
+});
+
+const upperCodes = (options?: Array<{ code: string }>): Set<string> =>
+  new Set((options ?? []).map((option) => option.code.toUpperCase()));
+
+/**
+ * Grants that do not blink. The session re-reads its permissions every minute and, while that
+ * read is in flight, answers every edit grant as withdrawn. On this screen that turned the whole
+ * decision into plain text for about a second each minute: the unit picker closed under the
+ * mouse, the cursor left the quantity box, "Quote all" vanished. A grant this page already held
+ * is kept while the re-read is pending; a settled answer — a revocation included — and a failed
+ * read apply at once. The server authorises every write regardless.
+ */
+const useSteadyGrants = <T extends Record<string, boolean>>(live: T, revalidating: boolean): T => {
+  const [held, setHeld] = React.useState<T>(live);
+  if (!revalidating && JSON.stringify(held) !== JSON.stringify(live)) setHeld(live);
+  if (!revalidating) return live;
+  return Object.fromEntries(Object.entries(live).map(([key, value]) => [key, value || held[key] === true])) as T;
+};
 
 const Fact: React.FC<{ label: string; value: React.ReactNode; tone?: 'default' | 'due' | 'late' }> = ({ label, value, tone = 'default' }) => (
   <Box sx={{ minWidth: 0 }}>
@@ -115,9 +154,12 @@ const DecidePage: React.FC = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
-  const { hasPermission, userData } = useAuth();
+  const { hasPermission, userData, permissionsStale, permissionsError } = useAuth();
   const [searchParams] = useSearchParams();
-  const commercialAccess = commercialActionPermissions(hasPermission);
+  const commercialAccess = useSteadyGrants(
+    commercialActionPermissions(hasPermission),
+    Boolean(permissionsStale) && !permissionsError,
+  );
   const isManager = hasCommercialDecisionAuthority(userData);
   const canEdit = commercialAccess.canEditLeadDecision;
   const canPromote = commercialAccess.canPromoteLeadToRfq && isManager;
@@ -131,12 +173,14 @@ const DecidePage: React.FC = () => {
   const [historyOpen, setHistoryOpen] = React.useState(() => ['evidence', 'validate'].includes(searchParams.get('stage') ?? ''));
   const [checkOpen, setCheckOpen] = React.useState(false);
   const [checkFocus, setCheckFocus] = React.useState<number | null>(null);
+  /** A request to take the rep to a unit picker; each click is a new object. */
+  const [unitFocus, setUnitFocus] = React.useState<{ lineId?: number; nonce: number } | null>(null);
   /** Which server participation state the choices on screen were seeded from. */
   const decisionSeed = React.useRef<string | null>(null);
   /** Which saved fit assessment the concern controls were seeded from. */
   const concernSeed = React.useRef<string | null>(null);
   /** The lines and choices of the revision last shown, so a new revision can inherit the choices. */
-  const previous = React.useRef<{ revisionId: number; byLabel: Map<string, EditableLineDecision>; concern: ConcernState } | null>(null);
+  const previous = React.useRef<{ revisionId: number; byKey: Map<string, EditableLineDecision>; concern: ConcernState } | null>(null);
   /** The lines currently on screen, for callbacks that must not close over a stale workbench. */
   const linesRef = React.useRef<LeadDecisionWorkbenchDTO['lines']>([]);
   const fitOperation = React.useRef<RetryOperation | null>(null);
@@ -150,6 +194,9 @@ const DecidePage: React.FC = () => {
     queryFn: () => leadDecisionService.getWorkbench(leadId),
     enabled: Number.isFinite(leadId) && leadId > 0,
     retry: 1,
+    // The page says both failures itself: the whole-page notice when nothing ever loaded, and a
+    // quiet line above the lines when a re-read fails while the rep is working.
+    meta: { silenceGlobalError: true },
   });
   const briefQuery = useQuery({
     queryKey: ['lead-decision-brief', leadId],
@@ -184,20 +231,15 @@ const DecidePage: React.FC = () => {
     // the fit save is the first step of the button, and the choices must survive it.
     const nextDecisionSeed = [workbench.leadRevisionId, workbench.participationVersion ?? 'none', workbench.participationStatus].join(':');
     if (decisionSeed.current !== nextDecisionSeed) {
-      const initial = initializeDecisionMap(workbench);
-      // A document check mints a new immutable revision with new line ids. The rep's Quote/Skip
-      // choices and reasons carry across by line number; the corrected commercial values win.
+      // Only a unit the tenant quotes in is pre-selected; a word kept as written is shown beside
+      // an empty picker, never as a value that renders blank.
+      let initial = keepTenantUnits(initializeDecisionMap(workbench), workbench.unitOptions ?? []);
+      // A document check mints a new immutable revision with new line ids. What the rep chose
+      // carries across by line number: Quote/Skip with its reason and note, and a quantity, unit
+      // or currency picked for a line the new revision still has none for. Corrected values win.
       if (revisionChanged && previous.current) {
-        for (const line of workbench.lines) {
-          const carried = previous.current.byLabel.get(lineLabel(line));
-          if (!carried || initial[line.revisionLineId]?.decision !== 'Pending') continue;
-          initial[line.revisionLineId] = {
-            ...initial[line.revisionLineId],
-            decision: carried.decision,
-            ...(carried.reasonCode ? { reasonCode: carried.reasonCode } : {}),
-            ...(carried.note ? { note: carried.note } : {}),
-          };
-        }
+        initial = carryChoices(workbench.lines, initial, previous.current.byKey,
+          upperCodes(workbench.unitOptions), upperCodes(workbench.currencyOptions));
       }
       setDecisions(initial);
       decisionSeed.current = nextDecisionSeed;
@@ -220,12 +262,11 @@ const DecidePage: React.FC = () => {
 
   // The guard compares JSON strings, so what it sees is canonical: the same choices serialise
   // the same way whether the rep built them by clicking or the server sent them back.
-  const formValue = React.useMemo<FormValue>(
-    () => ({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) }),
-    [decisions, concern],
-  );
+  const formValue = React.useMemo<FormValue>(() => formOf(workbench, decisions, concern), [workbench, decisions, concern]);
   const guard = useUnsavedWorkGuard<FormValue>({
-    storageKey: workbench ? `nexora.lead-decision.${leadId}.revision.${workbench.leadRevisionId}` : '',
+    // Keyed by the request, not its revision: a rep who leaves to approve the extraction and comes
+    // back to the new revision it created still gets their unsaved choices back.
+    storageKey: workbench ? `nexora.lead-decision.${leadId}` : '',
     value: formValue,
     enabled: Boolean(workbench && decisionSeed.current),
     leaveMessage: 'You have unsaved choices on this request. Leave without saving them?',
@@ -250,14 +291,16 @@ const DecidePage: React.FC = () => {
 
   const updateLine = React.useCallback((revisionLineId: number, patch: Partial<EditableLineDecision>) => {
     setDecisions((current) => {
-      const merged = { ...(current[revisionLineId] ?? { decision: 'Pending' }), ...patch };
+      const existing = current[revisionLineId];
+      const merged: EditableLineDecision = { ...(existing ?? { decision: 'Pending' }), ...patch };
       // Quoting a warned line needs an acknowledgement. "Quote all" writes one; quoting the line
       // on its own used to leave the note empty and red, so a one-line request could not be
-      // quoted without typing. Same note, editable on the line.
+      // quoted without typing. The note says what happened on the line — a catalogue warning, or
+      // the unit the request did not give and the rep chose — and stays true as the unit is
+      // chosen. A note the rep typed is theirs.
       const line = workbench?.lines.find((candidate) => candidate.revisionLineId === revisionLineId);
-      if (patch.decision === 'Bid' && line?.needsAttention && (merged.note?.trim().length ?? 0) < 5)
-        merged.note = QUOTED_AS_READ_NOTE;
-      return { ...current, [revisionLineId]: merged };
+      const next = line && !('note' in patch) ? withAcknowledgement(line, existing, merged, patch.decision === 'Bid') : merged;
+      return { ...current, [revisionLineId]: next };
     });
   }, [workbench]);
 
@@ -270,13 +313,11 @@ const DecidePage: React.FC = () => {
     setDecisions((current) => {
       const next: DecisionMap = { ...current };
       for (const line of workbench.lines) {
-        const existing = current[line.revisionLineId] ?? { decision: 'Pending' };
-        const merged = { ...existing, ...patch };
+        const existing = current[line.revisionLineId];
+        const merged: EditableLineDecision = { ...(existing ?? { decision: 'Pending' }), ...patch };
         // Quoting a warned line needs an acknowledgement; "Quote all" is that acknowledgement,
         // written on the line where it can be read and changed.
-        if (patch.decision === 'Bid' && line.needsAttention && (merged.note?.trim().length ?? 0) < 5)
-          merged.note = QUOTED_AS_READ_NOTE;
-        next[line.revisionLineId] = merged;
+        next[line.revisionLineId] = withAcknowledgement(line, existing, merged, patch.decision === 'Bid');
       }
       return next;
     });
@@ -284,9 +325,13 @@ const DecidePage: React.FC = () => {
 
   React.useEffect(() => {
     if (!workbench) return;
+    const keys = lineKeys(workbench.lines);
     previous.current = {
       revisionId: workbench.leadRevisionId,
-      byLabel: new Map(workbench.lines.map((line) => [lineLabel(line), decisions[line.revisionLineId]]).filter((entry): entry is [string, EditableLineDecision] => Boolean(entry[1]))),
+      byKey: new Map(workbench.lines.flatMap((line) => {
+        const decision = decisions[line.revisionLineId];
+        return decision ? [[keys.get(line.revisionLineId)!, decision] as [string, EditableLineDecision]] : [];
+      })),
       concern,
     };
   }, [workbench, decisions, concern]);
@@ -297,8 +342,18 @@ const DecidePage: React.FC = () => {
   React.useEffect(() => {
     const draft = guard.recoveredDraft;
     if (!draft || !workbench || decisionRecordIsLocked(workbench, decisions)) return;
-    setDecisions(draft.value.decisions);
-    setConcern(draft.value.concern);
+    const saved = draft.value;
+    const byKey = saved?.decisions ?? {};
+    if (saved?.revisionId === workbench.leadRevisionId) {
+      setDecisions((current) => decisionsFromLineKeys(workbench.lines, byKey, current));
+      if (saved.concern) setConcern(saved.concern);
+    } else {
+      // A draft from before a document check or an extraction approval: carried by line number
+      // onto the new revision, with the values that approval corrected winning.
+      setDecisions((current) => carryChoices(workbench.lines, current, new Map(Object.entries(byKey)),
+        upperCodes(workbench.unitOptions), upperCodes(workbench.currencyOptions)));
+      if (saved?.concern?.raised && !(workbench.fitAssessment && workbench.fitAssessment.version > 0)) setConcern(saved.concern);
+    }
     guard.acceptRecovered();
     enqueueSnackbar(`Restored the choices you had not saved yet (from ${formatDateSafe(draft.savedAt)}).`, { variant: 'info' });
   }, [guard, workbench, decisions, enqueueSnackbar]);
@@ -307,6 +362,20 @@ const DecidePage: React.FC = () => {
     setCheckFocus(line?.revisionLineId ?? null);
     setCheckOpen(true);
   }, []);
+
+  /** One unit, chosen by the rep, for every quoted line that has none the tenant quotes in. */
+  const setUnitOnUnitless = React.useCallback((code: string) => {
+    if (!workbench) return;
+    const unitCodes = upperCodes(workbench.unitOptions);
+    setDecisions((current) => applyUnitToUnitless(workbench.lines, current, code, unitCodes));
+  }, [workbench]);
+
+  /** What the next step's button does: open the check, go to a unit picker, or go elsewhere. */
+  const runAction = React.useCallback((action: NextAction) => {
+    if (action.intent === 'check-document') openDocument();
+    else if (action.intent === 'choose-unit') setUnitFocus((current) => ({ lineId: action.lineId, nonce: (current?.nonce ?? 0) + 1 }));
+    else navigate(action.path);
+  }, [navigate, openDocument]);
 
   /**
    * Applies the values a rep confirmed against the document to the lines now on screen. Keyed
@@ -376,7 +445,7 @@ const DecidePage: React.FC = () => {
         participationOperation.current = operation;
         await leadDecisionService.saveParticipation(leadId, request, operation.key);
         participationOperation.current = null;
-        guard.markSaved({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) });
+        guard.markSaved(formOf(workbench, decisions, concern));
         current = await freshWorkbench();
       }
 
@@ -401,7 +470,7 @@ const DecidePage: React.FC = () => {
         expectedParticipationVersion: current.participationVersion,
         idempotencyKey: promotionKey.current,
       });
-      guard.markSaved({ decisions: normalizeDecisions(decisions), concern: normalizeConcern(concern) });
+      guard.markSaved(formOf(workbench, decisions, concern));
       enqueueSnackbar(
         `RFQ ${receipt.rfqNumber || `#${receipt.rfqId}`} created with ${receipt.promotedLineCount} line${receipt.promotedLineCount === 1 ? '' : 's'}.`,
         { variant: 'success' },
@@ -447,7 +516,9 @@ const DecidePage: React.FC = () => {
     );
   }
 
-  if (workbenchQuery.isError || !workbench) {
+  // Only a request that never loaded is replaced by the failure notice. A background re-read that
+  // fails keeps the lines and the rep's choices on screen (TanStack keeps the last good data).
+  if (!workbench) {
     return (
       <Box sx={{ p: { xs: 1, sm: 3 }, maxWidth: 760, mx: 'auto' }}>
         <Alert severity="error" action={<Button color="inherit" onClick={() => workbenchQuery.refetch()}>Retry</Button>}>
@@ -492,7 +563,7 @@ const DecidePage: React.FC = () => {
     if (unowned && !locked) return { label: 'Assign an owner', disabled: false, onClick: () => document.querySelector('[data-testid="decide-owner"]')?.scrollIntoView({ block: 'center', behavior: 'smooth' }) };
     if (next.kind === 'blocked' && next.action) {
       const action = next.action;
-      return { label: action.label, disabled: false, onClick: () => (action.intent === 'check-document' ? openDocument() : navigate(action.path)) };
+      return { label: action.label, disabled: false, onClick: () => runAction(action) };
     }
     // Declining is a committed decision, which the server allows only to commercial authority;
     // a rep's skip-everything is saved as a draft for a manager to decline.
@@ -571,6 +642,17 @@ const DecidePage: React.FC = () => {
         <Alert severity="error" sx={{ mb: 1.5 }}>
           <AlertTitle>This record needs an administrator</AlertTitle>
           {inconsistentBlocker.message}
+        </Alert>
+      ) : null}
+
+      {workbenchQuery.isRefetchError ? (
+        <Alert
+          severity="warning"
+          sx={{ mb: 1.5 }}
+          action={<Button color="inherit" size="small" onClick={() => workbenchQuery.refetch()}>Try again</Button>}
+        >
+          Couldn&apos;t refresh this request just now. Your choices are kept; the lines are as of{' '}
+          {new Date(workbenchQuery.dataUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.
         </Alert>
       ) : null}
 
@@ -678,6 +760,8 @@ const DecidePage: React.FC = () => {
             readOnly={readOnly}
             onChange={updateLine}
             onOpenDocument={openDocument}
+            onBulkUnit={setUnitOnUnitless}
+            focusUnit={unitFocus}
           />
         </Box>
 
@@ -778,13 +862,15 @@ const DecidePage: React.FC = () => {
                 sx={{ color: next.kind === 'ready' || next.kind === 'decline' || busy ? 'text.secondary' : 'warning.dark', fontWeight: next.kind === 'blocked' ? 600 : 400 }}
               >
                 {unowned && !locked ? 'Assign an owner first: take it, or give it to someone, at the top of this request.' : footerSentence}
-                {!unowned && next.kind === 'blocked' && next.action ? (
+                {/* The unit step's button sits right beside this sentence; a second control with
+                    the same name would only be read twice. */}
+                {!unowned && next.kind === 'blocked' && next.action && next.action.intent !== 'choose-unit' ? (
                   <>
                     {' '}
                     <Link
                       component="button"
                       type="button"
-                      onClick={() => (next.action!.intent === 'check-document' ? openDocument() : navigate(next.action!.path))}
+                      onClick={() => runAction(next.action!)}
                       sx={{ fontWeight: 700, verticalAlign: 'baseline' }}
                     >
                       {next.action.label}
@@ -849,6 +935,7 @@ const DecidePage: React.FC = () => {
         focusLineId={checkFocus}
         onClose={() => setCheckOpen(false)}
         onConfirmed={applyConfirmed}
+        decisions={decisions}
       />
 
       <ResolveClientDialog

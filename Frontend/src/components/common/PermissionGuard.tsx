@@ -1,7 +1,7 @@
 import React from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Box, Button, Typography } from '@mui/material';
+import { Box, Button, CircularProgress, Typography } from '@mui/material';
 import {
   ErrorOutlined as ErrorIcon,
   Security as SecurityIcon,
@@ -12,6 +12,15 @@ interface PermissionGuardProps {
   action?: 'view' | 'create' | 'edit' | 'delete';
   children: React.ReactNode;
   fallback?: React.ReactNode;
+  /**
+   * The guard wraps a whole screen (a route), not a single control.
+   *
+   * A create/edit guard around a BUTTON hides the button when the grant is missing. The same guard
+   * around a SCREEN used to hide the screen the same way — `null` under the top bar, no sentence,
+   * no retry — so a permissions read that failed during a deploy left Upload documents and the
+   * quote, order and shipment editors blank. A page guard always explains itself instead.
+   */
+  page?: boolean;
   // NOTE: a `redirect` prop used to be declared here but was never destructured, so all ~100 call
   // sites that passed it were no-ops. It is gone rather than implemented: silently bouncing a user
   // off a page they lack access to is exactly the "blank screen with no explanation" behaviour this
@@ -84,8 +93,11 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
   action = 'view',
   children,
   fallback,
+  page = false,
 }) => {
-  const { token, hasPermission, permissionsError, permissionsLoading, refreshPermissions } = useAuth();
+  const {
+    token, hasPermission, permissionsError, permissionsLoading, permissionsStale, refreshPermissions,
+  } = useAuth();
 
   // Auth gate: unauthenticated users are always sent to the login screen
   // (prevents the /dashboard -> /dashboard redirect loop / blank screen). Delegated to RequireAuth
@@ -98,10 +110,26 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
   const isAuthorized = hasPermission(moduleName, action);
 
   if (!isAuthorized) {
+    const guardsScreen = action === 'view' || page;
+
+    // Nothing has been confirmed yet and nothing has failed: the first read of this session is
+    // still on its way. Answering "Access Denied" (or a blank screen) for that second blames the
+    // user for a load that is about to succeed.
+    if (guardsScreen && permissionsStale && !permissionsError) {
+      return (
+        <Box
+          role="status"
+          sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}
+        >
+          <CircularProgress aria-label="Checking your access" />
+        </Box>
+      );
+    }
+
     // The permission set failed to load, so we are denying from an EMPTY set, not from a real
     // decision. Saying "Access Denied" here would send the user to an administrator who would
     // find nothing wrong with their grants. Name the actual fault and offer a retry.
-    if (permissionsError && action === 'view') {
+    if (permissionsError && guardsScreen) {
       return (
         <Box
           role="alert"
@@ -132,7 +160,7 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
       return <>{fallback}</>;
     }
 
-    if (action === 'view') {
+    if (guardsScreen) {
       return (
         <Box role="alert" aria-live="polite" sx={{
           display: 'flex',
@@ -148,7 +176,9 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
             Access Denied
           </Typography>
           <Typography variant="body1" sx={{ color: 'text.secondary', mb: 1 }}>
-            You do not have permission to access the <strong>{moduleName}</strong> module.
+            {action === 'view'
+              ? <>You do not have permission to access the <strong>{moduleName}</strong> module.</>
+              : <>You do not have permission to {action} records in the <strong>{moduleName}</strong> module.</>}
           </Typography>
           {/* Name the exact grant so the user can ask for it by name instead of "more access". */}
           <Typography variant="body2" sx={{ color: 'text.secondary', mb: 3, maxWidth: 460 }}>
