@@ -152,6 +152,9 @@ public static partial class UomCanonicalizer
         ["METER"] = "M", ["METRE"] = "M", ["METERS"] = "M", ["METRES"] = "M",
         ["LM"] = "M", ["RM"] = "M", ["LINEARMETER"] = "M", ["LINEARMETRE"] = "M",
         ["RUNNINGMETER"] = "M", ["RUNNINGMETRE"] = "M",
+        // Gulf and South-Asian BOQ spellings of the same metre ("Rmt", "Lmt", "Running meters").
+        ["RMT"] = "M", ["RMTS"] = "M", ["LMT"] = "M", ["LMTS"] = "M",
+        ["LINEARMETERS"] = "M", ["LINEARMETRES"] = "M", ["RUNNINGMETERS"] = "M", ["RUNNINGMETRES"] = "M",
         ["KM"] = "KM", ["KILOMETER"] = "KM", ["KILOMETRE"] = "KM", ["KILOMETERS"] = "KM", ["KILOMETRES"] = "KM",
         ["IN"] = "IN", ["INCH"] = "IN", ["INCHES"] = "IN",
         ["FT"] = "FT", ["FOOT"] = "FT", ["FEET"] = "FT",
@@ -159,8 +162,12 @@ public static partial class UomCanonicalizer
 
         // Area / volume. NFKD folds "m²"/"m³" to "M2"/"M3" before lookup.
         ["M2"] = "M2", ["SQM"] = "M2", ["SQMTR"] = "M2", ["SQUAREMETER"] = "M2", ["SQUAREMETRE"] = "M2",
+        ["SQMT"] = "M2", ["SQMTRS"] = "M2", ["SQMETER"] = "M2", ["SQMETRE"] = "M2", ["SQMETERS"] = "M2",
+        ["SQMETRES"] = "M2", ["SQUAREMETERS"] = "M2", ["SQUAREMETRES"] = "M2",
         ["FT2"] = "FT2", ["SQFT"] = "FT2", ["SQUAREFOOT"] = "FT2", ["SQUAREFEET"] = "FT2",
         ["M3"] = "M3", ["CBM"] = "M3", ["CUM"] = "M3", ["CUBICMETER"] = "M3", ["CUBICMETRE"] = "M3",
+        ["CUMTR"] = "M3", ["CUMTRS"] = "M3", ["CUMETER"] = "M3", ["CUMETRE"] = "M3",
+        ["CUBICMETERS"] = "M3", ["CUBICMETRES"] = "M3",
         ["L"] = "L", ["LTR"] = "L", ["LTRS"] = "L", ["LITER"] = "L", ["LITRE"] = "L", ["LITERS"] = "L", ["LITRES"] = "L",
         ["ML"] = "ML", ["MILLILITER"] = "ML", ["MILLILITRE"] = "ML",
 

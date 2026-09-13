@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Extraction.Templates;
 using ERP_RFQ_Automation.Extraction.Quantities;
+using ERP_RFQ_Automation.Services.Uom;
 
 namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 
@@ -92,6 +93,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                         : new Dictionary<string, string>(row.UnmappedColumns, StringComparer.Ordinal)
                 };
 
+                ReadUnitFromQuantityCell(line, row);
                 CanonicaliseCurrency(line.Currency);
                 ReadManufacturingPartText(line, row);
                 ReadMaterialPoText(line, row);
@@ -691,6 +693,44 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         value.Transformations.Add($"{fieldName}: {QuantityReason(reading, "not a positive number with at most six decimal places")}");
         value.Transformations.Add($"quantity_origin:{reading.Origin}");
         return value;
+    }
+
+    /// <summary>
+    /// "10 Nos" in the quantity cell of a sheet with no unit column (or an empty unit cell on
+    /// this row). The quantity parser already split the word off; it used to be recorded only as
+    /// a transformation note, so the line arrived with no unit and the rep was asked for one the
+    /// customer had written. The customer-PO path already reads it (row unit ?? unit token).
+    ///
+    /// This is the document's own word, not a default: it is kept verbatim (the canonicaliser
+    /// maps or refuses it later, so "25 Pack" still asks a person how many are in a pack), and
+    /// its evidence points at the quantity cell. A trailing word the canonicaliser does not know
+    /// at all ("10 approx") is not taken as a unit — the line then stays without one, as before.
+    /// </summary>
+    private static void ReadUnitFromQuantityCell(CanonicalRfqLineItem line, RfqSpreadsheetRow row)
+    {
+        if (line.UnitOfMeasure.Kind != CanonicalValueKind.Missing
+            || line.Quantity.Kind != CanonicalValueKind.Normalized)
+            return;
+
+        var token = QuantityParser.Parse(NormalizeNumerals(row.Quantity), allowFractional: true).UnitToken?.Trim();
+        if (string.IsNullOrWhiteSpace(token)) return;
+
+        var reading = UomCanonicalizer.Canonicalize(token);
+        if (reading.Resolution == UomResolution.Absent || reading.ReviewReason == UomReviewReason.Unknown)
+            return;
+
+        var unit = new CanonicalValue<string>
+        {
+            OriginalValue = row.Quantity,
+            Value = token,
+            Kind = CanonicalValueKind.Extracted,
+            Confidence = line.Quantity.Confidence,
+            ValidationStatus = ValidationStatus.Valid,
+            Evidence = new List<SourceEvidence> { Evidence(row, RfqSpreadsheetFields.Quantity, token) },
+            Transformations = new List<string> { "trim", "unit_read_from_quantity_cell" }
+        };
+        ApplyProvenance(unit, row, RfqSpreadsheetFields.Quantity);
+        line.UnitOfMeasure = unit;
     }
 
     private static string QuantityReason(QuantityReading reading, string unreadable) => reading.Origin switch

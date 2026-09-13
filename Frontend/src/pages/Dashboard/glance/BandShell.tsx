@@ -3,6 +3,7 @@ import { Alert, AlertTitle, Box, Button, Paper, Stack, Tooltip, Typography } fro
 import { LockOutlined as ForbiddenIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { glanceCssVariables } from './tokens';
+import RefreshFailedNotice from '../../../components/common/RefreshFailedNotice';
 import { SCOPE_UNRESOLVED } from './scopeWords';
 
 /**
@@ -47,6 +48,11 @@ export interface BandShellProps {
   /** The server's own sentence about why this reader may not see the band. */
   forbidden?: string | null;
   onRetry?: () => void;
+  /**
+   * `dataUpdatedAt` of a band whose latest background refresh failed while its last good answer is
+   * still drawn. The band keeps its rows and says how old they are; only `error` replaces them.
+   */
+  refreshFailedAt?: number | null;
   /** The band's reserved height. It is held in every state, empty included. */
   minHeight?: number;
   index?: number;
@@ -59,7 +65,7 @@ const sealFreshness = (generatedAt?: string | null): string => {
 };
 
 export default function BandShell({
-  title, seal, children, step, loading = false, error = null, forbidden = null, onRetry, minHeight = 260, index = 0,
+  title, seal, children, step, loading = false, error = null, forbidden = null, onRetry, refreshFailedAt = null, minHeight = 260, index = 0,
 }: BandShellProps) {
   const scopeText = seal.scope ?? SCOPE_UNRESOLVED;
   const sealText = `${scopeText} · ${seal.window} · ${sealFreshness(seal.generatedAt)}`;
@@ -103,6 +109,9 @@ export default function BandShell({
           <Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading {title.toLowerCase()}…</Typography>
         </Box>
       );
+    }
+    if (refreshFailedAt !== null) {
+      return <>{<RefreshFailedNotice updatedAt={refreshFailedAt} sx={{ mb: 1 }} />}{children}</>;
     }
     return children;
   })();

@@ -228,6 +228,8 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
     queryFn: commercialIntelligenceService.getSalesToday,
     refetchInterval: 60_000,
     retry: 1,
+    // The band renders its own failure; a background re-read must not raise a toast as well.
+    meta: { silenceGlobalError: true },
   });
 
   const data = query.data;
@@ -240,6 +242,8 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
 
   const presented = query.isError ? toPresentableError(query.error, { context: 'list' }) : null;
   const forbidden = presented?.status === 403 ? presented.message : null;
+  // A failed 60 s re-read keeps the rows already drawn. Only a band that never loaded shows the error.
+  const hasData = data !== undefined;
 
   return (
     <BandShell
@@ -248,7 +252,8 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
       index={index}
       minHeight={468}
       loading={query.isLoading}
-      error={presented && !forbidden ? presented.message : null}
+      error={presented && !forbidden && !hasData ? presented.message : null}
+      refreshFailedAt={presented && !forbidden && hasData ? query.dataUpdatedAt : null}
       forbidden={forbidden}
       onRetry={() => void query.refetch()}
       seal={{

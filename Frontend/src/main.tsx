@@ -8,6 +8,8 @@ import { ThemeContextProvider } from './context/ThemeContext';
 import App from './App';
 import { queryClient } from './api/queryClient';
 import ErrorBoundary from './components/common/ErrorBoundary';
+import DeploymentUpdateNotice from './components/common/DeploymentUpdateNotice';
+import { installDeploymentUpdateListener } from './utils/deploymentUpdate';
 import { SnackbarProvider } from 'notistack';
 import { Toaster } from 'react-hot-toast';
 import './index.css';
@@ -38,6 +40,15 @@ const DevelopmentQueryDevtoolsRouteGate: React.FC = () => {
   );
 };
 
+// A code file that fails to preload after a deploy raises the quiet "Nexora was updated" notice.
+installDeploymentUpdateListener();
+
+/** The app-level boundary clears when the address changes, so Back recovers from a crash card. */
+const RoutedErrorBoundary: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { pathname } = useLocation();
+  return <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>;
+};
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
@@ -46,12 +57,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <CssBaseline />
           <BrowserRouter>
             <SnackbarProvider maxSnack={3} anchorOrigin={{ vertical: 'top', horizontal: 'right' }}>
-              <ErrorBoundary>
+              <RoutedErrorBoundary>
                 <App />
                 {/* Inside the boundary, not beside it: a render throw originating in a toast used
                     to be uncaught and unmounted the entire application root. */}
                 <Toaster position="top-right" />
-              </ErrorBoundary>
+              </RoutedErrorBoundary>
+              <DeploymentUpdateNotice />
             </SnackbarProvider>
             <DevelopmentQueryDevtoolsRouteGate />
           </BrowserRouter>

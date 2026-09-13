@@ -1,4 +1,5 @@
-import { lazy, Suspense } from 'react';
+import { Suspense } from 'react';
+import lazyWithRetry from '../utils/lazyWithRetry';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Box, CircularProgress } from '@mui/material';
 import PlatformGuard from './components/PlatformGuard';
@@ -8,18 +9,18 @@ import PlatformLayout from './components/PlatformLayout';
 /** Absolute landing path for the control plane. See the redirect note below. */
 const PLATFORM_HOME = '/platform/overview';
 
-const OverviewPage = lazy(() => import('./pages/OverviewPage'));
-const TenantsPage = lazy(() => import('./pages/TenantsPage'));
-const TenantDetailPage = lazy(() => import('./pages/TenantDetailPage'));
-const PipelinePage = lazy(() => import('./pages/PipelinePage'));
-const PlansFlagsPage = lazy(() => import('./pages/PlansFlagsPage'));
-const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
-const PlatformUsersPage = lazy(() => import('./pages/PlatformUsersPage'));
-const BillingPage = lazy(() => import('./pages/BillingPage'));
-const SupportPage = lazy(() => import('./pages/SupportPage'));
-const SecurityPage = lazy(() => import('./pages/SecurityPage'));
-const EmailSettingsPage = lazy(() => import('./pages/EmailSettingsPage'));
-const PlatformAuthenticationPage = lazy(() => import('./pages/PlatformAuthenticationPage'));
+const OverviewPage = lazyWithRetry(() => import('./pages/OverviewPage'));
+const TenantsPage = lazyWithRetry(() => import('./pages/TenantsPage'));
+const TenantDetailPage = lazyWithRetry(() => import('./pages/TenantDetailPage'));
+const PipelinePage = lazyWithRetry(() => import('./pages/PipelinePage'));
+const PlansFlagsPage = lazyWithRetry(() => import('./pages/PlansFlagsPage'));
+const AuditLogPage = lazyWithRetry(() => import('./pages/AuditLogPage'));
+const PlatformUsersPage = lazyWithRetry(() => import('./pages/PlatformUsersPage'));
+const BillingPage = lazyWithRetry(() => import('./pages/BillingPage'));
+const SupportPage = lazyWithRetry(() => import('./pages/SupportPage'));
+const SecurityPage = lazyWithRetry(() => import('./pages/SecurityPage'));
+const EmailSettingsPage = lazyWithRetry(() => import('./pages/EmailSettingsPage'));
+const PlatformAuthenticationPage = lazyWithRetry(() => import('./pages/PlatformAuthenticationPage'));
 
 export const PlatformLoader = () => (
   <Box

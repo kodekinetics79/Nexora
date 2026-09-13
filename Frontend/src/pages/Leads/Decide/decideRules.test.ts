@@ -17,6 +17,15 @@ import {
   normalizeDecisions,
   qualificationStep,
   qualificationTransition,
+  acknowledgementFor,
+  applyUnitToUnitless,
+  carryChoices,
+  decisionsByLineKey,
+  decisionsFromLineKeys,
+  keepTenantUnits,
+  lineKeys,
+  QUOTED_AS_READ_NOTE,
+  withAcknowledgement,
 } from './decideRules';
 
 const line = (overrides: Partial<LeadDecisionLineDTO> & { id: number }): LeadDecisionLineDTO => ({
@@ -116,7 +125,9 @@ describe('the single next thing', () => {
     const many = workbench({
       lines: Array.from({ length: 8 }, (_item, index) => line({ id: index + 1, currency: 'SAR', verificationStatus: 'NEEDS_CHECK' })),
     });
-    const decisions: DecisionMap = Object.fromEntries(many.lines.map((item) => [item.revisionLineId, { decision: 'Bid' }]));
+    // Quoted as the page seeds them: the units the document gave are on the lines. (Lines with no
+    // unit are asked for their unit first — see "asks for one unit for every unitless line".)
+    const decisions = quoteAll(many);
 
     const next = nextThing({ workbench: many, decisions, concern: NO_CONCERN, lifecycle: undefined, leadId: 407 });
 
@@ -278,5 +289,136 @@ describe('qualification and dates', () => {
     expect(dueSentence(daysUntil('2026-09-09T20:00:00Z', now))).toBe('1 day left');
     expect(dueSentence(daysUntil('2026-09-01T00:00:00Z', now))).toBe('Closed 8 days ago');
     expect(dueSentence(daysUntil(null, now))).toBe('No deadline stated');
+  });
+});
+
+describe('a line the customer gave no usable unit for', () => {
+  it('says the request gave no unit, and the button goes to that line\'s picker', () => {
+    const wb = workbench({ lines: [line({ id: 1, unitOfMeasure: null })] });
+    expect(nextThing({ workbench: wb, decisions: quoteAll(wb), concern: NO_CONCERN, leadId: 407 })).toMatchObject({
+      kind: 'blocked',
+      sentence: 'The request gives no unit for line 00001. Choose it beside the quantity.',
+      action: { label: 'Choose the unit', intent: 'choose-unit', lineId: 10 },
+    });
+  });
+
+  it('names the word the customer wrote when the tenant does not quote in it', () => {
+    const wb = workbench({ lines: [line({ id: 1, unitOfMeasure: 'Roll', normalizedUom: 'Roll' })] });
+    expect(nextThing({ workbench: wb, decisions: quoteAll(wb), concern: NO_CONCERN, leadId: 407 }))
+      .toMatchObject({ sentence: 'Line 00001 says "Roll". Choose the unit you\'ll quote it in.', action: { intent: 'choose-unit' } });
+  });
+
+  it('asks for one unit for every unitless line before sending the rep to certify them', () => {
+    const many = workbench({
+      lines: Array.from({ length: 8 }, (_item, index) => line({ id: index + 1, unitOfMeasure: null, verificationStatus: 'NEEDS_CHECK' })),
+    });
+    expect(nextThing({ workbench: many, decisions: quoteAll(many), concern: NO_CONCERN, leadId: 407 })).toMatchObject({
+      kind: 'blocked',
+      sentence: '8 quoted lines need a unit. Choose one for all 8 above the lines, or line by line.',
+      action: { label: 'Choose the unit', intent: 'choose-unit' },
+    });
+  });
+
+  it('takes units chosen on the screen into the check on the screen, not to an approval that would drop them', () => {
+    const many = workbench({
+      lines: Array.from({ length: 8 }, (_item, index) => line({ id: index + 1, unitOfMeasure: null, verificationStatus: 'NEEDS_CHECK' })),
+    });
+    expect(nextThing({ workbench: many, decisions: quoteAll(many, { unitOfMeasure: 'EA' }), concern: NO_CONCERN, leadId: 407 })).toMatchObject({
+      kind: 'blocked',
+      sentence: 'Check the 8 quoted lines against the document and confirm them. The units you chose go with them.',
+      action: { label: 'Check the document', intent: 'check-document' },
+    });
+  });
+
+  it('asks one line to be checked with the unit the rep chose', () => {
+    const wb = workbench({ lines: [line({ id: 1, unitOfMeasure: null, verificationStatus: 'NEEDS_CHECK' })] });
+    expect(nextThing({ workbench: wb, decisions: quoteAll(wb, { unitOfMeasure: 'EA' }), concern: NO_CONCERN, leadId: 407 })).toMatchObject({
+      sentence: 'Check line 00001 against the document and confirm it. The unit you chose goes with it.',
+      action: { intent: 'check-document' },
+    });
+  });
+
+  it('says the tenant has no units before sending anyone to certify lines', () => {
+    const many = workbench({
+      unitOptions: [],
+      lines: Array.from({ length: 8 }, (_item, index) => line({ id: index + 1, verificationStatus: 'NEEDS_CHECK' })),
+    });
+    expect(nextThing({ workbench: many, decisions: quoteAll(many), concern: NO_CONCERN, leadId: 407 }))
+      .toMatchObject({ kind: 'blocked', sentence: expect.stringMatching(/no units of measure set up/) });
+  });
+});
+
+describe('the acknowledgement written on a warned line', () => {
+  it('keeps the catalogue sentence for a catalogue warning', () => {
+    expect(acknowledgementFor({ attentionReason: 'No catalog match found' })).toBe(QUOTED_AS_READ_NOTE);
+  });
+
+  it('says what happened to the unit instead of claiming a catalogue miss', () => {
+    const missing = { attentionReason: 'Unit of measure missing' };
+    expect(acknowledgementFor(missing, { unitOfMeasure: 'EA' })).toBe('The request gave no unit; quoted in EA.');
+    expect(acknowledgementFor(missing)).not.toMatch(/catalogue/);
+    const pack = { attentionReason: 'Unit of measure "Pack" needs review — packaging unit — confirm how many items it contains before quoting' };
+    expect(acknowledgementFor(pack, { unitOfMeasure: 'SET' })).toBe('The request said "Pack"; quoted in SET.');
+    expect(acknowledgementFor({ attentionReason: 'No catalog match found; Unit of measure missing' }, { unitOfMeasure: 'M' }))
+      .toBe(`${QUOTED_AS_READ_NOTE} The request gave no unit; quoted in M.`);
+  });
+
+  it('rewrites its own note as the unit is chosen, and never a note the rep typed', () => {
+    const warned = { attentionReason: 'Unit of measure missing', needsAttention: true };
+    const quoted = withAcknowledgement(warned, { decision: 'Pending' }, { decision: 'Bid' }, true);
+    expect(quoted.note).toBe('The request gave no unit; the unit is chosen on the line.');
+    expect(withAcknowledgement(warned, quoted, { ...quoted, unitOfMeasure: 'EA' }, false).note).toBe('The request gave no unit; quoted in EA.');
+    const typed = { ...quoted, note: 'Customer confirmed by phone: each.' };
+    expect(withAcknowledgement(warned, typed, { ...typed, unitOfMeasure: 'EA' }, false).note).toBe('Customer confirmed by phone: each.');
+  });
+
+  it('calls a unit-only warning a warning, not a catalogue warning', () => {
+    const wb = workbench({ lines: [line({ id: 1, needsAttention: true, attentionReason: 'Unit of measure missing' })] });
+    expect(nextThing({ workbench: wb, decisions: quoteAll(wb), concern: NO_CONCERN, leadId: 407 }))
+      .toMatchObject({ sentence: 'Say how you handled the warning on line 00001.' });
+  });
+});
+
+describe('choices that outlive a new revision', () => {
+  it('carries a unit the rep chose onto a line the new revision still has none for, but a corrected unit wins', () => {
+    const lines = [line({ id: 7, lineItemNo: '00001', unitOfMeasure: null }), line({ id: 8, lineItemNo: '00002', unitOfMeasure: 'SET' })];
+    const initial: DecisionMap = {
+      70: { decision: 'Pending', quantity: 4, currency: 'SAR' },
+      80: { decision: 'Pending', quantity: 4, unitOfMeasure: 'SET', currency: 'SAR' },
+    };
+    const carried = new Map([
+      ['00001', { decision: 'Bid' as const, unitOfMeasure: 'EA' }],
+      ['00002', { decision: 'Bid' as const, unitOfMeasure: 'EA' }],
+    ]);
+    const result = carryChoices(lines, initial, carried, new Set(['EA', 'SET']), new Set(['SAR']));
+    expect(result[70]).toMatchObject({ decision: 'Bid', unitOfMeasure: 'EA' });
+    expect(result[80]).toMatchObject({ decision: 'Bid', unitOfMeasure: 'SET' });
+  });
+
+  it('keys repeated line numbers apart and round-trips choices by line number', () => {
+    const lines = [line({ id: 1, lineItemNo: '10' }), line({ id: 2, lineItemNo: '10' }), line({ id: 3, lineItemNo: '20' })];
+    expect([...lineKeys(lines).values()]).toEqual(['10', '10#2', '20']);
+    const byKey = decisionsByLineKey(lines, { 10: { decision: 'Bid' }, 20: { decision: 'NoBid', reasonCode: 'NO_STOCK' } });
+    const renumbered = [line({ id: 7, lineItemNo: '10' }), line({ id: 8, lineItemNo: '10' }), line({ id: 9, lineItemNo: '20' })];
+    expect(decisionsFromLineKeys(renumbered, byKey, {})).toEqual({ 70: { decision: 'Bid' }, 80: { decision: 'NoBid', reasonCode: 'NO_STOCK' } });
+  });
+
+  it('pre-selects only units the tenant quotes in, spelled its way', () => {
+    expect(keepTenantUnits(
+      { 10: { decision: 'Pending', unitOfMeasure: 'Roll' }, 20: { decision: 'Pending', unitOfMeasure: 'ea' } },
+      [{ code: 'EA', label: 'Each' }],
+    )).toEqual({ 10: { decision: 'Pending' }, 20: { decision: 'Pending', unitOfMeasure: 'EA' } });
+  });
+
+  it('sets one unit on every quoted line without one, and leaves a line that has one', () => {
+    const lines = [line({ id: 1 }), line({ id: 2 }), line({ id: 3 })];
+    const result = applyUnitToUnitless(lines, {
+      10: { decision: 'Bid' },
+      20: { decision: 'Bid', unitOfMeasure: 'SET' },
+      30: { decision: 'NoBid', reasonCode: 'NO_STOCK' },
+    }, 'EA', new Set(['EA', 'SET']));
+    expect(result[10].unitOfMeasure).toBe('EA');
+    expect(result[20].unitOfMeasure).toBe('SET');
+    expect(result[30].unitOfMeasure).toBeUndefined();
   });
 });

@@ -27,6 +27,7 @@ import type {
 import type { DecisionMap, EditableLineDecision } from '../Workbench/workbenchRules';
 import { catalogWarningSummary } from '../Workbench/catalogWarningPresentation';
 import { lineLabel, lineNeeds, lineTitle, type LineNeedKind } from './decideRules';
+import { readUnit, tenantUnitCode, unitCaption } from './unitRules';
 
 interface Option { code: string; label: string }
 
@@ -41,6 +42,13 @@ export interface LinesTableProps {
   onChange: (revisionLineId: number, patch: Partial<EditableLineDecision>) => void;
   /** Opens the document check beside the lines, focused on the given line when there is one. */
   onOpenDocument: (line?: LeadDecisionLineDTO) => void;
+  /** Sets the rep's chosen unit on every quoted line that has none the tenant quotes in. */
+  onBulkUnit?: (code: string) => void;
+  /**
+   * A request to take the rep to a unit picker: one line's (turning to its page), or the one for
+   * every line when `lineId` is absent. A new object is a new request.
+   */
+  focusUnit?: { lineId?: number; nonce: number } | null;
   /** Lines drawn per page; the default suits a real bid list, tests use fewer. */
   linesPerPage?: number;
 }
@@ -78,6 +86,11 @@ const LineRow = React.memo(function LineRow({
   const skipping = choice === 'NoBid';
   const needs = new Set<LineNeedKind>(lineNeeds(line, decision, unitCodes, currencyCodes).map((need) => need.kind));
   const unverified = needs.has('source') || needs.has('missing-source');
+  // What the customer wrote for the unit, said under the picker: the word they used when Nexora
+  // mapped it, the word itself when it is not a unit this tenant quotes in, or that there was none.
+  const unitReading = readUnit(line, unitCodes);
+  const unitValue = tenantUnitCode(decision?.unitOfMeasure, unitOptions) ?? '';
+  const unitNote = skipping ? null : unitCaption(unitReading, decision?.unitOfMeasure, quoting && !readOnly);
   // Two numbers can sit on a line and they are not the same thing: the buyer's own material
   // code, and the maker's part number. Each is named so a rep never quotes the wrong one.
   const detail = [
@@ -159,10 +172,18 @@ const LineRow = React.memo(function LineRow({
                 }}
                 sx={{ width: 96 }}
               />
-              <FormControl size="small" error={needs.has('unit') || needs.has('unit-unconfigured')} sx={{ minWidth: 88 }}>
+              <FormControl
+                size="small"
+                error={needs.has('unit') || needs.has('unit-unconfigured')}
+                sx={{ minWidth: 88 }}
+                data-unit-line={line.revisionLineId}
+              >
+                {/* Only a unit the tenant quotes in is ever the value, so the box never renders
+                    blank while holding a word; that word is said underneath instead. */}
                 <Select
-                  value={decision?.unitOfMeasure ?? ''}
+                  value={unitValue}
                   displayEmpty
+                  renderValue={(value: string) => value || <Box component="em" sx={{ color: 'text.secondary' }}>Unit</Box>}
                   inputProps={{ 'aria-label': `Unit for line ${label}` }}
                   onChange={(event) => onChange(line.revisionLineId, { unitOfMeasure: event.target.value || undefined })}
                 >
@@ -174,6 +195,14 @@ const LineRow = React.memo(function LineRow({
               </FormControl>
             </Stack>
           )}
+          {unitNote ? (
+            <Typography
+              variant="caption"
+              sx={{ display: 'block', mt: 0.5, color: unitReading.kind === 'mapped' || readOnly ? 'text.secondary' : 'warning.dark' }}
+            >
+              {unitNote}
+            </Typography>
+          ) : null}
         </TableCell>
         <TableCell>
           {readOnly || !quoting ? (
@@ -294,6 +323,8 @@ const LinesTable: React.FC<LinesTableProps> = ({
   readOnly,
   onChange,
   onOpenDocument,
+  onBulkUnit,
+  focusUnit,
   linesPerPage = LINES_PER_PAGE,
 }) => {
   const skipReasons = React.useMemo(() => reasonCodes.filter((reason) => reason.appliesTo.includes('NoBid')), [reasonCodes]);
@@ -311,7 +342,67 @@ const LinesTable: React.FC<LinesTableProps> = ({
   }, [lines.length, page, pageSize]);
   const visible = lines.length > pageSize ? lines.slice(page * pageSize, (page + 1) * pageSize) : lines;
 
+  // A bid list with no unit column: every quoted line lacks one. One picker sets them all, and
+  // only those — a line that already has a unit keeps it.
+  const unitlessQuoted = unitOptions.length === 0 ? 0 : lines.filter((line) => {
+    const decision = decisions[line.revisionLineId];
+    return decision?.decision === 'Bid' && !(decision.unitOfMeasure && unitCodes.has(decision.unitOfMeasure.trim().toUpperCase()));
+  }).length;
+  const showBulkUnit = !readOnly && Boolean(onBulkUnit) && unitlessQuoted >= 2;
+
+  // The next-step button can bring the rep to a unit picker. Turn to the line's page first, then
+  // focus the picker once that page is drawn.
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+  const [focusTarget, setFocusTarget] = React.useState<{ lineId?: number } | null>(null);
+  React.useEffect(() => {
+    if (!focusUnit) return;
+    if (focusUnit.lineId != null && lines.length > pageSize) {
+      const index = lines.findIndex((candidate) => candidate.revisionLineId === focusUnit.lineId);
+      if (index >= 0) setPage(Math.floor(index / pageSize));
+    }
+    setFocusTarget({ lineId: focusUnit.lineId });
+    // Only a new request moves the page; the lines changing under it must not, so the lines and
+    // the page size are read, not watched.
+  }, [focusUnit]);
+  React.useEffect(() => {
+    if (!focusTarget) return;
+    const selector = focusTarget.lineId != null
+      ? `[data-unit-line="${focusTarget.lineId}"] [role="combobox"]`
+      : '[data-testid="decide-bulk-unit"] [role="combobox"]';
+    const node = containerRef.current?.querySelector<HTMLElement>(selector);
+    node?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    node?.focus();
+    setFocusTarget(null);
+  }, [focusTarget, page]);
+
   return (
+    <Box ref={containerRef}>
+    {showBulkUnit ? (
+      <Stack
+        direction="row"
+        spacing={1.5}
+        data-testid="decide-bulk-unit"
+        sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1, px: { xs: 2, sm: 3 }, py: 1.25, borderTop: 1, borderColor: 'divider', bgcolor: 'action.hover' }}
+      >
+        <Typography variant="body2" sx={{ fontWeight: 700 }}>{unitlessQuoted} quoted lines need a unit.</Typography>
+        <FormControl size="small" error sx={{ minWidth: 180 }}>
+          <Select
+            value=""
+            displayEmpty
+            renderValue={() => <Box component="em" sx={{ color: 'text.secondary' }}>Unit for all {unitlessQuoted}</Box>}
+            inputProps={{ 'aria-label': `Unit for the ${unitlessQuoted} quoted lines without one` }}
+            onChange={(event) => { if (event.target.value) onBulkUnit?.(String(event.target.value)); }}
+          >
+            {unitOptions.map((option) => (
+              <MenuItem key={option.code} value={option.code}>
+                {option.label && option.label !== option.code ? `${option.code} · ${option.label}` : option.code}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <Typography variant="caption" color="text.secondary">Lines that already have a unit keep theirs.</Typography>
+      </Stack>
+    ) : null}
     <TableContainer sx={{ overflowX: 'auto' }}>
       {lines.length > linesPerPage ? (
         <TablePagination
@@ -367,6 +458,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
         </TableBody>
       </Table>
     </TableContainer>
+    </Box>
   );
 };
 
