@@ -181,6 +181,76 @@ describe('ClientIdentityPanel — suggested', () => {
   });
 
   /**
+   * Lead 682 in production: a Marafiq RFQ whose own text reads "MARAFIQ invites bidders in
+   * accordance with our Request for Quotation(RFQ)." The candidate carried that sentence
+   * and the panel dropped it for the category phrase, so "Nexora thinks this is Marafiq"
+   * never said what on the page made it think so.
+   */
+  it("prefers the candidate's own sentence, then the lead's, over the reason-code phrase", async () => {
+    getClientCandidates.mockResolvedValue([
+      {
+        rank: 1,
+        customerId: 55,
+        customerName: 'Marafiq',
+        confidence: 0.9,
+        reasonCode: 'NAME_IN_DOCUMENT',
+        explanation: '"MARAFIQ" appears in the sentence that names the buyer: "MARAFIQ invites bidders in accordance with our Request for Quotation(RFQ)."',
+      },
+    ]);
+    renderPanel(
+      <ClientIdentityPanel
+        lead={lead({
+          customerMatchStatus: 'SUGGESTED',
+          customerMatchReasonCode: 'NAME_IN_DOCUMENT',
+          customerMatchExplanation: 'Same portal vendor code 1495 on MARAFIQ.',
+        })}
+      />,
+    );
+
+    expect(await screen.findByText(/MARAFIQ invites bidders in accordance with our Request for Quotation/))
+      .toBeInTheDocument();
+    expect(screen.getByText('Why')).toBeInTheDocument();
+    expect(screen.queryByText(/Matched because/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Same portal vendor code/)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the lead's sentence when the candidate carries none", async () => {
+    getClientCandidates.mockResolvedValue([
+      { rank: 1, customerId: 55, customerName: 'Marafiq', confidence: 0.9, reasonCode: 'NAME_IN_DOCUMENT' },
+    ]);
+    renderPanel(
+      <ClientIdentityPanel
+        lead={lead({
+          customerMatchStatus: 'SUGGESTED',
+          customerMatchReasonCode: 'NAME_IN_DOCUMENT',
+          customerMatchExplanation: '"MARAFIQ" appears in the company named on the document: "MARAFIQ".',
+        })}
+      />,
+    );
+
+    expect(await screen.findByText(/appears in the company named on the document/)).toBeInTheDocument();
+    expect(screen.queryByText(/Matched because/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the weak-hint warning as its own sentence so the quoted words survive intact', async () => {
+    getClientCandidates.mockResolvedValue([
+      {
+        rank: 1,
+        customerId: 30,
+        customerName: 'Saudi Aramco',
+        confidence: 0.55,
+        reasonCode: 'RFQ_PATTERN',
+        explanation: '"Saudi Aramco" numbering: RFQ number C001046556 follows this client\'s numbering.',
+      },
+    ]);
+    renderPanel(<ClientIdentityPanel lead={lead({ customerMatchStatus: 'SUGGESTED', customerMatchReasonCode: 'RFQ_PATTERN' })} />);
+
+    expect(await screen.findByText('Only a weak hint — check the document before confirming.')).toBeInTheDocument();
+    // Not lowercased into `"saudi Aramco" numbering…` by being folded into the warning.
+    expect(screen.getByText(/"Saudi Aramco" numbering/)).toBeInTheDocument();
+  });
+
+  /**
    * One click, and it goes to the dedicated client endpoint.
    *
    * This used to submit an extraction review, echoing every stored line item back so the
@@ -257,9 +327,91 @@ describe('ClientIdentityPanel — resolved', () => {
     const link = await screen.findByRole('link', { name: 'Saudi Electricity Company' });
     expect(link).toHaveAttribute('href', '/customers/42');
     expect(screen.getByText('Confirmed by a person')).toBeInTheDocument();
+    expect(screen.getByText('Why')).toBeInTheDocument();
     expect(screen.getByText(/Matched because the sender's email address is on file/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Change client/i })).toBeInTheDocument();
     // A resolved lead needs no suggestions.
     expect(getClientCandidates).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Lead 680 in production: an SEC portal print carrying ONLY a delivery address — no
+   * sender, no company-name field, no portal block. The resolver auto-linked it at 0.88 and
+   * wrote the sentence below, quoting the line it read. This panel discarded that and
+   * printed the reason-code phrase, so the rep was told a decision existed but never what
+   * the machine had actually read, and could not check it against the document.
+   */
+  it("shows the engine's own sentence, quoting the document, not the category phrase", async () => {
+    renderPanel(
+      <ClientIdentityPanel
+        lead={lead({
+          customerId: 42,
+          customerName: 'Saudi Electricity Company',
+          customerMatchStatus: 'AUTO_MATCHED',
+          customerMatchReasonCode: 'NAME_IN_DOCUMENT',
+          customerMatchConfidence: 0.88,
+          customerMatchExplanation:
+            '"Saudi Electricity Company" appears in the delivery address: "Saudi Electricity Company-DAMMAM".',
+        })}
+      />,
+    );
+
+    expect(await screen.findByText(/appears in the delivery address: "Saudi Electricity Company-DAMMAM"/))
+      .toBeInTheDocument();
+    expect(screen.getByText('Why')).toBeInTheDocument();
+    expect(screen.queryByText(/Matched because/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * NAME_IN_DOCUMENT and HUMAN_RESOLVED had no case in the reason-code switch, so a lead
+   * matched either way showed a name, a percentage and silence.
+   */
+  it('explains a colleague’s own decision instead of showing silence', async () => {
+    renderPanel(
+      <ClientIdentityPanel
+        lead={lead({
+          customerId: 42,
+          customerName: 'Marafiq',
+          customerMatchStatus: 'CONFIRMED',
+          customerMatchReasonCode: 'HUMAN_RESOLVED',
+        })}
+      />,
+    );
+
+    expect(await screen.findByText(/a colleague already chose this customer/)).toBeInTheDocument();
+  });
+
+  /**
+   * THE UNDO THAT COULD NOT WORK. "Change client" was offered on every resolved lead, but
+   * the server's re-pointing guard refuses to move the customer once the lead has become an
+   * RFQ and answers 409 — which the shared error layer renders as "This changed while you
+   * were working… refresh and reapply". Nothing had changed, so refreshing and retrying
+   * returned the identical refusal, forever. DecidePage already hid its picker once a
+   * customer was set; the two screens contradicted each other on the same lead.
+   */
+  it('offers no undo it cannot honour on a confirmed lead, and says instead how to correct it', async () => {
+    renderPanel(
+      <ClientIdentityPanel
+        lead={lead({
+          customerId: 42,
+          customerName: 'Saudi Electricity Company',
+          customerMatchStatus: 'CONFIRMED',
+          customerMatchReasonCode: 'SENDER_EMAIL_EXACT',
+        })}
+      />,
+    );
+
+    expect(await screen.findByRole('link', { name: 'Saudi Electricity Company' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Change client/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/locked now that the inquiry is confirmed/i)).toBeInTheDocument();
+    expect(screen.getByText(/reject this inquiry and raise it again/i)).toBeInTheDocument();
+    expect(screen.getByText(/correct the client there/i)).toBeInTheDocument();
+  });
+
+  it('keeps the client choosable while the lead has no customer yet', async () => {
+    renderPanel(<ClientIdentityPanel lead={lead()} />);
+
+    expect(await screen.findByText('No client linked yet')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose the customer' })).toBeEnabled();
+    expect(screen.queryByText(/locked now that the inquiry is confirmed/i)).not.toBeInTheDocument();
   });
 });

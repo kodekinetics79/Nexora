@@ -29,7 +29,8 @@ import { commercialActionPermissions } from '../../utils/commercialActionPermiss
  *
  * Three states, none of them a dead end:
  *
- *   resolved   — the client, linked, with the reason it was matched.
+ *   resolved   — the client, linked, in the engine's own words quoting the document,
+ *                plus the honest statement that it is now locked and how to correct it.
  *   suggested  — Nexora's best guess, confirmable in ONE click.
  *   unresolved — no link, but every scrap of evidence Nexora does hold, so the
  *                decision takes five seconds instead of a hunt through the
@@ -63,6 +64,32 @@ const EvidenceList: React.FC<{ rows: EvidenceRow[] }> = ({ rows }) => (
         </Box>
       </React.Fragment>
     ))}
+  </Box>
+);
+
+/**
+ * WHY THIS CLIENT — the one line that lets a rep check the machine against the document.
+ *
+ * The resolver writes a sentence quoting the page it read (`"Saudi Electricity Company"
+ * appears in the delivery address: "Saudi Electricity Company-DAMMAM".`), and the quoted
+ * words ARE the evidence. Set in disabled grey under the name they read as a system note
+ * nobody is meant to act on, which is how a checkable fact became decoration. Labelled
+ * plainly and set in body text, a rep can hold it against the document in three seconds.
+ */
+const WhyLine: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <Box sx={{ mt: 1 }}>
+    <Typography
+      component="span"
+      sx={{
+        fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled',
+        textTransform: 'uppercase', letterSpacing: '0.03em', mr: 1,
+      }}
+    >
+      Why
+    </Typography>
+    <Typography component="span" sx={{ fontSize: '0.85rem', color: 'text.primary', overflowWrap: 'anywhere' }}>
+      {children}
+    </Typography>
   </Box>
 );
 
@@ -242,15 +269,26 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
             ? `Buyer contact on file${lead.buyersName ? `: ${lead.buyersName}` : ''}.`
             : 'No buyer contact linked at this client yet.'}
         </Typography>
-        {explanation && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
-            {explanation}
-          </Typography>
-        )}
+        {/* The engine's own sentence, quoting the document — not the category phrase. */}
+        {explanation && <WhyLine>{explanation}</WhyLine>}
+        {/* NO "Change client" HERE — the control could not do what it offered.
+            The server's re-pointing guard (LeadRepository.LinkClientCoreAsync) refuses to
+            move the customer on a lead that has already become an RFQ, because
+            Rfq.InheritCommercialIdentity would then leave the lead and the RFQ naming
+            different buyers with no way to re-inherit. That refusal comes back as 409, and
+            the shared error layer titles every 409 "This changed while you were working"
+            and tells the rep to refresh and reapply — advice that cannot succeed here:
+            nothing changed underneath them, and the answer is the same every time. So the
+            rep refreshed and retried, and retried.
+            DecidePage has always hidden its own picker once a customer is set, which is how
+            the two screens came to contradict each other on the same lead. An honest
+            sentence beats a button that cannot work; the way out is named instead. */}
         {canResolveClient && (
-          <Button size="small" onClick={openDialog} sx={{ mt: 1, fontWeight: 800, textTransform: 'none' }}>
-            Change client
-          </Button>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1.25, maxWidth: 560 }}>
+            This client is locked now that the inquiry is confirmed, so the quote and the order
+            cannot end up naming different buyers. If it is wrong, reject this inquiry and raise
+            it again — or, if it has already become an RFQ, correct the client there.
+          </Typography>
         )}
       </Box>,
       'resolved',
@@ -262,7 +300,14 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
   if (state === 'suggested' && top) {
     const confidence = top.confidence ?? lead.customerMatchConfidence;
     const pct = confidencePercent(confidence);
-    const why = matchExplanation({ customerMatchReasonCode: top.reasonCode ?? lead.customerMatchReasonCode });
+    // The engine's own sentence about THIS candidate first, then the one it wrote on the
+    // lead, and only then the reason-code phrase. The candidate rows in ResolveClientDialog
+    // have always preferred the authored sentence (see candidateExplanation); this panel was
+    // holding the same sentence in `top.explanation` and dropping it for the category phrase,
+    // so "Nexora thinks this is Marafiq" never said what on the page made it think so.
+    const why = (top.explanation ?? '').trim()
+      || (lead.customerMatchExplanation ?? '').trim()
+      || matchExplanation({ customerMatchReasonCode: top.reasonCode ?? lead.customerMatchReasonCode });
     const others = candidates.length - 1;
     // A numbering pattern, an earlier sender or a contact's name is a hint, not a read of the
     // document. Printed as "Nexora thinks this is Saudi Aramco" with a gold Confirm button, a
@@ -282,11 +327,15 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
           </Box>
           {pct != null ? ` (${pct}%)` : ''}
         </Typography>
-        {why && (
+        {/* The warning is its own sentence so the engine's words survive intact beneath it.
+            Folding them together used to lowercase the first character, which turned a
+            sentence opening on a quoted company name into `"saudi Electricity Company"…`. */}
+        {weak && (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
-            {weak ? `Only a weak hint: ${why.charAt(0).toLowerCase()}${why.slice(1)} Check the document before confirming.` : why}
+            Only a weak hint — check the document before confirming.
           </Typography>
         )}
+        {why && <WhyLine>{why}</WhyLine>}
         {others > 0 && (
           <Typography variant="body2" color="warning.main" sx={{ mt: 0.25, fontWeight: 700 }}>
             {others === 1 ? '1 other client also matches the evidence.' : `${others} other clients also match the evidence.`}
