@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import LeadDecisionActions, { reopenBlockedReason } from './LeadDecisionActions';
+import LeadDecisionActions, {
+  clarifyCallout, passCallout, qualifyCallout, reopenBlockedReason,
+} from './LeadDecisionActions';
 
 const getState = vi.fn();
 const transition = vi.fn();
@@ -205,5 +207,118 @@ describe('reopenBlockedReason', () => {
     const finished = reopenBlockedReason(false, true, 'DUPLICATED');
     expect(finished).toContain('duplicated');
     expect(finished).not.toContain('DUPLICATED');
+  });
+});
+
+/**
+ * On a request that had become an RFQ the three call-outs said "Pass is not available for this
+ * completed lead." and "Qualification is not an allowed transition from the current lifecycle
+ * state." Neither was true: it was not completed, and "transition" is not a word a rep uses.
+ */
+describe('LeadDecisionActions — call-outs say where the request stands', () => {
+  const becameRfq = {
+    aggregateId: 42,
+    currentStatusCode: 'CONVERTED_TO_RFQ',
+    version: 6,
+    isTerminal: false,
+    canReopen: false,
+    allowedTransitions: [
+      { statusId: 12, statusCode: 'QUOTED', label: 'Quoted', requiresReason: false },
+      { statusId: 13, statusCode: 'CANCELLED', label: 'Cancelled', requiresReason: true },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authUser = { id: 7, isManager: true, isSuperAdmin: false };
+    getLeadOutcomeReasons.mockResolvedValue([]);
+  });
+
+  it('on a request that became an RFQ, says that on each disabled verb', async () => {
+    getState.mockResolvedValue(becameRfq);
+    renderActions();
+
+    const qualify = await screen.findByRole('button', { name: 'Qualify Lead' });
+    await waitFor(() => expect(qualify.parentElement).toHaveAttribute('title', 'This request already became an RFQ.'));
+    const pass = screen.getByRole('button', { name: 'Pass' });
+    expect(pass).toBeDisabled();
+    expect(pass.parentElement).toHaveAttribute('title', "This request already became an RFQ, so it can't be passed on here.");
+    expect(screen.getByRole('button', { name: /request clarification/i }).parentElement)
+      .toHaveAttribute('title', 'This request already became an RFQ, so there is nothing to clarify here.');
+
+    fireEvent.mouseOver(pass.parentElement!);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent("This request already became an RFQ, so it can't be passed on here.");
+    expect(document.body.innerHTML).not.toMatch(/completed lead|allowed transition|lifecycle state/i);
+  });
+
+  it('says what Qualify and Pass do while they are available', async () => {
+    getState.mockResolvedValue(state);
+    renderActions();
+
+    const qualify = await screen.findByRole('button', { name: 'Qualify Lead' });
+    await waitFor(() => expect(qualify).toBeEnabled());
+    expect(qualify.parentElement).toHaveAttribute(
+      'title',
+      'Marks this request as worth quoting. It does not create an RFQ; that happens on the Decide screen.',
+    );
+    expect(screen.getByRole('button', { name: 'Pass' }).parentElement)
+      .toHaveAttribute('title', 'Closes this request without an RFQ. You choose the reason.');
+  });
+
+  it('says in the Qualify dialog that lines are marked, not quoted', async () => {
+    getState.mockResolvedValue(state);
+    renderActions();
+
+    const qualify = await screen.findByRole('button', { name: 'Qualify Lead' });
+    await waitFor(() => expect(qualify).toBeEnabled());
+    fireEvent.click(qualify);
+    expect(screen.getByText(
+      'This marks the request qualified. It does not create an RFQ: lines are marked Quote or Skip, and the RFQ is created, on the Decide screen.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/quoted or skipped|governed lifecycle transition/i)).toBeNull();
+  });
+});
+
+describe('the three call-outs, status by status', () => {
+  const at = (currentStatusCode: string, isTerminal = false) => ({ currentStatusCode, isTerminal });
+
+  it('say the status is still being read before it arrives', () => {
+    expect(qualifyCallout(undefined, false)).toBe('Checking where this request stands…');
+    expect(passCallout(undefined, false)).toBe('Checking where this request stands…');
+    expect(clarifyCallout(undefined, false)).toBe('Record the missing information needed from the customer.');
+  });
+
+  it('Qualify', () => {
+    expect(qualifyCallout(at('QUALIFIED'), false)).toBe('This request is already qualified.');
+    expect(qualifyCallout(at('CONVERTED_TO_RFQ'), false)).toBe('This request already became an RFQ.');
+    expect(qualifyCallout(at('QUOTED'), false)).toBe('This request has moved past qualifying (Quote sent).');
+    expect(qualifyCallout(at('COMPLETED', true), false)).toBe('This request has moved past qualifying (Completed).');
+    expect(qualifyCallout(at('DUPLICATED', true), false)).toBe("This request is closed (Duplicate), so it can't be qualified.");
+    expect(qualifyCallout(at('UNASSIGNED'), false))
+      .toBe("This request can't be qualified from Waiting for an owner. Ask an administrator to check the lead statuses under Setup.");
+  });
+
+  it('Pass', () => {
+    expect(passCallout(at('DISQUALIFIED', true), false)).toBe('This request was already declined.');
+    expect(passCallout(at('LOST', true), false)).toBe('This request is already closed (Lost).');
+    expect(passCallout(at('NEGOTIATION'), false)).toBe('This request is past the point of passing on (In negotiation).');
+    expect(passCallout(at('SOMETHING_TENANT_MADE'), false))
+      .toBe("Passing on isn't available from its current status. Ask an administrator to check the lead statuses under Setup.");
+  });
+
+  it('Request clarification', () => {
+    expect(clarifyCallout(at('RECEIVED'), false)).toBe('Record the missing information needed from the customer.');
+    expect(clarifyCallout(at('CANCELLED', true), true)).toBe('This request is closed (Cancelled), so there is nothing to clarify here.');
+  });
+
+  it('never print a raw status code', () => {
+    const codes = ['RECEIVED', 'UNDER_REVIEW', 'QUALIFIED', 'DISQUALIFIED', 'CONVERTED_TO_RFQ', 'QUOTED', 'NEGOTIATION',
+      'AWARDED', 'PARTIALLY_AWARDED', 'LOST', 'CANCELLED', 'COMPLETED', 'DUPLICATED', 'PENDING_IDENTIFICATION', 'MYSTERY_CODE'];
+    for (const code of codes) {
+      for (const terminal of [false, true]) {
+        const said = [qualifyCallout(at(code, terminal), false), passCallout(at(code, terminal), false), clarifyCallout(at(code, terminal), true)];
+        for (const sentence of said) expect(sentence).not.toMatch(/[A-Z]{2,}_[A-Z]|MYSTERY/);
+      }
+    }
   });
 });

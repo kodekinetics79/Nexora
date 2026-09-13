@@ -2,12 +2,20 @@ import type {
   FitAssessmentDTO,
   LeadDecisionLineDTO,
   LeadDecisionWorkbenchDTO,
+  PromotionReceiptDTO,
   SaveFitAssessmentRequest,
   SaveParticipationRequest,
 } from '../../../api/services/leadDecisionService';
 import type { LifecycleState, LifecycleTransitionOption } from '../../../api/services/commercialLifecycleService';
-import { parseDateSafe } from '../../../utils/dates';
-import { TERMINAL_BLOCKERS, type DecisionMap, type EditableLineDecision } from '../Workbench/workbenchRules';
+import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
+import { leadStatusWords } from '../../../utils/leadStatusWords';
+import {
+  countDecisions,
+  decisionRecordIsLocked,
+  TERMINAL_BLOCKERS,
+  type DecisionMap,
+  type EditableLineDecision,
+} from '../Workbench/workbenchRules';
 import { readUnit, tenantUnitCode, type UnitOption, type UnitReading } from './unitRules';
 
 export { TERMINAL_BLOCKERS };
@@ -278,12 +286,28 @@ const SELF_RESOLVED_BLOCKERS = new Set([
 /** The one eligibility refusal the page clears itself, by qualifying the lead on the way. */
 const NOT_QUALIFIED_MESSAGE = /only a qualified lead/i;
 
+/**
+ * Where the request stands. The first five kinds are finished or stopped records the page only
+ * reports; the last four are an open request and what it needs.
+ */
 export type NextThing =
+  | { kind: 'rfq'; rfqId: number; rfqRef: string; changed: boolean }
+  | { kind: 'legacy'; path?: string }
+  | { kind: 'inconsistent' }
+  | { kind: 'declined' }
+  | { kind: 'closed'; statusCode: string; canReopen: boolean }
   | { kind: 'ready' }
   | { kind: 'decline' }
   | { kind: 'concern' }
-  | { kind: 'blocked'; sentence: string; action?: NextAction }
-  | { kind: 'closed'; sentence: string };
+  | { kind: 'blocked'; sentence: string; action?: NextAction };
+
+/** The kinds an open request can be in: the ones the decision section and its button serve. */
+export const isOpenKind = (next: NextThing): next is Extract<NextThing, { kind: 'ready' | 'decline' | 'concern' | 'blocked' }> =>
+  next.kind === 'ready' || next.kind === 'decline' || next.kind === 'concern' || next.kind === 'blocked';
+
+/** How an RFQ names itself: its number, or its id when it has none yet. */
+export const rfqRefOf = (promotion: { rfqNumber?: string | null; rfqId: number }): string =>
+  promotion.rfqNumber?.trim() || `#${promotion.rfqId}`;
 
 export interface NextThingInput {
   workbench: LeadDecisionWorkbenchDTO;
@@ -509,15 +533,27 @@ export const applyUnitToUnitless = (
 };
 
 export const nextThing = ({ workbench, decisions, concern, lifecycle, leadId }: NextThingInput): NextThing => {
+  // What the decision record itself says comes first and never waits for the status read: a
+  // request that became an RFQ is that, whatever the lifecycle read says or whether it came back.
+  if (workbench.promotion) {
+    return {
+      kind: 'rfq',
+      rfqId: workbench.promotion.rfqId,
+      rfqRef: rfqRefOf(workbench.promotion),
+      changed: workbench.blockers.some((blocker) => blocker.code === 'RFQ_REVISION_REQUIRED'),
+    };
+  }
+  const legacy = workbench.blockers.find((blocker) => blocker.code === 'LEGACY_RFQ');
+  if (legacy) return { kind: 'legacy', ...(legacy.actionPath ? { path: legacy.actionPath } : {}) };
+  if (workbench.blockers.some((blocker) => blocker.code === 'INCONSISTENT_CONVERTED_STATE')) return { kind: 'inconsistent' };
+  const counts = countDecisions(decisions);
+  if (decisionRecordIsLocked(workbench, decisions) && counts.total > 0 && counts.noBid === counts.total) return { kind: 'declined' };
+
+  if (lifecycle && qualificationStep(lifecycle) === 'impossible') {
+    return { kind: 'closed', statusCode: lifecycle.currentStatusCode, canReopen: lifecycle.canReopen === true };
+  }
   if (!workbench.customerId) {
     return { kind: 'blocked', sentence: 'Choose the customer this request came from.' };
-  }
-  const closed = lifecycle && qualificationStep(lifecycle) === 'impossible';
-  if (closed) {
-    return {
-      kind: 'closed',
-      sentence: `This request is ${lifecycle.currentStatusCode.toLowerCase().replaceAll('_', ' ')}. Reopen it from the lead page before deciding.`,
-    };
   }
   const unitCodes = new Set((workbench.unitOptions ?? []).map((option) => option.code.toUpperCase()));
   const currencyCodes = new Set((workbench.currencyOptions ?? []).map((option) => option.code.toUpperCase()));
@@ -543,7 +579,7 @@ export const nextThing = ({ workbench, decisions, concern, lifecycle, leadId }: 
   if (unitless.length >= 2) {
     return {
       kind: 'blocked',
-      sentence: `${unitless.length} quoted lines need a unit. Choose one for all ${unitless.length} above the lines, or line by line.`,
+      sentence: `${unitless.length} lines marked to quote need a unit. Choose one for all ${unitless.length} above the lines, or line by line.`,
       action: { label: 'Choose the unit', path: `/procurement/leads/${leadId}/workbench`, intent: 'choose-unit' },
     };
   }
@@ -558,13 +594,13 @@ export const nextThing = ({ workbench, decisions, concern, lifecycle, leadId }: 
     if (unverifiedQuoted.some((line) => readUnit(line, unitCodes).kind !== 'mapped')) {
       return {
         kind: 'blocked',
-        sentence: `Check the ${unverifiedQuoted.length} quoted lines against the document and confirm them. The units you chose go with them.`,
+        sentence: `Check the ${unverifiedQuoted.length} lines marked to quote against the document and confirm them. The units you chose go with them.`,
         action: { label: 'Check the document', path: `/procurement/extraction/review/${leadId}`, intent: 'check-document' },
       };
     }
     return {
       kind: 'blocked',
-      sentence: `Nexora could not certify ${unverifiedQuoted.length} of the quoted lines against the document. Approve the extraction once in Documents to check, then come back here.`,
+      sentence: `Nexora could not certify ${unverifiedQuoted.length} of the lines marked to quote against the document. Approve the extraction once in Documents to check, then come back here.`,
       action: { label: 'Approve the extraction', path: `/procurement/extraction/review/${leadId}` },
     };
   }
@@ -616,4 +652,228 @@ export const dueSentence = (days: number | null): string => {
   if (days < 0) return `Closed ${-days} day${days === -1 ? '' : 's'} ago`;
   if (days === 0) return 'Due today';
   return `${days} day${days === 1 ? '' : 's'} left`;
+};
+
+/** "line" for one, "lines" otherwise. */
+export const lineWord = (count: number): string => (count === 1 ? 'line' : 'lines');
+
+export type StepTone = 'info' | 'warning' | 'error' | 'success';
+
+/** The one control a finished or stopped request offers beside its sentence. */
+export interface StepAction {
+  label: string;
+  /** Where the control goes; absent when the page does it in place. */
+  path?: string;
+  /** Opens the review of a customer's change on this screen. */
+  intent?: 'review-change';
+}
+
+export interface StepCopy {
+  sentence: string;
+  tone: StepTone;
+  action?: StepAction;
+}
+
+export interface StepCopyContext {
+  leadId: number;
+  /** The viewer may open RFQs. */
+  canViewRfq: boolean;
+  /** The viewer may record the review of a customer's change after the RFQ was created. */
+  canReviewChange: boolean;
+  /** The viewer may reopen a closed request on the lead page. */
+  mayReopen: boolean;
+  currentRevisionNumber: number;
+  /** The revision the RFQ was created from, when there is one. */
+  promotedRevisionNumber?: number | null;
+  /** The tenant's own label for the status, for codes Nexora has no words for. */
+  statusLabel?: string | null;
+}
+
+/** Closed statuses a manager can bring back, with the words that open their sentence. */
+const REOPENABLE_OPENINGS: Readonly<Record<string, string>> = {
+  DISQUALIFIED: 'This request was declined.',
+  CANCELLED: 'This request was cancelled.',
+  LOST: 'This request was lost.',
+};
+
+const MOVED_ON = new Set(['QUOTED', 'NEGOTIATION', 'AWARDED', 'PARTIALLY_AWARDED']);
+
+/**
+ * The sentence for a request whose status allows no qualification, so no RFQ. It says what the
+ * status means in job words and names the way back only where one exists for this viewer: the
+ * server reopens a declined, cancelled or lost request (a manager's action on the lead page), and
+ * nothing else.
+ */
+export const closedSentence = (
+  statusCode: string,
+  { canReopen, mayReopen, fallbackLabel }: { canReopen: boolean; mayReopen: boolean; fallbackLabel?: string | null },
+): string => {
+  const code = (statusCode ?? '').trim().toUpperCase();
+  const words = leadStatusWords(code) ?? (fallbackLabel?.trim() || 'not recorded');
+  const opening = REOPENABLE_OPENINGS[code];
+  if (opening) {
+    if (!canReopen) return `${opening} Nothing more can be decided here.`;
+    return mayReopen
+      ? `${opening} To work on it again, reopen it on the lead page.`
+      : `${opening} Ask a manager to reopen it if the customer still wants a price.`;
+  }
+  if (code === 'DUPLICATED') return 'This request was marked as a duplicate of another request. Nothing can be decided here; work on the other one.';
+  if (code === 'COMPLETED') return 'This request is completed. Nothing more can be decided here.';
+  if (MOVED_ON.has(code)) return `This request has already moved on (${words}). Nothing more can be decided here.`;
+  if (code === 'CONVERTED_TO_RFQ') return 'This request already became an RFQ. Nothing more can be decided here.';
+  return `This request can't be marked qualified from its current status (${words}), so no RFQ can be created. Ask an administrator to check the lead statuses under Setup.`;
+};
+
+/**
+ * The next-step sentence, tone and control for a request that is finished or stopped. Null for an
+ * open request, whose sentence depends on who is deciding and what the lines still need.
+ */
+export const nextStepCopy = (next: NextThing, ctx: StepCopyContext): StepCopy | null => {
+  switch (next.kind) {
+    case 'rfq': {
+      const openRfq: StepAction = { label: 'Open the RFQ', path: `/procurement/rfqs/view/${next.rfqId}` };
+      if (next.changed) {
+        if (ctx.canReviewChange) {
+          return {
+            tone: 'warning',
+            sentence: `The customer changed this request after it became RFQ ${next.rfqRef}. Compare revision ${ctx.currentRevisionNumber} with the RFQ, then press Review the change to record what you did.`,
+            action: { label: 'Review the change', intent: 'review-change' },
+          };
+        }
+        return {
+          tone: 'warning',
+          sentence: `The customer changed this request after it became RFQ ${next.rfqRef}. Ask a manager to review the change.`,
+          ...(ctx.canViewRfq ? { action: openRfq } : {}),
+        };
+      }
+      if (!ctx.canViewRfq) {
+        return { tone: 'success', sentence: `This request became RFQ ${next.rfqRef}. Your role can't open RFQs; ask a manager what happens next.` };
+      }
+      const fromOlderRevision = ctx.promotedRevisionNumber != null && ctx.promotedRevisionNumber !== ctx.currentRevisionNumber;
+      return {
+        tone: 'success',
+        sentence: fromOlderRevision
+          ? `This request became RFQ ${next.rfqRef} from revision ${ctx.promotedRevisionNumber}. The work carries on from the RFQ.`
+          : `This request became RFQ ${next.rfqRef}. The work carries on from the RFQ.`,
+        action: openRfq,
+      };
+    }
+    case 'legacy':
+      if (!ctx.canViewRfq) {
+        return { tone: 'info', sentence: "This request already has an RFQ, created before decisions were recorded on this screen. Your role can't open RFQs; ask a manager what happens next." };
+      }
+      return {
+        tone: 'info',
+        sentence: 'This request already has an RFQ, created before decisions were recorded on this screen. The work carries on from the RFQ.',
+        ...(next.path?.startsWith('/') ? { action: { label: 'Open the RFQ', path: next.path } } : {}),
+      };
+    case 'inconsistent':
+      return { tone: 'error', sentence: 'This request is marked as an RFQ, but no RFQ exists. Ask an administrator to repair it; nothing can be decided here.' };
+    case 'declined':
+      return { tone: 'info', sentence: 'Every line was skipped and the request was declined. No RFQ was created, and there is nothing more to do here.' };
+    case 'closed': {
+      const code = next.statusCode.trim().toUpperCase();
+      const sentence = closedSentence(code, { canReopen: next.canReopen, mayReopen: ctx.mayReopen, fallbackLabel: ctx.statusLabel });
+      const reopenHere = code in REOPENABLE_OPENINGS && next.canReopen && ctx.mayReopen;
+      return {
+        tone: 'info',
+        sentence,
+        ...(reopenHere ? { action: { label: 'Open the lead', path: `/procurement/leads/view/${ctx.leadId}` } } : {}),
+      };
+    }
+    default:
+      return null;
+  }
+};
+
+/**
+ * The Next step for a record the server has locked but this screen has no finished state to report
+ * for: a newer revision after an RFQ whose promotion receipt did not come back, say. There is no
+ * decision and no button, so the sentence names only the control beside it.
+ */
+export const lockedStepCopy = (leadId: number): StepCopy => ({
+  tone: 'info',
+  sentence: 'Nothing can be decided here right now. Open the lead to see where it stands.',
+  action: { label: 'Open the lead', path: `/procurement/leads/view/${leadId}` },
+});
+
+/** A promotion receipt with the read-only fields a newer server adds; both are optional. */
+/** Who created the RFQ, as a person reads it: their name, "You", or the login they used. */
+export const receiptActor = (promotion: PromotionReceiptDTO, viewerEmail?: string | null): string | null => {
+  const name = promotion.promotedByName?.trim();
+  if (name) return name;
+  const login = promotion.promotedBy?.trim();
+  const viewer = viewerEmail?.trim();
+  if (login && viewer && login.toLowerCase() === viewer.toLowerCase()) return 'You';
+  return login || null;
+};
+
+/**
+ * The receipt under "Became an RFQ": who created it and when, and how many lines went in. The
+ * total is the line count of the revision the RFQ came from; the lines on screen are only that
+ * revision's when the numbers match, so a newer revision's total is never put beside it.
+ */
+export const receiptSentence = (
+  promotion: PromotionReceiptDTO,
+  current: { revisionNumber: number; lineCount: number },
+  viewerEmail?: string | null,
+): string => {
+  const actor = receiptActor(promotion, viewerEmail);
+  const date = formatDateSafe(promotion.promotedAtUtc, '');
+  const when = date ? ` on ${date}` : '';
+  const created = actor ? `${actor} created it${when}.` : `Created${when}.`;
+  const went = promotion.promotedLineCount;
+  const outOf = promotion.promotedRevisionLineCount
+    ?? (promotion.leadRevisionNumber === current.revisionNumber ? current.lineCount : null);
+  const lines = outOf != null
+    ? `${went} of ${outOf} ${lineWord(outOf)} went into the RFQ.`
+    : `${went} ${lineWord(went)} went into the RFQ.`;
+  return `${created} ${lines}`;
+};
+
+/** What one click of the button had already written when a later step failed. */
+export interface WrittenSteps {
+  fitSaved: boolean;
+  qualifiedNow: boolean;
+  /** The line choices this click saved, as a draft or committed. */
+  choicesSavedNow: boolean;
+  /** The committed choices the record already held, so this click did not write them again. */
+  choicesAlreadyCommitted: boolean;
+  /** The request was qualified before the click. */
+  alreadyQualified: boolean;
+}
+
+/**
+ * What to tell a person when the button's chain stops half-way. Null when this click wrote
+ * nothing, so "Nothing was changed" stays true; otherwise the steps that did go through, and the
+ * one control that finishes the job.
+ */
+export const partialFailureSentence = (
+  mode: 'rfq' | 'draft' | 'decline',
+  steps: WrittenSteps,
+  draftLabel: 'Save for review' | 'Save for a manager',
+): string | null => {
+  if (!steps.fitSaved && !steps.qualifiedNow && !steps.choicesSavedNow) return null;
+  if (mode === 'draft') {
+    return steps.choicesSavedNow
+      ? "Your choices are saved as a draft, but Nexora couldn't read the request back. Refresh the page to see them."
+      : `Your line choices were not saved. Your concern answer is saved. Press ${draftLabel} again.`;
+  }
+  if (mode === 'decline') {
+    return steps.choicesSavedNow
+      ? "The request is declined and recorded, but Nexora couldn't read it back. Refresh the page to see it."
+      : 'The request was not declined. Your concern answer is saved. Press Decline request again.';
+  }
+  const qualified = steps.qualifiedNow || steps.alreadyQualified;
+  if (steps.choicesSavedNow || steps.choicesAlreadyCommitted) {
+    return qualified
+      ? 'The RFQ was not created. Your choices are saved and the request is marked qualified. Press Create RFQ again.'
+      : 'The RFQ was not created. Your choices are saved. Press Create RFQ again.';
+  }
+  if (steps.qualifiedNow) {
+    return 'The RFQ was not created. The request is marked qualified, but your line choices are not saved. Press Create RFQ again.';
+  }
+  return steps.alreadyQualified
+    ? 'The RFQ was not created. Your concern answer is saved, but your line choices are not saved. Press Create RFQ again.'
+    : 'The RFQ was not created. Your concern answer is saved, but the request is not marked qualified and your line choices are not saved. Press Create RFQ again.';
 };

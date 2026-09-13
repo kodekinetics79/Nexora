@@ -386,6 +386,25 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .ToArrayAsync(ct);
 
         var status = LeadDecisionParticipationState.Resolve(decision, fit, hasDecisionOnPriorRevision);
+
+        // Read-only facts the screen words its own sentences from. An email's arrival is already
+        // told by its sender and receipt time above; for every other channel the intake batch
+        // records when the request was put into Nexora and by whom.
+        var uploadBatch = sourceOccurrence is null || isEmailSource ? null
+            : await _db.Set<LeadIngestionBatch>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == sourceOccurrence.BatchId)
+                .Select(x => new { x.CreatedAtUtc, x.CreatedBy })
+                .SingleOrDefaultAsync(ct);
+        var uploadedBy = PersonActor(uploadBatch?.CreatedBy);
+        // The receipt counts the lines of the revision that was promoted. The current revision can
+        // be newer (a customer amendment after the RFQ), and its total is a different number.
+        int? promotedRevisionLineCount = promotedRevision is null ? null
+            : promotedRevision.Id == revision.Id ? revision.Items.Count
+            : await _db.Set<LeadItemRevision>().AsNoTracking()
+                .CountAsync(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == promotedRevision.Id, ct);
+        var namesByEmail = await PersonNamesByEmailAsync(businessUnitId,
+            new[] { PersonActor(promotion?.PromotedBy), uploadedBy }, ct);
+
         return new LeadDecisionWorkbenchDto(lead.Id, revision.Id, revision.RevisionNumber, lead.CurrentRevisionNumber,
             decision?.Sequence, status, lead.LeadStatus?.SetupCode ?? "UNKNOWN", lead.LeadStatus?.SetupValue,
             lead.CommercialCaseReference, revision.CustomerRfqReference, lead.CustomerId, customerName,
@@ -403,7 +422,41 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             new SourceCoverageDto(lines.Count(x => x.VerificationStatus == "VERIFIED"), lines.Length), evidence, lines,
             reasonCodes, unitOptions, currencyOptions, fit is null ? DefaultFitAssessment() : FitDto(fit), promotion is null || rfq is null || promotedRevision is null || promotedDecision is null ? null
                 : new PromotionReceiptDto(rfq.Id, rfq.Rfqno, promotedRevision.RevisionNumber, promotedDecision.Sequence,
-                    rfq.NoOfLineItems ?? 0, promotion.PromotedAtUtc, promotion.PromotedBy), blockers);
+                    rfq.NoOfLineItems ?? 0, promotion.PromotedAtUtc, promotion.PromotedBy,
+                    NameFor(namesByEmail, PersonActor(promotion.PromotedBy)), promotedRevisionLineCount), blockers,
+            sourceOccurrence?.SourceChannel, uploadBatch?.CreatedAtUtc, uploadedBy, NameFor(namesByEmail, uploadedBy));
+    }
+
+    /// <summary>
+    /// Intake batches and promotions record the actor as free text. Only an address names a
+    /// person: "document-ingestion" (an upload with no email claim), "System" (the manual upload
+    /// service) and bare ids do not, and the screen must never print one as if it were a person.
+    /// </summary>
+    internal static string? PersonActor(string? actor)
+    {
+        var value = actor?.Trim();
+        return string.IsNullOrEmpty(value) || !value.Contains('@') ? null : value;
+    }
+
+    private static string? NameFor(IReadOnlyDictionary<string, string> namesByEmail, string? email) =>
+        email is not null && namesByEmail.TryGetValue(email.ToLowerInvariant(), out var name) ? name : null;
+
+    private async Task<IReadOnlyDictionary<string, string>> PersonNamesByEmailAsync(long businessUnitId,
+        IEnumerable<string?> emails, CancellationToken ct)
+    {
+        var keys = emails.OfType<string>().Select(x => x.ToLowerInvariant()).Distinct().ToArray();
+        if (keys.Length == 0) return new Dictionary<string, string>();
+        // Same tenant chain as BelowFloorGuard: a platform user (no business unit) or one of this
+        // business unit's own users. The shape matches AssignedToName.
+        var users = await _db.Users.AsNoTracking()
+            .Where(u => (u.Buid == null || u.Buid == businessUnitId) && keys.Contains(u.Email.ToLower()))
+            .Select(u => new { u.Email, u.FirstName, u.LastName })
+            .ToListAsync(ct);
+        return users
+            .Select(u => (Key: u.Email.ToLowerInvariant(), Name: $"{u.FirstName} {u.LastName}".Trim()))
+            .Where(u => u.Name.Length > 0)
+            .GroupBy(u => u.Key)
+            .ToDictionary(group => group.Key, group => group.First().Name);
     }
 
     private static readonly DecisionReasonCodeDto[] ClarificationReasonCodes =
@@ -648,7 +701,8 @@ public sealed record FitCriterionDto(string Code, string Label, string? Descript
 public sealed record FitAssessmentDto(int Version, string OverallDecision, string Rationale,
     IReadOnlyList<FitCriterionDto> Criteria, string? AssessedBy, DateTimeOffset? AssessedAtUtc);
 public sealed record PromotionReceiptDto(long RfqId, string? RfqNumber, int LeadRevisionNumber,
-    int ParticipationVersion, int PromotedLineCount, DateTimeOffset PromotedAtUtc, string? PromotedBy);
+    int ParticipationVersion, int PromotedLineCount, DateTimeOffset PromotedAtUtc, string? PromotedBy,
+    string? PromotedByName = null, int? PromotedRevisionLineCount = null);
 public sealed record SourceCoverageDto(int CoveredLines, int TotalLines);
 public sealed record DecisionBlockerDto(string Code, string Message, string? ActionLabel = null, string? ActionPath = null);
 public sealed record DecisionValueOptionDto(string Code, string Label);
@@ -662,4 +716,6 @@ public sealed record LeadDecisionWorkbenchDto(long LeadId, long LeadRevisionId, 
     IReadOnlyList<LeadDecisionEvidenceDto> Evidence, IReadOnlyList<LeadDecisionLineDto> Lines,
     IReadOnlyList<DecisionReasonCodeDto> ReasonCodes, IReadOnlyList<DecisionValueOptionDto> UnitOptions,
     IReadOnlyList<DecisionValueOptionDto> CurrencyOptions, FitAssessmentDto? FitAssessment,
-    PromotionReceiptDto? Promotion, IReadOnlyList<DecisionBlockerDto> Blockers);
+    PromotionReceiptDto? Promotion, IReadOnlyList<DecisionBlockerDto> Blockers,
+    string? SourceChannel = null, DateTimeOffset? UploadedAtUtc = null, string? UploadedBy = null,
+    string? UploadedByName = null);

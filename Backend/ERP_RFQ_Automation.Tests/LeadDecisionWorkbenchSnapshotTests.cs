@@ -36,6 +36,21 @@ public sealed class LeadDecisionWorkbenchSnapshotTests
             latestFit: null, hasDecisionOnPriorRevision: false));
     }
 
+    [Theory]
+    [InlineData("  uploader.rep@nexora.invalid ", "uploader.rep@nexora.invalid")]
+    [InlineData("document-ingestion", null)]
+    [InlineData("System", null)]
+    [InlineData("42", null)]
+    [InlineData("   ", null)]
+    [InlineData(null, null)]
+    public void Only_an_address_is_treated_as_the_person_who_uploaded_or_promoted(string? actor, string? expected)
+    {
+        // Intake batches record "document-ingestion" (no uploader claim) or "System" (manual
+        // upload service) as their actor. Neither is a person, so the screen must never print
+        // "Uploaded … by System".
+        Assert.Equal(expected, LeadDecisionWorkbenchService.PersonActor(actor));
+    }
+
     [Fact]
     public void Participation_on_an_older_lead_revision_is_reported_as_stale()
     {
