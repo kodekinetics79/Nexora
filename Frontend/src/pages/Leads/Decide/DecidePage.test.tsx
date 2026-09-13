@@ -257,7 +257,7 @@ describe('DecidePage', () => {
     expect(api.saveFitAssessment).not.toHaveBeenCalled();
     const dialog = await screen.findByRole('dialog', { name: 'Create an RFQ for Saudi Electricity Company?' });
     expect(dialog).toHaveTextContent('3 of 3 lines go into the RFQ.');
-    expect(dialog).toHaveTextContent('The request is marked qualified.');
+    expect(dialog).toHaveTextContent('Yes also marks the request qualified.');
     expect(dialog).toHaveTextContent('Concern: none raised.');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, create the RFQ' }));
 
@@ -392,6 +392,8 @@ describe('DecidePage', () => {
     record = promotedRecord();
     renderPage();
     expect(await screen.findByText('Became an RFQ: RFQ-2026-0417')).toBeInTheDocument();
+    // The lines read the saved record from the first paint: a line in the RFQ never says "Left out" first.
+    expect(screen.queryByText('Left out')).toBeNull();
     expect(screen.getByText(/3 of 3 lines went into the RFQ\./)).toBeInTheDocument();
     expect(screen.queryByText(/Already promoted/)).toBeNull();
     await waitFor(() => expect(screen.getAllByText('Went into the RFQ')).toHaveLength(3));
@@ -715,6 +717,71 @@ describe('Create RFQ asks first', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Create an RFQ for Saudi Electricity Company?' });
     expect(dialog).toHaveTextContent("Nexora couldn't read the request's status, so it isn't marked qualified here.");
   });
+
+  // A re-read of the status runs after every save and whenever the window regains focus. When one
+  // fails while the last good status is still held, Yes still qualifies the request from that
+  // status, so the page must not say it can't.
+  it('keeps the status it already read when a later re-read of it fails', async () => {
+    const { client } = renderPage();
+    await quoteEveryLine();
+    await pickOption('Currency for line 00002', 'SAR');
+    const ready = 'Ready: Create RFQ asks you to confirm, then puts 3 of 3 lines for Saudi Electricity Company into a new RFQ.';
+    await waitFor(() => expect(status()).toHaveTextContent(ready));
+
+    api.getState.mockRejectedValue(new Error('502'));
+    await client.invalidateQueries({ queryKey: ['lifecycle', 'leads', 407] });
+    await waitFor(() => expect(client.getQueryState(['lifecycle', 'leads', 407])?.status).toBe('error'));
+    expect(client.getQueryData(['lifecycle', 'leads', 407])).toBeDefined();
+
+    expect(status()).toHaveTextContent(ready);
+    expect(screen.queryByText(/couldn't read this request's status/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Check the status again' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Create RFQ' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create an RFQ for Saudi Electricity Company?' });
+    expect(dialog).toHaveTextContent('Yes also marks the request qualified.');
+    expect(dialog).not.toHaveTextContent(/couldn't read/i);
+  });
+
+  it('says the status is still being read, not that it failed, when Create RFQ is pressed before the first read arrives', async () => {
+    api.getState.mockReturnValue(new Promise(() => undefined));
+    renderPage();
+    await quoteEveryLine();
+    await pickOption('Currency for line 00002', 'SAR');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create RFQ' })).toBeEnabled());
+
+    expect(screen.queryByText(/couldn't read this request's status/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Create RFQ' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create an RFQ for Saudi Electricity Company?' });
+    expect(dialog).toHaveTextContent("Nexora is still reading the request's status, so Yes won't mark it qualified.");
+    expect(dialog).not.toHaveTextContent(/couldn't read/i);
+    expect(dialog).not.toHaveTextContent('Yes also marks the request qualified.');
+  });
+
+  it('closes the question, and writes nothing, when the request stops being ready behind it', async () => {
+    const { client } = renderPage();
+    await quoteEveryLine();
+    await pickOption('Currency for line 00002', 'SAR');
+    fireEvent.click(screen.getByRole('button', { name: 'Create RFQ' }));
+    expect(await screen.findByRole('dialog', { name: 'Create an RFQ for Saudi Electricity Company?' })).toBeInTheDocument();
+
+    // Someone else checked the document while the question was open: a new revision arrives with a
+    // line Nexora is unsure about, so Create RFQ is no longer the next thing.
+    record = {
+      ...record,
+      leadRevisionId: 9002,
+      leadRevisionNumber: 2,
+      lines: [line({ id: 7, lineItemNo: '00001', verificationStatus: 'NEEDS_CHECK' }), line({ id: 8, lineItemNo: '00002' }), line({ id: 9, lineItemNo: '00003' })],
+    };
+    await client.invalidateQueries({ queryKey: ['lead-decision-workbench', 407] });
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /Create an RFQ/ })).toBeNull());
+    expect(status()).toHaveTextContent('Check what Nexora read for line 00001 against the document.');
+    expect(screen.queryByRole('button', { name: 'Yes, create the RFQ' })).toBeNull();
+    expect(api.saveFitAssessment).not.toHaveBeenCalled();
+    expect(api.transition).not.toHaveBeenCalled();
+    expect(api.saveParticipation).not.toHaveBeenCalled();
+    expect(api.promoteToRfq).not.toHaveBeenCalled();
+  });
 });
 
 describe('a click that stops half-way says what went through', () => {
@@ -796,7 +863,34 @@ describe('a request that can no longer be decided reads as what it is', () => {
     expect(screen.getAllByRole('status', { name: 'Next step' })).toHaveLength(1);
     expect(screen.queryByRole('group', { name: /Quote or skip/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /Create RFQ|Save for a manager|Quote all|Open the lead/ })).toBeNull();
-    expect(screen.queryByText(/Reopen it from the lead page|duplicated/)).toBeNull();
+    expect(screen.queryByText(/reopen it from the lead page|duplicated/i)).toBeNull();
+    expect(document.body.textContent).not.toMatch(/[A-Z]{2,}_[A-Z]{2,}|DUPLICATED/);
+  });
+
+  // The server can send RFQ_REVISION_REQUIRED with no promotion receipt (the promoted revision or
+  // decision row is missing). The record is locked, so there is no decision and no button, yet the
+  // lines alone still ask for a choice. The sentence must not name a control that is not there.
+  it('names no absent control when the record is locked but the screen has no finished state to report', async () => {
+    record = {
+      ...baseWorkbench(),
+      leadRevisionId: 9002,
+      leadRevisionNumber: 2,
+      promotion: null,
+      blockers: [{ code: 'RFQ_REVISION_REQUIRED', message: 'A reply or amendment created a newer immutable Lead revision after RFQ promotion.' }],
+    };
+    api.getState.mockReturnValue(new Promise(() => undefined));
+    renderPage();
+    await waitFor(() => expect(status()).toHaveTextContent('Nothing can be decided here right now. Open the lead to see where it stands.'));
+    expect(status()).not.toHaveTextContent(/Create RFQ|Choose Quote or Skip|Ready:|Save for/);
+    expect(screen.getAllByRole('status', { name: 'Next step' })).toHaveLength(1);
+    expect(screen.queryByRole('group', { name: /Quote or skip/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Create RFQ|Save for a manager|Save for review|Quote all|Check the document|Choose the unit|Assign an owner/ })).toBeNull();
+    expect(screen.queryByText(/newer immutable Lead revision/)).toBeNull();
+    expect(document.body.textContent).not.toMatch(/[A-Z]{2,}_[A-Z]{2,}/);
+    // One "Open the lead", in the panel beside the sentence that names it.
+    expect(screen.getAllByRole('button', { name: 'Open the lead' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Open the lead' }));
+    expect(navigate).toHaveBeenCalledWith('/procurement/leads/view/407');
   });
 
   it('offers Open the lead on a declined request only to someone who may reopen it', async () => {
@@ -938,6 +1032,7 @@ describe('the facts and the history in job words', () => {
     expect(screen.getByText('Decided (version 1)')).toBeInTheDocument();
     expect(screen.getByText('Concern answer')).toBeInTheDocument();
     expect(screen.getByText('Line choices')).toBeInTheDocument();
-    expect(screen.queryByText(/committed|v1 ·|v2 ·|Converted to RFQ/)).toBeNull();
+    expect(screen.queryByText(/committed|converted_to_rfq|converted to rfq|v\d ·/i)).toBeNull();
+    expect(document.body.textContent).not.toMatch(/[A-Z]{2,}_[A-Z]{2,}|COMMITTED/);
   });
 });

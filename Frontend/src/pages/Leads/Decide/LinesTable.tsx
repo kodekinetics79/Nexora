@@ -136,6 +136,8 @@ interface LineRowProps {
   onOpenDocument: LinesTableProps['onOpenDocument'];
   /** The tenant's words for the line's saved reason, or null when it has none they name. */
   reasonLabel: string | null;
+  /** The choice the read-only chip reports: the server's record once the lines belong to an RFQ. */
+  chipChoice: LineParticipationDecision | undefined;
   chipMode: LineChipMode;
   rfqRef?: string | null;
   currentRevisionNumber?: number | null;
@@ -149,7 +151,7 @@ interface LineRowProps {
  */
 const LineRow = React.memo(function LineRow({
   line, decision, unitOptions, currencyOptions, unitCodes, currencyCodes, skipReasons, readOnly, onChange, onOpenDocument,
-  reasonLabel, chipMode, rfqRef, currentRevisionNumber, promotedRevisionNumber,
+  reasonLabel, chipChoice, chipMode, rfqRef, currentRevisionNumber, promotedRevisionNumber,
 }: LineRowProps) {
   const label = lineLabel(line);
   const choice = decision?.decision ?? 'Pending';
@@ -296,7 +298,7 @@ const LineRow = React.memo(function LineRow({
         </TableCell>
         <TableCell align="right">
           {readOnly ? (() => {
-            const chip = readOnlyLineChip(chipMode, decision?.decision, reasonLabel, {
+            const chip = readOnlyLineChip(chipMode, chipChoice, reasonLabel, {
               rfqRef, currentRevisionNumber, promotedRevisionNumber,
             });
             // The label wraps rather than being cut off, so a skip reason is read in full.
@@ -522,7 +524,11 @@ const LinesTable: React.FC<LinesTableProps> = ({
         </TableHead>
         <TableBody>
           {visible.map((line) => {
-            const reasonCode = decisions[line.revisionLineId]?.reasonCode;
+            // Lines that belong to an RFQ (or arrived after one, or predate this screen's records)
+            // report what the server saved for them. The page fills its choices in after the first
+            // paint, so reading those painted "Left out" on every line of a promoted request first.
+            const chipRecord = chipMode === 'choice' ? decisions[line.revisionLineId] : line.participation ?? undefined;
+            const reasonCode = chipRecord?.reasonCode;
             return (
             <LineRow
               key={line.revisionLineId}
@@ -537,6 +543,7 @@ const LinesTable: React.FC<LinesTableProps> = ({
               onChange={onChange}
               onOpenDocument={onOpenDocument}
               reasonLabel={reasonCode ? reasonLabels.get(reasonCode) ?? null : null}
+              chipChoice={chipRecord?.decision}
               chipMode={chipMode}
               rfqRef={rfqRef}
               currentRevisionNumber={currentRevisionNumber}

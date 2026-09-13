@@ -78,6 +78,7 @@ import {
   lineKeys,
   lineLabel,
   lineWord,
+  lockedStepCopy,
   newId,
   nextStepCopy,
   nextThing,
@@ -92,6 +93,7 @@ import {
   type ConcernState,
   type NextAction,
   type StepAction,
+  type StepCopy,
   type StepTone,
   type WrittenSteps,
 } from './decideRules';
@@ -611,7 +613,10 @@ const DecidePage: React.FC = () => {
   const rfqLabel = workbench.promotion ? (workbench.promotion.rfqNumber || `RFQ #${workbench.promotion.rfqId}`) : null;
   const canReviewChange = commercialAccess.canResolveRfqRevisionImpact && isManager;
   const ownerName = leadQuery.data?.assignedToFullName?.trim() || null;
-  const statusReadFailed = lifecycleQuery.isError;
+  // The status read has failed only when there is no status to act on. A re-read that fails while
+  // the last good status is still held leaves run() qualifying from that status, so the sentence,
+  // "Check the status again" and the question all follow the one fact run() follows.
+  const statusReadFailed = lifecycleQuery.isError && !lifecycleQuery.data;
   const chipMode = promotion
     ? (promotion.leadRevisionNumber === workbench.leadRevisionNumber ? 'rfq' : 'newer-revision')
     : next.kind === 'legacy' ? 'legacy' : 'choice';
@@ -702,7 +707,9 @@ const DecidePage: React.FC = () => {
       sentence: `Ready: Create RFQ asks you to confirm, then puts ${quoted} of ${lineCount} ${lineWord(lineCount)} for ${customer} into a new RFQ.`,
     };
   })();
-  const panel = stepCopy ?? openStep;
+  // A locked record with no finished state to report has no decision and no button, so the open
+  // request's sentence would name a control that is not there.
+  const panel: StepCopy = stepCopy ?? (showDecision ? openStep : lockedStepCopy(leadId));
 
   // What the counter beside the lines says: a running tally while there are choices to make, the
   // skipped total on a declined request, and nothing once the lines are the RFQ's.
@@ -742,7 +749,7 @@ const DecidePage: React.FC = () => {
   // withdrawn grant): "Yes" must never run the chain from a state whose button was not enabled.
   if (confirmOpen && (next.kind !== 'ready' || !canPromote || !canEdit || unowned || locked)) setConfirmOpen(false);
   const qualification: QualificationOutlook = !lifecycleQuery.data
-    ? 'unknown'
+    ? (statusReadFailed ? 'unknown' : 'checking')
     : qualificationStep(lifecycleQuery.data) === 'transition' ? 'transition' : 'already';
 
   const uploaded = Boolean(workbench.uploadedAtUtc) && (workbench.sourceChannel ?? '').trim().toLowerCase() !== 'email';
@@ -838,8 +845,8 @@ const DecidePage: React.FC = () => {
         title="Next step"
         sentence={panel.sentence}
         ariaLabel={showDecision ? undefined : 'Next step'}
-        action={!showDecision && stepCopy?.action
-          ? <Button variant="contained" onClick={() => runStepAction(stepCopy.action!)} sx={{ fontWeight: 800 }}>{stepCopy.action.label}</Button>
+        action={!showDecision && panel.action
+          ? <Button variant="contained" onClick={() => runStepAction(panel.action!)} sx={{ fontWeight: 800 }}>{panel.action.label}</Button>
           : undefined}
         testId="decide-next-step"
       />

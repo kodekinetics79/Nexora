@@ -786,6 +786,17 @@ export const nextStepCopy = (next: NextThing, ctx: StepCopyContext): StepCopy | 
   }
 };
 
+/**
+ * The Next step for a record the server has locked but this screen has no finished state to report
+ * for: a newer revision after an RFQ whose promotion receipt did not come back, say. There is no
+ * decision and no button, so the sentence names only the control beside it.
+ */
+export const lockedStepCopy = (leadId: number): StepCopy => ({
+  tone: 'info',
+  sentence: 'Nothing can be decided here right now. Open the lead to see where it stands.',
+  action: { label: 'Open the lead', path: `/procurement/leads/view/${leadId}` },
+});
+
 /** A promotion receipt with the read-only fields a newer server adds; both are optional. */
 /** Who created the RFQ, as a person reads it: their name, "You", or the login they used. */
 export const receiptActor = (promotion: PromotionReceiptDTO, viewerEmail?: string | null): string | null => {

@@ -170,10 +170,15 @@ describe('a read-only line says what happened to it, in job words', () => {
     30: { decision: 'Pending' },
     40: { decision: 'Clarify' },
   };
-  const renderReadOnly = (decisions: DecisionMap, extra: Partial<LinesTableProps> = {}) => render(
+  /** The lines as the server sends them: what was saved for each line is on the line itself. */
+  const recorded = (saved: DecisionMap): LeadDecisionLineDTO[] => [line(1), line(2), line(3), line(4)].map((item) => {
+    const entry = saved[item.revisionLineId];
+    return entry ? { ...item, participation: { decision: entry.decision, reasonCode: entry.reasonCode ?? null } } : item;
+  });
+  const renderReadOnly = (decisions: DecisionMap, extra: Partial<LinesTableProps> = {}, lines: LeadDecisionLineDTO[] = recorded(decisions)) => render(
     <LinesTable
       leadId={407}
-      lines={[line(1), line(2), line(3), line(4)]}
+      lines={lines}
       decisions={decisions}
       unitOptions={[{ code: 'EA', label: 'Each' }]}
       currencyOptions={[{ code: 'SAR', label: 'Saudi riyal' }]}
@@ -199,6 +204,22 @@ describe('a read-only line says what happened to it, in job words', () => {
     expect(screen.queryByText(/NO_STOCK/)).toBeNull();
     expect(decisionHeader()).toHaveTextContent('Choice');
     expect(screen.queryByRole('group', { name: 'Quote or skip line 00001' })).toBeNull();
+  });
+
+  // The choice on screen and the saved record must be able to disagree in a test. When every
+  // fixture built one from the other, a chip reading the wrong source in either mode still passed.
+  it('follows the choice on screen before an RFQ, and the saved record once one exists', () => {
+    const onScreen: DecisionMap = { 10: { decision: 'Bid' } };
+    const saved = recorded({ 10: { decision: 'NoBid' } });
+
+    const first = renderReadOnly(onScreen, {}, saved);
+    expect(screen.getByText('Marked to quote')).toBeInTheDocument();
+    expect(screen.queryByText(/^Skipped/)).toBeNull();
+    first.unmount();
+
+    renderReadOnly(onScreen, { chipMode: 'rfq', rfqRef: 'RFQ-2026-0417', currentRevisionNumber: 2, promotedRevisionNumber: 2 }, saved);
+    expect(screen.queryByText('Went into the RFQ')).toBeNull();
+    expect(screen.getAllByText(/^Left out/).length).toBeGreaterThan(0);
   });
 
   it('says "Skipped" alone, never the raw code, when the reason has no words', () => {
@@ -244,6 +265,25 @@ describe('a read-only line says what happened to it, in job words', () => {
       'This request became an RFQ before this screen recorded decisions. The RFQ shows which lines it holds.',
     );
     expect(decisionHeader()).toHaveTextContent('Choice');
+  });
+
+  // The page fills its choices after the first paint. A request that became an RFQ painted "Left
+  // out" on every line in that frame, then "Went into the RFQ": a false claim, however brief.
+  it('on a request that became an RFQ, reads the saved record from the first paint, not the choices on screen', () => {
+    const saved = recorded({ 10: { decision: 'Bid' }, 20: { decision: 'Bid' }, 30: { decision: 'NoBid', reasonCode: 'NO_STOCK' }, 40: { decision: 'Bid' } });
+    renderReadOnly({}, { chipMode: 'rfq', rfqRef: 'RFQ-2026-0417', currentRevisionNumber: 1, promotedRevisionNumber: 1 }, saved);
+
+    expect(screen.getAllByText('Went into the RFQ')).toHaveLength(3);
+    expect(screen.getByText('Left out · Item unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Left out')).toBeNull();
+  });
+
+  it('on an RFQ made before choices were recorded, reads the saved record from the first paint', () => {
+    renderReadOnly({}, { chipMode: 'legacy' }, recorded(mixed));
+
+    expect(screen.getByText('Marked to quote')).toBeInTheDocument();
+    expect(screen.getByText('Skipped · Item unavailable')).toBeInTheDocument();
+    expect(screen.getAllByText('Not recorded here')).toHaveLength(2);
   });
 
   it('keeps the question as the header while the lines can still be changed', () => {

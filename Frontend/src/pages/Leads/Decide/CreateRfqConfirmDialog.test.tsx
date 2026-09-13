@@ -28,7 +28,10 @@ describe('CreateRfqConfirmDialog', () => {
   it('says what goes in, what is left out, the status move and the lock, then asks', () => {
     const { dialog, onConfirm, onCancel } = renderDialog();
     expect(dialog).toHaveTextContent('2 of 3 lines go into the RFQ. 1 is left out.');
-    expect(dialog).toHaveTextContent('The request is marked qualified.');
+    // Nothing is qualified until Yes is pressed, so the status is said as what Yes will do, never
+    // as a fact about the request now.
+    expect(dialog).toHaveTextContent('Yes also marks the request qualified.');
+    expect(dialog).not.toHaveTextContent('The request is marked qualified.');
     expect(dialog).toHaveTextContent('Concern: none raised.');
     expect(dialog).toHaveTextContent('Once the RFQ exists, these choices are locked on this screen.');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, create the RFQ' }));
@@ -51,7 +54,14 @@ describe('CreateRfqConfirmDialog', () => {
   it('warns that an unread status may stop the RFQ', () => {
     renderDialog({ qualification: 'unknown' });
     expect(screen.getByText("Nexora couldn't read the request's status, so it isn't marked qualified here. If it isn't qualified already, the RFQ won't be created.")).toBeInTheDocument();
-    expect(screen.queryByText('The request is marked qualified.')).toBeNull();
+    expect(screen.queryByText('Yes also marks the request qualified.')).toBeNull();
+  });
+
+  it('says the status is still being read, not that reading it failed, while the first read is on its way', () => {
+    renderDialog({ qualification: 'checking' });
+    expect(screen.getByText("Nexora is still reading the request's status, so Yes won't mark it qualified. If it isn't qualified already, the RFQ won't be created.")).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't read/i)).toBeNull();
+    expect(screen.queryByText('Yes also marks the request qualified.')).toBeNull();
   });
 
   it('counts lines in plain grammar', () => {

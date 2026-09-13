@@ -3,11 +3,16 @@ import { Button, Dialog, DialogActions, DialogContent, DialogTitle, Stack, Typog
 import { lineWord } from './decideRules';
 
 /** What pressing "Yes" will do to the request's status, as far as the page knows it. */
-export type QualificationOutlook = 'transition' | 'already' | 'unknown';
+export type QualificationOutlook = 'transition' | 'already' | 'checking' | 'unknown';
 
+// Said before Yes is pressed, so a status move is what Yes will do, never a fact about the request
+// now: the request is not qualified until the person says yes.
 export const QUALIFICATION_SENTENCES: Readonly<Record<QualificationOutlook, string>> = {
-  transition: 'The request is marked qualified.',
+  transition: 'Yes also marks the request qualified.',
   already: 'The request is already qualified.',
+  // While the first status read is still on its way, Yes runs with no status to move from, exactly as
+  // after a failed read. Saying "couldn't read" then would be false: nothing has failed yet.
+  checking: "Nexora is still reading the request's status, so Yes won't mark it qualified. If it isn't qualified already, the RFQ won't be created.",
   unknown: "Nexora couldn't read the request's status, so it isn't marked qualified here. If it isn't qualified already, the RFQ won't be created.",
 };
 
