@@ -139,9 +139,8 @@ public sealed class PlatformGovernanceController(
         retention.GetAsync(TenantId(), ct);
 
     /// <summary>
-    /// Sets the retention window and the opt-in switch. Saving a policy is the tenant's
-    /// explicit consent to irreversible deletion — <c>POST /purge-run</c> refuses to delete
-    /// anything until this has been done by a named user with a written reason.
+    /// Sets the retention window (how many days original files are kept, one day or more)
+    /// and the standing-rule switch. A confirmed manual purge does not depend on either.
     /// </summary>
     [HttpPut("evidence-retention/policy")]
     [RequireTenantOwnerRole]
@@ -155,8 +154,11 @@ public sealed class PlatformGovernanceController(
     /// <para>
     /// <c>dryRun</c> is defaulted to true by the binder below, so a malformed or truncated
     /// body can never be interpreted as "delete everything eligible". The destructive path
-    /// has to be asked for explicitly, twice: once by enabling the policy, once by sending
-    /// <c>dryRun:false</c> with a reason and an Idempotency-Key.
+    /// has to be asked for explicitly: <c>dryRun:false</c> with a reason, an Idempotency-Key,
+    /// the signed preview token, and <c>confirmedCount</c> — the number of documents the
+    /// administrator typed as the second confirmation, verified against the run's own count.
+    /// It does NOT require the standing policy switch: that is consent to a scheduled rule,
+    /// and no scheduler exists in this build.
     /// </para>
     ///
     /// <para>

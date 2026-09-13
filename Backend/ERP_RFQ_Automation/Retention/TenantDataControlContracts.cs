@@ -99,12 +99,18 @@ public sealed record TenantDataControlView(
 ///
 /// <para><see cref="Confirmation"/> is verified on the SERVER. A confirmation phrase checked only
 /// in the browser is not a gate — it is a decoration on a request anyone can send directly.</para>
+///
+/// <para><see cref="ConfirmedCount"/> is the second confirmation: the number of messages and
+/// files the run is about to remove, typed by the administrator and verified here against the
+/// candidate set the run has actually selected. It proves the figure for THIS removal was read,
+/// not that a familiar word was typed; a stale preview fails it and nothing is deleted.</para>
 /// </summary>
 public sealed record TenantDataCleanupCommand(
     IReadOnlyList<string>? Buckets,
     bool? DryRun,
     string Reason,
-    string? Confirmation)
+    string? Confirmation,
+    int? ConfirmedCount = null)
 {
     public bool IsDryRun => DryRun is not false;
 }
@@ -127,7 +133,10 @@ public sealed record TenantDataCleanupResult(
     IReadOnlyList<TenantDataRefusal> Refused,
     string Summary,
     string Disclosure,
-    bool IdempotentReplay);
+    bool IdempotentReplay,
+    /// <summary>How many owner-rank administrators were emailed a receipt for a real run. Zero on
+    /// a dry run, on a replay, and when outbound mail is not configured.</summary>
+    int AdministratorsNotified = 0);
 
 public static class TenantDataControlCopy
 {

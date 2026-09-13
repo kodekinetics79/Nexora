@@ -115,8 +115,7 @@ public sealed class TenantDataControlPointerCoverageTests(PostgreSqlTestDatabase
                 TenantDataBuckets.OrphanedStoredFiles);
             Assert.Equal(0, bucket.Count);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, "sweep-pod",
-                Clear(TenantDataBuckets.OrphanedStoredFiles), default);
+            var result = await ClearAsync(service, tenantId, 9, "sweep-pod", TenantDataBuckets.OrphanedStoredFiles);
 
             Assert.Equal(0, result.FilesDeleted);
             Assert.True(File.Exists(files.ResolvePath(key)),
@@ -163,8 +162,7 @@ public sealed class TenantDataControlPointerCoverageTests(PostgreSqlTestDatabase
                 TenantDataBuckets.OrphanedStoredFiles);
             Assert.Equal(survives ? 0 : 1, bucket.Count);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, $"sweep-{pointer}",
-                Clear(TenantDataBuckets.OrphanedStoredFiles), default);
+            var result = await ClearAsync(service, tenantId, 9, $"sweep-{pointer}", TenantDataBuckets.OrphanedStoredFiles);
 
             Assert.Equal(survives ? 0 : 1, result.FilesDeleted);
             Assert.Equal(survives, File.Exists(files.ResolvePath(key)));
@@ -214,8 +212,7 @@ public sealed class TenantDataControlPointerCoverageTests(PostgreSqlTestDatabase
             Assert.False(bucket.CanClear);
             Assert.Contains("ShipmentPhotoArchive.StorageUri", bucket.BlockedReason!);
 
-            var result = await service.RunCleanupAsync(tenantId, 9, "sweep-untaught",
-                Clear(TenantDataBuckets.OrphanedStoredFiles), default);
+            var result = await ClearAsync(service, tenantId, 9, "sweep-untaught", TenantDataBuckets.OrphanedStoredFiles);
             Assert.Equal(0, result.FilesDeleted);
             Assert.True(File.Exists(files.ResolvePath(orphan)));
             Assert.Contains(result.Refused, x => x.Why!.Contains("ShipmentPhotoArchive.StorageUri"));
@@ -232,6 +229,17 @@ public sealed class TenantDataControlPointerCoverageTests(PostgreSqlTestDatabase
 
     private static TenantDataBucketView Bucket(TenantDataControlView view, string code) =>
         view.Buckets.Single(x => x.Code == code);
+
+    /// <summary>Preview, then remove with the previewed figure typed back — the second confirmation
+    /// the server verifies on every real run.</summary>
+    private static async Task<TenantDataCleanupResult> ClearAsync(TenantDataControlService service,
+        long tenantId, long actorUserId, string idempotencyKey, params string[] buckets)
+    {
+        var preview = await service.RunCleanupAsync(tenantId, actorUserId, $"{idempotencyKey}:preview",
+            new TenantDataCleanupCommand(buckets, true, "Preview.", null), default);
+        return await service.RunCleanupAsync(tenantId, actorUserId, idempotencyKey,
+            Clear(buckets) with { ConfirmedCount = preview.MessagesCleared + preview.FilesDeleted }, default);
+    }
 
     private static TenantDataCleanupCommand Clear(params string[] buckets) =>
         new(buckets, false, "Free the space.", TenantDataControlCopy.ConfirmationPhrase);

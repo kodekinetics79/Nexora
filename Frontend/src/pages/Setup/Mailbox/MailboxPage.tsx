@@ -124,6 +124,12 @@ const MailboxPage: React.FC = () => {
   const [showPassword, setShowPassword] = React.useState(false);
   const [probe, setProbe] = React.useState<MailboxProbeResult | null>(null);
   const [providerKey, setProviderKey] = React.useState('');
+  // Removal used to be one click on a trash icon, with no dialog. A mailbox row holds stored
+  // credentials and is the thing that reads inquiries in and sends quotes out, so removing the
+  // wrong one stops the business until someone notices. The dialog names the address, says what
+  // stops, and asks for the address typed back before the request is sent.
+  const [removing, setRemoving] = React.useState<Mailbox | null>(null);
+  const [removeConfirmText, setRemoveConfirmText] = React.useState('');
 
   const {
     data: mailboxes = [], isLoading,
@@ -199,9 +205,16 @@ const MailboxPage: React.FC = () => {
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => mailboxService.remove(id),
-    onSuccess: (result) => { toast.success(result.message); refresh(); },
+    onSuccess: (result) => { toast.success(result.message); setRemoving(null); setRemoveConfirmText(''); refresh(); },
     onError: () => toast.error('Could not remove the mailbox'),
   });
+  const closeRemove = () => {
+    if (deleteMutation.isPending) return;
+    setRemoving(null);
+    setRemoveConfirmText('');
+  };
+  const removeAddressTyped = removing !== null
+    && removeConfirmText.trim().toLowerCase() === removing.emailAddress.trim().toLowerCase();
 
   const pauseMutation = useMutation({
     mutationFn: mailboxService.pauseOutbound,
@@ -300,10 +313,11 @@ const MailboxPage: React.FC = () => {
             </Tooltip>
           )}
           {canDelete && (
-            <Tooltip title="Remove">
+            <Tooltip title={`Remove ${mailbox.emailAddress} — asks you to confirm first`}>
               <IconButton
                 size="small"
-                onClick={() => deleteMutation.mutate(mailbox.id)}
+                aria-label={`Remove ${mailbox.emailAddress}`}
+                onClick={() => { setRemoveConfirmText(''); setRemoving(mailbox); }}
                 disabled={deleteMutation.isPending}
               >
                 <DeleteIcon fontSize="small" />
@@ -627,6 +641,46 @@ const MailboxPage: React.FC = () => {
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
             {editing ? 'Save changes' : 'Add mailbox'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Removal confirmation. Names the mailbox, says what stops, asks for the address back. */}
+      <Dialog open={removing !== null} onClose={closeRemove} maxWidth="xs" fullWidth aria-labelledby="remove-mailbox-title">
+        <DialogTitle id="remove-mailbox-title" sx={{ fontWeight: 800 }}>
+          Remove {removing?.emailAddress}?
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.5}>
+            <Typography variant="body2">
+              {removing?.protocol === 'SMTP'
+                ? 'Quotes and supplier requests will stop sending from this address until another outbound mailbox is set up.'
+                : 'Nexora will stop reading new inquiries from this inbox. Mail already received, and every lead made from it, stays.'}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              The stored sign-in details for this mailbox are removed with it. Adding it back means
+              entering them again.
+            </Typography>
+            <TextField
+              label="Type the email address to confirm"
+              value={removeConfirmText}
+              onChange={(event) => setRemoveConfirmText(event.target.value)}
+              fullWidth
+              autoComplete="off"
+              helperText={removing ? `Type ${removing.emailAddress} exactly.` : undefined}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, py: 2 }}>
+          <Button onClick={closeRemove} disabled={deleteMutation.isPending}>Keep it</Button>
+          <Button
+            variant="contained"
+            color="error"
+            startIcon={<DeleteIcon />}
+            disabled={!removeAddressTyped || deleteMutation.isPending}
+            onClick={() => removing && deleteMutation.mutate(removing.id)}
+          >
+            {deleteMutation.isPending ? 'Removing…' : 'Remove mailbox'}
           </Button>
         </DialogActions>
       </Dialog>

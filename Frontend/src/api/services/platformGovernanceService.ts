@@ -233,8 +233,11 @@ export interface GovernedArtifactDetail {
 
 /** Compliance-approved default: 90 days is the dispute / re-extraction buffer after extraction. */
 export const EVIDENCE_RETENTION_DEFAULT_DAYS = 90;
-/** Floor. Anything shorter stops being a retention policy and starts being a delete button. */
-export const EVIDENCE_RETENTION_MIN_DAYS = 30;
+/**
+ * Floor: one day, a settle guard for asynchronous extraction and nothing more. How long to keep
+ * original files beyond that is the tenant's decision; Nexora does not impose a data policy.
+ */
+export const EVIDENCE_RETENTION_MIN_DAYS = 1;
 /** Ceiling, mirroring the AI governance `RetentionDays` bound (1–3650). */
 export const EVIDENCE_RETENTION_MAX_DAYS = 3650;
 
@@ -311,6 +314,8 @@ export interface EvidenceRetentionRunResult {
    * "not reported", not "nothing was excluded" — the page must not claim the latter.
    */
   skippedReported: boolean;
+  /** How many owner-rank administrators were emailed a receipt. Zero until the server says. */
+  administratorsNotified: number;
   missingFields: string[];
 }
 
@@ -409,6 +414,7 @@ export const readEvidenceRetentionRun = (
     previewExpiresOn: asText(root.previewExpiresOn),
     skipped: skippedReported ? (root.skipped as unknown[]).map(readExclusion) : [],
     skippedReported,
+    administratorsNotified: asCount(root.administratorsNotified) ?? 0,
     missingFields,
   };
 };
@@ -466,6 +472,8 @@ export interface TenantDataCleanupResult {
   summary: string | null;
   disclosure: string | null;
   idempotentReplay: boolean;
+  /** How many owner-rank administrators were emailed a receipt. Zero until the server says. */
+  administratorsNotified: number;
 }
 
 /**
@@ -544,6 +552,7 @@ export const readTenantDataCleanup = (
     summary: asText(root.summary),
     disclosure: asText(root.disclosure),
     idempotentReplay: asFlag(root.idempotentReplay) ?? false,
+    administratorsNotified: asCount(root.administratorsNotified) ?? 0,
   };
 };
 
@@ -686,6 +695,11 @@ export const platformGovernanceService = {
     reason: string;
     /** Only sent on the destructive call. The server verifies it — the browser check is a courtesy. */
     confirmation?: string;
+    /**
+     * The second confirmation: the number of items being removed, typed by the administrator.
+     * Verified by the server against the run's own count, so a stale figure deletes nothing.
+     */
+    confirmedCount?: number;
     /** Caller-owned so a retry of the SAME confirmed cleanup cannot delete twice. */
     idempotencyKey: string;
   }): Promise<TenantDataCleanupResult> => {
@@ -696,6 +710,7 @@ export const platformGovernanceService = {
         dryRun: command.dryRun,
         reason: command.reason,
         confirmation: command.confirmation ?? null,
+        confirmedCount: command.confirmedCount ?? null,
       },
       { headers: { 'Idempotency-Key': command.idempotencyKey } });
     return readTenantDataCleanup(data, command.dryRun);
@@ -705,6 +720,8 @@ export const platformGovernanceService = {
     reason: string;
     /** Signed by the server during preview; required for permanent deletion. */
     previewToken?: string;
+    /** The second confirmation: the number of documents being deleted, verified by the server. */
+    confirmedCount?: number;
     /** Caller-owned so a retry of the SAME confirmed purge cannot delete twice. */
     idempotencyKey: string;
   }): Promise<EvidenceRetentionRunResult> => {
@@ -714,6 +731,7 @@ export const platformGovernanceService = {
         dryRun: command.dryRun,
         reason: command.reason,
         previewToken: command.previewToken ?? null,
+        confirmedCount: command.confirmedCount ?? null,
       },
       { headers: { 'Idempotency-Key': command.idempotencyKey } });
     return readEvidenceRetentionRun(data, command.dryRun);

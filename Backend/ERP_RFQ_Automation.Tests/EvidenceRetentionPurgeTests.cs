@@ -237,7 +237,7 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             // The estimate is the promise the real run has to keep.
             db.ChangeTracker.Clear();
             var real = await service.RunPurgeAsync(tenantId, 9, "purge-real",
-                new EvidenceRetentionPurgeCommand(false, "Confirmed.", dry.PreviewToken), default);
+                new EvidenceRetentionPurgeCommand(false, "Confirmed.", dry.PreviewToken, dry.Eligible), default);
             Assert.Equal(dry.BytesReclaimed, real.BytesReclaimed);
         }
         finally { Directory.Delete(root, recursive: true); }
@@ -352,9 +352,16 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    /// <summary>
+    /// The standing-policy switch is consent to a scheduled rule, and no scheduler exists. A
+    /// manually confirmed run proves its own intent — signed preview, reason, typed count,
+    /// Idempotency-Key — so it must not be held hostage to that switch. Requiring a tenant to turn
+    /// on automatic deletion of everything in order to delete what he has just previewed was the
+    /// imposition this removes.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Deletion_is_refused_until_the_tenant_opts_in()
+    public async Task A_confirmed_purge_needs_no_standing_policy()
     {
         var tenantId = NewTenantId();
         var root = NewRoot();
@@ -363,18 +370,70 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             await using var db = database.ContextFor(null);
             await SeedAsync(db, tenantId, enabled: false);
             var files = new LocalFileStorage(root, root);
-            var document = await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-optin.pdf");
+            var document = await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-no-policy.pdf");
             var service = NewService(db, files);
 
-            await Assert.ThrowsAsync<PlatformGovernanceConflictException>(() =>
-                RunConfirmedAsync(service, tenantId, 9, "purge-disabled", "Not opted in."));
+            var result = await RunConfirmedAsync(service, tenantId, 9, "purge-no-policy", "Reclaiming space once.");
+
+            Assert.Equal(1, result.Purged);
+            Assert.False(File.Exists(files.ResolvePath(document.ClearedKey)));
+            db.ChangeTracker.Clear();
+            var stored = await db.Set<SourceDocument>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == document.Id);
+            Assert.Equal(EvidencePurgeState.Purged, stored.PurgeState);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    /// <summary>
+    /// The second confirmation is a NUMBER, checked on the server against the run's own count. A
+    /// familiar word typed by reflex proves nothing about this deletion; the count of this
+    /// deletion, read off the preview, does — and a stale or misread figure deletes nothing.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_confirmed_purge_is_refused_when_the_typed_count_does_not_match()
+    {
+        var tenantId = NewTenantId();
+        var root = NewRoot();
+        try
+        {
+            await using var db = database.ContextFor(null);
+            await SeedAsync(db, tenantId, enabled: true);
+            var files = new LocalFileStorage(root, root);
+            var document = await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-count.pdf");
+            var service = NewService(db, files);
+
+            var preview = await service.RunPurgeAsync(tenantId, 9, "count-preview",
+                new EvidenceRetentionPurgeCommand(true, "Preview."), default);
+            Assert.Equal(1, preview.Eligible);
+
+            db.ChangeTracker.Clear();
+            var wrong = await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.RunPurgeAsync(tenantId, 9, "count-wrong",
+                    new EvidenceRetentionPurgeCommand(false, "Typed the wrong number.",
+                        preview.PreviewToken, preview.Eligible + 1), default));
+            Assert.Contains("1", wrong.Message);
             Assert.True(File.Exists(files.ResolvePath(document.ClearedKey)));
 
-            // A dry run still works, so a tenant can see the estimate before committing.
             db.ChangeTracker.Clear();
-            var dry = await service.RunPurgeAsync(tenantId, 9, "purge-disabled-dry",
-                new EvidenceRetentionPurgeCommand(true, "Estimate only."), default);
-            Assert.Equal(1, dry.Eligible);
+            await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.RunPurgeAsync(tenantId, 9, "count-missing",
+                    new EvidenceRetentionPurgeCommand(false, "No number typed.",
+                        preview.PreviewToken), default));
+            Assert.True(File.Exists(files.ResolvePath(document.ClearedKey)));
+            db.ChangeTracker.Clear();
+            Assert.Empty(await db.TenantGovernanceAuditEvents.AsNoTracking()
+                .Where(x => x.BusinessUnitId == tenantId && x.Action == EvidenceRetentionService.ActionPurgeRun)
+                .ToListAsync());
+
+            // The right number, and the same preview, still works.
+            db.ChangeTracker.Clear();
+            var real = await service.RunPurgeAsync(tenantId, 9, "count-right",
+                new EvidenceRetentionPurgeCommand(false, "Confirmed with the right number.",
+                    preview.PreviewToken, preview.Eligible), default);
+            Assert.Equal(1, real.Purged);
+            Assert.False(File.Exists(files.ResolvePath(document.ClearedKey)));
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -673,7 +732,13 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
 
             await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
                 service.UpdatePolicyAsync(tenantId, 11, "policy-too-short",
-                    new UpdateEvidenceRetentionPolicyCommand(7, true, "Too aggressive."), default));
+                    new UpdateEvidenceRetentionPolicyCommand(0, true, "Below the one-day settle floor."), default));
+
+            // Seven days used to be refused by a 30-day floor Nexora imposed. The tenant sets it now.
+            db.ChangeTracker.Clear();
+            var week = await service.UpdatePolicyAsync(tenantId, 11, "policy-week",
+                new UpdateEvidenceRetentionPolicyCommand(7, false, "Keep originals one week."), default);
+            Assert.Equal(7, week.Policy.RetentionDays);
 
             db.ChangeTracker.Clear();
             var updated = await service.UpdatePolicyAsync(tenantId, 11, "policy-ok",
@@ -681,13 +746,17 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
                 default);
             Assert.Equal(120, updated.Policy.RetentionDays);
             Assert.True(updated.Policy.IsEnabled);
-            Assert.Equal(2, updated.Policy.Version);
+            Assert.Equal(3, updated.Policy.Version);
 
-            var audit = await db.TenantGovernanceAuditEvents.AsNoTracking()
-                .SingleAsync(x => x.BusinessUnitId == tenantId
-                    && x.Action == EvidenceRetentionService.ActionPolicyUpdated);
-            Assert.Equal(11, audit.ActorUserId);
-            Assert.Contains("Dispute window agreed with legal.", audit.Reason);
+            var audits = await db.TenantGovernanceAuditEvents.AsNoTracking()
+                .Where(x => x.BusinessUnitId == tenantId
+                    && x.Action == EvidenceRetentionService.ActionPolicyUpdated)
+                .OrderBy(x => x.OccurredOn).ThenBy(x => x.Id)
+                .ToListAsync();
+            Assert.Equal(2, audits.Count);
+            Assert.All(audits, audit => Assert.Equal(11, audit.ActorUserId));
+            Assert.Contains("Keep originals one week.", audits[0].Reason);
+            Assert.Contains("Dispute window agreed with legal.", audits[1].Reason);
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -878,7 +947,7 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             tenantId,
             actorUserId,
             idempotencyKey,
-            new EvidenceRetentionPurgeCommand(false, reason, preview.PreviewToken),
+            new EvidenceRetentionPurgeCommand(false, reason, preview.PreviewToken, preview.Eligible),
             ct);
     }
 

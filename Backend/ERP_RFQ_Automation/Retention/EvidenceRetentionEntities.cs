@@ -17,16 +17,25 @@ namespace ERP_RFQ_Automation.Retention;
 /// </para>
 ///
 /// <para>
-/// Defaults are deliberately conservative: 90 days (a dispute and re-extraction buffer),
-/// a 30-day floor, and <see cref="IsEnabled"/> false. Irreversible deletion is opt-in, never
-/// on by default — nothing should silently start destroying a customer's documents because
-/// they upgraded.
+/// The default is 90 days (a dispute and re-extraction buffer). The floor is ONE day, and it
+/// is a settle guard rather than a retention opinion: extraction and assembly are asynchronous,
+/// and a document ingested minutes ago may still be mid-flight. How long to keep original files
+/// beyond that is the tenant's decision, not ours — the owner's rule is that Nexora does not
+/// impose a data policy on a customer. What Nexora does still refuse, however the policy is
+/// set, is the statutory set (invoices, purchase orders, contracts), legal holds, and anything
+/// still in use; those exclusions live in <see cref="EvidenceRetentionEligibility"/> and are
+/// enforced in SQL, not by the number here.
+/// </para>
+/// <para>
+/// <see cref="IsEnabled"/> is a recorded consent to a STANDING rule. No scheduler reads it in
+/// this build, and a manually confirmed purge does not require it: that path proves intent by a
+/// signed preview, a written reason, the typed count and an Idempotency-Key.
 /// </para>
 /// </summary>
 public sealed class EvidenceRetentionPolicy
 {
     public const int DefaultRetentionDays = 90;
-    public const int MinimumRetentionDays = 30;
+    public const int MinimumRetentionDays = 1;
     public const int MaximumRetentionDays = 3650;
 
     public long Id { get; set; }
@@ -35,9 +44,10 @@ public sealed class EvidenceRetentionPolicy
     /// <summary>Days after ingestion before an eligible document's bytes may be purged.</summary>
     public int RetentionDays { get; set; } = DefaultRetentionDays;
 
-    /// <summary>False until a named user opts in. Scheduled purges do nothing while false;
-    /// an explicit, dual-confirmed manual run is still permitted so a tenant can reclaim
-    /// space once without committing to a standing policy.</summary>
+    /// <summary>False until a named user opts in to a standing rule. No scheduler exists in this
+    /// build, so the flag currently records consent and nothing else; an explicitly confirmed
+    /// manual run never needs it, so a tenant can reclaim space once without committing to a
+    /// standing policy.</summary>
     public bool IsEnabled { get; set; }
 
     /// <summary>Monotonic. Stamped into every tombstone so an auditor can reconstruct which
