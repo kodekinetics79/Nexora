@@ -874,4 +874,83 @@ public class ChunkedExtractionServiceTests
             ManufacturerPartNumber = "MPN-1",
             LeadTimeDays = "10"
         };
+    // ---- Cross-chunk duplicates -------------------------------------------------------------
+    //
+    // Every chunk carries the same header context. A model that finds a line item in that
+    // context returns it on every call: a one-item, 13-page Marafiq RFQ read in five chunks
+    // came back as five copies of the same 40 kVA transformer (line 00010, material
+    // 201195514), and all five were saved on the lead. The union must recognise a line it has
+    // already seen.
+
+    private static LeadItemData Marafiq(string name = "TRANSFORMER: STEP UP, 400 TO 480VAC, 40KVA")
+        => Ext.Item(0.95, name) with { LineItemNo = "00010", ItemMaterialCode = "201195514", UnitOfMeasure = "EA" };
+
+    [Fact]
+    public async Task An_item_an_earlier_chunk_already_returned_is_kept_once()
+    {
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var llm = new StubLlm(
+            Ext.Result([Marafiq(), Ext.Item(0.9, "Item A") with { LineItemNo = "00020", ItemMaterialCode = "300000001" }], 0.9),
+            Ext.Result([Marafiq("TRANSFORMER: STEP UP ,400  TO 480VAC ,40KVA"), Ext.Item(0.9, "Item B") with { LineItemNo = "00030", ItemMaterialCode = "300000002" }], 0.9),
+            Ext.Result([Marafiq()], 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk * 2 + 1)));
+
+        Assert.Equal(3, llm.CallCount);
+        Assert.NotNull(outcome.Result);
+        // Three real lines, not five: the transformer once, then A and B.
+        Assert.Equal(3, outcome.Result!.Items.Count);
+        Assert.Equal(["00010", "00020", "00030"], outcome.Result.Items.Select(i => i.LineItemNo).ToArray());
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+        Assert.Contains(outcome.Diagnostics, d => d.StartsWith("Dropped 2 item(s) repeated across chunks"));
+    }
+
+    [Fact]
+    public async Task Duplicates_are_only_dropped_across_chunks_never_inside_one()
+    {
+        // What one chunk returns is that chunk's reading of its own lines; only a repeat of an
+        // EARLIER chunk's item is the header-context echo this guards against.
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var llm = new StubLlm(
+            Ext.Result([Marafiq(), Marafiq()], 0.9),
+            Ext.Result([Ext.Item(0.9, "Item B") with { LineItemNo = "00030", ItemMaterialCode = "300000002" }], 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk + 1)));
+
+        Assert.Equal(2, llm.CallCount);
+        Assert.Equal(3, outcome.Result!.Items.Count);
+        Assert.DoesNotContain(outcome.Diagnostics, d => d.StartsWith("Dropped"));
+    }
+
+    [Fact]
+    public async Task Items_without_a_line_number_code_or_part_number_are_never_deduplicated()
+    {
+        // Two bare descriptions that agree are not provably the same line. Leave them alone.
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var llm = new StubLlm(
+            Ext.Result([Ext.Item(0.9, "BOLT M10")], 0.9),
+            Ext.Result([Ext.Item(0.9, "BOLT M10")], 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk + 1)));
+
+        Assert.Equal(2, outcome.Result!.Items.Count);
+    }
+
+    [Fact]
+    public async Task Header_context_is_sent_as_reference_only_on_every_chunk()
+    {
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var llm = new StubLlm(Ext.Result(Ext.Items(1, 0.9), 0.9), Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk + 1), header: "RFQ 9500202307\n00010 201195514 TRANSFORMER"));
+
+        Assert.Equal(2, llm.Prompts.Count);
+        Assert.All(llm.Prompts, prompt =>
+        {
+            Assert.Contains("Do NOT extract line items from this section", prompt);
+            Assert.Contains("[LINE ITEMS", prompt);
+            // The header still travels: RFQ number, buyer and currency are read from it.
+            Assert.Contains("RFQ 9500202307", prompt);
+        });
+    }
 }

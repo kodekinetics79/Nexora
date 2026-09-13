@@ -1351,11 +1351,7 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
         // through the middle of each item's specification block, and the model was asked to
         // find whole line items in fragments carrying no code and no quantity. See
         // LineItemRegionGrouper for the measurements.
-        var headerLineCount = Math.Min(20, lines.Count);
-        var header = string.Join('\n', lines.Take(headerLineCount));
-        var regions = LineItemRegionGrouper.Group(lines.Skip(headerLineCount).ToList()).ToList();
-        if (regions.Count == 0 && lines.Count > 0)
-            regions = lines; // whole-doc pass
+        var (header, regions) = LineItemRegionGrouper.SplitHeaderAndRegions(lines, 20);
 
         return new DocumentExtractionInput
         {
