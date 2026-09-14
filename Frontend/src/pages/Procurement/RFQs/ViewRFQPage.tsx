@@ -9,7 +9,7 @@ import {
   AccordionSummary,
   Box, Typography, Paper, Button, Grid, Stack, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  CircularProgress, Divider, Breadcrumbs, Link, Alert, AlertTitle, ButtonBase,
+  CircularProgress, Divider, Breadcrumbs, Link, Alert, ButtonBase,
   Drawer, IconButton, LinearProgress, Tooltip, Autocomplete, TextField,
   Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material';
@@ -124,6 +124,27 @@ export const presentRfqExtraFields = (json: string | null | undefined): ExtraFie
 const formatScenarioMoney = (value: number, currencyCode?: string | null) =>
   currencyCode ? formatMoney(value, currencyCode) : `${formatMoney(value)} (currency not stated)`;
 
+/**
+ * "Not now" on a part missing from the catalogue is a choice, so it is remembered in this browser:
+ * the line stops asking and is priced by hand. Storage can be blocked or empty; then the choice lasts
+ * for this visit only, and the page still renders.
+ */
+const readNotNowLineIds = (key: string): number[] => {
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(key) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((value): value is number => Number.isInteger(value)) : [];
+  } catch {
+    return [];
+  }
+};
+const writeNotNowLineIds = (key: string, ids: number[]) => {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(ids));
+  } catch {
+    // Storage blocked: the choice lasts for this visit.
+  }
+};
+
 const ViewRFQPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
@@ -139,6 +160,14 @@ const ViewRFQPage: React.FC = () => {
   const [productSearch, setProductSearch] = React.useState('');
   const [selectedProduct, setSelectedProduct] = React.useState<ProductDTO | null>(null);
   const [productResolutionReason, setProductResolutionReason] = React.useState('');
+  // The rare case: the part is in the catalogue under another number, so the user searches instead.
+  const [searchInstead, setSearchInstead] = React.useState(false);
+  const notNowKey = `nexora.rfq.${id}.catalogue-not-now`;
+  const [notNowLineIds, setNotNowLineIds] = React.useState<number[]>(() => readNotNowLineIds(notNowKey));
+  const rememberNotNow = (ids: number[]) => {
+    setNotNowLineIds(ids);
+    writeNotNowLineIds(notNowKey, ids);
+  };
 
   const { data: rfq, isLoading, isError, refetch } = useQuery({
     queryKey: ['rfq-detail', Number(id)],
@@ -203,6 +232,7 @@ const ViewRFQPage: React.FC = () => {
     setProductResolutionItemId(null);
     setSelectedProduct(null);
     setProductResolutionReason('');
+    setSearchInstead(false);
   };
   const describeError = (error: any, fallback: string) =>
     error?.response?.data?.detail || error?.response?.data?.message || error?.message || fallback;
@@ -258,11 +288,14 @@ const ViewRFQPage: React.FC = () => {
         setSelectedProduct(created);
         setProductSearch(`${created.partNo} · ${created.productName || 'Unnamed product'}`);
         setProductResolutionReason(reason);
-        throw new Error(`${created.partNo} was added to the catalogue, but this line could not be bound to it: ${describeError(error, 'unknown error')}. Save product resolution to try again.`, { cause: error });
+        throw new Error(`${created.partNo} was added to the catalogue, but this line could not be linked to it: ${describeError(error, 'unknown error')}. Press "Use this product" to try again.`, { cause: error });
       }
       return created;
     },
     onSuccess: async (created) => {
+      if (productResolutionItemId !== null && notNowLineIds.includes(productResolutionItemId)) {
+        rememberNotNow(notNowLineIds.filter((lineId) => lineId !== productResolutionItemId));
+      }
       await invalidateLineViews();
       queryClient.invalidateQueries({ queryKey: ['rfq-product-resolution-search'] });
       closeProductResolution();
@@ -332,6 +365,7 @@ const ViewRFQPage: React.FC = () => {
       : (item.manufacturerPartNumber || item.itemMaterialCode || item.productShortDescription || ''));
     setSelectedProduct(null);
     setProductResolutionReason('');
+    setSearchInstead(false);
   };
   const resolutionPartNumber = (productResolutionItem?.manufacturerPartNumber || productResolutionItem?.itemMaterialCode || '').trim();
   const resolutionDescription = (productResolutionItem?.productShortDescription || productResolutionItem?.itemText || productResolutionItem?.materialPotext || '').trim();
@@ -340,12 +374,24 @@ const ViewRFQPage: React.FC = () => {
   const catalogueMiss = productResolutionItem !== null && !effectiveProduct
     && productSearchQuery.isSuccess && (productSearchQuery.data?.length ?? 0) === 0
     && productSearch.trim().length > 0 && (resolutionPartNumber.length > 0 || resolutionDescription.length > 0);
+  const unboundLine = productResolutionItem !== null && !productResolutionItem.productId;
+  // A line with no product first checks the catalogue for its part number, then asks ONE question when
+  // the part is not there. The search form is only for a line being changed, or when the user says the
+  // part is already in the catalogue under another number. Both states belong to the line's own part
+  // number only: what the user types in the search must never hide the search box or flip the dialog back.
+  const searchingOwnPart = productResolutionItem !== null && productSearch === (
+    productResolutionItem.manufacturerPartNumber || productResolutionItem.itemMaterialCode || productResolutionItem.productShortDescription || '');
+  const checkingCatalogue = unboundLine && searchingOwnPart && !selectedProduct && !searchInstead && productSearchQuery.isLoading;
+  const askToAdd = unboundLine && searchingOwnPart && catalogueMiss && !searchInstead && !selectedProduct;
+  const resolutionTitle = askToAdd
+    ? `Add ${resolutionPartNumber || 'this part'} to your catalogue?`
+    : productResolutionItem?.productId ? 'Change product' : 'Match to our product';
   const saveBlockedReason = addToCatalogueMutation.isPending || productResolutionMutation.isPending
     ? null
     : !effectiveProduct
-      ? (catalogueMiss ? 'No catalogue product is chosen. Add the part above, or search for another product.' : 'Pick a product from the list to enable Save.')
+      ? (catalogueMiss ? 'Nothing matches that search.' : 'Pick a product from the list first.')
       : !productResolutionReason.trim()
-        ? 'Add a one-line reason to enable Save.'
+        ? 'Add a one-line reason first.'
         : null;
   const lineMatches = (itemId: number, filter: string) => {
     const line = sourcingLines.get(itemId);
@@ -413,10 +459,15 @@ const ViewRFQPage: React.FC = () => {
   const awards = sourcingQuery.data?.awards ?? [];
   const solicitations = sourcingQuery.data?.solicitations ?? [];
   const quoteDraft = sourcingQuery.data?.customerQuoteDraft ?? null;
-  const unresolvedCount = rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length;
+  // A line the user left out of the catalogue ("Not now") stops asking; it is priced by hand.
+  const unresolvedLines = rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved'));
+  const leftOutCount = unresolvedLines.filter((x) => notNowLineIds.includes(x.id)).length;
+  const unresolvedCount = unresolvedLines.length - leftOutCount;
   const isAwarded = (lineId: number) => awards.some((a) => a.rfqItemId === lineId && ['APPROVED', 'SPLITAPPROVED'].includes((a.status ?? '').replaceAll('_', '').toUpperCase()));
   const isAsked = (lineId: number) => solicitations.some((sol) => (sol.requestedRfqItemIds ?? []).includes(lineId));
-  const shortLines = [...sourcingLines.values()].filter((line) => line.shortfallQuantity > 0 && line.resolution !== 'INCOMING' && !isAwarded(line.id));
+  // A line with no catalogue product cannot be put to a supplier (the server refuses the case), so it is
+  // never counted as "short and not asked".
+  const shortLines = [...sourcingLines.values()].filter((line) => line.shortfallQuantity > 0 && line.resolution !== 'INCOMING' && line.resolution !== 'UNKNOWN' && !isAwarded(line.id));
   const shortNotAsked = shortLines.filter((line) => !line.sourcingCaseId || !isAsked(line.id));
   const shortWithSuppliers = shortLines.filter((line) => line.sourcingCaseId && isAsked(line.id));
   const canCreateQuote = hasPermission('Quotations', 'create');
@@ -434,7 +485,7 @@ const ViewRFQPage: React.FC = () => {
           : unresolvedCount > 0
             ? {
                 tone: 'warning', title: 'Next step',
-                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} ${unresolvedCount === 1 ? 'is' : 'are'} not matched to a catalogue product yet, so stock and suppliers cannot be checked. Open "Resolve catalogue product" on the line: pick the product, or add the part to your catalogue from there if it is new.${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
+                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} ${unresolvedCount === 1 ? 'is' : 'are'} not in your catalogue yet, so stock and suppliers cannot be checked. Use "Add to catalogue" on the line, or choose "Not now" there to price it by hand.${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
                 action: <Button variant="outlined" onClick={() => setLineFilter('unresolved')} sx={{ borderRadius: 2 }}>Show unmatched lines</Button>,
               }
             : shortNotAsked.length > 0
@@ -449,6 +500,13 @@ const ViewRFQPage: React.FC = () => {
                     sentence: `${shortWithSuppliers.length} line${shortWithSuppliers.length === 1 ? ' is' : 's are'} with suppliers. Capture their replies and approve the best offer in the Sourcing workbench.`,
                     action: hasPermission('Supplier History') ? <Button variant="outlined" startIcon={<WorkbenchIcon />} onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)} sx={{ borderRadius: 2 }}>Open Sourcing workbench</Button> : undefined,
                   }
+                : leftOutCount > 0 && !quoteDraft && canPrepareQuote
+                  ? {
+                      tone: 'info', title: 'Next step',
+                      sentence: `${leftOutCount} line${leftOutCount === 1 ? ' is' : 's are'} left out of the catalogue for now. ${canCreateQuote
+                        ? `Prepare the quote draft and price ${leftOutCount === 1 ? 'it' : 'them'} by hand`
+                        : 'Ask someone with quoting rights to prepare the quote draft'}, or use "Add to catalogue" on the line.`,
+                    }
                 : quoteDraft
                   ? {
                       tone: 'success', title: 'Next step',
@@ -756,14 +814,18 @@ const ViewRFQPage: React.FC = () => {
                                   </Tooltip>
                                 );
                               }
-                              return <Chip size="small" icon={<UndecidedIcon />} label="Not in catalogue" color="warning" variant="outlined" />;
+                              return notNowLineIds.includes(item.id)
+                                ? <Chip size="small" icon={<UndecidedIcon />} label="Not in catalogue · left for now" variant="outlined" />
+                                : <Chip size="small" icon={<UndecidedIcon />} label="Not in catalogue" color="warning" variant="outlined" />;
                             }
                             const reviewed = resolution.productResolution?.decisionState?.toLowerCase().includes('approved') || resolution.classification === 'KnownInStock' || resolution.classification === 'KnownIncoming' || resolution.classification === 'KnownShortage';
                             return <Tooltip title={`Evidence: ${resolution.evidenceReference || 'not recorded'}`}><Chip size="small" icon={reviewed ? <ApproveIcon /> : <BlockerIcon />} label={reviewed ? 'Persisted resolution' : statusLabel(resolution.classification)} color={reviewed ? 'success' : 'warning'} variant="outlined" /></Tooltip>;
                           })()}
-                          {commercialAccess.canResolveRfqProduct && (
+                          {/* One button per line. A line with no product carries "Add to catalogue" in its
+                              next-action cell, so it is not repeated here. */}
+                          {commercialAccess.canResolveRfqProduct && (item.productId || sourcingLines.get(item.id)?.resolution !== 'UNKNOWN') && (
                             <Button size="small" variant="text" onClick={() => openProductResolution(item)}>
-                              {item.productResolvedOn ? 'Change product' : 'Resolve catalogue product'}
+                              {item.productId ? 'Change product' : 'Add to catalogue'}
                             </Button>
                           )}
                         </Stack>
@@ -830,14 +892,17 @@ const ViewRFQPage: React.FC = () => {
                             // ProcurementApplicationService refuses a Sourcing Case on a line with no
                             // product ("Resolve this RFQ line to a tenant catalogue product before opening
                             // Supplier sourcing"). Offering the case here was a button that could only fail.
+                            const leftOut = notNowLineIds.includes(item.id);
                             return (
                               <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
-                                <Typography variant="caption" color="warning.main" sx={{ fontWeight: 700 }}>
-                                  {sourcingLine.requestedQuantity} requested · needs a catalogue product before sourcing
+                                <Typography variant="caption" color={leftOut ? 'text.secondary' : 'warning.main'} sx={{ fontWeight: 700 }}>
+                                  {leftOut
+                                    ? `${sourcingLine.requestedQuantity} requested · left out of the catalogue for now, price it by hand`
+                                    : `${sourcingLine.requestedQuantity} requested · needs a catalogue product before sourcing`}
                                 </Typography>
                                 {commercialAccess.canResolveRfqProduct && (
-                                  <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={() => openProductResolution(item)}>
-                                    Resolve catalogue product
+                                  <Button size="small" variant={leftOut ? 'outlined' : 'contained'} startIcon={<AddIcon />} onClick={() => openProductResolution(item)}>
+                                    Add to catalogue
                                   </Button>
                                 )}
                                 <Tooltip title="Inspect persisted source and normalization evidence"><Button size="small" variant="text" startIcon={<EvidenceIcon />} onClick={() => setEvidenceItemId(item.id)}>Evidence</Button></Tooltip>
@@ -1123,17 +1188,13 @@ const ViewRFQPage: React.FC = () => {
 
       <Dialog
         open={Boolean(productResolutionItem)}
-        onClose={() => !productResolutionMutation.isPending && !addToCatalogueMutation.isPending && setProductResolutionItemId(null)}
+        onClose={() => !productResolutionMutation.isPending && !addToCatalogueMutation.isPending && closeProductResolution()}
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>Resolve catalogue product</DialogTitle>
+        <DialogTitle>{resolutionTitle}</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2}>
-            <Alert severity="info">
-              Choose the product in your catalogue that this customer line is asking for. Stock, supplier
-              candidates and pricing are all checked against that product, and the choice is recorded with your name.
-            </Alert>
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="caption" color="text.secondary">Customer line</Typography>
               <Typography sx={{ fontWeight: 800 }}>
@@ -1143,6 +1204,29 @@ const ViewRFQPage: React.FC = () => {
                 {productResolutionItem?.productShortDescription || productResolutionItem?.itemText || productResolutionItem?.materialPotext || 'No description recorded'}
               </Typography>
             </Paper>
+            {checkingCatalogue ? (
+              <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
+                <CircularProgress size={18} />
+                <Typography variant="body2">Checking your catalogue for this part…</Typography>
+              </Stack>
+            ) : askToAdd ? (
+              // The owner's rule: say the part is not in the catalogue and ask to add it. One question,
+              // two answers. No reason to type and no form: the add records its own reason.
+              <>
+                <Typography variant="body2">
+                  {canAddToCatalogue
+                    ? 'It is not in your catalogue yet. Add it, and this line can be stock-checked and sent to suppliers.'
+                    : 'It is not in your catalogue yet. Ask someone who can add products to add it.'}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Not now keeps the line on the RFQ. You price it by hand on the quote.
+                </Typography>
+                <Link component="button" type="button" variant="body2" onClick={() => setSearchInstead(true)} sx={{ alignSelf: 'flex-start' }}>
+                  Already in the catalogue under another number? Search for it
+                </Link>
+              </>
+            ) : (
+              <>
             <Autocomplete
               openOnFocus
               options={productSearchQuery.data ?? []}
@@ -1160,7 +1244,7 @@ const ViewRFQPage: React.FC = () => {
                 ? 'Product search is unavailable. No catalogue decision was saved.'
                 : 'No tenant catalogue product matches this search.'}
               renderInput={(params) => (
-                <TextField {...params} label="Tenant catalogue product" required helperText="Search by part number or product name." />
+                <TextField {...params} label="Product in your catalogue" required helperText="Search by part number or product name." />
               )}
               renderOption={(props, option) => {
                 const { key, ...optionProps } = props;
@@ -1176,44 +1260,20 @@ const ViewRFQPage: React.FC = () => {
                 );
               }}
             />
-            {catalogueMiss && (
-              // Two explicit answers, not one button and a Cancel. "Not now" is a legitimate
-              // choice: the line can still go on the quote and be priced by hand; only the stock
-              // check and supplier outreach wait for the entry, and the same button on the row
-              // brings the user back.
-              <Alert severity="info" icon={<AddIcon fontSize="inherit" />}>
-                <AlertTitle>{resolutionPartNumber || 'This part'} is not in your catalogue yet.</AlertTitle>
-                {canAddToCatalogue
-                  ? `Add it now to check stock and ask suppliers, or leave it for later. Adding creates "${(resolutionDescription || resolutionPartNumber).slice(0, 100)}" as a product and uses it for this line; the record can be completed under Products later.`
-                  : 'Ask someone with Products create rights to add it, then choose it here.'}
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  Without the entry this line can still be quoted by hand, but it cannot be stock-checked or sent to suppliers. You can come back any time from the same button on the line.
-                </Typography>
-                <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
-                  {canAddToCatalogue && (
-                    <Button color="inherit" size="small" variant="outlined" sx={{ whiteSpace: 'nowrap', fontWeight: 800 }}
-                      onClick={() => addToCatalogueMutation.mutate()} disabled={addToCatalogueMutation.isPending}>
-                      {addToCatalogueMutation.isPending ? 'Adding…' : 'Add to catalogue and use it'}
-                    </Button>
-                  )}
-                  <Button color="inherit" size="small" disabled={addToCatalogueMutation.isPending}
-                    onClick={() => {
-                      closeProductResolution();
-                      enqueueSnackbar(`${resolutionPartNumber || 'This line'} left out of the catalogue for now. It stays marked "Not in catalogue"; use "Resolve catalogue product" on the line when you are ready.`, { variant: 'info' });
-                    }}>
-                    Not now
-                  </Button>
-                </Stack>
-              </Alert>
+            {catalogueMiss && unboundLine && canAddToCatalogue && (
+              <Button variant="outlined" startIcon={<AddIcon />} sx={{ alignSelf: 'flex-start' }}
+                onClick={() => addToCatalogueMutation.mutate()} disabled={addToCatalogueMutation.isPending}>
+                {addToCatalogueMutation.isPending ? 'Adding…' : `Add ${resolutionPartNumber || 'this part'} to the catalogue instead`}
+              </Button>
             )}
             <TextField
-              label="Resolution reason"
+              label="Reason"
               required
               multiline
-              minRows={3}
+              minRows={2}
               value={productResolutionReason}
               onChange={(event) => setProductResolutionReason(event.target.value)}
-              helperText="Record the customer part, drawing, specification or catalogue evidence used for this decision."
+              helperText="What shows it is the same part: part number, drawing or specification."
             />
             {productResolutionItem?.productResolvedOn && (
               <Alert severity="info">
@@ -1221,24 +1281,49 @@ const ViewRFQPage: React.FC = () => {
                 A correction is allowed until Supplier outreach has been prepared.
               </Alert>
             )}
+              </>
+            )}
           </Stack>
         </DialogContent>
-        <DialogActions sx={{ justifyContent: 'space-between', px: 3, gap: 2 }}>
-          {/* A grey Save with no reason beside it read as broken. The reason is always said. */}
-          <Typography variant="caption" color={saveBlockedReason ? 'text.secondary' : 'success.main'} sx={{ fontWeight: 700 }}>
-            {saveBlockedReason ?? 'Ready to save.'}
-          </Typography>
-          <Stack direction="row" spacing={1}>
-            <Button onClick={() => setProductResolutionItemId(null)} disabled={productResolutionMutation.isPending || addToCatalogueMutation.isPending}>Cancel</Button>
+        {askToAdd ? (
+          <DialogActions sx={{ px: 3, gap: 1 }}>
             <Button
-              variant="contained"
-              onClick={() => productResolutionMutation.mutate(effectiveProduct)}
-              disabled={Boolean(saveBlockedReason) || productResolutionMutation.isPending || addToCatalogueMutation.isPending}
+              disabled={addToCatalogueMutation.isPending}
+              onClick={() => {
+                // Remembered, so the line stops asking until the user chooses to add it.
+                if (productResolutionItemId !== null && !notNowLineIds.includes(productResolutionItemId)) {
+                  rememberNotNow([...notNowLineIds, productResolutionItemId]);
+                }
+                closeProductResolution();
+                enqueueSnackbar(`${resolutionPartNumber || 'This line'} left out for now. Price it by hand, or add it any time from the line.`, { variant: 'info' });
+              }}
             >
-              {productResolutionMutation.isPending ? 'Saving resolution…' : 'Save product resolution'}
+              Not now
             </Button>
-          </Stack>
-        </DialogActions>
+            {canAddToCatalogue && (
+              <Button variant="contained" startIcon={<AddIcon />} onClick={() => addToCatalogueMutation.mutate()} disabled={addToCatalogueMutation.isPending}>
+                {addToCatalogueMutation.isPending ? 'Adding…' : 'Add to catalogue'}
+              </Button>
+            )}
+          </DialogActions>
+        ) : (
+          <DialogActions sx={{ justifyContent: 'space-between', px: 3, gap: 2 }}>
+            {/* A grey button with no reason beside it read as broken. The reason is always said. */}
+            <Typography variant="caption" color={saveBlockedReason || checkingCatalogue ? 'text.secondary' : 'success.main'} sx={{ fontWeight: 700 }}>
+              {checkingCatalogue ? 'Checking your catalogue…' : (saveBlockedReason ?? 'Ready.')}
+            </Typography>
+            <Stack direction="row" spacing={1}>
+              <Button onClick={closeProductResolution} disabled={productResolutionMutation.isPending || addToCatalogueMutation.isPending}>Cancel</Button>
+              <Button
+                variant="contained"
+                onClick={() => productResolutionMutation.mutate(effectiveProduct)}
+                disabled={checkingCatalogue || Boolean(saveBlockedReason) || productResolutionMutation.isPending || addToCatalogueMutation.isPending}
+              >
+                {productResolutionMutation.isPending ? 'Saving…' : 'Use this product'}
+              </Button>
+            </Stack>
+          </DialogActions>
+        )}
       </Dialog>
 
       <Drawer anchor="right" open={Boolean(evidenceItem)} onClose={() => setEvidenceItemId(null)} slotProps={{ paper: { sx: { width: { xs: '100%', sm: 440 }, p: 3 } } }}>
