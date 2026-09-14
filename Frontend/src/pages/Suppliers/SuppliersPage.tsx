@@ -7,7 +7,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions,
   Grid, FormControlLabel, Switch, TextField, CircularProgress,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Tooltip, Divider, MenuItem, Select, FormControl, InputLabel,
+  Tooltip, Divider, MenuItem, Select, FormControl, InputLabel, Alert,
 } from '@mui/material';
 import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import {
@@ -472,6 +472,12 @@ const SuppliersPage: React.FC = () => {
         </DialogTitle>
 
         <DialogContent dividers sx={{ p: 3 }}>
+          {returnTo && !selectedRecord && (
+            <Alert severity="info" sx={{ mb: 3 }}>
+              Adding a supplier for a sourcing case. Tags already hold the part number; add the maker too, so this supplier
+              is suggested for that maker's other parts. Saving takes you back to the case.
+            </Alert>
+          )}
 
           <Box sx={{ mb: 4 }}>
             <Grid container spacing={2}>

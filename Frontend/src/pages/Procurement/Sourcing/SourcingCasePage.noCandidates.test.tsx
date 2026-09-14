@@ -89,6 +89,41 @@ describe('SourcingCasePage — no known supplier is a next step, not a dead end'
     expect(navigate).toHaveBeenCalledWith('/suppliers/12');
   });
 
+  it('speaks the buyer\'s words on an empty case: no system status, no zero counts, no filled button that cannot be pressed', async () => {
+    getSourcingCase.mockResolvedValue(sourcingCase([]));
+    renderPage();
+
+    await screen.findByTestId('sourcing-case-next-step');
+    expect(screen.getByRole('heading', { name: 'Ask suppliers' })).toBeInTheDocument();
+    expect(screen.getByText('No supplier yet')).toBeInTheDocument();
+    expect(screen.queryByText('Discovery Required')).not.toBeInTheDocument();
+    expect(screen.queryByText(/can be asked ·/)).not.toBeInTheDocument();
+    const ask = screen.getByRole('button', { name: 'Ask the ticked suppliers' });
+    expect(ask).toBeDisabled();
+    expect(ask.className).toContain('MuiButton-outlined');
+  });
+
+  it('shows why a blocked supplier cannot be asked in one line, with every reason one hover away', async () => {
+    getSourcingCase.mockResolvedValue(sourcingCase([candidate({ blockingReasons: ['Supplier approval is required', 'Supplier verification status must be VERIFIED'] })]));
+    renderPage();
+
+    expect(await screen.findByText('Needs approval')).toBeInTheDocument();
+    expect(screen.getByText('Supplier approval is required · 1 more')).toBeInTheDocument();
+    expect(screen.getByText('Tags name this part or its maker')).toBeInTheDocument();
+    expect(screen.queryByText('Persisted tenant relationship')).not.toBeInTheDocument();
+  });
+
+  it('counts the ticked suppliers on the button and fills it only once one is ticked', async () => {
+    getSourcingCase.mockResolvedValue({ ...sourcingCase([candidate({ eligibleForSupplierRfq: true, blockingReasons: [] })], 'CANDIDATES_READY'), nextAction: 'Select suppliers for outreach' });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Arabian Turbine Parts' }));
+    const ask = screen.getByRole('button', { name: 'Ask 1 supplier' });
+    expect(ask).toBeEnabled();
+    expect(ask.className).toContain('MuiButton-contained');
+    expect(screen.getByText('1 of 1 can be asked · 1 ticked')).toBeInTheDocument();
+  });
+
   it('keeps the server sentence once a supplier can be asked', async () => {
     getSourcingCase.mockResolvedValue({ ...sourcingCase([candidate({ eligibleForSupplierRfq: true, blockingReasons: [] })], 'CANDIDATES_READY'), nextAction: 'Select suppliers for outreach' });
     renderPage();
