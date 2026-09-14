@@ -2786,13 +2786,14 @@ public sealed class CustomerAliasLearnerTests
     }
 
     [Theory]
-    [InlineData(CustomerIdentifierSources.LeadReviewLearned, true, false)]
-    // The control: nobody decided the pair's print for anyone else, and the learned pair links SEC at 0.92.
-    [InlineData(CustomerIdentifierSources.LeadReviewLearned, false, true)]
-    // A pair a person entered is never overruled by people's decisions.
-    [InlineData("MasterData", true, true)]
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned, true, "refused")]
+    // The control: nobody decided the pair's print for anyone else, so the learned pair is still evidence. On this
+    // pair-only print, which names nobody, it is offered for SEC rather than applied (owner decision 2026-09-14, lead 694).
+    [InlineData(CustomerIdentifierSources.LeadReviewLearned, false, "offered")]
+    // A pair a person entered is never overruled by people's decisions, and decides on a silent page.
+    [InlineData("MasterData", true, "links")]
     public async Task PolicyA_a_learned_portal_pair_whose_print_a_person_since_saved_for_another_customer_no_longer_links(
-        string source, bool savedForAnother, bool links)
+        string source, bool savedForAnother, string expected)
     {
         // Owner decision 2026-09-13, policy A: a portal account is learned only when the document itself names the customer,
         // and a relink takes back what the rejected customer learned from it (P5). THE DEFECT (the open item of the repair
@@ -2823,15 +2824,22 @@ public sealed class CustomerAliasLearnerTests
         await context.SaveChangesAsync();
 
         var outcome = await ResolveWithoutSavingAsync(db, 8630);
-        if (links)
+        switch (expected)
         {
-            Assert.Equal(Sec, outcome.CustomerId);
-            Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
-        }
-        else
-        {
-            Assert.Null(outcome.CustomerId);
-            Assert.NotEqual(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+            case "links":
+                Assert.Equal(Sec, outcome.CustomerId);
+                Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+                break;
+            case "offered":
+                Assert.Null(outcome.CustomerId);
+                Assert.Contains(outcome.Candidates, candidate => candidate.CustomerId == Sec
+                                                                 && candidate.ReasonCode == CustomerMatchReasonCodes.LearnedPortalAccount);
+                break;
+            default:
+                Assert.Null(outcome.CustomerId);
+                Assert.NotEqual(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
+                Assert.DoesNotContain(outcome.Candidates, candidate => candidate.ReasonCode == CustomerMatchReasonCodes.LearnedPortalAccount);
+                break;
         }
     }
 

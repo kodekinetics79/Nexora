@@ -266,13 +266,17 @@ public static class CustomerIdentityResolver
         // "SEC Materials West Plant" in its storage location. A decision resting only on taught pairs waits for the
         // page: where a header or an address names a different customer at link strength, both are offered
         // instead (see the passage tier). A pair a person entered, a taught alias, or a pair the page agrees with
-        // still decides here, and a page with no passages costs nothing.
+        // still decides here.
+        //
+        // NOR DOES A TAUGHT PAIR DECIDE ON A PAGE THAT NAMES NOBODY (owner decision 2026-09-14, lead 694). One review on
+        // 18 Aug taught SEC's "MATERIALS E-BIDDING SYSTEM / 2004414" to Saudi Aramco, and SEC's C001046115, whose page
+        // named no buyer and no delivery address, linked to Aramco at 0.92 and was auto-verified without anybody being
+        // asked. A taught pair is an earlier pick, so it links only where a header or an address names its customer.
         Hit? taughtPairAwaitingThePage = null;
         ClientResolutionOutcome? taughtPairOutcome = null;
         if (Decide(learnedHits, names, policy, out var learnedOutcome))
         {
             if (learnedOutcome!.CustomerId is long pairOwner
-                && guarded.Passages.Count > 0
                 && learnedHits.Where(hit => hit.CustomerId == pairOwner)
                     .All(hit => hit.Taught && hit.ReasonCode == CustomerMatchReasonCodes.LearnedPortalAccount))
             {
@@ -588,17 +592,30 @@ public static class CustomerIdentityResolver
                 rivalOffers.AddRange(competition.Offers);
             }
         }
-        // THE TAUGHT PAIR MEETS THE PAGE (see S3). Where no header or address names a different customer at link
-        // strength, the pair decides as it always did. Where one does, neither is applied: the named customer is
-        // offered at the demoted ship-to strength and the pair's owner below it, because the pair is an earlier pick
-        // and a rep shown the earlier pick first repeats it (the same order CompetesWith gives earlier decisions).
+        // THE TAUGHT PAIR MEETS THE PAGE (see S3). Where a header or address names the pair's own customer at link
+        // strength and nobody else, the pair decides. Where the page names nobody, the pair is only offered. Where it
+        // names a different customer, neither is applied: the named customer is offered at the demoted ship-to strength
+        // and the pair's owner below it, because the pair is an earlier pick and a rep shown the earlier pick first
+        // repeats it (the same order CompetesWith gives earlier decisions).
         Hit? taughtPairOffer = null;
-        if (taughtPairAwaitingThePage is not null)
+        var pairRival = taughtPairAwaitingThePage is null
+            ? null
+            : namedInAddress.FirstOrDefault(hit => hit.CustomerId != taughtPairAwaitingThePage.CustomerId);
+        if (taughtPairAwaitingThePage is not null && pairRival is null)
+        {
+            if (namedInAddress.Any(hit => hit.CustomerId == taughtPairAwaitingThePage.CustomerId))
+                return WithContact(taughtPairOutcome!, guarded, corpus);
+            taughtPairOffer = taughtPairAwaitingThePage with
+            {
+                Confidence = Math.Min(policy.PriorSenderSuggestionConfidence, policy.ShipToDemotedConfidence),
+                Explanation = $"{taughtPairAwaitingThePage.Explanation} A reviewer taught that portal account to this " +
+                              "client, but nothing on the page names who is buying, so it is offered rather than applied."
+            };
+        }
+        else if (taughtPairAwaitingThePage is not null)
         {
             var pairOwner = taughtPairAwaitingThePage.CustomerId;
-            var rival = namedInAddress.FirstOrDefault(hit => hit.CustomerId != pairOwner);
-            if (rival is null)
-                return WithContact(taughtPairOutcome!, guarded, corpus);
+            var rival = pairRival!;
 
             var ownerName = names.TryGetValue(pairOwner, out var knownOwner) ? knownOwner : $"Customer #{pairOwner}";
             var rivalName = names.TryGetValue(rival.CustomerId, out var knownRival) ? knownRival : $"Customer #{rival.CustomerId}";
