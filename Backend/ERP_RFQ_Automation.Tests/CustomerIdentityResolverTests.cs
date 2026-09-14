@@ -197,8 +197,10 @@ public sealed class CustomerIdentityResolverTests
     }
 
     [Fact]
-    public void A_learned_portal_and_vendor_code_pair_links()
+    public void A_learned_portal_and_vendor_code_pair_is_offered_on_a_page_that_names_nobody()
     {
+        // Owner decision 2026-09-14 (lead 694): a taught pair is an earlier pick, so it links only where the page
+        // names its customer. Here the page names nobody, so it is offered and a person picks.
         var key = $"{CustomerNameNormalizer.LooseKey("MATERIALS E-BIDDING SYSTEM")}|2004414";
         var corpus = Corpus(
             customers: [new(Sec, "Saudi Electricity Company")],
@@ -216,9 +218,11 @@ public sealed class CustomerIdentityResolverTests
             SupplierAccountRefOnDocument = "2004414"
         }, corpus, Policy);
 
-        Assert.Equal(Sec, outcome.CustomerId);
-        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, outcome.ReasonCode);
-        Assert.Equal(0.92m, outcome.Confidence);
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        var offered = Assert.Single(outcome.Candidates);
+        Assert.Equal(Sec, offered.CustomerId);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, offered.ReasonCode);
     }
 
     [Fact]
@@ -746,7 +750,7 @@ public sealed class CustomerIdentityResolverTests
         // The test for membership is "who issued the number", not "is it a portal". SEC's own
         // MATERIALS E-BIDDING SYSTEM is buyer-operated: one buyer runs it and issues the codes
         // in it, so vendor code 2004414 means nothing anywhere else and therefore names SEC.
-        // This is the case the tier was built for and it must keep linking at 0.92.
+        // This is the case the tier was built for and it must keep linking at 0.92 where the page names SEC.
         var corpus = Corpus(customers: [new(Sec, "Saudi Electricity Company")], identifiers:
         [
             new(1, Sec, CustomerIdentifierType.PortalAccount, "MATERIALS E BIDDING SYSTEM|2004414", true, 0.92m,
@@ -756,6 +760,7 @@ public sealed class CustomerIdentityResolverTests
         {
             BusinessUnitId = 1, LeadId = 10,
             CustomerPortalName = "MATERIALS E-BIDDING SYSTEM", SupplierAccountRefOnDocument = "2004414",
+            Passages = [new DocumentPassage("delivery address", "Saudi Electricity Company-DAMMAM", true)],
         }, corpus, Policy);
 
         Assert.Equal(Sec, outcome.CustomerId);
@@ -2577,7 +2582,34 @@ public sealed class CustomerIdentityResolverTests
     }
 
     [Fact]
-    public void A_portal_pair_still_decides_where_the_page_agrees_names_nobody_or_a_person_entered_it()
+    public void A_portal_pair_taught_to_another_customer_is_only_offered_on_a_page_that_names_nobody()
+    {
+        // THE DEFECT (production lead 694, 2026-09-14). One review on 18 Aug taught SEC's "MATERIALS E-BIDDING SYSTEM /
+        // 2004414" to Saudi Aramco. SEC's C001046115 came in naming no buyer organisation and no delivery address, linked
+        // to Aramco at 0.92 and was auto-verified. Its real shape: portal, our vendor code, the supplier line, a buyer
+        // person, an SEC-style RFQ number, and nothing else.
+        const long aramco = OtherCustomer;
+        CustomerNameSnapshot[] customers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")];
+        var lead694 = EBiddingPrint() with { RfqNumber = "C001046115" };
+
+        var outcome = CustomerIdentityResolver.Resolve(lead694,
+            Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned)]), Policy);
+
+        Assert.Null(outcome.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.Suggested, outcome.Status);
+        var earlierPick = Assert.Single(outcome.Candidates, candidate => candidate.CustomerId == aramco);
+        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, earlierPick.ReasonCode);
+        Assert.True(earlierPick.Confidence < Policy.LearnedPortalAccountConfidence);
+
+        // CONTROL: a pair a person entered is a fact, not an earlier pick, and still decides on the same silent page.
+        var entered = CustomerIdentityResolver.Resolve(lead694,
+            Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.MasterData)]), Policy);
+        Assert.Equal(aramco, entered.CustomerId);
+        Assert.Equal(Policy.LearnedPortalAccountConfidence, entered.Confidence);
+    }
+
+    [Fact]
+    public void A_portal_pair_still_decides_where_the_page_agrees_or_a_person_entered_it()
     {
         const long aramco = OtherCustomer;
         CustomerNameSnapshot[] customers = [new(Sec, "Saudi Electricity Company"), new(aramco, "Saudi Aramco")];
@@ -2594,8 +2626,6 @@ public sealed class CustomerIdentityResolverTests
         {
             (CustomerIdentityResolver.Resolve(EBiddingPrint(new DocumentPassage("delivery address", "Saudi Aramco Ras Tanura Refinery", true)),
                 Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned)]), Policy), "the page names the pair's own customer"),
-            (CustomerIdentityResolver.Resolve(EBiddingPrint(),
-                Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned)]), Policy), "the page names nobody"),
             (CustomerIdentityResolver.Resolve(EBiddingPrint(secAddress),
                 Corpus(customers, [EBiddingPair(aramco, CustomerIdentifierSources.MasterData)]), Policy), "a person entered the pair"),
         })
@@ -2717,10 +2747,13 @@ public sealed class CustomerIdentityResolverTests
             Corpus(buyers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned) with { IsVerified = false }]), Policy);
         Assert.Null(pairFiled.CustomerId);
         Assert.DoesNotContain(pairFiled.Candidates, candidate => candidate.ReasonCode == CustomerMatchReasonCodes.LearnedPortalAccount);
+        // On a page that names nobody a verified taught pair is offered, not applied (owner decision 2026-09-14,
+        // lead 694), so "acts" here means it is on the candidate list where the filing is not.
         var pairLearned = CustomerIdentityResolver.Resolve(EBiddingPrint(),
             Corpus(buyers, [EBiddingPair(aramco, CustomerIdentifierSources.LeadReviewLearned)]), Policy);
-        Assert.Equal(aramco, pairLearned.CustomerId);
-        Assert.Equal(CustomerMatchReasonCodes.LearnedPortalAccount, pairLearned.ReasonCode);
+        Assert.Null(pairLearned.CustomerId);
+        Assert.Contains(pairLearned.Candidates, candidate => candidate.CustomerId == aramco
+                                                             && candidate.ReasonCode == CustomerMatchReasonCodes.LearnedPortalAccount);
 
         // A name written in the delivery address (the passage scan).
         var nameEvidence = new LeadClientEvidence
