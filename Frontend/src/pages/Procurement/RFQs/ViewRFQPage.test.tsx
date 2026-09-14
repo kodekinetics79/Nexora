@@ -159,6 +159,7 @@ const wrapper = ({ children }: { children: ReactNode }) => {
 beforeEach(() => {
   vi.clearAllMocks();
   testAccess.denied.clear();
+  window.localStorage.clear();
   getRfq.mockResolvedValue(rfq());
   getWorkbench.mockResolvedValue(workbench(rfq().rfqitems));
   getRfqIntelligence.mockResolvedValue(intelligence());
@@ -262,7 +263,7 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     render(<ViewRFQPage />, { wrapper });
 
     await screen.findAllByText('RFQ-9001');
-    expect(screen.queryByRole('button', { name: 'Resolve catalogue product' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add to catalogue' })).not.toBeInTheDocument();
   });
 
   it('records a human product choice and its evidence reason', async () => {
@@ -270,16 +271,16 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     getWorkbench.mockResolvedValue(workbench([line(1)]));
     render(<ViewRFQPage />, { wrapper });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
-    expect(await screen.findByRole('dialog', { name: 'Resolve catalogue product' })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue' }));
+    expect(await screen.findByRole('dialog', { name: 'Match to our product' })).toBeInTheDocument();
 
-    const productInput = screen.getByRole('combobox', { name: 'Tenant catalogue product' });
+    const productInput = await screen.findByRole('combobox', { name: 'Product in your catalogue' });
     fireEvent.change(productInput, { target: { value: 'VALVE' } });
     fireEvent.click(await screen.findByRole('option', { name: /VALVE-A/ }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Resolution reason' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Reason' }), {
       target: { value: 'Customer part number VALVE-A matches the approved tenant catalogue record.' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save product resolution' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
 
     await waitFor(() => {
       expect(resolveLineProduct).toHaveBeenCalledWith(
@@ -296,17 +297,17 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     getWorkbench.mockResolvedValue(workbench([line(1)]));
     render(<ViewRFQPage />, { wrapper });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
-    expect(await screen.findByText('Pick a product from the list to enable Save.')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue' }));
+    expect(await screen.findByText('Pick a product from the list first.')).toBeInTheDocument();
 
-    const productInput = screen.getByRole('combobox', { name: 'Tenant catalogue product' });
+    const productInput = screen.getByRole('combobox', { name: 'Product in your catalogue' });
     fireEvent.change(productInput, { target: { value: 'VALVE' } });
     fireEvent.click(await screen.findByRole('option', { name: /VALVE-A/ }));
-    expect(screen.getByText('Add a one-line reason to enable Save.')).toBeInTheDocument();
+    expect(screen.getByText('Add a one-line reason first.')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByRole('textbox', { name: 'Resolution reason' }), { target: { value: 'Same part.' } });
-    expect(screen.getByText('Ready to save.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Save product resolution' })).toBeEnabled();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Reason' }), { target: { value: 'Same part.' } });
+    expect(screen.getByText('Ready.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Use this product' })).toBeEnabled();
   });
 
   /**
@@ -325,11 +326,13 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     resolveLineProduct.mockResolvedValue({ lineId: 1, productId: 777, replayed: false });
     render(<ViewRFQPage />, { wrapper });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
-    expect(await screen.findByText('MPN-1 is not in your catalogue yet.')).toBeInTheDocument();
-    expect(screen.getByText('No catalogue product is chosen. Add the part above, or search for another product.')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue' }));
+    // One question, not a form: no search box, no reason to type.
+    const dialog = await screen.findByRole('dialog', { name: 'Add MPN-1 to your catalogue?' });
+    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('textbox')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add to catalogue and use it' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add to catalogue' }));
 
     await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
     const form = createProduct.mock.calls[0][0] as FormData;
@@ -342,27 +345,67 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     await waitFor(() => {
       expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 777, expect.stringContaining('MPN-1'));
     });
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resolve catalogue product' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
-  it('lets the user decline for now, leaving the line untouched and marked so they can come back', async () => {
+  /**
+   * The owner's defect (2026-09-14): after "Not now" the line still showed the gold "Resolve catalogue
+   * product" button, which opened the same long form again, and the next-step banner kept asking.
+   * "Not now" is a choice, so it sticks: the line stops asking, the banner moves on, and the line can
+   * still be added later. It survives a reload.
+   */
+  it('remembers "Not now": the line stops asking, the banner moves on, and the part can still be added later', async () => {
     getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
-    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    const bench = workbench([line(1)]);
+    bench.lines[0] = { ...bench.lines[0], availableQuantity: 0, shortfallQuantity: 10, resolution: 'UNKNOWN' as const };
+    getWorkbench.mockResolvedValue(bench);
     getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
-    render(<ViewRFQPage />, { wrapper });
+    const view = render(<ViewRFQPage />, { wrapper });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
-    expect(await screen.findByText('MPN-1 is not in your catalogue yet.')).toBeInTheDocument();
-    expect(screen.getByText(/can still be quoted by hand, but it cannot be stock-checked or sent to suppliers/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add to catalogue and use it' })).toBeInTheDocument();
+    expect(await screen.findByText(/1 line is not in your catalogue yet/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Add to catalogue' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Add MPN-1 to your catalogue?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Not now' }));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
-
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resolve catalogue product' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(createProduct).not.toHaveBeenCalled();
     expect(resolveLineProduct).not.toHaveBeenCalled();
-    expect(screen.getByText('Not in catalogue')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Resolve catalogue product' })).toBeInTheDocument();
+    expect(screen.getByText('Not in catalogue · left for now')).toBeInTheDocument();
+    expect(screen.getByText('10 requested · left out of the catalogue for now, price it by hand')).toBeInTheDocument();
+    expect(screen.queryByText(/not in your catalogue yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not been put to a supplier yet/)).not.toBeInTheDocument();
+    // Quiet, not the screen's main button, and still there for later.
+    const addLater = screen.getByRole('button', { name: 'Add to catalogue' });
+    expect(addLater).toHaveClass('MuiButton-outlined');
+
+    view.unmount();
+    render(<ViewRFQPage />, { wrapper });
+    expect(await screen.findByText('Not in catalogue · left for now')).toBeInTheDocument();
+  });
+
+  it('lets the user search instead when the part is in the catalogue under another number', async () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
+    getWorkbench.mockResolvedValue(workbench([line(1)]));
+    const valve = {
+      id: 501, partNo: 'VALVE-A', productName: 'Control Valve', qtyOnHand: 0, reorderPoint: 0, isActive: true,
+      createdBy: 'qa', createdOn: '2026-08-01T00:00:00Z', images: [], attachments: [],
+    };
+    getProducts.mockImplementation(async ({ search }: { search?: string }) => (search === 'MPN-1'
+      ? { items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 }
+      : { items: [valve], totalItems: 1, pageNumber: 1, pageSize: 20, totalPages: 1 }));
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Add MPN-1 to your catalogue?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Already in the catalogue under another number? Search for it' }));
+
+    const productInput = await screen.findByRole('combobox', { name: 'Product in your catalogue' });
+    fireEvent.change(productInput, { target: { value: 'VALVE' } });
+    fireEvent.click(await screen.findByRole('option', { name: /VALVE-A/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Reason' }), { target: { value: 'Customer code for our VALVE-A.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+    await waitFor(() => expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 501, 'Customer code for our VALVE-A.'));
+    expect(createProduct).not.toHaveBeenCalled();
   });
 
   it('does not offer the add step without Products:create, but still says the part is missing', async () => {
@@ -372,10 +415,11 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
     render(<ViewRFQPage />, { wrapper });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
-    expect(await screen.findByText('MPN-1 is not in your catalogue yet.')).toBeInTheDocument();
-    expect(screen.getByText('Ask someone with Products create rights to add it, then choose it here.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Add to catalogue and use it' })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Add MPN-1 to your catalogue?' });
+    expect(within(dialog).getByText('It is not in your catalogue yet. Ask someone who can add products to add it.')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Add to catalogue' })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeInTheDocument();
     expect(createProduct).not.toHaveBeenCalled();
   });
 
@@ -390,15 +434,16 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     resolveLineProduct.mockRejectedValueOnce(new Error('network'));
     render(<ViewRFQPage />, { wrapper });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue and use it' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to catalogue' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Add MPN-1 to your catalogue?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add to catalogue' }));
 
     await waitFor(() => expect(resolveLineProduct).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText('Ready to save.')).toBeInTheDocument();
-    expect(screen.getByRole('dialog', { name: 'Resolve catalogue product' })).toBeInTheDocument();
+    expect(await screen.findByText('Ready.')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Match to our product' })).toBeInTheDocument();
     expect(createProduct).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save product resolution' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
     await waitFor(() => expect(resolveLineProduct).toHaveBeenLastCalledWith(9001, 1, 778, expect.stringContaining('MPN-1')));
     expect(createProduct).toHaveBeenCalledTimes(1);
   });
@@ -412,10 +457,10 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     });
     render(<ViewRFQPage />, { wrapper });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Resolve catalogue product' }));
-    expect(await screen.findByText('Add a one-line reason to enable Save.')).toBeInTheDocument();
-    fireEvent.change(screen.getByRole('textbox', { name: 'Resolution reason' }), { target: { value: 'Confirmed against the drawing.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save product resolution' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Change product' }));
+    expect(await screen.findByText('Add a one-line reason first.')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Reason' }), { target: { value: 'Confirmed against the drawing.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
     await waitFor(() => expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 501, 'Confirmed against the drawing.'));
   });
 });
@@ -442,7 +487,7 @@ describe('ViewRFQPage — a line without a product says so, and is not offered a
     expect(screen.getByText('Not checked')).toBeInTheDocument();
     expect(screen.queryByText(/Available 0 · Short 10/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create / Open Sourcing Case' })).not.toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Resolve catalogue product' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Add to catalogue' })).toHaveLength(1);
   });
 });
 
