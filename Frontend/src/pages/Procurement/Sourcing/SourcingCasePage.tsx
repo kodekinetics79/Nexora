@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  Link,
   Alert,
   Box,
   Button,
@@ -27,7 +28,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { ArrowBack, Refresh, Send } from "@mui/icons-material";
+import { ArrowBack, PersonAdd, Refresh, Send } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
 import procurementService, {
   type SourcingCaseCandidate,
@@ -107,6 +108,11 @@ function SourcingCasePage() {
     "COMPARISON_READY", "NEGOTIATION", "AWARD_REVIEW", "SUPPLIER_SELECTED",
     "CUSTOMER_QUOTE_READY", "CLOSED", "CANCELLED"].includes(query.data?.status ?? "");
   const canRefreshCandidates = hasPermission("Supplier History", "edit") && !candidatesFrozen;
+  // Before outreach, an empty or all-blocked candidate list is the rep's problem to solve on this screen,
+  // so the panel says why and offers the next move instead of repeating the server's "Review discovery options".
+  const canAddSupplier = hasPermission("Suppliers", "create");
+  const noKnownSupplier = !candidatesFrozen && candidates.length === 0;
+  const noneReady = !candidatesFrozen && candidates.length > 0 && eligibleCandidates.length === 0;
   // Same wording pattern as the "cannot prepare Supplier RFQs" notice below: a disabled control
   // says which of its two gates is shut, so the reader knows whether to ask for a permission or
   // simply that the step has passed.
@@ -258,13 +264,27 @@ function SourcingCasePage() {
       </Paper>
 
       <NextStepPanel
-        tone={sourcingCase.status === "OUTREACH_SENT" ? "success" : "info"}
+        tone={sourcingCase.status === "OUTREACH_SENT" ? "success" : noKnownSupplier || noneReady ? "warning" : "info"}
         title="Next step"
-        sentence={sourcingCase.nextAction}
+        sentence={noKnownSupplier
+          ? `No supplier on your list is linked to ${sourcingCase.requestedPartNumber || "this part"} yet. ${canAddSupplier
+            ? "Add one with this part number or its maker in Tags, then press Refresh candidates."
+            : "Ask someone who can add suppliers to add one with this part number or its maker in Tags."}`
+          : noneReady
+            ? "None of these suppliers can be asked yet. Open each one and have a manager approve it, then press Refresh candidates."
+            : sourcingCase.nextAction}
         testId="sourcing-case-next-step"
         action={outreachAlreadySent
           ? <Button variant="contained" onClick={() => navigate(`/procurement/rfqs/${sourcingCase.rfqId}/sourcing`)}>Open sourcing workbench</Button>
-          : undefined}
+          : noKnownSupplier && canAddSupplier
+            ? (
+              <Tooltip describeChild title="Opens the supplier form with this part number already in Tags, and brings you back here when it is saved.">
+                <Button variant="contained" startIcon={<PersonAdd />} onClick={() => navigate(`/suppliers?new=1&tags=${encodeURIComponent(sourcingCase.requestedPartNumber ?? "")}&returnTo=${encodeURIComponent(`/procurement/sourcing-cases/${sourcingCase.id}`)}`)}>
+                  Add a supplier
+                </Button>
+              </Tooltip>
+            )
+            : undefined}
       />
 
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between", mb: 2 }}>
@@ -298,7 +318,7 @@ function SourcingCasePage() {
         <Paper variant="outlined" sx={{ p: 4, textAlign: "center" }}>
           <Typography sx={{ fontWeight: 700 }}>No known Supplier candidates found</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            No tenant Supplier history matched this demand line. No external search was started.
+            Suppliers show here when their record names this part number or its maker in Tags, or when they quoted or supplied this product before. No internet search is run.
           </Typography>
         </Paper>
       ) : (
@@ -327,7 +347,9 @@ function SourcingCasePage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <Typography variant="body2" sx={{ fontWeight: 800 }}>{candidate.supplierName}</Typography>
+                      <Link component="button" type="button" variant="body2" underline="hover" onClick={() => navigate(`/suppliers/${candidate.supplierId}`)} sx={{ fontWeight: 800, textAlign: "left", display: "block" }}>
+                        {candidate.supplierName}
+                      </Link>
                       <Typography variant="caption" color="text.secondary">
                         {candidate.contactEmail || "No contact email"}
                       </Typography>

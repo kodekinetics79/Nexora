@@ -34,7 +34,7 @@ import {
   HourglassEmpty as WaitingIcon,
   AddCircleOutlined as AddIcon,
 } from '@mui/icons-material';
-import rfqService from '../../../api/services/rfqService';
+import rfqService, { type RfqitemResponseDTO } from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 import LifecycleActions from '../../../components/common/LifecycleActions';
@@ -259,26 +259,35 @@ const ViewRFQPage: React.FC = () => {
   // create the entry by hand, come back, search again. Nobody did (Render logs: searches, zero
   // saves). Adding the entry and binding the line is one governed step; the line is already
   // being quoted, so the entry is wanted. The record can be completed under Products later.
+  // One catalogue entry per customer part, built the same way wherever a line is added: the dialog's
+  // "Add to catalogue" and the line's "Ask suppliers" must not create two different records for one part.
+  const catalogueEntryFor = (item: RfqitemResponseDTO) => {
+    const partNo = (item.manufacturerPartNumber || item.itemMaterialCode || '').trim();
+    const description = (item.productShortDescription || item.itemText || item.materialPotext || '').trim();
+    if (!partNo && !description) return null;
+    const manufacturer = (item.manufacturerName || '').trim();
+    const fullDescription = [manufacturer && manufacturer.toUpperCase() !== 'N/A' ? `Manufacturer: ${manufacturer}.` : '', description]
+      .filter(Boolean).join(' ');
+    // Products.PartNo and ProductName are varchar(100); Description is varchar(500).
+    const form = new FormData();
+    form.append('partNo', (partNo || description).slice(0, 100));
+    form.append('productName', (description || partNo).slice(0, 100));
+    if (fullDescription) form.append('description', fullDescription.slice(0, 500));
+    form.append('isActive', 'true');
+    form.append('isCatalogItem', 'true');
+    form.append('createdBy', userData?.userName || 'System');
+    form.append('buid', String(userData?.businessUnitId || 0));
+    return { partNo, description, form };
+  };
+
   const addToCatalogueMutation = useMutation({
     mutationFn: async () => {
       const item = rfq?.rfqitems.find((x) => x.id === productResolutionItemId);
       if (!item) throw new Error('The RFQ line is no longer on this screen.');
-      const partNo = (item.manufacturerPartNumber || item.itemMaterialCode || '').trim();
-      const description = (item.productShortDescription || item.itemText || item.materialPotext || '').trim();
-      if (!partNo && !description) throw new Error('This line has neither a part number nor a description to add to the catalogue.');
-      const manufacturer = (item.manufacturerName || '').trim();
-      const fullDescription = [manufacturer && manufacturer.toUpperCase() !== 'N/A' ? `Manufacturer: ${manufacturer}.` : '', description]
-        .filter(Boolean).join(' ');
-      // Products.PartNo and ProductName are varchar(100); Description is varchar(500).
-      const form = new FormData();
-      form.append('partNo', (partNo || description).slice(0, 100));
-      form.append('productName', (description || partNo).slice(0, 100));
-      if (fullDescription) form.append('description', fullDescription.slice(0, 500));
-      form.append('isActive', 'true');
-      form.append('isCatalogItem', 'true');
-      form.append('createdBy', userData?.userName || 'System');
-      form.append('buid', String(userData?.businessUnitId || 0));
-      const created = await productService.create(form);
+      const entry = catalogueEntryFor(item);
+      if (!entry) throw new Error('This line has neither a part number nor a description to add to the catalogue.');
+      const { partNo, description } = entry;
+      const created = await productService.create(entry.form);
       const reason = productResolutionReason.trim()
         || `No catalogue product matched customer part ${partNo || description}. Added ${created.partNo} to the catalogue from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} because the line is being quoted.`;
       try {
@@ -323,6 +332,49 @@ const ViewRFQPage: React.FC = () => {
       error?.response?.data?.detail || error?.response?.data?.message || 'The Sourcing Case could not be created.',
       { variant: 'error' },
     ),
+  });
+
+  // "Ask suppliers" on a line that is not in the catalogue. Supplier sourcing is keyed to a catalogue
+  // product (the server refuses a case without one), so the rep is not sent off to build a product
+  // record first: the part is found by its exact part number, or added, the line is linked to it, and the
+  // sourcing case opens with the suppliers who carry that part or maker. Three existing governed calls,
+  // in order; a failure part-way says which step stopped and leaves what already succeeded in place.
+  const askSuppliersMutation = useMutation({
+    mutationFn: async (item: RfqitemResponseDTO) => {
+      const entry = catalogueEntryFor(item);
+      if (!entry) throw new Error('This line has neither a part number nor a description, so there is nothing to ask suppliers for.');
+      const compact = (value?: string | null) => (value ?? '').replace(/[^a-z0-9]/gi, '').toUpperCase();
+      let product: ProductDTO | undefined;
+      if (entry.partNo) {
+        const found = await productService.getAll({
+          businessUnitId: userData?.businessUnitId || 0, pageNumber: 1, pageSize: 20, search: entry.partNo, isActive: true,
+        });
+        product = found.items.find((candidate) => compact(candidate.partNo) === compact(entry.partNo));
+      }
+      const added = !product;
+      if (!product) product = await productService.create(entry.form);
+      const reason = added
+        ? `No catalogue product matched customer part ${entry.partNo || entry.description}. Added ${product.partNo} from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} to ask suppliers for a price.`
+        : `Customer part ${entry.partNo} is catalogue product ${product.partNo} (same part number). Linked from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} to ask suppliers for a price.`;
+      try {
+        await rfqService.resolveLineProduct(Number(id), item.id, product.id, reason);
+      } catch (error) {
+        throw new Error(`${added ? `${product.partNo} was added to the catalogue, but` : 'The'} line could not be linked to it: ${describeError(error, 'unknown error')}. Press "Ask suppliers" again.`, { cause: error });
+      }
+      try {
+        return await procurementService.createOrOpenSourcingCase(Number(id), item.id, 10);
+      } catch (error) {
+        throw new Error(`The line is now linked to ${product.partNo}, but the sourcing case could not be opened: ${describeError(error, 'unknown error')}. Press "Create / Open Sourcing Case" on the line.`, { cause: error });
+      }
+    },
+    onSuccess: (sourcingCase, item) => {
+      if (notNowLineIds.includes(item.id)) rememberNotNow(notNowLineIds.filter((lineId) => lineId !== item.id));
+      navigate(`/procurement/sourcing-cases/${sourcingCase.id}`);
+    },
+    onError: async (error: any) => {
+      await invalidateLineViews();
+      enqueueSnackbar(describeError(error, 'Suppliers could not be asked for this line.'), { variant: 'error' });
+    },
   });
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
@@ -370,6 +422,8 @@ const ViewRFQPage: React.FC = () => {
   const resolutionPartNumber = (productResolutionItem?.manufacturerPartNumber || productResolutionItem?.itemMaterialCode || '').trim();
   const resolutionDescription = (productResolutionItem?.productShortDescription || productResolutionItem?.itemText || productResolutionItem?.materialPotext || '').trim();
   const canAddToCatalogue = commercialAccess.canResolveRfqProduct && hasPermission('Products', 'create');
+  // Asking suppliers on an uncatalogued line adds the product and opens the case, so it needs both rights.
+  const canAskSuppliers = canAddToCatalogue && commercialAccess.canCreateOrOpenSourcingCase;
   // "Nothing matches" is a fact about the catalogue, not a dead end: it is offered as the add step.
   const catalogueMiss = productResolutionItem !== null && !effectiveProduct
     && productSearchQuery.isSuccess && (productSearchQuery.data?.length ?? 0) === 0
@@ -485,7 +539,9 @@ const ViewRFQPage: React.FC = () => {
           : unresolvedCount > 0
             ? {
                 tone: 'warning', title: 'Next step',
-                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} ${unresolvedCount === 1 ? 'is' : 'are'} not in your catalogue yet, so stock and suppliers cannot be checked. Use "Add to catalogue" on the line, or choose "Not now" there to price it by hand.${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
+                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} ${unresolvedCount === 1 ? 'is' : 'are'} not in your catalogue yet, so stock and suppliers cannot be checked. ${canAskSuppliers
+                  ? 'Press "Ask suppliers" on the line to add it and get supplier prices, or "Add to catalogue" to pick a product you already have or leave it out for now.'
+                  : 'Use "Add to catalogue" on the line, or choose "Not now" there to price it by hand.'}${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
                 action: <Button variant="outlined" onClick={() => setLineFilter('unresolved')} sx={{ borderRadius: 2 }}>Show unmatched lines</Button>,
               }
             : shortNotAsked.length > 0
@@ -505,7 +561,7 @@ const ViewRFQPage: React.FC = () => {
                       tone: 'info', title: 'Next step',
                       sentence: `${leftOutCount} line${leftOutCount === 1 ? ' is' : 's are'} left out of the catalogue for now. ${canCreateQuote
                         ? `Prepare the quote draft and price ${leftOutCount === 1 ? 'it' : 'them'} by hand`
-                        : 'Ask someone with quoting rights to prepare the quote draft'}, or use "Add to catalogue" on the line.`,
+                        : 'Ask someone with quoting rights to prepare the quote draft'}, or ${canAskSuppliers ? 'press "Ask suppliers" on the line to get supplier prices' : 'use "Add to catalogue" on the line'}.`,
                     }
                 : quoteDraft
                   ? {
@@ -898,10 +954,22 @@ const ViewRFQPage: React.FC = () => {
                                 <Typography variant="caption" color={leftOut ? 'text.secondary' : 'warning.main'} sx={{ fontWeight: 700 }}>
                                   {leftOut
                                     ? `${sourcingLine.requestedQuantity} requested · left out of the catalogue for now, price it by hand`
-                                    : `${sourcingLine.requestedQuantity} requested · needs a catalogue product before sourcing`}
+                                    : canAskSuppliers
+                                      ? `${sourcingLine.requestedQuantity} requested · not in your catalogue yet`
+                                      : `${sourcingLine.requestedQuantity} requested · needs a catalogue product before sourcing`}
                                 </Typography>
+                                {canAskSuppliers && (
+                                  <Tooltip describeChild title="Adds this part to your catalogue, links the line to it and opens a sourcing case, where you tick every supplier to ask at once.">
+                                    <span>
+                                      <Button size="small" variant={leftOut ? 'outlined' : 'contained'} startIcon={<SourcingIcon />}
+                                        disabled={askSuppliersMutation.isPending} onClick={() => askSuppliersMutation.mutate(item)}>
+                                        {askSuppliersMutation.isPending && askSuppliersMutation.variables?.id === item.id ? 'Opening…' : 'Ask suppliers'}
+                                      </Button>
+                                    </span>
+                                  </Tooltip>
+                                )}
                                 {commercialAccess.canResolveRfqProduct && (
-                                  <Button size="small" variant={leftOut ? 'outlined' : 'contained'} startIcon={<AddIcon />} onClick={() => openProductResolution(item)}>
+                                  <Button size="small" variant={leftOut || canAskSuppliers ? 'outlined' : 'contained'} startIcon={<AddIcon />} onClick={() => openProductResolution(item)}>
                                     Add to catalogue
                                   </Button>
                                 )}

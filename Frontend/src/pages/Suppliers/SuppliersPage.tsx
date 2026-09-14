@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
@@ -123,6 +123,10 @@ const NO_CREATE_PERMISSION = 'Ask your administrator for permission to add suppl
 const SuppliersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // A sourcing case with no known supplier sends the rep here with ?new=1&tags=<part>&returnTo=<case>.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const returnToParam = searchParams.get('returnTo');
+  const returnTo = returnToParam && returnToParam.startsWith('/procurement/') ? returnToParam : null;
   const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -197,8 +201,13 @@ const SuppliersPage: React.FC = () => {
     mutationFn: (fd: FormData) => supplierService.create(fd),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['suppliers'] });
-      enqueueSnackbar('Supplier created!', { variant: 'success' });
       setIsModalOpen(false);
+      if (returnTo) {
+        enqueueSnackbar('Supplier added. A manager approves it on its supplier page, then press Refresh candidates.', { variant: 'success' });
+        navigate(returnTo);
+        return;
+      }
+      enqueueSnackbar('Supplier created!', { variant: 'success' });
     },
     onError: (error: any) => enqueueSnackbar(
       error?.response?.data?.detail || error?.response?.data || 'Failed to create supplier',
@@ -278,6 +287,21 @@ const SuppliersPage: React.FC = () => {
     setContactForm(emptyContact);
     setIsModalOpen(true);
   };
+
+  // Arriving from a sourcing case: open the add form with the part already in Tags, once. The flag is
+  // removed from the address so a reload does not reopen the form; returnTo stays for the save.
+  React.useEffect(() => {
+    if (searchParams.get('new') !== '1' || !canCreateSupplier) return;
+    setSelectedRecord(null);
+    setFormData({ ...emptySupplier, tags: searchParams.get('tags') ?? '' });
+    setShowContactForm(false);
+    setContactForm(emptyContact);
+    setIsModalOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('new');
+    next.delete('tags');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, canCreateSupplier]);
 
   /**
    * True zero, filtered-to-zero and failed-to-load used to render identically as MUI's bare
