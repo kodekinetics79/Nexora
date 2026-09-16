@@ -742,6 +742,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var poByAward = purchaseOrders.SelectMany(x => x.Lines.Select(line => new { line.SourcingAwardId, PurchaseOrderId = x.Id }))
             .ToDictionary(x => x.SourcingAwardId, x => x.PurchaseOrderId);
         var awardQuoteIds = awards.Where(x => x.SupplierQuotedItemId.HasValue).Select(x => x.SupplierQuotedItemId!.Value).ToHashSet();
+        var approvedQuantityByOffer = ApprovedQuantityByOffer(awards);
 
         // Every purchase order on the RFQ is loaded above because the panel below lists them all —
         // a cancelled order must stay visible. Only the ones that are actually committed supply may
@@ -816,7 +817,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var sourceLine = lines.SingleOrDefault(x => x.Id == row.RfqItemId);
             var comparison = ToComparisonLine(row, sourceLine?.ShortfallQuantity ?? 0m, supplier,
                 workbenchRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0),
-                sourceLine?.RequiredOn);
+                sourceLine?.RequiredOn, approvedQuantityByOffer.GetValueOrDefault(row.Id));
             return new SupplierOfferView(row.Id, row.SupplierSolicitationId ?? 0, row.RfqItemId ?? 0, row.SupplierId,
                 supplier?.Name ?? $"Supplier {row.SupplierId}", row.QuoteReference, row.QuoteRevision,
                 row.CurrencyId ?? 0, currencyCodes.GetValueOrDefault(row.CurrencyId ?? 0) ?? "N/A", row.Quantity,
@@ -1309,6 +1310,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var rows = await _db.SupplierQuotedItems.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
             && x.RfqId == rfqItem.Rfqid && x.RfqItemId == rfqItemId && x.IsActive).ToListAsync(ct);
         var remainingRequirement = await GetNetSourcingRequirementAsync(businessUnitId, rfqItem, ct);
+        // D17: what each offer has itself been awarded, so the offer that covered the line is
+        // presented as awarded rather than as "cannot be awarded: already covered".
+        var approvedQuantityByOffer = ApprovedQuantityByOffer(await _db.Set<SourcingAward>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.RfqItemId == rfqItemId
+                && x.Status != "CANCELLED" && x.Status != "REJECTED")
+            .ToListAsync(ct));
         var supplierIds = rows.Select(x => x.SupplierId).Distinct().ToArray();
         var suppliers = await _db.Suppliers.AsNoTracking().Where(x => x.Buid == businessUnitId &&
             supplierIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
@@ -1322,7 +1329,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var lines = rows.Select(row => ToComparisonLine(row, remainingRequirement,
                 suppliers.GetValueOrDefault(row.SupplierId),
                 canonicalRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0),
-                rfqItem.RequiredDesiredDate))
+                rfqItem.RequiredDesiredDate,
+                approvedQuantityByOffer.GetValueOrDefault(row.Id)))
             .ToArray();
         var eligible = lines.Where(x => x.Eligible).ToArray();
         var currencies = eligible.Select(x => x.CurrencyId).Distinct().ToArray();
@@ -2660,8 +2668,19 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             throw new ProcurementValidationException("A Supplier RFQ response deadline must be in the future.");
     }
 
+    /// <summary>
+    /// Approved quantity per supplier quoted item. APPROVED and SPLIT_APPROVED both count — a split
+    /// is still an award — and a cancelled or rejected award covers nothing.
+    /// </summary>
+    private static Dictionary<long, decimal> ApprovedQuantityByOffer(IEnumerable<SourcingAward> awards)
+        => awards
+            .Where(x => x.SupplierQuotedItemId.HasValue && x.Status is ("APPROVED" or "SPLIT_APPROVED"))
+            .GroupBy(x => x.SupplierQuotedItemId!.Value)
+            .ToDictionary(x => x.Key, x => x.Sum(award => award.Quantity ?? 0m));
+
     private static QuoteComparisonLine ToComparisonLine(SupplierQuotedItem row, decimal remainingRequirement,
-        Supplier? supplier, SupplierQuotes.SupplierQuoteRevision? canonicalRevision, DateTime? requiredOn)
+        Supplier? supplier, SupplierQuotes.SupplierQuoteRevision? canonicalRevision, DateTime? requiredOn,
+        decimal approvedAwardQuantity = 0m)
     {
         var blockers = new List<string>();
         // The offer's own description of what is being quoted. Read once here and carried onto the
@@ -2685,9 +2704,18 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         if (row.LeadTimeDays is null or < 0) blockers.Add("lead time missing");
         var quoteCapacity = Math.Min(row.Quantity, row.AvailableQuantity ?? 0m);
         if (row.AvailableQuantity is null || quoteCapacity <= 0) blockers.Add("available quantity insufficient or unknown");
-        if (remainingRequirement <= 0) blockers.Add("sourcing requirement already covered");
+        // D17. The two coverage tests below ask "is there anything left for THIS offer to cover?".
+        // An offer's own approved award is the reason the line is covered, so it cannot also be the
+        // reason the offer "cannot be awarded": the buyer pressed Approve and the row they had just
+        // approved read "Not scored — this offer cannot be awarded as it stands: sourcing
+        // requirement already covered", chip and "Needs attention" banner included. Its own
+        // approved quantity is added back, so the awarded offer stays eligible while every OTHER
+        // offer on the covered line keeps the blocker. The award path passes nothing here on
+        // purpose — it must still refuse to award more than remains.
+        var coverageRequirement = remainingRequirement + approvedAwardQuantity;
+        if (coverageRequirement <= 0) blockers.Add("sourcing requirement already covered");
         if (row.MinimumOrderQuantity is > 0
-            && (remainingRequirement < row.MinimumOrderQuantity || quoteCapacity < row.MinimumOrderQuantity))
+            && (coverageRequirement < row.MinimumOrderQuantity || quoteCapacity < row.MinimumOrderQuantity))
             blockers.Add("minimum order quantity cannot be satisfied");
         if (row.ValidUntil is null || row.ValidUntil <= DateTime.UtcNow) blockers.Add("quote expired or validity missing");
         if (row.LandedUnitCost is null or <= 0) blockers.Add("landed cost unavailable");

@@ -26,6 +26,7 @@ export interface SourcingLine {
     | "IN_STOCK"
     | "PARTIAL"
     | "INCOMING"
+    | "COVERED"
     | "SHORTAGE"
     | "UNKNOWN"
     | "POSSIBLE_MATCH";

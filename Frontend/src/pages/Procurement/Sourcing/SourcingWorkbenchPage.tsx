@@ -522,8 +522,17 @@ function SourcingWorkbenchPage() {
     workbench?.solicitations.filter(
       (s) => (s.status ?? "").replaceAll("_", "").toUpperCase() === "DELIVERYFAILED",
     ) ?? [];
+  // Every status goes through one normaliser; a failed or empty read is said as such.
+  const norm = (status: string | null | undefined) => (status ?? "").replaceAll("_", "").toUpperCase();
+  const isApprovedAward = (status: string | null | undefined) => ["APPROVED", "SPLITAPPROVED"].includes(norm(status));
+  // D17: the offers that HAVE been approved. An approved offer's own award is why its line is
+  // covered, so it is presented as awarded — never counted among the offers that "cannot be
+  // awarded until missing commercial evidence is resolved".
+  const approvedOfferIds = new Set(
+    (workbench?.awards ?? []).filter((award) => isApprovedAward(award.status)).map((award) => award.supplierQuotedItemId),
+  );
   const blockedOffers = Object.values(comparisonsQuery.data ?? {}).flatMap(
-    (comparison) => comparison.lines.filter((line) => !line.eligible),
+    (comparison) => comparison.lines.filter((line) => !line.eligible && !approvedOfferIds.has(line.supplierQuotedItemId)),
   );
   const approvedUnconverted =
     workbench?.awards.filter(
@@ -545,14 +554,12 @@ function SourcingWorkbenchPage() {
   const referenceQueries = [currenciesQuery, warehousesQuery];
   const referenceDataFailed = referenceQueries.some((query) => query.isError);
   // What sourcing is waiting for, in one sentence, from the workbench the page already holds.
-  // Every status goes through one normaliser; a failed or empty read is said as such.
-  const norm = (status: string | null | undefined) => (status ?? "").replaceAll("_", "").toUpperCase();
   const sols = workbench?.solicitations ?? [];
   const awaitingSuppliers = sols.filter((s) => ["PENDINGDISPATCH", "DISPATCHING", "SENT"].includes(norm(s.status)));
   const uncertainDeliveries = failedSolicitations.filter((s) => s.deliveryOutcome === "UNCERTAIN");
   const notDelivered = failedSolicitations.filter((s) => s.deliveryOutcome !== "UNCERTAIN");
   const linesWithOffers = new Set((workbench?.offers ?? []).map((offer) => offer.rfqItemId));
-  const awardedLineIds = new Set((workbench?.awards ?? []).filter((a) => ["APPROVED", "SPLITAPPROVED"].includes(norm(a.status))).map((a) => a.rfqItemId));
+  const awardedLineIds = new Set((workbench?.awards ?? []).filter((a) => isApprovedAward(a.status)).map((a) => a.rfqItemId));
   const linesAwaitingAward = unresolvedLines.filter((line) => linesWithOffers.has(line.id) && !awardedLineIds.has(line.id));
   const repliesNotCaptured = sols.filter((s) => norm(s.status) === "RESPONDED" && !(s.requestedRfqItemIds ?? []).some((id) => linesWithOffers.has(id)));
   const shortNotAsked = unresolvedLines.filter((line) => line.resolution !== "INCOMING" && !awardedLineIds.has(line.id) && !sols.some((s) => (s.requestedRfqItemIds ?? []).includes(line.id)));
@@ -1036,6 +1043,10 @@ function SourcingWorkbenchPage() {
                 const isCheapest =
                   cheapest?.supplierQuotedItemId === offer.id;
                 const award = workbench.awards.find((item) => item.supplierQuotedItemId === offer.id);
+                // D17: an approved offer is presented as what it is — awarded. Its own award covered
+                // the line, so "already covered" is not a reason it cannot be awarded.
+                const approvedAward = award && isApprovedAward(award.status) ? award : undefined;
+                const sourcingLine = workbench.lines.find((item) => item.id === offer.rfqItemId);
                 const quoteLine = workbench.customerQuoteDraft?.lines.find((item) => item.rfqItemId === offer.rfqItemId);
                 return (
                   <TableRow key={offer.id}>
@@ -1115,7 +1126,10 @@ function SourcingWorkbenchPage() {
                       : `${authoritativeOffer.reliability}%`}
                   </TableCell>
                   <TableCell align="right">
-                    {scoreState.status === "SCORED" ? (
+                    {approvedAward && scoreState.status !== "SCORED" ? (
+                      // D17: an awarded offer is never told it "cannot be awarded as it stands".
+                      <Typography sx={{ fontWeight: 800 }}>Awarded</Typography>
+                    ) : scoreState.status === "SCORED" ? (
                       <Stack spacing={0.25} sx={{ alignItems: "flex-end" }}>
                         <Typography sx={{ fontWeight: 800 }}>
                           {scoreState.headline}
@@ -1148,7 +1162,11 @@ function SourcingWorkbenchPage() {
                       behind a hover: a score a buyer cannot add up is a black box, and the last
                       line of this cell is the sum they can check. */}
                   <TableCell>
-                    {scoreState.status !== "SCORED" || !authoritativeOffer ? (
+                    {approvedAward && scoreState.status !== "SCORED" ? (
+                      <Typography variant="caption" color="text.secondary">
+                        {`Approved at ${money(approvedAward.landedUnitCost, approvedAward.currencyCode)} landed. The award is the decision; nothing on this line waits on a score.`}
+                      </Typography>
+                    ) : scoreState.status !== "SCORED" || !authoritativeOffer ? (
                       <Typography
                         variant="caption"
                         color={
@@ -1188,7 +1206,9 @@ function SourcingWorkbenchPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    {!authoritativeOffer ? (
+                    {approvedAward ? (
+                      <Chip size="small" color="success" label="Awarded" />
+                    ) : !authoritativeOffer ? (
                       <Chip size="small" label="Checking eligibility" />
                     ) : authoritativeOffer.blockers.length > 0 ? (
                       authoritativeOffer.blockers.map((reason) => (
@@ -1265,23 +1285,44 @@ function SourcingWorkbenchPage() {
                           label="Lowest landed cost"
                         />
                       )}
-                      <Button
-                        size="small"
-                        variant="contained"
-                        startIcon={<AssignmentTurnedIn />}
-                        disabled={
-                          !authoritativeOffer?.eligible ||
-                          remainingRequirement(offer.rfqItemId) <= 0
-                        }
-                        sx={{ display: canAward ? "inline-flex" : "none" }}
-                        onClick={() => setAwardOffer(offer)}
-                      >
-                        {remainingRequirement(offer.rfqItemId) <= 0
-                          ? "Covered"
-                          : offer.awarded
-                            ? "Award more"
-                            : "Approve"}
-                      </Button>
+                      {approvedAward && (
+                        // D17: the decision that was made, in the buyer's words, on the row it was made on.
+                        <Typography variant="body2" sx={{ fontWeight: 700, textAlign: "right" }}>
+                          {`Awarded · ${approvedAward.quantity} of ${sourcingLine?.requestedQuantity ?? approvedAward.quantity} · ${money(approvedAward.landedUnitCost, approvedAward.currencyCode)} landed`}
+                        </Typography>
+                      )}
+                      {(() => {
+                        // The Approve control. Gone once this offer is awarded and nothing remains;
+                        // otherwise contained when it can be pressed, and outlined WITH its reason
+                        // when it cannot — a blocked offer or a line covered by someone else.
+                        const remaining = remainingRequirement(offer.rfqItemId);
+                        if (approvedAward && remaining <= 0) return null;
+                        const canApprove = !!authoritativeOffer?.eligible && remaining > 0;
+                        const reason = !authoritativeOffer
+                          ? "Checking whether this offer can be awarded."
+                          : remaining <= 0
+                            ? "This line is already covered. Nothing is left to award."
+                            : authoritativeOffer.blockers.length > 0
+                              ? `This offer cannot be awarded as it stands: ${authoritativeOffer.blockers.join("; ")}.`
+                              : "";
+                        const approveButton = (
+                          <Button
+                            size="small"
+                            variant={canApprove ? "contained" : "outlined"}
+                            startIcon={<AssignmentTurnedIn />}
+                            disabled={!canApprove}
+                            sx={{ display: canAward ? "inline-flex" : "none" }}
+                            onClick={() => setAwardOffer(offer)}
+                          >
+                            {remaining <= 0 ? "Covered" : offer.awarded ? "Award more" : "Approve"}
+                          </Button>
+                        );
+                        return canApprove ? approveButton : (
+                          <Tooltip title={reason}>
+                            <span tabIndex={0} aria-label={reason}>{approveButton}</span>
+                          </Tooltip>
+                        );
+                      })()}
                       {award && canAward && hasPermission("Quotations", "edit") && (quoteLine ? (
                         <Button size="small" startIcon={<PriceCheck />} onClick={() => setPricingSelection({
                           awardId: award.id, quoteItemId: quoteLine.quoteItemId,
