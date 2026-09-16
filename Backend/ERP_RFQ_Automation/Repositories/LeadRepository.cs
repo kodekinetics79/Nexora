@@ -1305,9 +1305,7 @@ namespace ERP_RFQ_Automation.Repositories
             var historicalAutoVerificationNeedsHumanAuthority = action == "approve"
                 && lead.CommercialFactsVerified
                 && !lead.RequiresCommercialReview
-                && string.Equals(lead.ReviewApprovedBy,
-                    ERP_RFQ_Automation.Extraction.LeadPersister.AutoVerifyActor,
-                    StringComparison.Ordinal)
+                && ERP_RFQ_Automation.Extraction.LeadPersister.IsSystemVerifier(lead.ReviewApprovedBy)
                 && sourceOccurrenceCount > 0;
             var awaitingReview = (lead.EmailIngests != null
                 ? string.Equals(lead.EmailIngests.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase)

@@ -311,7 +311,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                     lineDecision.CatalogPolicyVersion, lineDecision.WarningSnapshotJson),
                 // The buyer's own number and their long text: the maker's part number above is a
                 // different thing, and a rep needs both to know what is being asked for.
-                canonical?.ItemMaterialCode, canonical?.MaterialPotext, LineExtras(canonical));
+                canonical?.ItemMaterialCode, canonical?.MaterialPotext, LineExtras(canonical),
+                criticalEvidence.Complete);
         }).ToArray();
 
         var hasFrozenCommercialHeader = LeadRevisionCommercialSnapshot.TryParse(
@@ -696,7 +697,10 @@ public sealed record LeadDecisionLineDto(long Id, long RevisionLineId, string? L
     string WarningSnapshotJson, string VerificationStatus,
     string? VerificationDetail, LineParticipationDto? Participation,
     string? ItemMaterialCode = null, string? Specification = null,
-    IReadOnlyDictionary<string, string>? Extras = null);
+    IReadOnlyDictionary<string, string>? Extras = null,
+    // True when retained cell evidence covers the item, its quantity and its unit — the line was
+    // read from the document, whatever a person has or has not yet confirmed about it.
+    bool SourceEvidenceComplete = false);
 public sealed record FitCriterionDto(string Code, string Label, string? Description, string Decision, string? Note);
 public sealed record FitAssessmentDto(int Version, string OverallDecision, string Rationale,
     IReadOnlyList<FitCriterionDto> Criteria, string? AssessedBy, DateTimeOffset? AssessedAtUtc);

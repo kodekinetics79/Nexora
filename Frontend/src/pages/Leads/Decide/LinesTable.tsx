@@ -372,7 +372,14 @@ const LineRow = React.memo(function LineRow({
                     ? 'No source document is on file for this line, so it cannot be quoted.'
                     : (
                       <>
-                        Nexora is not sure it read this line correctly.{' '}
+                        {/* Two different truths. A line whose item, quantity and unit are each an
+                            exact cell of the document was read, not guessed; saying "not sure"
+                            about it told the rep the reader was unreliable when only the person's
+                            confirmation was missing. Only a line the evidence does not cover
+                            earns the doubt. */}
+                        {line.sourceEvidenceComplete
+                          ? 'Read from the document; not yet checked by a person.'
+                          : 'Nexora is not sure it read this line correctly.'}{' '}
                         {/* Named for its line: the page's one "Check the document" is the next-step button. */}
                         <Link component="button" type="button" onClick={() => onOpenDocument(line)} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
                           {`Check line ${label}`}

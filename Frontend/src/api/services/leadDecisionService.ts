@@ -66,6 +66,11 @@ export interface LeadDecisionLineDTO {
   warningSnapshotJson?: string | null;
   verificationStatus: 'VERIFIED' | 'NEEDS_CHECK' | 'MISSING_SOURCE' | 'MACHINE_SUGGESTION' | string;
   verificationDetail?: string | null;
+  /**
+   * True when retained cell evidence covers the item, its quantity and its unit: the line was read
+   * from the document. Says nothing about whether a person has confirmed it yet.
+   */
+  sourceEvidenceComplete?: boolean;
   participation?: {
     decision: LineParticipationDecision;
     reasonCode?: string | null;
