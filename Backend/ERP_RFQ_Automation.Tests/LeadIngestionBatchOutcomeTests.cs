@@ -131,4 +131,108 @@ public sealed class LeadIngestionBatchOutcomeTests
         Assert.Equal("RFQ-7322", item.DuplicateOf.RfqNo);
         Assert.Equal("Sara Bin Ali", item.DuplicateOf.OwnerName);
     }
+
+    [Fact]
+    public void Revision_differences_compact_to_line_field_from_to_in_a_reps_words()
+    {
+        var differences = new[]
+        {
+            new LeadRevisionDifference { Id = 1, ChangeType = LeadRevisionChangeType.Unchanged, Scope = "Field", Path = "$.buyersName", PreviousValueJson = "\"Aramco\"", CurrentValueJson = "\"Aramco\"" },
+            new LeadRevisionDifference { Id = 2, ChangeType = LeadRevisionChangeType.Modified, Scope = "Field", Path = "$.bidClosingDate", PreviousValueJson = "\"2026-10-01T00:00:00Z\"", CurrentValueJson = "\"2026-10-08T00:00:00Z\"" },
+            new LeadRevisionDifference { Id = 3, ChangeType = LeadRevisionChangeType.Modified, Scope = "Field", Path = "$.commercialCaseId", PreviousValueJson = "1", CurrentValueJson = "2" },
+            new LeadRevisionDifference { Id = 4, ChangeType = LeadRevisionChangeType.Modified, Scope = "Line", Path = "$.items[\"2\"]",
+                PreviousValueJson = "{\"line\":\"2\",\"part\":\"VALVE-A\",\"Quantity\":20,\"quantity\":20.0,\"unitOfMeasure\":\"EA\"}",
+                CurrentValueJson = "{\"line\":\"2\",\"part\":\"VALVE-A\",\"Quantity\":35,\"quantity\":35.0,\"unitOfMeasure\":\"EA\"}" },
+            new LeadRevisionDifference { Id = 5, ChangeType = LeadRevisionChangeType.Modified, Scope = "Line", Path = "$.items[\"4\"]",
+                PreviousValueJson = "{\"lineItemNo\":\"4\",\"quantity\":1500}", CurrentValueJson = "{\"lineItemNo\":\"4\",\"quantity\":2000}" },
+            new LeadRevisionDifference { Id = 6, ChangeType = LeadRevisionChangeType.Added, Scope = "Line", Path = "$.items[\"ordinal:5\"]",
+                PreviousValueJson = null, CurrentValueJson = "{\"part\":\"GASKET-9\",\"quantity\":10}" },
+        };
+
+        var changes = LeadIdentityApplicationService.CompactChanges(differences);
+
+        Assert.Equal(
+            [("closing date", (string?)null, "2026-10-01", "2026-10-08"), ("qty", "2", "20", "35"), ("qty", "4", "1500", "2000"), ("line", "5", null, "added")],
+            changes.Select(c => (c.Field, c.Line, c.From, c.To)).ToArray());
+        Assert.DoesNotContain(changes, c => c.Field.Contains("commercialCase", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task A_revision_of_a_lead_that_became_an_rfq_carries_the_changes_and_the_rfq()
+    {
+        const long bu = 7_330;
+        using var db = new TestDb();
+        await using var ctx = db.ContextFor(bu);
+        Seed.BusinessUnit(ctx, bu);
+        Rep(ctx, 7_331, bu, "Oze", "Khan");
+        var batch = Batch(ctx, bu);
+        await ctx.SaveChangesAsync();
+        var lead = Seed.Lead(ctx, 7_332, bu);
+        lead.Rfqno = "AJP-RFQ-2026-0917";
+        lead.AssignTo = 7_331;
+        await ctx.SaveChangesAsync();
+        var occurrence = Occurrence(bu, batch.Id, lead.Id, LeadOccurrenceClassification.Revision, fileName: "AJP-RFQ-2026-0917 rev2.pdf");
+        ctx.Add(occurrence);
+        await ctx.SaveChangesAsync();
+        var revision = new LeadRevision
+        {
+            BusinessUnitId = bu, LeadId = lead.Id, RevisionNumber = 2, EstablishedByOccurrenceId = occurrence.Id,
+            LogicalInquiryFingerprint = new string('d', 64), SnapshotJson = "{}", CreatedAtUtc = DateTimeOffset.UtcNow,
+            CreatedBy = "worker", ProcessingPath = LeadProcessingPath.Deterministic,
+        };
+        revision.Differences.Add(new LeadRevisionDifference
+        {
+            BusinessUnitId = bu, ChangeType = LeadRevisionChangeType.Modified, Scope = "Line", Path = "$.items[\"2\"]",
+            PreviousValueJson = "{\"line\":\"2\",\"quantity\":20}", CurrentValueJson = "{\"line\":\"2\",\"quantity\":35}",
+        });
+        revision.Differences.Add(new LeadRevisionDifference
+        {
+            BusinessUnitId = bu, ChangeType = LeadRevisionChangeType.Unchanged, Scope = "Field", Path = "$.buyersName",
+            PreviousValueJson = "\"Acme\"", CurrentValueJson = "\"Acme\"",
+        });
+        ctx.Add(revision);
+        await ctx.SaveChangesAsync();
+        occurrence.LeadRevisionId = revision.Id;
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = 2;
+        ctx.Rfqs.Add(new Rfq
+        {
+            Id = 7_333, Rfqno = "RFQ-2026-000031", RecDate = DateTime.UtcNow, BusinessUnitId = bu, LeadId = lead.Id,
+            CreatedBy = "seed", CreatedDate = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+
+        var result = await new LeadIdentityApplicationService(ctx).GetBatchAsync(bu, batch.Id);
+
+        var item = Assert.Single(result!.Items);
+        Assert.Equal("Revision", item.Classification);
+        Assert.Equal("AJP-RFQ-2026-0917", item.CustomerReference);
+        var change = Assert.Single(item.Changes);
+        Assert.Equal(("2", "qty", "20", "35"), (change.Line, change.Field, change.From, change.To));
+        Assert.NotNull(item.Rfq);
+        Assert.Equal(7_333, item.Rfq!.RfqId);
+        Assert.Equal("RFQ-2026-000031", item.Rfq.RfqNo);
+        Assert.Equal("Oze Khan", item.Rfq.OwnerName);
+    }
+
+    [Fact]
+    public async Task A_lead_with_no_rfq_carries_no_rfq_link_so_the_page_can_still_offer_decide()
+    {
+        const long bu = 7_340;
+        using var db = new TestDb();
+        await using var ctx = db.ContextFor(bu);
+        Seed.BusinessUnit(ctx, bu);
+        var batch = Batch(ctx, bu);
+        await ctx.SaveChangesAsync();
+        var lead = Seed.Lead(ctx, 7_342, bu);
+        await ctx.SaveChangesAsync();
+        ctx.Add(Occurrence(bu, batch.Id, lead.Id, LeadOccurrenceClassification.New, fileName: "new.pdf"));
+        await ctx.SaveChangesAsync();
+
+        var result = await new LeadIdentityApplicationService(ctx).GetBatchAsync(bu, batch.Id);
+
+        var item = Assert.Single(result!.Items);
+        Assert.Null(item.Rfq);
+        Assert.Empty(item.Changes);
+    }
 }

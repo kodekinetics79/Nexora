@@ -572,6 +572,7 @@ export default function LeadIngestionBatchPage() {
         onDecide={(leadId) => navigate(`/procurement/leads/${leadId}/workbench`)}
         onOpenInquiries={() => navigate('/procurement/leads/all')}
         onOpenLead={(leadId) => navigate(`/procurement/leads/view/${leadId}`)}
+        onOpenRfq={(rfqId) => navigate(`/procurement/rfqs/view/${rfqId}`)}
       />
       <Grid container spacing={1} sx={{ mb: 1.5 }}>
         {metrics.map((metric) => (

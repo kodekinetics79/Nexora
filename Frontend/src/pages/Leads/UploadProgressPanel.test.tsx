@@ -20,7 +20,19 @@ const intakeDuplicate = (duplicateOf: BatchReconciliationItemDTO['duplicateOf'])
   fileName: 'AJP-RFQ-2026-0917 (1).pdf', duplicateOf,
 });
 
-const handlers = () => ({ onDecide: vi.fn(), onOpenInquiries: vi.fn(), onOpenLead: vi.fn() });
+const handlers = () => ({ onDecide: vi.fn(), onOpenInquiries: vi.fn(), onOpenLead: vi.fn(), onOpenRfq: vi.fn() });
+
+/** A revision row exactly as the batch API returns it, with the compact diff and (optionally) the RFQ it became. */
+const revision = (overrides: Partial<BatchReconciliationItemDTO> = {}) => item({
+  occurrenceId: 12, classification: 'Revision', leadId: 88, revisionNumber: 2, nexoraSerial: 'NX-000088',
+  customerReference: 'AJP-RFQ-2026-0917', securityStatus: 'Cleared', extractionStatus: 'Succeeded',
+  customerResolutionStatus: 'AUTO_MATCHED', confidence: 0.98,
+  changes: [
+    { line: '2', field: 'qty', from: '20', to: '35' },
+    { line: '4', field: 'qty', from: '1500', to: '2000' },
+  ],
+  ...overrides,
+});
 
 describe('documentProgress — the step a document is on, in the rep\'s words', () => {
   it('walks safety check → reading → matching → customer → ready', () => {
@@ -84,6 +96,35 @@ describe('UploadProgressPanel', () => {
     fireEvent.click(only);
     expect(h.onOpenLead).toHaveBeenCalledWith(41);
     expect(h.onDecide).not.toHaveBeenCalled();
+  });
+
+  it('says what a revision changed and, when the inquiry is already an RFQ, opens the RFQ instead of offering Decide', () => {
+    const h = handlers();
+    render(<UploadProgressPanel batch={batch([revision({ rfq: { rfqId: 31, rfqNo: 'RFQ-2026-000031', ownerName: 'Oze Khan' } })])} {...h} />);
+    expect(screen.getByText('Already an RFQ')).toBeInTheDocument();
+    expect(screen.getAllByText('AJP-RFQ-2026-0917 was revised: line 2 qty 20→35, line 4 qty 1,500→2,000. It is already RFQ RFQ-2026-000031, owned by Oze Khan.').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/One inquiry is ready/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Decide' })).not.toBeInTheDocument();
+    const [only] = screen.getAllByRole('button');
+    expect(only).toHaveTextContent('Open the RFQ');
+    expect(only).toHaveClass('MuiButton-contained');
+    fireEvent.click(only);
+    expect(h.onOpenRfq).toHaveBeenCalledWith(31);
+    expect(h.onDecide).not.toHaveBeenCalled();
+  });
+
+  it('says what a revision changed and offers Decide when the inquiry is not yet an RFQ', () => {
+    const h = handlers();
+    render(<UploadProgressPanel batch={batch([revision({ rfq: null })])} {...h} />);
+    expect(screen.getByText('Done')).toBeInTheDocument();
+    expect(screen.getByText(/AJP-RFQ-2026-0917 was revised: line 2 qty 20→35, line 4 qty 1,500→2,000\. Decide whether to quote the revised inquiry\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Decide' }));
+    expect(h.onDecide).toHaveBeenCalledWith(88);
+  });
+
+  it('states plainly when a revision changed nothing commercial', () => {
+    render(<UploadProgressPanel batch={batch([revision({ changes: [], rfq: null })])} {...handlers()} />);
+    expect(screen.getAllByText(/AJP-RFQ-2026-0917 was revised, but nothing commercial changed/).length).toBeGreaterThan(0);
   });
 
   it('falls back to the inquiries list when a repeat has no known original', () => {

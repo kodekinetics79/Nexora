@@ -50,6 +50,37 @@ export const duplicateSentence = (item: BatchReconciliationItemDTO): string => {
   return `This is the same file as ${label}${customer}${desk}. Nothing to do.`;
 };
 
+export const isRevision = (item: BatchReconciliationItemDTO) => norm(item.classification) === 'revision';
+
+/** "1500" → "1,500"; anything that is not a number is shown as it came. */
+const amount = (value: string | null | undefined): string => {
+  if (value == null || value.trim() === '') return '—';
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString('en-US') : value;
+};
+
+/**
+ * What a revision changed, from the compact diff the batch carries, and — when the inquiry has
+ * already become an RFQ — where it lives now. "One inquiry is ready. Decide whether to quote it."
+ * told a rep nothing about a document they had already decided on.
+ */
+export const revisionSentence = (item: BatchReconciliationItemDTO): string => {
+  const label = item.customerReference || item.nexoraSerial || 'The inquiry';
+  const changes = item.changes ?? [];
+  const shown = changes.slice(0, 4).map((c) => {
+    const where = c.line ? `line ${c.line} ` : '';
+    if (c.field === 'line') return `${where}${c.to === 'added' ? 'added' : 'removed'}`;
+    return `${where}${c.field} ${amount(c.from)}→${amount(c.to)}`;
+  });
+  const more = changes.length > shown.length ? `, and ${changes.length - shown.length} more` : '';
+  const what = shown.length > 0
+    ? `${label} was revised: ${shown.join(', ')}${more}.`
+    : `${label} was revised, but nothing commercial changed: same lines, quantities and dates.`;
+  if (!item.rfq) return what;
+  const owner = item.rfq.ownerName ? `, owned by ${item.rfq.ownerName}` : '';
+  return `${what} It is already RFQ ${item.rfq.rfqNo}${owner}.`;
+};
+
 /** The one step a document is on right now, and how far it has come. */
 export const documentProgress = (item: BatchReconciliationItemDTO): DocumentProgress => {
   const security = norm(item.securityStatus);
@@ -77,7 +108,10 @@ export const documentProgress = (item: BatchReconciliationItemDTO): DocumentProg
   if (extraction === 'extracting') return finish(2, 'active', 'Reading the document: headers, dates, lines and part numbers.');
   if (extraction === 'persisting') return finish(2, 'active', 'Saving what it read, line by line, with its evidence.');
   if (classification === 'pending') return finish(3, 'active', 'Comparing with inquiries you already have.');
-  const verdict = classification === 'revision' ? 'A new revision of an inquiry you already have.'
+  // A revision of a lead that already became an RFQ is finished here: there is nothing to decide,
+  // the customer is whoever the RFQ is for, and the sentence says what changed and where it lives.
+  if (classification === 'revision' && item.rfq) return finish(5, 'done', revisionSentence(item));
+  const verdict = classification === 'revision' ? revisionSentence(item)
       : classification === 'possiblematchreviewrequired' ? 'Might be a repeat of an earlier inquiry; a person decides.'
         : 'A new inquiry.';
   if (customer.startsWith('automatched') || customer === 'humanconfirmed' || customer === 'confirmed') {
@@ -121,9 +155,11 @@ export interface UploadProgressPanelProps {
   onOpenInquiries: () => void;
   /** Opens an existing inquiry's record — the original a duplicate upload repeats. */
   onOpenLead: (leadId: number) => void;
+  /** Opens the RFQ a revised inquiry has already become. */
+  onOpenRfq: (rfqId: number) => void;
 }
 
-const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDecide, onOpenInquiries, onOpenLead }) => {
+const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDecide, onOpenInquiries, onOpenLead, onOpenRfq }) => {
   const progress = batch.items.map((item) => ({ item, progress: documentProgress(item) }));
   const notYetRecorded = Math.max(batch.filesReceived - batch.items.length, 0);
   const total = Math.max(batch.filesReceived, batch.items.length);
@@ -132,17 +168,28 @@ const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDeci
   const running = total - finished - stuck;
   const percent = total === 0 ? 0
     : Math.round((progress.reduce((sum, { progress: p }) => sum + (p.state === 'done' ? STAGES.length : p.step), 0) / (total * STAGES.length)) * 100);
-  const readyLeads = progress
+  // A lead that already became an RFQ is never offered "Decide" again: that decision was made.
+  const readyItems = progress
     .filter(({ item, progress: p }) => p.state === 'done' && typeof item.leadId === 'number' && item.leadId > 0
-      && !['exactduplicate'].includes(norm(item.classification)))
-    .map(({ item }) => item.leadId as number);
+      && !isExactDuplicate(item) && !item.rfq)
+    .map(({ item }) => item);
+  const readyLeads = readyItems.map((item) => item.leadId as number);
+  const converted = progress.filter(({ item }) => Boolean(item.rfq)).map(({ item }) => item);
   const failed = progress.filter(({ progress: p }) => p.state === 'failed').length;
   const complete = running === 0 && notYetRecorded === 0;
   const duplicates = progress.filter(({ item }) => isExactDuplicate(item)).map(({ item }) => item);
   const onlyDuplicates = complete && duplicates.length > 0 && duplicates.length === progress.length;
   const theDuplicate = onlyDuplicates && duplicates.length === 1 ? duplicates[0] : null;
+  const theRevision = readyItems.length === 1 && isRevision(readyItems[0]) ? readyItems[0] : null;
 
-  const nextStep = complete && onlyDuplicates
+  const nextStep = complete && readyLeads.length === 0 && converted.length > 0 && converted.length === progress.length - duplicates.length - failed
+    // Every readable document belonged to an inquiry that is already an RFQ. Say what changed and
+    // open that RFQ; the decision it would otherwise offer was made when the RFQ was created.
+    ? { tone: 'info' as const, title: 'Already an RFQ',
+        sentence: converted.length === 1 ? revisionSentence(converted[0])
+          : `${converted.length} documents revise inquiries that are already RFQs. Start with ${converted[0].rfq!.rfqNo}.`,
+        action: <Button variant="contained" onClick={() => onOpenRfq(converted[0].rfq!.rfqId)} sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>Open the RFQ</Button> }
+    : complete && onlyDuplicates
     // Every file was a repeat. One contained button, to the inquiry the file repeats; when the
     // original is unknown (never reconciled) the list of inquiries is the honest fallback.
     ? theDuplicate?.duplicateOf
@@ -153,7 +200,10 @@ const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDeci
           action: <Button variant="outlined" onClick={onOpenInquiries} sx={{ whiteSpace: 'nowrap' }}>Open inquiries</Button> }
     : complete
     ? readyLeads.length === 1
-      ? { tone: 'success' as const, title: 'Done', sentence: `Your document is read${failed ? `, ${failed} could not be` : ''}. One inquiry is ready. Decide whether to quote it.`,
+      ? { tone: 'success' as const, title: 'Done',
+          sentence: theRevision
+            ? `${revisionSentence(theRevision)} Decide whether to quote the revised inquiry.`
+            : `Your document is read${failed ? `, ${failed} could not be` : ''}. One inquiry is ready. Decide whether to quote it.`,
           action: <Button variant="contained" onClick={() => onDecide(readyLeads[0])} sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>Decide</Button> }
       : readyLeads.length > 1
         ? { tone: 'success' as const, title: 'Done', sentence: `${readyLeads.length} inquiries are ready to decide${failed ? `; ${failed} could not be read` : ''}. Start with the first, or open the list.`,
