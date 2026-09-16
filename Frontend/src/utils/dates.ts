@@ -30,3 +30,16 @@ export function formatDateSafe(dateStr: string | null | undefined, fallback = 'â
   if (!d) return fallback;
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
+
+/**
+ * Formats a moment as "15 Sep 2026, 23:19": the date exactly as every list shows it, then the
+ * clock in 24-hour form. One shape for every timestamp a person reads, so a time on one screen
+ * never has to be translated into the date format of the next.
+ */
+export function formatDateTimeSafe(dateStr: string | null | undefined, fallback = 'â€”'): string {
+  const d = parseDateSafe(dateStr);
+  if (!d) return fallback;
+  const date = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `${date}, ${time}`;
+}
