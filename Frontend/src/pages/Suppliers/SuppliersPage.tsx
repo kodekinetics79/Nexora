@@ -32,6 +32,7 @@ import useColumnPreferences from '../../hooks/useColumnPreferences';
 import UploadExportToolbar from '../../components/common/UploadExportToolbar';
 import { useSnackbar } from 'notistack';
 import { statusLabel } from '../../utils/statusLabels';
+import { withRefreshOnReturn } from '../Procurement/Sourcing/sourcingCaseReturn';
 
 // ─── Empty forms ───────────────────────────────────────────────────────────
 const emptySupplier = {
@@ -203,8 +204,10 @@ const SuppliersPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['suppliers'] });
       setIsModalOpen(false);
       if (returnTo) {
-        enqueueSnackbar('Supplier added. A manager approves it on its supplier page, then press Refresh candidates.', { variant: 'success' });
-        navigate(returnTo);
+        // The case runs the candidate search itself on this return (see sourcingCaseReturn.ts),
+        // so the new supplier is listed there without the rep pressing Refresh.
+        enqueueSnackbar('Supplier added. The case lists it now; a manager approves it before it can be asked.', { variant: 'success' });
+        navigate(withRefreshOnReturn(returnTo));
         return;
       }
       enqueueSnackbar('Supplier created!', { variant: 'success' });

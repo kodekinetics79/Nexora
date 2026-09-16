@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Link,
   Alert,
@@ -36,6 +36,7 @@ import procurementService, {
 import NextStepPanel from "../../../components/common/NextStepPanel";
 import { useAuth } from "../../../context/AuthContext";
 import { statusLabel } from "../../../utils/statusLabels";
+import { REFRESH_ON_RETURN_PARAM } from "./sourcingCaseReturn";
 
 type CandidateLimit = 10 | 20 | 50;
 
@@ -90,6 +91,7 @@ function SourcingCasePage() {
   const { caseId } = useParams<{ caseId: string }>();
   const sourcingCaseId = Number(caseId);
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const { hasPermission } = useAuth();
   const [candidateLimit, setCandidateLimit] = useState<CandidateLimit>(10);
@@ -171,6 +173,23 @@ function SourcingCasePage() {
     },
     onError: (error) => toast.error(errorMessage(error, "Known supplier candidates could not be refreshed.")),
   });
+
+  // Back from "Add a supplier": the suppliers page appends ?refresh=1 to the return address and the
+  // case runs the search itself, so the new supplier is listed without the rep pressing Refresh.
+  // The flag is stripped once acted on, so a reload does not search again.
+  const returnRefreshHandled = useRef(false);
+  const refreshOnReturn = searchParams.get(REFRESH_ON_RETURN_PARAM) === "1";
+  const refreshMutate = refreshCandidates.mutate;
+  useEffect(() => {
+    if (!refreshOnReturn || !query.data || returnRefreshHandled.current) return;
+    returnRefreshHandled.current = true;
+    if (canRefreshCandidates) refreshMutate(query.data.searchLimit ?? candidateLimit);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete(REFRESH_ON_RETURN_PARAM);
+      return next;
+    }, { replace: true });
+  }, [refreshOnReturn, query.data, canRefreshCandidates, refreshMutate, candidateLimit, setSearchParams]);
 
   const prepareSupplierRfqs = useMutation({
     mutationFn: async () => {
