@@ -70,6 +70,30 @@ const SupplierDetailPage: React.FC = () => {
     enabled: !!id,
   });
 
+  // Every hook runs on every render, BEFORE the loading/error/not-found returns below. The
+  // mutation used to be declared after them, so the first render (loading) registered one
+  // hook fewer than the second (loaded) and React threw #310 — the whole supplier page
+  // "stopped working" the moment its data arrived, on every open.
+  const governanceMutation = useMutation({
+    mutationFn: () => {
+      if (!supplier) throw new Error('The supplier has not loaded yet.');
+      return supplierService.govern(supplier.id, {
+        ...governance,
+        expectedConcurrencyToken: supplier.concurrencyToken || '',
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['supplier-detail', Number(id)] });
+      void queryClient.invalidateQueries({ queryKey: ['suppliers'] });
+      setGovernanceOpen(false);
+      enqueueSnackbar('Supplier governance decision recorded.', { variant: 'success' });
+    },
+    onError: (mutationError: any) => enqueueSnackbar(
+      mutationError?.response?.data?.detail || mutationError?.response?.data || 'Supplier governance decision was not recorded.',
+      { variant: 'error' },
+    ),
+  });
+
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
   if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button onClick={() => refetch()}>Retry</Button>}>
     {(error as any)?.response?.data?.detail || (error as Error)?.message || 'The Supplier could not be loaded.'}
@@ -89,22 +113,6 @@ const SupplierDetailPage: React.FC = () => {
     });
     setGovernanceOpen(true);
   };
-  const governanceMutation = useMutation({
-    mutationFn: () => supplierService.govern(supplier.id, {
-      ...governance,
-      expectedConcurrencyToken: supplier.concurrencyToken || '',
-    }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['supplier-detail', Number(id)] });
-      void queryClient.invalidateQueries({ queryKey: ['suppliers'] });
-      setGovernanceOpen(false);
-      enqueueSnackbar('Supplier governance decision recorded.', { variant: 'success' });
-    },
-    onError: (mutationError: any) => enqueueSnackbar(
-      mutationError?.response?.data?.detail || mutationError?.response?.data || 'Supplier governance decision was not recorded.',
-      { variant: 'error' },
-    ),
-  });
 
   return (
     <Box sx={{ p: 3, width: '100%' }}>
