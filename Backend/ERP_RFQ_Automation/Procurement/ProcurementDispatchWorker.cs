@@ -153,6 +153,11 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                         AcceptableMakers = line.AcceptableMakers
                     }).ToList(),
                     DueDate = payload.DueOn?.ToString("yyyy-MM-dd") ?? "Please respond promptly",
+                    // The rep's own words from the Send dialog; a payload queued without any (or
+                    // before the field existed) keeps the standard sentence.
+                    Message = string.IsNullOrWhiteSpace(payload.Message)
+                        ? RfqToSupplierNotification.DefaultMessage
+                        : payload.Message.Trim(),
                     CtaPath = $"/procurement/rfqs/{payload.RfqId}/sourcing"
                 }, providerCts.Token);
             }

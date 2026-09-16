@@ -151,7 +151,7 @@ Review it here: {{ctaUrl}}
 {{itemRowsHtml}}
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Respond by</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{dueDate}}</td></tr>
 </table>
-<p style="margin:0 0 8px 0;">{{message}}</p>
+<p style="margin:0 0 8px 0;">{{messageHtml}}</p>
 """ + CtaButton),
                     Text = """
 Request for Quotation {{rfqNumber}}

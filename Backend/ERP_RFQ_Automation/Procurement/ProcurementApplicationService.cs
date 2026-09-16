@@ -418,6 +418,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     {
         ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
         ValidateSolicitationDueOn(command.DueOn);
+        var buyerMessage = NormaliseBuyerMessage(command.Message);
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
@@ -432,7 +433,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 command.SourcingCaseId,
                 command.SupplierId,
                 command.DueOn,
-                command.ExpectedVersion
+                command.ExpectedVersion,
+                Message = buyerMessage
             });
             var replay = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == solicitationKey, ct);
@@ -491,7 +493,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 var originalPayload = preparationEvent is null
                     ? null
                     : JsonSerializer.Deserialize<SolicitationDispatchPayload>(preparationEvent.PayloadJson);
-                if (originalPayload is null || originalPayload.DueOn != command.DueOn)
+                if (originalPayload is null || originalPayload.DueOn != command.DueOn
+                    || !string.Equals(originalPayload.Message, buyerMessage, StringComparison.Ordinal))
                     throw new ProcurementConflictException(
                         "A prepared Supplier RFQ already exists with different delivery terms. Review or cancel it before preparing another.");
                 // The dispatch address was corrected after this Supplier RFQ was prepared: the
@@ -548,6 +551,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 Status = SolicitationStatus.PendingDispatch,
                 Channel = "Email",
                 DueOn = command.DueOn,
+                BuyerMessage = buyerMessage,
                 Notes = command.DueOn is null ? $"Sourcing Case {sourcingCase.Id}"
                     : $"Sourcing Case {sourcingCase.Id}; Due {command.DueOn.Value:O}",
                 CreatedOn = now,
@@ -562,7 +566,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             };
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
-                solicitation.SupplierRfqNumber, SummariseLinesForSupplier(preparedLines), command.DueOn, preparedLines));
+                solicitation.SupplierRfqNumber, SummariseLinesForSupplier(preparedLines), command.DueOn, preparedLines,
+                buyerMessage));
             candidate.Selected = true;
             candidate.UpdatedOn = now;
             sourcingCase.Status = SourcingCaseStatuses.OutreachReady;
@@ -2607,7 +2612,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var candidates = await ToCandidateViewsAsync(sourcingCase.BusinessUnitId, sourcingCase.Candidates, ct);
         return new SourcingCaseView(sourcingCase.Id, sourcingCase.CommercialDemandLineId,
             sourcingCase.RfqId, sourcingCase.RfqItemId, sourcingCase.NexoraSerial, sourcingCase.ProductId,
-            sourcingCase.RequestedPartNumber, sourcingCase.Description, sourcingCase.RequestedQuantity,
+            sourcingCase.RequestedPartNumber, Clean(sourcingCase.Manufacturer), sourcingCase.Description,
+            Clean(sourcingCase.UnitOfMeasure), sourcingCase.RequestedQuantity,
             sourcingCase.StockQuantity, sourcingCase.UnfulfilledQuantity, sourcingCase.RequiredOn,
             sourcingCase.SearchLimit, sourcingCase.Status, sourcingCase.NextAction, sourcingCase.Version, candidates);
     }
@@ -2739,6 +2745,21 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     /// persisted rather than discarded. Reject anything that could not be honoured: a non-UTC
     /// instant (the column and the dispatch payload are both UTC) or a deadline already past.
     /// </summary>
+    /// <summary>
+    /// The rep's message to the suppliers: trimmed, null when blank (the email then carries its
+    /// standard sentence), and refused past 2,000 characters in a sentence the rep can act on.
+    /// </summary>
+    internal const int BuyerMessageMaxLength = 2000;
+
+    private static string? NormaliseBuyerMessage(string? message)
+    {
+        var trimmed = Clean(message);
+        if (trimmed is not null && trimmed.Length > BuyerMessageMaxLength)
+            throw new ProcurementValidationException(
+                $"Your message to the suppliers can be at most {BuyerMessageMaxLength:N0} characters; it is {trimmed.Length:N0}.");
+        return trimmed;
+    }
+
     private static void ValidateSolicitationDueOn(DateTime? dueOn)
     {
         if (dueOn is null) return;
@@ -3548,7 +3569,8 @@ internal sealed record SolicitationDispatchPayload(
     string RfqNumber,
     string ItemSummary,
     DateTime? DueOn,
-    IReadOnlyList<SolicitationDispatchLine>? Lines = null);
+    IReadOnlyList<SolicitationDispatchLine>? Lines = null,
+    string? Message = null);
 
 internal sealed record CandidateEvidence(
     long SupplierId,

@@ -101,7 +101,8 @@ public sealed record PrepareSupplierRfqCommand(
     long ExpectedVersion,
     string IdempotencyKey,
     string Actor,
-    string CorrelationId);
+    string CorrelationId,
+    string? Message = null);
 
 public sealed record QueuePreparedSupplierRfqCommand(
     long BusinessUnitId,
@@ -129,7 +130,9 @@ public sealed record SourcingCaseView(
     string NexoraSerial,
     long? ProductId,
     string? RequestedPartNumber,
+    string? Manufacturer,
     string Description,
+    string? UnitOfMeasure,
     decimal RequestedQuantity,
     decimal StockQuantity,
     decimal UnfulfilledQuantity,

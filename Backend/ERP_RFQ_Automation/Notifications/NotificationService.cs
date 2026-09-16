@@ -69,6 +69,9 @@ namespace ERP_RFQ_Automation.Notifications
                 ["itemRowsText"] = RfqToSupplierLineFormatter.TextRows(request.Lines, request.ItemSummary),
                 ["dueDate"] = request.DueDate,
                 ["message"] = request.Message,
+                // The rep types this; encode it before it enters the HTML part and keep their
+                // paragraph breaks.
+                ["messageHtml"] = HtmlParagraph(request.Message),
                 ["ctaUrl"] = ResolveCta(request.CtaPath),
                 ["ctaLabel"] = "Submit quotation"
             };
@@ -271,6 +274,15 @@ namespace ERP_RFQ_Automation.Notifications
         /// relative path is combined with <c>Notifications:AppBaseUrl</c>. When no
         /// path is supplied the app base URL is used.
         /// </summary>
+        /// <summary>
+        /// Rep-typed plain text made safe for the HTML part: encoded, with each line break kept as
+        /// a <c>&lt;br&gt;</c> so a two-paragraph message still reads as two paragraphs.
+        /// </summary>
+        private static string HtmlParagraph(string? text)
+            => System.Net.WebUtility.HtmlEncode(text ?? string.Empty)
+                .Replace("\r\n", "\n")
+                .Replace("\n", "<br>");
+
         private string ResolveCta(string? ctaPath)
         {
             var baseUrl = string.IsNullOrWhiteSpace(_options.AppBaseUrl)

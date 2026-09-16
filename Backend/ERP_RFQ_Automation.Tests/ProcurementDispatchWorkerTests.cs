@@ -508,6 +508,42 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task The_reps_message_in_the_queued_payload_is_what_the_supplier_email_says()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending(payloadJson: JsonSerializer.Serialize(new
+        {
+            SolicitationId = 72_030,
+            BusinessUnitId = 72_001,
+            RfqId = DispatchFixture.Rfq,
+            ToEmail = "supplier@example.test",
+            SupplierName = "Supplier One",
+            RfqNumber = "SRFQ-0001-00000001",
+            ItemSummary = "Line 1: Ball valve — 12 EA",
+            DueOn = (DateTime?)null,
+            Lines = Array.Empty<object>(),
+            Message = "We need delivery to Jubail by 1 October."
+        }));
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var request = fixture.Notification.LastRequest;
+        Assert.NotNull(request);
+        Assert.Equal("We need delivery to Jubail by 1 October.", request!.Message);
+    }
+
+    [Fact]
+    public async Task A_payload_queued_without_a_message_sends_the_standard_sentence()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        Assert.Equal(RfqToSupplierNotification.DefaultMessage, fixture.Notification.LastRequest!.Message);
+    }
+
+    [Fact]
     public async Task Readiness_is_unhealthy_after_repeated_cycle_failures()
     {
         var heartbeat = new ProcurementDispatchHeartbeat();

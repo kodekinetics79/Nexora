@@ -200,6 +200,35 @@ public sealed class SupplierRfqEmailContentTests
         Assert.DoesNotContain("{{", message.TextBody);
     }
 
+    [Fact]
+    public async Task The_reps_own_message_reaches_both_parts_of_the_email_and_is_encoded_for_html()
+    {
+        var sender = new CapturingSender();
+        var service = new NotificationService(sender, new EmailTemplateRenderer(NullLogger<EmailTemplateRenderer>.Instance),
+            Options.Create(new NotificationsOptions()), NullLogger<NotificationService>.Instance);
+
+        await service.SendRfqToSupplierWithReceiptAsync(new RfqToSupplierNotification
+        {
+            ToEmail = "quotes@valves.example",
+            SupplierName = "Valves Co",
+            RfqNumber = "SRFQ-0007-00000013",
+            RfqTitle = "Request for quotation for 1 line",
+            DueDate = "2026-09-22",
+            Lines = [new RfqToSupplierLine { LineNumber = "1", Description = "Ball valve", Quantity = "12", UnitOfMeasure = "EA" }],
+            Message = "Quote DDP Jubail <urgent>\nInclude HS codes."
+        });
+
+        var message = Assert.Single(sender.Sent);
+        // The text part carries the rep's words as typed.
+        Assert.Contains("Quote DDP Jubail <urgent>\nInclude HS codes.", message.TextBody);
+        // The HTML part encodes them and keeps the line break; the standard sentence is gone.
+        Assert.Contains("Quote DDP Jubail &lt;urgent&gt;<br>Include HS codes.", message.HtmlBody);
+        Assert.DoesNotContain("<urgent>", message.HtmlBody);
+        Assert.DoesNotContain(RfqToSupplierNotification.DefaultMessage, message.HtmlBody);
+        Assert.DoesNotContain(RfqToSupplierNotification.DefaultMessage, message.TextBody);
+        Assert.DoesNotContain("{{", message.HtmlBody);
+    }
+
     private static async Task MakeSourcingReadyAsync(ProcurementScenario fixture, Action<Models.Rfqitem> shapeLine)
     {
         await using var context = fixture.Context();

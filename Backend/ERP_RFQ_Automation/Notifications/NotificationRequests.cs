@@ -61,7 +61,15 @@ namespace ERP_RFQ_Automation.Notifications
         public List<RfqToSupplierLine> Lines { get; set; } = new();
 
         public string DueDate { get; set; } = string.Empty;
-        public string Message { get; set; } = "Please submit your best pricing and lead times.";
+
+        /// <summary>The sentence every supplier RFQ carries unless the rep wrote their own.</summary>
+        public const string DefaultMessage = "Please submit your best pricing and lead times.";
+
+        /// <summary>
+        /// The rep's words to the supplier, or <see cref="DefaultMessage"/>. Plain text: the
+        /// HTML part encodes it and turns line breaks into <c>&lt;br&gt;</c>.
+        /// </summary>
+        public string Message { get; set; } = DefaultMessage;
     }
 
     /// <summary>One line of a supplier RFQ, already formatted for display.</summary>
