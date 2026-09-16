@@ -83,6 +83,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 l.Aiconfidence,
                 l.CustomerId,
                 l.CommercialCaseId,
+                l.CurrentRevisionId,
                 SenderEmail = l.EmailIngests != null ? l.EmailIngests.FromEmail : l.Clientemail,
                 Items = l.LeadItems
                     .OrderBy(li => li.Id)
@@ -105,20 +106,33 @@ public sealed class LeadDecisionService : ILeadDecisionService
         var now = DateTime.UtcNow;
         var items = lead.Items;
 
+        // ---- 0. what a person has already settled on the Decide screen ------
+        // A line a rep bound to a catalogue product, or gave a currency, on the current
+        // participation decision is decision-grade: the brief must read it, or it tells the rep
+        // "1 of 6 matched" about a lead where they resolved line 5 themselves.
+        var settled = await CurrentLineDecisionsAsync(lead.Id, lead.CurrentRevisionId, businessUnitId, ct);
+
         // ---- 1. catalog coverage -------------------------------------------
         var matches = await MatchCatalogAsync(items, businessUnitId, ct);
         var availableByProduct = await AvailableToPromiseByProductAsync(
-            matches.Values.Select(m => m.Product.Id).Distinct().ToArray(), businessUnitId, ct);
+            matches.Values.Select(m => m.Product.Id)
+                .Concat(settled.Values.Where(s => s.ProductId.HasValue).Select(s => s.ProductId!.Value))
+                .Distinct().ToArray(), businessUnitId, ct);
 
         // ---- 2 + 3. estimated value & margin potential ---------------------
         var coverageItems = new List<CoverageItem>(items.Count);
         var estimatedValue = 0m;
         var pricedLines = 0;
         var pricedLinesWithKnownCurrency = 0;
+        var lineCurrencies = new List<string?>(items.Count);
 
         foreach (var li in items)
         {
             matches.TryGetValue(li.Id, out var match);
+            settled.TryGetValue(li.Id, out var settledLine);
+            var resolvedProductId = match?.Product.Id ?? settledLine?.ProductId;
+            var lineCurrency = NormaliseCurrency(settledLine?.Currency) ?? NormaliseCurrency(li.Currency);
+            lineCurrencies.Add(lineCurrency);
 
             decimal? price = null;
             string? priceSource = null;
@@ -138,7 +152,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
             if (price.HasValue && priceSource == "lead")
             {
                 pricedLines++;
-                if (!string.IsNullOrWhiteSpace(li.Currency)) pricedLinesWithKnownCurrency++;
+                if (lineCurrency is not null) pricedLinesWithKnownCurrency++;
                 // A line with no stated quantity contributes nothing to the estimate. It is not
                 // worth zero — it is unknown, and the brief says so through pricedLines rather
                 // than by pretending the line has no value.
@@ -156,9 +170,9 @@ public sealed class LeadDecisionService : ILeadDecisionService
             // that the availability engine cannot see at all. A rep reading the brief was shown a
             // number no other screen agreed with. The figure is now available-to-promise summed
             // over the tenant's real inventory rows, via InventoryQuantityMath.
-            decimal? catalogQtyOnHand = match is null
+            decimal? catalogQtyOnHand = resolvedProductId is null
                 ? null
-                : availableByProduct.GetValueOrDefault(match.Product.Id);
+                : availableByProduct.GetValueOrDefault(resolvedProductId.Value);
             var hasCatalogOnHand = catalogQtyOnHand is > 0m;
 
             coverageItems.Add(new CoverageItem
@@ -166,9 +180,10 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 LeadItemId = li.Id,
                 Description = li.ProductShortName ?? li.ProductShortDescription ?? li.ItemMaterialCode,
                 Quantity = li.Quantity,
-                Matched = match is not null,
-                MatchType = match?.MatchType,
-                ProductId = match?.Product.Id,
+                Matched = resolvedProductId is not null,
+                // "resolved" = a person bound the line to this product on the Decide screen.
+                MatchType = match?.MatchType ?? (resolvedProductId is null ? null : "resolved"),
+                ProductId = resolvedProductId,
                 InStock = hasCatalogOnHand,
                 HasCatalogOnHand = hasCatalogOnHand,
                 CatalogQtyOnHand = catalogQtyOnHand,
@@ -194,17 +209,23 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // own price or a matched product's price) — honest about sparse data.
         var valueConfidence = totalItems > 0 && pricedLines * 2 > totalItems ? "high" : "low";
 
-        var currencies = items
-            .Where(i => i.UnitPrice is > 0m)
-            .Select(i => i.Currency?.Trim().ToUpperInvariant())
-            .Where(c => !string.IsNullOrEmpty(c))
+        // The lead's currency is what its lines say, priced or not: a bid list whose every line
+        // reads SAR has one known currency even before anyone has priced a line. The aggregate
+        // still needs every PRICED line to state that one currency.
+        var pricedCurrencies = items
+            .Select((i, index) => (i.UnitPrice, Currency: lineCurrencies[index]))
+            .Where(x => x.UnitPrice is > 0m && x.Currency is not null)
+            .Select(x => x.Currency!)
             .Distinct()
+            .OrderBy(c => c, StringComparer.Ordinal)
             .ToList();
+        var distinctLineCurrencies = lineCurrencies.Where(c => c is not null).Select(c => c!).Distinct().ToList();
+        var currency = distinctLineCurrencies.Count == 1 ? distinctLineCurrencies[0] : null;
         var hasOneKnownCurrency = pricedLines > 0
                                   && pricedLinesWithKnownCurrency == pricedLines
-                                  && currencies.Count == 1;
-        var currency = hasOneKnownCurrency ? currencies[0] : null;
+                                  && pricedCurrencies.Count == 1;
         decimal? aggregateEstimatedValue = hasOneKnownCurrency ? Round2(estimatedValue) : null;
+        var valueEvidence = new ValueEvidence(pricedLines, pricedLines - pricedLinesWithKnownCurrency, pricedCurrencies);
 
         // ---- 3b. margin, from the one place a landed cost is decision-grade ----
         // Not re-derived here: the same service, the same records and the same value-weighted
@@ -245,8 +266,52 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // to read as "skip" — on 100% of inbound enquiries.
         var catalogAssessable = await CatalogHasIdentitiesAsync(businessUnitId, ct);
         (brief.Recommendation, brief.Reasons) = Recommend(
-            brief, lead.Aiconfidence, catalogAssessable, marginEvidence.UnavailableReason);
+            brief, lead.Aiconfidence, catalogAssessable, marginEvidence.UnavailableReason, valueEvidence);
         return brief;
+    }
+
+    /// <summary>What a person settled per line on the current participation decision.</summary>
+    private sealed record SettledLine(long? ProductId, string? Currency);
+
+    /// <summary>
+    /// The facts behind the value sentence, so the brief can say WHY there is no total rather
+    /// than blaming the currency whenever the total is missing.
+    /// </summary>
+    private sealed record ValueEvidence(int PricedLines, int PricedLinesWithoutCurrency, IReadOnlyList<string> PricedCurrencies);
+
+    /// <summary>
+    /// The latest participation decision on the lead's current revision, keyed by canonical
+    /// lead item — the same record the Decide screen shows. Only lines carrying a product or a
+    /// currency are returned; an empty dictionary means nothing has been settled.
+    /// </summary>
+    private async Task<Dictionary<long, SettledLine>> CurrentLineDecisionsAsync(
+        long leadId, long? currentRevisionId, long businessUnitId, CancellationToken ct)
+    {
+        var result = new Dictionary<long, SettledLine>();
+        if (currentRevisionId is null) return result;
+
+        var decisionId = await _db.Set<CommercialCases.Participation.LeadParticipationDecision>().AsNoTracking()
+            .Where(d => d.BusinessUnitId == businessUnitId && d.LeadId == leadId && d.LeadRevisionId == currentRevisionId.Value)
+            .OrderByDescending(d => d.Sequence)
+            .Select(d => (long?)d.Id)
+            .FirstOrDefaultAsync(ct);
+        if (decisionId is null) return result;
+
+        var lines = await _db.Set<CommercialCases.Participation.LeadLineParticipationDecision>().AsNoTracking()
+            .Where(l => l.ParticipationDecisionId == decisionId.Value
+                        && (l.ProductId != null || (l.Currency != null && l.Currency != ""))
+                        && l.LeadItemRevision.LeadItemId != null)
+            .Select(l => new { LeadItemId = l.LeadItemRevision.LeadItemId!.Value, l.ProductId, l.Currency })
+            .ToListAsync(ct);
+        foreach (var line in lines)
+            result[line.LeadItemId] = new SettledLine(line.ProductId, line.Currency);
+        return result;
+    }
+
+    private static string? NormaliseCurrency(string? currency)
+    {
+        var trimmed = currency?.Trim().ToUpperInvariant();
+        return string.IsNullOrEmpty(trimmed) ? null : trimmed;
     }
 
     /// <summary>
@@ -717,7 +782,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
     /// not about the catalog — so it still yields skip.
     /// </summary>
     private static (string recommendation, List<string> reasons) Recommend(
-        LeadDecisionBrief b, decimal? aiConfidence, bool catalogAssessable, string? marginUnavailableReason)
+        LeadDecisionBrief b, decimal? aiConfidence, bool catalogAssessable, string? marginUnavailableReason,
+        ValueEvidence value)
     {
         var reasons = new List<string>();
         var c = b.Coverage;
@@ -731,10 +797,13 @@ public sealed class LeadDecisionService : ILeadDecisionService
         else if (c.CoveredItems == 0)
             reasons.Add($"None of the {N0(c.TotalItems)} items match our catalog.");
         else
-            reasons.Add($"Exact catalog identities found for {N0(c.CoveredItems)} of {N0(c.TotalItems)} items " +
+            reasons.Add($"Catalogue matches for {N0(c.CoveredItems)} of {N0(c.TotalItems)} items " +
                         $"({Fmt(c.CoveragePct)}% coverage; {N0(c.CatalogOnHandItems)} have stock available to promise).");
 
         // -- value --
+        // Each sentence names the actual gap. The old text blamed the currency whenever the
+        // total was missing, including on a lead whose every line read SAR and simply had no
+        // prices.
         if (b.EstimatedValue is > 0m)
         {
             var cur = b.Currency is null ? "" : $" {b.Currency}";
@@ -742,10 +811,18 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 ? $"Estimated value {N0Dec(b.EstimatedValue.Value)}{cur}."
                 : $"Rough estimated value {N0Dec(b.EstimatedValue.Value)}{cur} — most lines had no usable price.");
         }
-        else
+        else if (value.PricedLines == 0)
             reasons.Add(b.Currency is null
-                ? "Aggregate value is unavailable without one known currency for all priced lines."
-                : "No price information on any line — value unknown.");
+                ? "No price information on any line — value unknown."
+                : $"No price information on any line — value unknown; the lines are in {b.Currency}.");
+        else if (value.PricedCurrencies.Count > 1)
+            reasons.Add($"Aggregate value is unavailable — the priced lines are in more than one currency " +
+                        $"({string.Join(", ", value.PricedCurrencies)}).");
+        else if (value.PricedLinesWithoutCurrency > 0)
+            reasons.Add($"Aggregate value is unavailable — {N0(value.PricedLinesWithoutCurrency)} of " +
+                        $"{N0(value.PricedLines)} priced lines state no currency.");
+        else
+            reasons.Add("No priced line states a quantity — value unknown.");
 
         // -- margin --
         if (b.MarginPotentialPct is decimal margin)
