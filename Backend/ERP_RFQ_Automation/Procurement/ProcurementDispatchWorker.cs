@@ -825,6 +825,8 @@ internal static class SupplierRfqEmail
         Opening = payload.Opening ?? string.Empty,
         SignOff = payload.SignOff ?? string.Empty,
         SendFromMailboxId = payload.SendFromMailboxId,
+        CcAddresses = payload.Cc?.ToList() ?? [],
+        BccAddresses = payload.Bcc?.ToList() ?? [],
         ReplyToAddress = replyTo,
         FromDisplayName = string.IsNullOrWhiteSpace(buyerCompany) ? RfqToSupplierNotification.BuyerCompanyFallback : buyerCompany.Trim(),
         ToEmail = payload.ToEmail,

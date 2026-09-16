@@ -112,6 +112,14 @@ public interface ISupplierDiscoveryService
     /// <summary>Turns the ticked hits into suppliers on this company's list and refreshes the case's candidates.</summary>
     Task<AdoptDiscoveredSuppliersResult> AdoptAsync(AdoptDiscoveredSuppliersCommand command, CancellationToken ct = default);
 
+    /// <summary>
+    /// A supplier the rep types in by email. An email one of the company's suppliers already uses
+    /// brings that supplier; otherwise a new one is added, tagged for this part so it is a candidate.
+    /// </summary>
+    Task<AdoptedDiscoveredSupplier> AddByEmailAsync(long businessUnitId, long sourcingCaseId, string email, string? name,
+        string actor, string correlationId, CancellationToken ct = default)
+        => throw new NotSupportedException();
+
     /// <summary>The same search from a free-text query — the supplier page's "search the internet" box.</summary>
     Task<SupplierDiscoveryResult> SearchAsync(long businessUnitId, string query, int offset, int limit, CancellationToken ct = default);
 }

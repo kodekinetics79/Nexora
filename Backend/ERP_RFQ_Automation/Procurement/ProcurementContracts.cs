@@ -12,7 +12,8 @@ public interface IProcurementApplicationService
         => PreviewSupplierRfqEmailAsync(businessUnitId, sourcingCaseId, quantity, message, dueOn, null, null, ct);
 
     Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
-        decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default)
+        decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default,
+        IReadOnlyList<string>? cc = null, IReadOnlyList<string>? bcc = null)
         => throw new NotSupportedException("Supplier request previews are not supported by this procurement adapter.");
 
     Task<SourcingCaseView> GetSourcingCaseAsync(long businessUnitId, long sourcingCaseId, CancellationToken ct = default)
@@ -116,7 +117,10 @@ public sealed record PrepareSupplierRfqCommand(
     /// <summary>Who pressed Send: their own default message and signature apply.</summary>
     long? UserId = null,
     /// <summary>The company's outgoing mailbox the rep chose; null uses the default.</summary>
-    long? SendFromMailboxId = null);
+    long? SendFromMailboxId = null,
+    /// <summary>Copied on every supplier's email of this send.</summary>
+    IReadOnlyList<string>? Cc = null,
+    IReadOnlyList<string>? Bcc = null);
 
 public sealed record QueuePreparedSupplierRfqCommand(
     long BusinessUnitId,
@@ -592,4 +596,5 @@ public sealed class ProcurementConflictException : InvalidOperationException
 }
 
 /// <summary>Subject and plain-text body of a supplier request, exactly as it would be sent.</summary>
-public sealed record SupplierRfqEmailPreview(string Subject, string Body, string? From = null, string? ReplyTo = null);
+public sealed record SupplierRfqEmailPreview(string Subject, string Body, string? From = null, string? ReplyTo = null,
+    IReadOnlyList<string>? Cc = null, IReadOnlyList<string>? Bcc = null);

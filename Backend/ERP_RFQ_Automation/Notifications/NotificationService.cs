@@ -176,6 +176,10 @@ namespace ERP_RFQ_Automation.Notifications
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
+                foreach (var cc in request.CcAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Cc.Add(new EmailAddress(cc.Trim()));
+                foreach (var bcc in request.BccAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Bcc.Add(new EmailAddress(bcc.Trim()));
 
                 var receipt = await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
 
@@ -231,6 +235,10 @@ namespace ERP_RFQ_Automation.Notifications
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
+                foreach (var cc in request.CcAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Cc.Add(new EmailAddress(cc.Trim()));
+                foreach (var bcc in request.BccAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Bcc.Add(new EmailAddress(bcc.Trim()));
 
                 var receipt = await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
                 if (receipt is null)

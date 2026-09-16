@@ -20633,6 +20633,14 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("DefaultBcc")
+                        .HasMaxLength(2600)
+                        .HasColumnType("character varying(2600)");
+
+                    b.Property<string>("DefaultCc")
+                        .HasMaxLength(2600)
+                        .HasColumnType("character varying(2600)");
+
                     b.Property<string>("DefaultMessage")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");

@@ -217,6 +217,28 @@ public sealed class SupplierDiscoveryServiceTests
     }
 
     [Fact]
+    public async Task A_supplier_typed_in_by_email_joins_the_list_for_this_part_and_a_known_email_brings_the_existing_supplier()
+    {
+        using var harness = new Harness();
+        var caseId = await harness.CreateCaseAsync("by-email");
+
+        await Assert.ThrowsAsync<ProcurementValidationException>(() =>
+            harness.Run(s => s.AddByEmailAsync(harness.Scenario.BusinessUnitId, caseId, "not-an-email", null, "qa", "corr")));
+
+        var added = await harness.Run(s => s.AddByEmailAsync(harness.Scenario.BusinessUnitId, caseId, " Sales@Al-Rajhi-Electric.example ", null, "qa", "corr"));
+        Assert.False(added.AlreadyExisted);
+        Assert.Equal("sales@al-rajhi-electric.example", added.ContactEmail);
+        Assert.Equal("Al Rajhi Electric", added.SupplierName);
+        var caseAfter = await harness.Scenario.Execute(s => s.GetSourcingCaseAsync(harness.Scenario.BusinessUnitId, caseId));
+        var candidate = caseAfter.Candidates.Single(x => x.SupplierId == added.SupplierId);
+        Assert.True(candidate.EligibleForSupplierRfq);
+
+        var again = await harness.Run(s => s.AddByEmailAsync(harness.Scenario.BusinessUnitId, caseId, "SALES@al-rajhi-electric.example", "Other name", "qa", "corr"));
+        Assert.True(again.AlreadyExisted);
+        Assert.Equal(added.SupplierId, again.SupplierId);
+    }
+
+    [Fact]
     public async Task The_customers_approved_maker_list_on_the_line_widens_the_search()
     {
         using var harness = new Harness();

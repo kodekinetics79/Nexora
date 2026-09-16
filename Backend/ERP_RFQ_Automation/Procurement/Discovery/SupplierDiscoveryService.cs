@@ -186,6 +186,61 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
         return new AdoptDiscoveredSuppliersResult(adopted.OrderBy(x => Array.IndexOf(hitIds, x.HitId)).ToArray());
     }
 
+    private static readonly System.Text.RegularExpressions.Regex EmailShape =
+        new(@"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    public async Task<AdoptedDiscoveredSupplier> AddByEmailAsync(long businessUnitId, long sourcingCaseId, string email, string? name,
+        string actor, string correlationId, CancellationToken ct = default)
+    {
+        EnsureTenant(businessUnitId);
+        var address = (email ?? string.Empty).Trim().ToLowerInvariant();
+        if (address.Length > 254 || !EmailShape.IsMatch(address))
+            throw new ProcurementValidationException("Type a full email address, like sales@company.com.");
+        var sourcingCase = await LoadCaseAsync(businessUnitId, sourcingCaseId, ct);
+        var identity = await IdentityForAsync(sourcingCase, ct);
+        var now = DateTime.UtcNow;
+        var who = string.IsNullOrWhiteSpace(actor) ? "unknown" : actor.Trim();
+
+        var existing = await _db.Suppliers
+            .Where(x => x.Buid == businessUnitId && x.ContactEmail != null && x.ContactEmail.ToLower() == address)
+            .OrderBy(x => x.Id).FirstOrDefaultAsync(ct);
+        Supplier supplier;
+        if (existing is not null)
+        {
+            supplier = existing;
+            // Tag the part and makers on, so the candidate rule finds them for this line.
+            var tags = (supplier.Tags ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            foreach (var tag in (identity.Tags() ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                if (!tags.Contains(tag, StringComparer.OrdinalIgnoreCase)) tags.Add(tag);
+            supplier.Tags = tags.Count == 0 ? null : string.Join("; ", tags);
+        }
+        else
+        {
+            var domain = address[(address.IndexOf('@') + 1)..];
+            supplier = new Supplier
+            {
+                Name = string.IsNullOrWhiteSpace(name) ? SupplierDiscoveryClassifier.NameFromDomain(domain) : name.Trim(),
+                Website = $"https://{domain}",
+                ContactEmail = address,
+                ImageUrl = string.Empty,
+                Tags = identity.Tags(),
+                Comments = $"Added by email for {identity.Subject()} on {now:yyyy-MM-dd}.",
+                GovernanceStatus = SupplierGovernanceStatuses.Discovered,
+                Tier = SupplierTiers.Tier3OutOfNetwork,
+                Buid = businessUnitId,
+                IsActive = true,
+                ConcurrencyToken = Guid.NewGuid(),
+                CreatedBy = who,
+                CreatedOn = now
+            };
+            _db.Suppliers.Add(supplier);
+        }
+        await _db.SaveChangesAsync(ct);
+        await _procurement.RefreshCandidatesAfterSupplierChangeAsync(new RefreshSourcingCandidatesCommand(
+            businessUnitId, sourcingCase.Id, who, correlationId), ct);
+        return new AdoptedDiscoveredSupplier("manual", supplier.Id, supplier.Name, supplier.ContactEmail, false, existing is not null);
+    }
+
     // ---- the search itself -------------------------------------------------
 
     private async Task<SupplierDiscoveryResult> RunAsync(

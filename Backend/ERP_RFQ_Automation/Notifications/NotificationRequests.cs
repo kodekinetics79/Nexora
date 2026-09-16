@@ -32,6 +32,10 @@ namespace ERP_RFQ_Automation.Notifications
         /// <summary>Sender name when the platform address is used, e.g. the company's name.</summary>
         public string? FromDisplayName { get; set; }
 
+        /// <summary>Copied addresses on this email.</summary>
+        public List<string> CcAddresses { get; set; } = new();
+        public List<string> BccAddresses { get; set; } = new();
+
         /// <summary>Optional attachments (e.g. a generated quote/order PDF).</summary>
         public List<EmailAttachment> Attachments { get; set; } = new();
     }

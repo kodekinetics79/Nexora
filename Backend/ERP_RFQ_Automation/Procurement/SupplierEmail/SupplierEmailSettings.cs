@@ -21,12 +21,16 @@ public sealed class SupplierEmailSettings
     public string? Opening { get; set; }
     public string? DefaultMessage { get; set; }
     public string? SignOff { get; set; }
+    /// <summary>Company only: addresses copied on every supplier request, comma-separated.</summary>
+    public string? DefaultCc { get; set; }
+    public string? DefaultBcc { get; set; }
     public string UpdatedBy { get; set; } = null!;
     public DateTime UpdatedOn { get; set; }
 }
 
 /// <summary>The five wordings, placeholders not yet filled.</summary>
-public sealed record SupplierEmailTexts(string Subject, string Greeting, string Opening, string DefaultMessage, string SignOff);
+public sealed record SupplierEmailTexts(string Subject, string Greeting, string Opening, string DefaultMessage, string SignOff,
+    IReadOnlyList<string>? DefaultCc = null, IReadOnlyList<string>? DefaultBcc = null);
 
 public static class SupplierEmailDefaults
 {
@@ -56,14 +60,16 @@ public static class SupplierEmailDefaults
 
 public sealed record CompanySupplierEmailView(
     string? Subject, string? Greeting, string? Opening, string? DefaultMessage, string? SignOff,
-    SupplierEmailTexts Defaults, string? UpdatedBy, DateTime? UpdatedOn);
+    SupplierEmailTexts Defaults, string? UpdatedBy, DateTime? UpdatedOn,
+    IReadOnlyList<string>? DefaultCc = null, IReadOnlyList<string>? DefaultBcc = null);
 
 public sealed record CompanySupplierEmailTexts(string DefaultMessage, string SignOff);
 
 public sealed record MySupplierEmailView(string? DefaultMessage, string? SignOff, CompanySupplierEmailTexts Company);
 
 public sealed record SaveCompanySupplierEmailCommand(
-    string? Subject, string? Greeting, string? Opening, string? DefaultMessage, string? SignOff);
+    string? Subject, string? Greeting, string? Opening, string? DefaultMessage, string? SignOff,
+    IReadOnlyList<string>? DefaultCc = null, IReadOnlyList<string>? DefaultBcc = null);
 
 public sealed record SaveMySupplierEmailCommand(string? DefaultMessage, string? SignOff);
 
@@ -105,6 +111,8 @@ public sealed class SupplierEmailSettingsService(ErpRfqAutomationContext db)
         row.Opening = Normalise(command.Opening, d.Opening, SupplierEmailDefaults.OpeningMax, "The opening sentence");
         row.DefaultMessage = Normalise(command.DefaultMessage, d.DefaultMessage, SupplierEmailDefaults.MessageMax, "The default message");
         row.SignOff = Normalise(command.SignOff, d.SignOff, SupplierEmailDefaults.SignOffMax, "The sign-off and signature");
+        row.DefaultCc = JoinCopies(command.DefaultCc, "Always CC");
+        row.DefaultBcc = JoinCopies(command.DefaultBcc, "Always BCC");
         row.UpdatedBy = Actor(actor);
         row.UpdatedOn = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -151,7 +159,25 @@ public sealed class SupplierEmailSettingsService(ErpRfqAutomationContext db)
             company?.Greeting ?? d.Greeting,
             company?.Opening ?? d.Opening,
             mine?.DefaultMessage ?? company?.DefaultMessage ?? d.DefaultMessage,
-            mine?.SignOff ?? company?.SignOff ?? d.SignOff);
+            mine?.SignOff ?? company?.SignOff ?? d.SignOff,
+            SplitCopies(company?.DefaultCc),
+            SplitCopies(company?.DefaultBcc));
+    }
+
+    private static IReadOnlyList<string> SplitCopies(string? joined) =>
+        (joined ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string? JoinCopies(IReadOnlyList<string>? addresses, string what)
+    {
+        try
+        {
+            var list = ERP_RFQ_Automation.Procurement.ProcurementApplicationService.NormaliseCopies(addresses, what);
+            return list.Count == 0 ? null : string.Join(", ", list);
+        }
+        catch (ERP_RFQ_Automation.Procurement.ProcurementValidationException ex)
+        {
+            throw new SupplierEmailValidationException(ex.Message);
+        }
     }
 
     public Task<SupplierEmailTexts> GetEffectiveAsync(long businessUnitId, long? userId, CancellationToken ct = default)
@@ -194,7 +220,8 @@ public sealed class SupplierEmailSettingsService(ErpRfqAutomationContext db)
 
     private static CompanySupplierEmailView ToCompanyView(SupplierEmailSettings? row) => new(
         row?.Subject, row?.Greeting, row?.Opening, row?.DefaultMessage, row?.SignOff,
-        SupplierEmailDefaults.Texts, row?.UpdatedBy, row?.UpdatedOn);
+        SupplierEmailDefaults.Texts, row?.UpdatedBy, row?.UpdatedOn,
+        SplitCopies(row?.DefaultCc), SplitCopies(row?.DefaultBcc));
 
     private static string? Normalise(string? value, string fallback, int max, string what)
     {

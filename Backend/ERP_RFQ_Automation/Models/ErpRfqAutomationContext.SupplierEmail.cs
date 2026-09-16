@@ -23,6 +23,8 @@ public partial class ErpRfqAutomationContext
             entity.Property(x => x.Opening).HasMaxLength(SupplierEmailDefaults.OpeningMax);
             entity.Property(x => x.DefaultMessage).HasMaxLength(SupplierEmailDefaults.MessageMax);
             entity.Property(x => x.SignOff).HasMaxLength(SupplierEmailDefaults.SignOffMax);
+            entity.Property(x => x.DefaultCc).HasMaxLength(2600);
+            entity.Property(x => x.DefaultBcc).HasMaxLength(2600);
             entity.Property(x => x.UpdatedBy).HasMaxLength(255).IsRequired();
             // One company standard per tenant, and one row per sales person.
             entity.HasIndex(x => x.BusinessUnitId).IsUnique().HasFilter("\"UserId\" IS NULL")

@@ -134,6 +134,51 @@ public sealed class SupplierEmailSettingsTests
         Assert.DoesNotContain("[Supplier name]", createdEvent.PayloadJson);
     }
 
+    [Fact]
+    public async Task Cc_and_bcc_reach_every_suppliers_email_and_the_company_can_set_them_as_always()
+    {
+        using var fixture = new ProcurementScenario();
+        await SupplierRfqEmailContentTests_MakeSourcingReady(fixture);
+        await using (var db = fixture.Context())
+        {
+            var saved = await new SupplierEmailSettingsService(db).SaveCompanyAsync(fixture.BusinessUnitId,
+                new SaveCompanySupplierEmailCommand(null, null, null, null, null, ["Purchasing@QA.example"], ["archive@qa.example"]), "admin@qa");
+            Assert.Equal(["purchasing@qa.example"], saved.DefaultCc);
+            var effective = await new SupplierEmailSettingsService(db).GetEffectiveAsync(fixture.BusinessUnitId, 501);
+            Assert.Equal(["archive@qa.example"], effective.DefaultBcc);
+            await Assert.ThrowsAsync<SupplierEmailValidationException>(() => new SupplierEmailSettingsService(db).SaveCompanyAsync(
+                fixture.BusinessUnitId, new SaveCompanySupplierEmailCommand(null, null, null, null, null, ["not an email"], null), "admin@qa"));
+        }
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            new CreateSourcingCaseCommand(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, 10, false, "copies", "qa", "corr-copies")));
+        var candidate = Assert.Single(created.Candidates);
+
+        await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service => service.PrepareSupplierRfqAsync(
+            new PrepareSupplierRfqCommand(fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+                "copies-bad", "qa", "corr-copies-bad", Cc: ["manager at company"]))));
+
+        var prepared = await fixture.Execute(service => service.PrepareSupplierRfqAsync(
+            new PrepareSupplierRfqCommand(fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+                "copies-prepare", "qa", "corr-copies-prepare", Cc: ["Manager@QA.example, purchasing@qa.example"], Bcc: ["archive@qa.example"])));
+        await using var verify = fixture.Context();
+        var createdEvent = await verify.ProcurementEvents.SingleAsync(x => x.AggregateType == "SupplierSolicitation"
+            && x.AggregateId == prepared.SupplierSolicitationId && x.EventType == "SUPPLIER_RFQ_CREATED");
+        Assert.Contains("\"Cc\":[\"manager@qa.example\",\"purchasing@qa.example\"]", createdEvent.PayloadJson);
+        Assert.Contains("\"Bcc\":[\"archive@qa.example\"]", createdEvent.PayloadJson);
+
+        var sender = new CapturingEmailSender();
+        var notifications = new NotificationService(sender, new EmailTemplateRenderer(NullLogger<EmailTemplateRenderer>.Instance),
+            Options.Create(new NotificationsOptions()), NullLogger<NotificationService>.Instance);
+        await notifications.SendRfqToSupplierWithReceiptAsync(new RfqToSupplierNotification
+        {
+            ToEmail = "quotes@valves.example", SupplierName = "Valves Co", RfqNumber = "SRFQ-1",
+            CcAddresses = ["manager@qa.example"], BccAddresses = ["archive@qa.example"],
+        });
+        var message = Assert.Single(sender.Sent);
+        Assert.Equal("manager@qa.example", Assert.Single(message.Cc).Address);
+        Assert.Equal("archive@qa.example", Assert.Single(message.Bcc).Address);
+    }
+
     private static async Task SupplierRfqEmailContentTests_MakeSourcingReady(ProcurementScenario fixture)
     {
         await using var context = fixture.Context();

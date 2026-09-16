@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Data;
 using System.Security.Cryptography;
 using System.Text;
@@ -270,8 +271,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         => PreviewSupplierRfqEmailAsync(businessUnitId, sourcingCaseId, quantity, message, dueOn, null, null, ct);
 
     public async Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
-        decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default)
+        decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default,
+        IReadOnlyList<string>? cc = null, IReadOnlyList<string>? bcc = null)
     {
+        var copy = NormaliseCopies(cc, "CC");
+        var blindCopy = NormaliseCopies(bcc, "BCC");
         ValidateTenant(businessUnitId);
         if (quantity is { } asked && (asked <= 0 || asked > 1_000_000_000m))
             throw new ProcurementValidationException("Ask for a quantity greater than zero.");
@@ -292,7 +296,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var wording = await WordingForAsync(businessUnitId, userId, "<supplier name>", company, "SRFQ-number-on-sending", ct);
         var payload = new SolicitationDispatchPayload(0, businessUnitId, sourcingCase.RfqId, string.Empty,
             "<supplier name>", "SRFQ-number-on-sending", SummariseLinesForSupplier([line]), dueOn, [line],
-            buyerMessage, wording.Subject, wording.Greeting, wording.Opening, wording.SignOff, mailbox?.MailboxId, wording.DefaultMessage);
+            buyerMessage, wording.Subject, wording.Greeting, wording.Opening, wording.SignOff, mailbox?.MailboxId, wording.DefaultMessage,
+            copy, blindCopy);
         var notification = SupplierRfqEmail.ComposeRfqToSupplier(payload, company, sendFrom.ReplyTo);
         var model = ERP_RFQ_Automation.Notifications.NotificationService.RfqToSupplierModel(notification, null);
         var rendered = new ERP_RFQ_Automation.Notifications.Templating.EmailTemplateRenderer(
@@ -302,7 +307,27 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         return new SupplierRfqEmailPreview(rendered.Subject.Replace("SRFQ-number-on-sending", "(number given when sent)"),
             rendered.TextBody.Replace("SRFQ-number-on-sending", "(number given when sent)").Trim(),
             mailbox is null ? $"{companyName} (system address)" : $"{companyName} <{mailbox.Address}>",
-            sendFrom.ReplyTo);
+            sendFrom.ReplyTo, copy, blindCopy);
+    }
+
+    private const int MaxCopies = 10;
+    private static readonly Regex CopyEmailShape = new(@"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$", RegexOptions.Compiled);
+
+    /// <summary>Trimmed, lower-cased, distinct, each a real-looking address, at most ten.</summary>
+    internal static IReadOnlyList<string> NormaliseCopies(IReadOnlyList<string>? addresses, string what)
+    {
+        var list = (addresses ?? [])
+            .SelectMany(x => (x ?? string.Empty).Split([',', ';', ' ', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            .Select(x => x.Trim().ToLowerInvariant())
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var bad = list.FirstOrDefault(x => x.Length > 254 || !CopyEmailShape.IsMatch(x));
+        if (bad is not null)
+            throw new ProcurementValidationException($"{what}: \"{bad}\" is not an email address.");
+        if (list.Count > MaxCopies)
+            throw new ProcurementValidationException($"{what} can have at most {MaxCopies} addresses.");
+        return list;
     }
 
     private const string RfqToSupplierNotificationName = ERP_RFQ_Automation.Notifications.RfqToSupplierNotification.BuyerCompanyFallback;
@@ -476,6 +501,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         // shortfall is only the default.
         if (command.Quantity is { } askedFor && (askedFor <= 0 || askedFor > 1_000_000_000m))
             throw new ProcurementValidationException("Ask for a quantity greater than zero.");
+        var copies = NormaliseCopies(command.Cc, "CC");
+        var blindCopies = NormaliseCopies(command.Bcc, "BCC");
         if (command.SendFromMailboxId is { } chosenMailbox
             && !(await SupplierEmail.SupplierEmailSettingsService.GetSendFromAsync(_db, command.BusinessUnitId, ct))
                 .Mailboxes.Any(x => x.MailboxId == chosenMailbox))
@@ -497,7 +524,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 command.ExpectedVersion,
                 Message = buyerMessage,
                 command.Quantity,
-                command.SendFromMailboxId
+                command.SendFromMailboxId,
+                Cc = copies,
+                Bcc = blindCopies
             });
             var replay = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == solicitationKey, ct);
@@ -645,7 +674,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
                 solicitation.SupplierRfqNumber, SummariseLinesForSupplier(preparedLines), command.DueOn, preparedLines,
                 buyerMessage, wording.Subject, wording.Greeting, wording.Opening, wording.SignOff, command.SendFromMailboxId,
-                wording.DefaultMessage));
+                wording.DefaultMessage, copies, blindCopies));
             candidate.Selected = true;
             candidate.UpdatedOn = now;
             sourcingCase.Status = SourcingCaseStatuses.OutreachReady;
@@ -3679,7 +3708,9 @@ internal sealed record SolicitationDispatchPayload(
     string? SignOff = null,
     long? SendFromMailboxId = null,
     /// <summary>The company's or rep's saved default message, used when the rep typed none. Message stays exactly what they typed.</summary>
-    string? DefaultMessage = null);
+    string? DefaultMessage = null,
+    IReadOnlyList<string>? Cc = null,
+    IReadOnlyList<string>? Bcc = null);
 
 internal sealed record CandidateEvidence(
     long SupplierId,
