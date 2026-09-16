@@ -1399,6 +1399,9 @@ function SourcingWorkbenchPage() {
                         );
                         return canApprove ? approveButton : (
                           <Tooltip title={reason}>
+                            {/* A disabled button cannot take focus, so the span carries the reason to
+                                keyboard and screen-reader users. */}
+                            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
                             <span tabIndex={0} aria-label={reason}>{approveButton}</span>
                           </Tooltip>
                         );
@@ -1425,6 +1428,7 @@ function SourcingWorkbenchPage() {
                         >
                           {/* Focusable while disabled so a keyboard user can reach the reason,
                               and labelled so a screen reader hears it without hovering. */}
+                          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
                           <span tabIndex={0} aria-label="Prepare the quote draft first — open the RFQ and press Prepare Quote Draft">
                             <Button size="small" startIcon={<PriceCheck />} disabled>Price customer quote</Button>
                           </span>

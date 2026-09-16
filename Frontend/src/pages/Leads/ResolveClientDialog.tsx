@@ -479,7 +479,10 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
             )}
             <Stack spacing={1.5}>
               <TextField
-                size="small" fullWidth required autoFocus
+                size="small" fullWidth required
+                // The dialog opens for one purpose, typing this name, so the cursor starts here.
+                // eslint-disable-next-line jsx-a11y/no-autofocus
+                autoFocus
                 label="Client name"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}

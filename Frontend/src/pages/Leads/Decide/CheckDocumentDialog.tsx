@@ -733,6 +733,9 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                     ? `you chose ${edit.unitOfMeasure} on the lines${unitReading.kind === 'unrecognised' ? ` · as written: ${unitReading.asWritten}` : ''}`
                     : unitCaption(unitReading, edit.unitOfMeasure);
                   return (
+                    // The click is a mouse convenience only: a keyboard user reaches the same
+                    // result by tabbing into any field of the line, which onFocusCapture handles.
+                    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
                     <Box
                       key={line.revisionLineId}
                       id={`check-line-${line.revisionLineId}`}
