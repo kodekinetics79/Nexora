@@ -1886,6 +1886,8 @@ namespace ERP_RFQ_Automation.Services
             else if (delivery is { CompletedOn: null })
             {
                 readiness.DeliveryInFlight = true;
+                readiness.DeliveryRecipient = delivery.RecipientEmail;
+                readiness.DeliveryRequestedOn = delivery.RequestedOn;
                 Block("DELIVERY_IN_FLIGHT",
                     "This quote is already queued for delivery. Wait for it to complete rather than "
                     + "sending it twice.");
@@ -1897,6 +1899,8 @@ namespace ERP_RFQ_Automation.Services
                 // update threw and is being retried). The customer HAS this quote. Say so —
                 // never "uncertain", and never let it look sendable.
                 readiness.DeliveryOutcome = "DELIVERED";
+                readiness.DeliveryRecipient = delivery.RecipientEmail;
+                readiness.DeliveryRequestedOn = delivery.RequestedOn;
                 Block("DELIVERY_STATUS_PENDING",
                     $"This quote was delivered to the customer on {delivery.CompletedOn:yyyy-MM-dd HH:mm} UTC. "
                     + "Its status is still being updated; nothing needs to be resent.");

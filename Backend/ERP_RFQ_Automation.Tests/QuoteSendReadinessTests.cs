@@ -157,6 +157,34 @@ public class QuoteSendReadinessTests
         Assert.DoesNotContain("may or may not", blocker.Message);
     }
 
+    [Fact]
+    public async Task A_delivery_in_flight_says_who_it_is_going_to_and_when_it_was_handed_over()
+    {
+        // D27 (2026-09-15): right after Send the panel said "Fix the item below, then send the
+        // quote" while the header tooltip said it was queued. The screen can only say "Sent to
+        // <recipient> at <time>. Being delivered — nothing to do." if readiness tells it who and
+        // when; until now it carried only the flag.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        var quoteId = SeedQuote(context, currencyId: 98011);
+        var handedOver = new DateTime(2026, 9, 15, 10, 42, 0, DateTimeKind.Utc);
+        context.QuoteDeliveryRequests.Add(new QuoteDeliveryRequest
+        {
+            BusinessUnitId = Tenant, QuoteId = quoteId, IdempotencyKey = $"quote:{quoteId}:delivery:v1",
+            RecipientEmail = "procurement@marafiq.example", Subject = "Quote", Body = "Quote",
+            AttachmentFileName = "Quote.pdf", RequestedOn = handedOver, AvailableOn = handedOver, Version = 1
+        });
+        context.SaveChanges();
+
+        var readiness = await new QuoteService(context, null!, Configured(),
+            outboundSenders: Sender(transmits: true)).EvaluateSendReadinessAsync(quoteId, Tenant);
+
+        Assert.True(readiness.DeliveryInFlight);
+        Assert.Equal("procurement@marafiq.example", readiness.DeliveryRecipient);
+        Assert.Equal(handedOver, readiness.DeliveryRequestedOn);
+        Assert.Contains(readiness.Blockers, x => x.Code == "DELIVERY_IN_FLIGHT");
+    }
+
     // ------------------------------------------------------------------------ test plumbing
 
     /// <summary>

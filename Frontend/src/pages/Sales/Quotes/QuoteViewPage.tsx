@@ -45,6 +45,11 @@ import { statusLabel } from '../../../utils/statusLabels';
 /** The one blocker that the send flow itself resolves (see PriceConfirmationDialog). */
 const isAttestationBlocker = (blocker: { code?: string | null }) =>
   (blocker.code || '').toUpperCase() === 'PRICE_ATTESTATION_REQUIRED';
+/**
+ * The readiness codes that mean "the send already happened; the system is finishing it"
+ * (QuoteService.EvaluateSendReadinessAsync). Not a defect the rep can fix, so not listed as one.
+ */
+const DELIVERY_PENDING_CODES: readonly string[] = ['DELIVERY_IN_FLIGHT', 'DELIVERY_STATUS_PENDING'];
 
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -336,6 +341,17 @@ const QuoteViewPage: React.FC = () => {
   const gatingBlockers = (sendReadiness?.blockers ?? []).filter((blocker) => !isAttestationBlocker(blocker));
   const attestationPending = (sendReadiness?.blockers ?? []).some(isAttestationBlocker);
   const serverBlocker = gatingBlockers[0];
+  // A send that already happened is not something to fix. When the readiness list's reason is
+  // the queued (or delivered-but-status-pending) delivery, the panel says who it went to and
+  // when, and offers nothing — the header used to say "queued" while the panel said "Fix the
+  // item below, then send the quote."
+  const deliveryPending = sendReadiness?.blockers?.find((b) => DELIVERY_PENDING_CODES.includes(b.code)) ?? null;
+  const deliveryHandedOver = sendReadiness?.deliveryRequestedOn
+    ? dayjs(/Z|[+-]\d\d:\d\d$/.test(sendReadiness.deliveryRequestedOn) ? sendReadiness.deliveryRequestedOn : `${sendReadiness.deliveryRequestedOn}Z`)
+    : null;
+  const deliveryPendingText = deliveryPending
+    ? `Sent to ${sendReadiness?.deliveryRecipient || 'the customer'} at ${deliveryHandedOver?.isValid() ? deliveryHandedOver.format('HH:mm on D MMM') : 'the last send'}. Being delivered — nothing to do.`
+    : null;
   const sendBlockedReason: { text: string; link?: { label: string; to: string } } | null = serverBlocker
     ? {
         text: serverBlocker.message,
@@ -389,10 +405,13 @@ const QuoteViewPage: React.FC = () => {
       : quote.statusValue === 'Accepted' ? 'po'
         : isSentQuote ? (quote.respondedOn ? 'outcome' : 'responded')
           : statusUpper === 'ORDERED' ? 'pdf'
+            : isDraftQuote && deliveryPending ? null
             : isDraftQuote ? (isCustomerRevision ? 'revision' : sendBlockedReason === null ? 'send' : 'edit')
               : null;
-  const blockerRows = sendReadiness?.blockers?.length
-    ? sendReadiness.blockers.map((blocker) => ({
+  // The pending delivery is the panel's sentence, not a row in the "fix these" list.
+  const listedBlockers = (sendReadiness?.blockers ?? []).filter((blocker) => blocker !== deliveryPending);
+  const blockerRows = listedBlockers.length
+    ? listedBlockers.map((blocker) => ({
         key: blocker.code,
         text: isAttestationBlocker(blocker) && gatingBlockers.length === 0
           ? 'Confirm where the prices came from — your sales manager, or a supplier quote. Press Send to customer; you confirm it there, then the quote goes.'
@@ -401,16 +420,18 @@ const QuoteViewPage: React.FC = () => {
           ? { label: `Open ${blocker.setupLabel}`, to: blocker.setupPath }
           : undefined,
       }))
-    : sendBlockedReason ? [{ key: 'client', ...sendBlockedReason }] : [];
+    : sendBlockedReason && !deliveryPending ? [{ key: 'client', ...sendBlockedReason }] : [];
   // Pre-send gates only matter while the quote can still be sent; on an ordered or closed
   // quote they would argue with the sentence that says it is finished.
   const showPreSendGates = isDraftQuote || isSentQuote;
-  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || (showPreSendGates && (supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null));
+  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || deliveryPending !== null || (showPreSendGates && (supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null));
   // The sentence that tells the rep what happens next, in every state, derived from facts the
   // page already holds. The screen drives; the rep never has to work out the next move.
   const blockerCount = blockerRows.length + (showPreSendGates && revisionImpactPresentation ? 1 : 0) + (showPreSendGates && supplierValidityWarnings.length > 0 ? 1 : 0);
   const nextStepText = revisionInfo?.supersededByQuoteNo
     ? `A newer revision replaces this quote. Work on ${revisionInfo.supersededByQuoteNo} instead.`
+    : deliveryPendingText && (isDraftQuote || isSentQuote)
+      ? deliveryPendingText
     : statusUpper === 'ORDERED'
       ? 'This quote became an order. Export the PDF if the customer needs a copy; nothing else is left to do here.'
       : quote.outcomeOn && statusUpper !== 'ACCEPTED'
@@ -440,7 +461,7 @@ const QuoteViewPage: React.FC = () => {
     && quote.statusValue?.toUpperCase() !== 'ORDERED'
     && (isDraftQuote || isSentQuote)
     ? (
-      <Tooltip title={sendBlockedReason ? `${blockerCount || 1} thing${(blockerCount || 1) === 1 ? '' : 's'} must be fixed first — see the list below` : ''}>
+      <Tooltip title={deliveryPending ? 'Already handed to delivery — nothing to do.' : sendBlockedReason ? `${blockerCount || 1} thing${(blockerCount || 1) === 1 ? '' : 's'} must be fixed first — see the list below` : ''}>
         <Box
           component="span"
           role={sendBlockedReason ? 'button' : undefined}
@@ -522,7 +543,8 @@ const QuoteViewPage: React.FC = () => {
     </Tooltip>
   ) : null;
   // The control that belongs beside the next-step sentence. The rail keeps the rest.
-  const panelAction = primaryAction === 'send' ? sendControl
+  const panelAction = deliveryPendingText ? null
+    : primaryAction === 'send' ? sendControl
     : primaryAction === 'edit' ? editControl
       : primaryAction === 'responded' ? respondedControl
         : primaryAction === 'outcome' ? outcomeControl
@@ -707,8 +729,8 @@ const QuoteViewPage: React.FC = () => {
           warning inside the totals card, and the same fact was worded differently in each. */}
       {(showBlockerPanel || nextStepText) && (
         <NextStepPanel
-          tone={showPreSendGates && (revisionImpactPresentation || supplierValidityWarnings.length > 0) ? 'error' : showBlockerPanel ? 'warning' : primaryAction === 'send' ? 'success' : 'info'}
-          title={showBlockerPanel ? (isDraftQuote ? 'Before this quote can be sent' : 'Needs attention') : 'Next step'}
+          tone={deliveryPendingText ? 'info' : showPreSendGates && (revisionImpactPresentation || supplierValidityWarnings.length > 0) ? 'error' : showBlockerPanel ? 'warning' : primaryAction === 'send' ? 'success' : 'info'}
+          title={deliveryPendingText ? 'Being delivered' : showBlockerPanel ? (isDraftQuote ? 'Before this quote can be sent' : 'Needs attention') : 'Next step'}
           sentence={nextStepText ?? blockerRows[0]?.text ?? ''}
           action={panelAction}
           testId="quote-next-step"

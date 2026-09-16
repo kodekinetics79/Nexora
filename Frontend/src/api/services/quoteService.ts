@@ -269,8 +269,11 @@ export interface QuoteSendReadiness {
    * already hold this quote, and nothing is resent automatically. NOT_DELIVERED when it
    * definitively failed. Null when no delivery has ended terminally.
    */
-  deliveryOutcome?: 'UNCERTAIN' | 'NOT_DELIVERED' | null;
+  deliveryOutcome?: 'UNCERTAIN' | 'NOT_DELIVERED' | 'DELIVERED' | null;
   deliveryInFlight?: boolean;
+  /** Who the pending mail is addressed to and when it was handed over; null when none is pending. */
+  deliveryRecipient?: string | null;
+  deliveryRequestedOn?: string | null;
 }
 
 export interface QuotePriceAttestationStatus {

@@ -126,6 +126,15 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
 
         /// <summary>True while a delivery for this quote is queued and not yet finished.</summary>
         public bool DeliveryInFlight { get; set; }
+
+        /// <summary>
+        /// Who the queued or delivered mail is addressed to, and when the send was handed over.
+        /// Set with <see cref="DeliveryInFlight"/> and with the DELIVERED status-pending case, so the
+        /// screen can say "Sent to X at HH:mm. Being delivered — nothing to do." instead of listing
+        /// the queue as something the rep has to fix. Null when no delivery is pending.
+        /// </summary>
+        public string? DeliveryRecipient { get; set; }
+        public DateTime? DeliveryRequestedOn { get; set; }
     }
 
     /// <summary>What the rep submits when confirming where a quote's prices came from (R5).</summary>
