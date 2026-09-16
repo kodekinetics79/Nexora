@@ -123,10 +123,7 @@ export function formatRelativeReceived(
  * clock in 24-hour form. One shape for every timestamp a person reads, so a time on one screen
  * never has to be translated into the date format of the next.
  */
+/** Same style as formatDateTime; kept for the call sites that adopted this name first. */
 export function formatDateTimeSafe(dateStr: string | null | undefined, fallback = '—'): string {
-  const d = parseDateSafe(dateStr);
-  if (!d) return fallback;
-  const date = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
-  return `${date}, ${time}`;
+  return formatDateTime(dateStr, fallback);
 }
