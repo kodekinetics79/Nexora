@@ -110,6 +110,26 @@ const searchedForLine = (searchedFor: SupplierDiscoveryResult["searchedFor"]) =>
   return `Searched for: ${subject}${alsoAcceptable.length ? ` · also acceptable: ${alsoAcceptable.join(", ")}` : ""}`;
 };
 
+/** The sentence the supplier email carries unless the rep writes their own (the server's default). */
+const DEFAULT_SUPPLIER_MESSAGE = "Please submit your best pricing and lead times.";
+const SUPPLIER_MESSAGE_MAX = 2000;
+
+/** "Respond by" exactly as the email prints it: the calendar date of the chosen deadline, else the standing phrase. */
+const respondByLabel = (localDateTime: string) => {
+  if (!localDateTime) return "Please respond promptly";
+  const instant = new Date(localDateTime);
+  return Number.isNaN(instant.getTime()) ? "Please respond promptly" : instant.toISOString().slice(0, 10);
+};
+
+/** The quantity the supplier is asked for is the shortfall, not the customer's full line; say so when they differ. */
+const quantityAskedLabel = (line: { unfulfilledQuantity: number; requestedQuantity: number; unitOfMeasure?: string | null }) => {
+  const unit = line.unitOfMeasure ? ` ${line.unitOfMeasure}` : "";
+  const asked = `${line.unfulfilledQuantity}${unit}`;
+  return line.unfulfilledQuantity < line.requestedQuantity
+    ? `${asked} (the rest of the ${line.requestedQuantity}${unit} comes from stock)`
+    : asked;
+};
+
 function SourcingCasePage() {
   const { caseId } = useParams<{ caseId: string }>();
   const sourcingCaseId = Number(caseId);
@@ -121,6 +141,8 @@ function SourcingCasePage() {
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<number[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [responseDueOn, setResponseDueOn] = useState("");
+  // The rep's words to the suppliers, pre-filled with the sentence every supplier RFQ carries.
+  const [supplierMessage, setSupplierMessage] = useState(DEFAULT_SUPPLIER_MESSAGE);
   // Internet discovery: the rep asked for it by hand (when ten known suppliers already match), the
   // hits ticked to add, and what the server made of the ones already added (so a row can say "Added").
   const [discoveryRequested, setDiscoveryRequested] = useState(false);
@@ -332,6 +354,8 @@ function SourcingCasePage() {
         // zone. The API rejects non-UTC and past deadlines, so convert to a real
         // UTC instant here rather than sending the raw field value.
         responseDueOn ? new Date(responseDueOn).toISOString() : null,
+        // The same message goes to every supplier in this send; blank keeps the standard sentence.
+        supplierMessage.trim() || null,
       );
     },
     onSuccess: async (results) => {
@@ -768,6 +792,69 @@ function SourcingCasePage() {
               />
             ))}
           </Stack>
+          <Typography id="supplier-rfq-preview-heading" variant="subtitle2" sx={{ mt: 3, mb: 1, fontWeight: 700 }}>
+            What each supplier receives
+          </Typography>
+          <Paper
+            component="section"
+            variant="outlined"
+            aria-labelledby="supplier-rfq-preview-heading"
+            data-testid="supplier-rfq-preview"
+            sx={{ p: 2 }}
+          >
+            <Typography variant="body2">{"Dear <supplier name>,"}</Typography>
+            <Typography variant="body2" sx={{ mt: 1.5, textWrap: "pretty" }}>
+              Your company invites you to submit a quotation for the following request. We&apos;d appreciate your best
+              pricing and lead times.
+            </Typography>
+            {query.data && (
+              <Table size="small" aria-label="The request as the supplier sees it" sx={{ mt: 1.5, "& td": { border: 0, px: 0, py: 0.5 } }}>
+                <TableBody>
+                  <TableRow>
+                    <TableCell sx={{ color: "text.secondary", width: "40%" }}>Part number</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>{query.data.requestedPartNumber || "Not stated"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell sx={{ color: "text.secondary" }}>Description</TableCell>
+                    <TableCell>{query.data.description}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell sx={{ color: "text.secondary" }}>Maker</TableCell>
+                    <TableCell>{query.data.manufacturer || "Not stated"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell sx={{ color: "text.secondary" }}>Quantity</TableCell>
+                    <TableCell className="tabular-nums">{quantityAskedLabel(query.data)}</TableCell>
+                  </TableRow>
+                  {query.data.requiredOn && (
+                    <TableRow>
+                      <TableCell sx={{ color: "text.secondary" }}>Needed by</TableCell>
+                      <TableCell>{query.data.requiredOn.slice(0, 10)}</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            )}
+            <Typography variant="body2" sx={{ mt: 1.5 }}>
+              Respond by: <strong>{respondByLabel(responseDueOn)}</strong>
+            </Typography>
+            <TextField
+              label="Your message to the suppliers"
+              value={supplierMessage}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) => setSupplierMessage(event.target.value)}
+              multiline
+              minRows={3}
+              maxRows={8}
+              fullWidth
+              sx={{ mt: 2 }}
+              slotProps={{ htmlInput: { maxLength: SUPPLIER_MESSAGE_MAX } }}
+              helperText={
+                supplierMessage.trim()
+                  ? "Goes to every supplier in this send, after the request details."
+                  : `Leave it blank and the email says "${DEFAULT_SUPPLIER_MESSAGE}"`
+              }
+            />
+          </Paper>
           <TextField
             type="datetime-local"
             label="Supplier response deadline (optional)"
@@ -779,7 +866,7 @@ function SourcingCasePage() {
             helperText="Leave blank for no deadline. The supplier sees it on the RFQ."
           />
           <Alert severity="info" sx={{ mt: 2 }}>
-            Your customer's target prices and your margins are never included.
+            Your customer is not named, and their target prices and your margins are never included.
           </Alert>
         </DialogContent>
         <DialogActions>

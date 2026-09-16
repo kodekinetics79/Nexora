@@ -405,7 +405,10 @@ export interface SourcingCase {
   nexoraSerial: string;
   productId?: number | null;
   requestedPartNumber?: string | null;
+  /** The maker named on the line, as the supplier email prints it. Null when the line named none. */
+  manufacturer?: string | null;
   description: string;
+  unitOfMeasure?: string | null;
   requestedQuantity: number;
   stockQuantity: number;
   unfulfilledQuantity: number;
@@ -668,6 +671,11 @@ const procurementService = {
      * local date string. Omit for no deadline.
      */
     dueOn?: string | null,
+    /**
+     * The rep's message to the suppliers, printed in every email of this send after the
+     * request details. Omit or send blank and the email keeps its standard sentence.
+     */
+    message?: string | null,
   ): Promise<SupplierRfqPreparationOutcome[]> => {
     const results: SupplierRfqPreparationOutcome[] = [];
     let version = expectedVersion;
@@ -676,7 +684,7 @@ const procurementService = {
         const prepared = unwrap(
           await axiosInstance.post<PreparedSupplierRfqResult>(
           `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`,
-          { supplierId, expectedVersion: version, dueOn: dueOn ?? null },
+          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null },
           {
             headers: commandHeaders(
               `prepare-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,
