@@ -133,42 +133,8 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             _heartbeat.BeginProviderCall(_providerCallTimeout);
             try
             {
-                receipt = await notification.SendRfqToSupplierWithReceiptAsync(new RfqToSupplierNotification
-                {
-                    ToEmail = payload.ToEmail,
-                    ToName = payload.SupplierName,
-                    TenantId = payload.BusinessUnitId.ToString(),
-                    BusinessUnitId = payload.BusinessUnitId.ToString(),
-                    SupplierName = payload.SupplierName,
-                    BuyerCompany = string.IsNullOrWhiteSpace(buyerCompany) ? RfqToSupplierNotification.BuyerCompanyFallback : buyerCompany.Trim(),
-                    RfqNumber = payload.RfqNumber,
-                    // Says what is being asked, not which record it is. The customer is not
-                    // named: suppliers are promised the customer's prices and margins stay
-                    // private, and the customer's identity is kept with them.
-                    RfqTitle = payload.Lines is { Count: > 0 }
-                        ? $"Request for quotation for {payload.Lines.Count} line{(payload.Lines.Count == 1 ? "" : "s")}"
-                        : $"Request for quotation {payload.RfqNumber}",
-                    ItemSummary = payload.ItemSummary,
-                    Lines = (payload.Lines ?? Array.Empty<SolicitationDispatchLine>()).Select(line => new RfqToSupplierLine
-                    {
-                        LineNumber = line.LineNumber,
-                        Description = line.Description,
-                        Maker = line.Maker,
-                        MakerPartNumber = line.MakerPartNumber,
-                        MaterialCode = line.MaterialCode,
-                        Quantity = line.Quantity.ToString("0.####"),
-                        UnitOfMeasure = line.UnitOfMeasure,
-                        RequiredBy = line.RequiredOn?.ToString("yyyy-MM-dd"),
-                        AcceptableMakers = line.AcceptableMakers
-                    }).ToList(),
-                    DueDate = payload.DueOn?.ToString("yyyy-MM-dd") ?? "Please respond promptly",
-                    // The rep's own words from the Send dialog; a payload queued without any (or
-                    // before the field existed) keeps the standard sentence.
-                    Message = string.IsNullOrWhiteSpace(payload.Message)
-                        ? RfqToSupplierNotification.DefaultMessage
-                        : payload.Message.Trim(),
-                    CtaPath = $"/procurement/rfqs/{payload.RfqId}/sourcing"
-                }, providerCts.Token);
+                receipt = await notification.SendRfqToSupplierWithReceiptAsync(
+                    SupplierRfqEmail.ComposeRfqToSupplier(payload, buyerCompany), providerCts.Token);
             }
             finally
             {
@@ -838,4 +804,49 @@ public sealed class ProcurementDispatchHealthCheck : IHealthCheck
         return Task.FromResult(HealthCheckResult.Healthy(
             "Procurement dispatch claim loop is active.", data));
     }
+}
+
+/// <summary>The supplier request email, composed one way for sending and for the Send window's preview.</summary>
+internal static class SupplierRfqEmail
+{
+
+    /// <summary>
+    /// The supplier email for a queued request. Shared with the Send window's preview so the rep
+    /// sees exactly what the supplier receives.
+    /// </summary>
+    internal static RfqToSupplierNotification ComposeRfqToSupplier(SolicitationDispatchPayload payload, string? buyerCompany) => new()
+    {
+        ToEmail = payload.ToEmail,
+        ToName = payload.SupplierName,
+        TenantId = payload.BusinessUnitId.ToString(),
+        BusinessUnitId = payload.BusinessUnitId.ToString(),
+        SupplierName = payload.SupplierName,
+        BuyerCompany = string.IsNullOrWhiteSpace(buyerCompany) ? RfqToSupplierNotification.BuyerCompanyFallback : buyerCompany.Trim(),
+        RfqNumber = payload.RfqNumber,
+        // Says what is being asked, not which record it is. The customer is not named: suppliers
+        // are promised the customer's prices and margins stay private, and the customer's identity
+        // is kept with them.
+        RfqTitle = payload.Lines is { Count: > 0 }
+            ? $"Request for quotation for {payload.Lines.Count} line{(payload.Lines.Count == 1 ? "" : "s")}"
+            : $"Request for quotation {payload.RfqNumber}",
+        ItemSummary = payload.ItemSummary,
+        Lines = (payload.Lines ?? Array.Empty<SolicitationDispatchLine>()).Select(line => new RfqToSupplierLine
+        {
+            LineNumber = line.LineNumber,
+            Description = line.Description,
+            Maker = line.Maker,
+            MakerPartNumber = line.MakerPartNumber,
+            MaterialCode = line.MaterialCode,
+            Quantity = line.Quantity.ToString("0.####"),
+            UnitOfMeasure = line.UnitOfMeasure,
+            RequiredBy = line.RequiredOn?.ToString("yyyy-MM-dd"),
+            AcceptableMakers = line.AcceptableMakers
+        }).ToList(),
+        DueDate = payload.DueOn?.ToString("yyyy-MM-dd") ?? "Please respond promptly",
+        // The rep's own words from the Send window; a payload queued without any keeps the standard sentence.
+        Message = string.IsNullOrWhiteSpace(payload.Message)
+            ? RfqToSupplierNotification.DefaultMessage
+            : payload.Message.Trim(),
+        CtaPath = $"/procurement/rfqs/{payload.RfqId}/sourcing"
+    };
 }

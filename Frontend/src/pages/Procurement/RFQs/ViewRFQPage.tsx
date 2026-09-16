@@ -50,7 +50,6 @@ import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
-import businessUnitService from '../../../api/services/businessUnitService';
 import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
@@ -367,13 +366,6 @@ const ViewRFQPage: React.FC = () => {
       }
   };
   const [findSupplierFor, setFindSupplierFor] = React.useState<{ item: RfqitemResponseDTO; presetSupplierIds?: number[]; presetMessage?: string } | null>(null);
-  const companyQuery = useQuery({
-    queryKey: ['business-unit-name', userData?.businessUnitId],
-    queryFn: () => businessUnitService.getById(userData!.businessUnitId!),
-    enabled: Boolean(userData?.businessUnitId),
-    staleTime: 10 * 60 * 1000,
-    retry: false,
-  });
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
   if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this RFQ.</Alert></Box>;
@@ -947,8 +939,10 @@ const ViewRFQPage: React.FC = () => {
                           const unknown = sourcingLine.resolution === 'UNKNOWN';
                           const leftOut = unknown && notNowLineIds.includes(item.id);
                           const sentFor = (sourcingQuery.data?.solicitations ?? []).filter((request) => request.requestedRfqItemIds?.includes(item.id));
-                          const waiting = sentFor.filter((request) => ['PENDING_DISPATCH', 'DISPATCHING', 'SENT'].includes(request.status));
-                          const failedSends = sentFor.filter((request) => request.status === 'DELIVERY_FAILED');
+                          // The server spells these both ways ("PENDINGDISPATCH" and "PENDING_DISPATCH"); compare without underscores.
+                          const statusOf = (request: { status: string }) => request.status.replace(/_/g, '').toUpperCase();
+                          const waiting = sentFor.filter((request) => ['PENDINGDISPATCH', 'DISPATCHING', 'SENT'].includes(statusOf(request)));
+                          const failedSends = sentFor.filter((request) => statusOf(request) === 'DELIVERYFAILED');
                           const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
                           const offersFor = (sourcingQuery.data?.offers ?? []).filter((offer) => offer.rfqItemId === item.id);
                           const validOffers = offersFor.filter((offer) => !offer.validUntil || new Date(offer.validUntil) >= startOfToday);
@@ -998,6 +992,7 @@ const ViewRFQPage: React.FC = () => {
                                   </Button>
                                 )}
                               </Stack>
+                              <Tooltip title="Inspect persisted source and normalization evidence"><Button size="small" variant="text" startIcon={<EvidenceIcon />} onClick={() => setEvidenceItemId(item.id)}>Evidence</Button></Tooltip>
                             </Stack>
                           );
                         })()}
@@ -1272,7 +1267,6 @@ const ViewRFQPage: React.FC = () => {
           <FindSupplierDialog
             open
             line={findLine}
-            companyName={companyQuery.data?.businessUnitName?.trim() || 'Your company'}
             openCase={() => openCaseForLine(found)}
             presetSupplierIds={findSupplierFor.presetSupplierIds}
             presetMessage={findSupplierFor.presetMessage}
@@ -1281,9 +1275,10 @@ const ViewRFQPage: React.FC = () => {
               .sort((a, b) => a.id - b.id)
               .map((request) => {
                 const when = formatDateSafe(request.sentOn ?? request.updatedOn);
-                const what = request.status === 'RESPONDED' ? 'replied'
-                  : request.status === 'DELIVERY_FAILED' ? 'email did not go through'
-                  : request.status === 'DECLINED' ? 'declined'
+                const status = request.status.replace(/_/g, '').toUpperCase();
+                const what = status === 'RESPONDED' ? 'replied'
+                  : status === 'DELIVERYFAILED' ? 'email did not go through'
+                  : status === 'DECLINED' ? 'declined'
                   : 'waiting for reply';
                 return [request.supplierId, `Asked ${when} · ${what}`] as [number, string];
               }))}

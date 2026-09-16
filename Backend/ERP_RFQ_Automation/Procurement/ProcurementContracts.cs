@@ -6,6 +6,11 @@ public interface IProcurementApplicationService
 {
     Task<SourcingCaseView> CreateOrOpenSourcingCaseAsync(CreateSourcingCaseCommand command, CancellationToken ct = default)
         => throw new NotSupportedException("Sourcing Cases are not supported by this procurement adapter.");
+    /// <summary>The exact email a supplier would receive from this line, before anything is sent.</summary>
+    Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
+        decimal? quantity, string? message, DateTime? dueOn, CancellationToken ct = default)
+        => throw new NotSupportedException("Supplier request previews are not supported by this procurement adapter.");
+
     Task<SourcingCaseView> GetSourcingCaseAsync(long businessUnitId, long sourcingCaseId, CancellationToken ct = default)
         => throw new NotSupportedException("Sourcing Cases are not supported by this procurement adapter.");
     Task<SourcingCandidateSearchResult> SearchSourcingCandidatesAsync(SearchSourcingCandidatesCommand command, CancellationToken ct = default)
@@ -577,3 +582,6 @@ public sealed class ProcurementConflictException : InvalidOperationException
 {
     public ProcurementConflictException(string message) : base(message) { }
 }
+
+/// <summary>Subject and plain-text body of a supplier request, exactly as it would be sent.</summary>
+public sealed record SupplierRfqEmailPreview(string Subject, string Body);

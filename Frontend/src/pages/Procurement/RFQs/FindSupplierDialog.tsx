@@ -7,12 +7,10 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
-  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  Link,
   Stack,
   TextField,
   Typography,
@@ -47,7 +45,6 @@ export interface FindSupplierLine {
 interface Props {
   open: boolean;
   line: FindSupplierLine | null;
-  companyName: string;
   /** Opens (or creates) the sourcing record behind the line. Adds the part to the catalogue first when it is not there. */
   openCase: () => Promise<SourcingCase>;
   /** Suppliers to tick when the window opens, e.g. the supplier whose price expired. */
@@ -78,13 +75,12 @@ type Row = {
  * default is a suggestion: ticks, quantity and message can all be changed.
  */
 export default function FindSupplierDialog({
-  open, line, companyName, openCase, presetSupplierIds, presetMessage, earlierRequests, onClose, onSent,
+  open, line, openCase, presetSupplierIds, presetMessage, earlierRequests, onClose, onSent,
 }: Props) {
   const [ticked, setTicked] = React.useState<Set<string>>(new Set());
   const [quantity, setQuantity] = React.useState("");
   const [message, setMessage] = React.useState(DEFAULT_SUPPLIER_MESSAGE);
   const [replyBy, setReplyBy] = React.useState("");
-  const [showEmail, setShowEmail] = React.useState(false);
   const [failures, setFailures] = React.useState<string[]>([]);
   const initialised = React.useRef(false);
 
@@ -143,7 +139,7 @@ export default function FindSupplierDialog({
     if (initialised.current || !sourcingCase || !line) return;
     initialised.current = true;
     const preset = new Set(presetSupplierIds ?? []);
-    setTicked(new Set(sourcingCase.candidates
+    setTicked(new Set((sourcingCase.candidates ?? [])
       .filter((candidate) => candidate.eligibleForSupplierRfq
         && (preset.has(candidate.supplierId) || (PAST_SUPPLY.has(candidate.evidenceType) && !earlierRequests?.has(candidate.supplierId))))
       .map((candidate) => `s-${candidate.supplierId}`)));
@@ -151,7 +147,6 @@ export default function FindSupplierDialog({
     setMessage(presetMessage ?? DEFAULT_SUPPLIER_MESSAGE);
     setReplyBy("");
     setFailures([]);
-    setShowEmail(false);
   }, [open, sourcingCase, line, presetSupplierIds, presetMessage, earlierRequests]);
 
   const toggle = (key: string) => setTicked((current) => {
@@ -162,6 +157,25 @@ export default function FindSupplierDialog({
 
   const quantityNumber = Number(quantity);
   const quantityOk = Number.isFinite(quantityNumber) && quantityNumber > 0;
+  const dueOnIso = replyBy ? new Date(`${replyBy}T17:00:00`).toISOString() : null;
+
+  // The email below is written by the server exactly as it will be sent, and follows what the rep types.
+  const [previewInput, setPreviewInput] = React.useState({ quantity: 0, message: "", dueOn: null as string | null });
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => setPreviewInput({ quantity: quantityOk ? quantityNumber : 0, message, dueOn: dueOnIso }), 400);
+    return () => window.clearTimeout(timer);
+  }, [quantityOk, quantityNumber, message, dueOnIso]);
+  const preview = useQuery({
+    queryKey: ["find-supplier-email", sourcingCase?.id, previewInput],
+    queryFn: () => procurementService.previewSupplierRfqEmail(sourcingCase!.id, {
+      quantity: previewInput.quantity || null,
+      message: previewInput.message.trim() || null,
+      dueOn: previewInput.dueOn,
+    }),
+    enabled: open && Boolean(sourcingCase),
+    retry: false,
+    placeholderData: (previous) => previous,
+  });
   const tickedRows = [...ownRows, ...internetRows].filter((row) => ticked.has(row.key) && !row.blocked);
 
   const send = useMutation({
@@ -178,7 +192,7 @@ export default function FindSupplierDialog({
       const askable = [...supplierIds].filter((id) => names.has(id));
       const results = await procurementService.prepareSupplierRfqs(
         fresh.id, askable, fresh.version, crypto.randomUUID(),
-        replyBy ? new Date(`${replyBy}T17:00:00`).toISOString() : null,
+        dueOnIso,
         message.trim() || null,
         quantityNumber,
       );
@@ -242,13 +256,18 @@ export default function FindSupplierDialog({
       <DialogTitle sx={{ pb: 1 }}>
         <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Find supplier</Typography>
         {line && (
-          <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }}>
-            {[line.partNumber, line.maker].filter(Boolean).join(" · ") || line.description}
-            {" — "}
-            {line.inStock > 0 && line.toSource > 0
-              ? `${line.inStock} in stock, ${line.toSource} to source`
-              : `${line.requested} ${line.unitOfMeasure ?? ""}`.trim()}
-          </Typography>
+          <>
+            {line.description && (
+              <Typography component="span" variant="body2" sx={{ display: "block", fontWeight: 600 }}>{line.description}</Typography>
+            )}
+            <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }}>
+              {[line.partNumber && `Part ${line.partNumber}`, line.maker].filter(Boolean).join(" · ")}
+              {line.partNumber || line.maker ? " · " : ""}
+              {line.inStock > 0 && line.toSource > 0
+                ? `${line.inStock} in stock, ${line.toSource} to source`
+                : `${line.requested} ${line.unitOfMeasure ?? ""}`.trim()}
+            </Typography>
+          </>
         )}
       </DialogTitle>
       <DialogContent dividers sx={{ pt: 1 }}>
@@ -324,26 +343,27 @@ export default function FindSupplierDialog({
               slotProps={{ htmlInput: { maxLength: 2000 } }}
               sx={{ mt: 1 }}
             />
-            <Link component="button" type="button" variant="caption" underline="hover" sx={{ mt: 0.75 }} onClick={() => setShowEmail((value) => !value)}>
-              {showEmail ? "Hide the email" : "See the email"}
-            </Link>
-            <Collapse in={showEmail}>
-              <Box sx={{ mt: 1, p: 1.5, border: 1, borderColor: "divider", borderRadius: 1 }}>
-                <Typography variant="body2">Dear &lt;supplier&gt;,</Typography>
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  {companyName} invites you to submit a quotation for the following request.
-                </Typography>
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  {[line?.partNumber, line?.maker, line?.description].filter(Boolean).join(" · ")}
-                  {" — "}{quantityOk ? quantityNumber : "?"} {line?.unitOfMeasure ?? ""}
-                </Typography>
-                <Typography variant="body2" sx={{ mt: 1 }}>Respond by: {replyBy || "Please respond promptly"}</Typography>
-                <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>{message.trim() || DEFAULT_SUPPLIER_MESSAGE}</Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
-                  Your customer is not named, and their target prices and your margins are never included.
-                </Typography>
-              </Box>
-            </Collapse>
+            <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>What each supplier receives</Typography>
+            <Box
+              data-testid="supplier-email-preview"
+              sx={{ p: 1.5, border: 1, borderColor: "divider", borderRadius: 1, maxHeight: 240, overflowY: "auto", bgcolor: "background.default" }}
+            >
+              {preview.data ? (
+                <>
+                  <Typography variant="body2" sx={{ fontWeight: 700, mb: 1 }}>{preview.data.subject}</Typography>
+                  <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.5 }}>
+                    {preview.data.body}
+                  </Typography>
+                </>
+              ) : preview.isError ? (
+                <Typography variant="body2" color="text.secondary">The email preview could not be loaded; the email is still sent with the details above.</Typography>
+              ) : (
+                <Typography variant="body2" color="text.secondary">Writing the email…</Typography>
+              )}
+            </Box>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+              &lt;supplier name&gt; is replaced with each supplier&apos;s name. Your customer is not named, and their target prices and your margins are never included.
+            </Typography>
 
             {failures.length > 0 && (
               <Alert severity="warning" sx={{ mt: 2 }}>

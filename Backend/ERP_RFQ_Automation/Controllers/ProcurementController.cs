@@ -41,6 +41,12 @@ public sealed class ProcurementController(
         => ExecuteAsync(async () => Ok(await service.GetSourcingCaseAsync(
             TenantId(), sourcingCaseId, RequestAborted)));
 
+    [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-rfqs/preview")]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    public Task<IActionResult> PreviewSupplierRfqEmail(long sourcingCaseId, [FromBody] PreviewSupplierRfqRequest request)
+        => ExecuteAsync(async () => Ok(await service.PreviewSupplierRfqEmailAsync(
+            TenantId(), sourcingCaseId, request.Quantity, request.Message, request.DueOn, RequestAborted)));
+
     [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-candidates/search")]
     [RequireModulePermission("Supplier History", PermissionAction.Edit)]
     [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.SupplierSearch)]
@@ -404,6 +410,7 @@ public sealed record AdoptDiscoveredSuppliersRequest(IReadOnlyCollection<string>
 /// </summary>
 /// <summary><paramref name="Quantity"/>: how many the rep asks for; the shortfall when omitted.</summary>
 public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion, string? Message = null, decimal? Quantity = null);
+public sealed record PreviewSupplierRfqRequest(decimal? Quantity = null, string? Message = null, DateTime? DueOn = null);
 public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);
 
 /// <summary>The operator states they checked with the supplier and the RFQ never arrived.</summary>

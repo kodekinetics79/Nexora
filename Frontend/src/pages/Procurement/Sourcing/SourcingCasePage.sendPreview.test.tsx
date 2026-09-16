@@ -105,7 +105,7 @@ describe('SourcingCasePage — the Send dialog shows the email and lets the rep 
 
     await waitFor(() => expect(prepareBodies()).toHaveLength(1));
     expect(prepareBodies()[0]).toEqual({
-      supplierId: 1, expectedVersion: 1, dueOn: null, message: 'Please submit your best pricing and lead times.',
+      supplierId: 1, expectedVersion: 1, dueOn: null, message: 'Please submit your best pricing and lead times.', quantity: null,
     });
   });
 

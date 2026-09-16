@@ -56,25 +56,7 @@ namespace ERP_RFQ_Automation.Notifications
             RfqToSupplierNotification request,
             CancellationToken ct = default)
         {
-            var model = new Dictionary<string, string?>
-            {
-                ["supplierName"] = request.SupplierName,
-                ["buyerCompany"] = request.BuyerCompany,
-                ["rfqNumber"] = request.RfqNumber,
-                ["rfqTitle"] = request.RfqTitle,
-                ["itemSummary"] = request.ItemSummary,
-                // The renderer substitutes raw text, so the per-line rows are built (and
-                // HTML-encoded) here rather than trusting a product description with markup.
-                ["itemRowsHtml"] = RfqToSupplierLineFormatter.HtmlRows(request.Lines, request.ItemSummary),
-                ["itemRowsText"] = RfqToSupplierLineFormatter.TextRows(request.Lines, request.ItemSummary),
-                ["dueDate"] = request.DueDate,
-                ["message"] = request.Message,
-                // The rep types this; encode it before it enters the HTML part and keep their
-                // paragraph breaks.
-                ["messageHtml"] = HtmlParagraph(request.Message),
-                ["ctaUrl"] = ResolveCta(request.CtaPath),
-                ["ctaLabel"] = "Submit quotation"
-            };
+            var model = RfqToSupplierModel(request, ResolveCta(request.CtaPath));
             return DispatchWithReceiptAsync(EmailTemplates.RfqToSupplier, request, model, ct);
         }
 
@@ -278,6 +260,26 @@ namespace ERP_RFQ_Automation.Notifications
         /// Rep-typed plain text made safe for the HTML part: encoded, with each line break kept as
         /// a <c>&lt;br&gt;</c> so a two-paragraph message still reads as two paragraphs.
         /// </summary>
+        /// <summary>The template model for a supplier request; shared with the Send window's preview.</summary>
+        internal static Dictionary<string, string?> RfqToSupplierModel(RfqToSupplierNotification request, string? ctaUrl) => new()
+        {
+            ["supplierName"] = request.SupplierName,
+            ["buyerCompany"] = request.BuyerCompany,
+            ["rfqNumber"] = request.RfqNumber,
+            ["rfqTitle"] = request.RfqTitle,
+            ["itemSummary"] = request.ItemSummary,
+            // The renderer substitutes raw text, so the per-line rows are built (and HTML-encoded)
+            // here rather than trusting a product description with markup.
+            ["itemRowsHtml"] = RfqToSupplierLineFormatter.HtmlRows(request.Lines, request.ItemSummary),
+            ["itemRowsText"] = RfqToSupplierLineFormatter.TextRows(request.Lines, request.ItemSummary),
+            ["dueDate"] = request.DueDate,
+            ["message"] = request.Message,
+            // The rep types this; encode it before it enters the HTML part and keep their paragraph breaks.
+            ["messageHtml"] = HtmlParagraph(request.Message),
+            ["ctaUrl"] = ctaUrl,
+            ["ctaLabel"] = "Submit quotation"
+        };
+
         private static string HtmlParagraph(string? text)
             => System.Net.WebUtility.HtmlEncode(text ?? string.Empty)
                 .Replace("\r\n", "\n")

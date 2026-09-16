@@ -265,6 +265,32 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         });
     }
 
+    public async Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
+        decimal? quantity, string? message, DateTime? dueOn, CancellationToken ct = default)
+    {
+        ValidateTenant(businessUnitId);
+        if (quantity is { } asked && (asked <= 0 || asked > 1_000_000_000m))
+            throw new ProcurementValidationException("Ask for a quantity greater than zero.");
+        var buyerMessage = NormaliseBuyerMessage(message);
+        var sourcingCase = await _db.SourcingCases.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == sourcingCaseId, ct)
+            ?? throw new ProcurementValidationException("Sourcing Case was not found in the authenticated tenant.");
+        var rfqItem = await _db.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == sourcingCase.RfqItemId
+            && x.Rfqid == sourcingCase.RfqId, ct);
+        var line = await DescribeLineForSupplierAsync(rfqItem, quantity ?? sourcingCase.UnfulfilledQuantity, ct);
+        var company = await _db.BusinessUnits.AsNoTracking().Where(x => x.Id == businessUnitId)
+            .Select(x => x.BusinessUnitName).FirstOrDefaultAsync(ct);
+        var payload = new SolicitationDispatchPayload(0, businessUnitId, sourcingCase.RfqId, string.Empty,
+            "<supplier name>", "SRFQ-number-on-sending", SummariseLinesForSupplier([line]), dueOn, [line], buyerMessage);
+        var notification = SupplierRfqEmail.ComposeRfqToSupplier(payload, company);
+        var model = ERP_RFQ_Automation.Notifications.NotificationService.RfqToSupplierModel(notification, null);
+        var rendered = new ERP_RFQ_Automation.Notifications.Templating.EmailTemplateRenderer(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<ERP_RFQ_Automation.Notifications.Templating.EmailTemplateRenderer>.Instance)
+            .Render(ERP_RFQ_Automation.Notifications.Templating.EmailTemplates.RfqToSupplier, model);
+        return new SupplierRfqEmailPreview(rendered.Subject.Replace("SRFQ-number-on-sending", "(number given when sent)"),
+            rendered.TextBody.Replace("SRFQ-number-on-sending", "(number given when sent)").Trim());
+    }
+
     public async Task<SourcingCaseView> GetSourcingCaseAsync(
         long businessUnitId, long sourcingCaseId, CancellationToken ct = default)
     {

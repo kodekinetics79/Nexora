@@ -177,6 +177,66 @@ public sealed class SupplierRfqEmailContentTests
     }
 
     [Fact]
+    public async Task A_supplier_email_is_from_the_company_and_never_names_or_links_to_the_platform()
+    {
+        // Suppliers received "Nexora" in the header, "an automated message from the Nexora platform"
+        // in the footer, and a "Submit quotation" link into Nexora they cannot log in to.
+        var sender = new CapturingSender();
+        var service = new NotificationService(sender, new EmailTemplateRenderer(NullLogger<EmailTemplateRenderer>.Instance),
+            Options.Create(new NotificationsOptions()), NullLogger<NotificationService>.Instance);
+
+        await service.SendRfqToSupplierWithReceiptAsync(new RfqToSupplierNotification
+        {
+            ToEmail = "quotes@valves.example",
+            SupplierName = "Valves Co",
+            BuyerCompany = "Noor And Sons",
+            RfqNumber = "SRFQ-0007-00000012",
+            RfqTitle = "Request for quotation for 1 line",
+            DueDate = "2026-09-22",
+            CtaPath = "/procurement/rfqs/7/sourcing",
+            Lines = [new RfqToSupplierLine { LineNumber = "1", Description = "Relay", MakerPartNumber = "SEL-751", Quantity = "3", UnitOfMeasure = "EA" }]
+        });
+
+        var message = Assert.Single(sender.Sent);
+        Assert.Contains("Noor And Sons", message.Subject);
+        foreach (var body in new[] { message.HtmlBody, message.TextBody! })
+        {
+            Assert.DoesNotContain("Nexora", body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("/procurement/", body);
+            Assert.Contains("reply to this email", body, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Noor And Sons", body);
+        }
+    }
+
+    [Fact]
+    public async Task The_send_window_preview_is_the_email_the_supplier_receives()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture, line =>
+        {
+            line.LineItemNo = "3";
+            line.ProductShortDescription = "RELAY, PROTECTION, FEEDER, IEC 61850";
+            line.ItemMaterialCode = "300012347";
+            line.RequiredDesiredDate = RequiredOn;
+        });
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            new CreateSourcingCaseCommand(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, 10, false,
+                "preview-case", "qa", "corr-preview-case")));
+
+        var preview = await fixture.Execute(service => service.PreviewSupplierRfqEmailAsync(
+            fixture.BusinessUnitId, created.Id, 5m, "Delivery to Jubail please.", null));
+
+        Assert.Contains("Line 3: RELAY, PROTECTION, FEEDER, IEC 61850", preview.Body);
+        Assert.Contains("QA-PART-0", preview.Body);
+        Assert.Contains("Material code: 300012347", preview.Body);
+        Assert.Contains("Quantity: 5 EA", preview.Body);
+        Assert.Contains("Needed by: 2026-10-01", preview.Body);
+        Assert.Contains("Delivery to Jubail please.", preview.Body);
+        Assert.DoesNotContain("Nexora", preview.Body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Request for Quotation", preview.Subject);
+    }
+
+    [Fact]
     public async Task A_message_queued_before_lines_existed_still_renders_its_summary()
     {
         var sender = new CapturingSender();

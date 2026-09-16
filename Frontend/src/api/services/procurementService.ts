@@ -660,6 +660,18 @@ const procurementService = {
       ),
     ),
 
+  /** The exact email a supplier would receive for this line (subject and plain text), before anything is sent. */
+  previewSupplierRfqEmail: async (
+    sourcingCaseId: number,
+    request: { quantity?: number | null; message?: string | null; dueOn?: string | null },
+  ): Promise<{ subject: string; body: string }> =>
+    unwrap(
+      await axiosInstance.post<{ subject: string; body: string }>(
+        `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs/preview`,
+        { quantity: request.quantity ?? null, message: request.message ?? null, dueOn: request.dueOn ?? null },
+      ),
+    ),
+
   prepareSupplierRfqs: async (
     sourcingCaseId: number,
     supplierIds: number[],
