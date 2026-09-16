@@ -17,12 +17,7 @@ import {
   Badge as RoleIcon,
   People as UsersIcon,
   VerifiedUser as PermissionsIcon,
-  Schema as TaxonomyIcon,
-  Psychology as AiTrustIcon,
-  ModelTraining as LifecycleIcon,
-  QueryStats as QualityIcon,
   Hub as IntegrationIcon,
-  RocketLaunch as ReleaseIcon,
   Gavel as LegalHoldIcon,
   Storage as RetentionIcon,
 } from '@mui/icons-material';
@@ -314,53 +309,15 @@ export const SETUP_GROUPS: SetupGroup[] = [
       },
     ],
   },
-  {
-    key: 'ai-governance',
-    title: 'AI & Automation Governance',
-    caption: 'What the models may do, how a change to them is approved, and how their output is judged.',
-    entries: [
-      {
-        key: 'platform-taxonomy',
-        label: 'Taxonomy & Document Skills',
-        description: 'The document schemas and extraction strategies — what the platform reads from a customer or supplier document, and what it does next.',
-        path: '/admin/platform/taxonomy',
-        icon: <TaxonomyIcon />,
-        moduleName: 'Users',
-        keywords: ['taxonomy', 'skills', 'schema', 'extraction', 'validation', 'document type'],
-      },
-      {
-        key: 'platform-ai-trust',
-        label: 'AI Trust',
-        description: 'Which models may run, what may leave your tenant, what it costs, and the record of every call.',
-        path: '/admin/platform/ai-trust',
-        icon: <AiTrustIcon />,
-        moduleName: 'Users',
-        keywords: ['ai', 'llm', 'model policy', 'egress', 'tokens', 'cost', 'accountability', 'trust'],
-      },
-      {
-        key: 'platform-lifecycle',
-        label: 'Model & Rule Lifecycle',
-        description: 'How a model, rule or dataset is evaluated, promoted and rolled back.',
-        path: '/admin/platform/lifecycle',
-        icon: <LifecycleIcon />,
-        moduleName: 'Users',
-        keywords: ['model', 'rule', 'dataset', 'promotion', 'provenance', 'rollback', 'evaluation'],
-      },
-      {
-        key: 'platform-quality',
-        label: 'Quality Analytics',
-        description: 'The metric definitions and thresholds the platform judges its own output by.',
-        path: '/admin/platform/quality',
-        icon: <QualityIcon />,
-        moduleName: 'Users',
-        keywords: ['quality', 'metric', 'threshold', 'cohort', 'accuracy', 'measurement'],
-      },
-    ],
-  },
+  // No "AI & Automation Governance" group here. Model policy, provider authorization, taxonomy
+  // and document skills, model lifecycle, quality thresholds and release control are Nexora's
+  // raw materials: they are configured once, at Platform Admin level, and a client sees the
+  // finished product only (owner decision, 2026-09-16). Integration Hub, Archive & Legal Hold and
+  // Storage & Retention stay: they govern the tenant's own systems and documents.
   {
     key: 'platform-ops',
     title: 'Platform Operations',
-    caption: 'Connections to other systems, how changes ship, and what becomes of documents over time.',
+    caption: 'Connections to other systems, and what becomes of documents over time.',
     entries: [
       {
         key: 'platform-integrations',
@@ -370,15 +327,6 @@ export const SETUP_GROUPS: SetupGroup[] = [
         icon: <IntegrationIcon />,
         moduleName: 'Users',
         keywords: ['connector', 'api', 'webhook', 'erp', 'sync', 'integration'],
-      },
-      {
-        key: 'platform-releases',
-        label: 'Test & Release',
-        description: 'Test suites, release approval and rollback for changes made on the screens above.',
-        path: '/admin/platform/releases',
-        icon: <ReleaseIcon />,
-        moduleName: 'Users',
-        keywords: ['release', 'test suite', 'approval', 'rollback', 'deploy', 'change control'],
       },
       {
         key: 'platform-archive',

@@ -20,13 +20,8 @@ const CustomFieldsPage = lazyWithRetry(() => import('./CustomFields/CustomFields
 // "Platform Governance" rails.
 const UsersPage = lazyWithRetry(() => import('../Security/Users/UsersPage'));
 const RolesPermissionsPage = lazyWithRetry(() => import('../Security/Roles/RolesPermissionsPage'));
-const TaxonomySkillStudioPage = lazyWithRetry(() => import('../PlatformGovernance/TaxonomySkillStudioPage'));
-const AiTrustCenterPage = lazyWithRetry(() => import('../PlatformGovernance/AiTrustCenterPage'));
-const LifecycleStudioPage = lazyWithRetry(() => import('../PlatformGovernance/LifecycleStudioPage'));
 const IntegrationHubPage = lazyWithRetry(() => import('../PlatformGovernance/IntegrationHubPage'));
-const ReleaseCenterPage = lazyWithRetry(() => import('../PlatformGovernance/ReleaseCenterPage'));
 const CommercialDocumentArchivePage = lazyWithRetry(() => import('../PlatformGovernance/CommercialDocumentArchivePage'));
-const QualityAnalyticsPage = lazyWithRetry(() => import('../PlatformGovernance/QualityAnalyticsPage'));
 const StorageRetentionPage = lazyWithRetry(() => import('../PlatformGovernance/StorageRetentionPage'));
 
 export interface SetupRoute {
@@ -120,15 +115,13 @@ export const SETUP_ROUTES: SetupRoute[] = [
  * mounts these under the same `SetupShell` as the rest, so they carry the breadcrumb and the jump
  * field and read as part of Setup regardless of the address bar.
  */
+// The AI trust, taxonomy, lifecycle, quality and release studios are no longer mounted for a
+// tenant. They are platform configuration (see the note in setupCatalog.tsx); the pages stay in
+// PlatformGovernance/ for the Platform Admin app to host.
 export const SETUP_ADOPTED_ROUTES: SetupRoute[] = [
   { path: '/security/users', moduleName: 'Users', component: UsersPage },
   { path: '/security/roles', moduleName: 'Roles & Permissions', component: RolesPermissionsPage },
-  { path: '/admin/platform/taxonomy', moduleName: 'Users', component: TaxonomySkillStudioPage },
-  { path: '/admin/platform/ai-trust', moduleName: 'Users', component: AiTrustCenterPage },
-  { path: '/admin/platform/lifecycle', moduleName: 'Users', component: LifecycleStudioPage },
   { path: '/admin/platform/integrations', moduleName: 'Users', component: IntegrationHubPage },
-  { path: '/admin/platform/releases', moduleName: 'Users', component: ReleaseCenterPage },
   { path: '/admin/platform/archive', moduleName: 'Users', component: CommercialDocumentArchivePage },
-  { path: '/admin/platform/quality', moduleName: 'Users', component: QualityAnalyticsPage },
   { path: '/admin/platform/retention', moduleName: 'Users', component: StorageRetentionPage },
 ];

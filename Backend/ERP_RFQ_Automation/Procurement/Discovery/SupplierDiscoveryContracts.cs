@@ -42,7 +42,6 @@ public static class SupplierDiscoveryStatuses
     public const string NotConfigured = "NotConfigured";
 
     /// <summary>This company has not switched internet search on under AI governance.</summary>
-    public const string ConsentRequired = "ConsentRequired";
 
     /// <summary>The internet was searched and nothing usable came back.</summary>
     public const string NoResults = "NoResults";

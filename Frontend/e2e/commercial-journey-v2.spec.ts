@@ -1148,7 +1148,8 @@ test('37 local-first processing evidence and governed learning remain visible ac
   // Processing evidence folds under "Line intelligence and processing evidence" on the RFQ.
   await page.getByRole('button', { name: /Line intelligence and processing evidence/ }).click();
   await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
-  await expect(page.getByText('Local-first', { exact: true })).toBeVisible();
+  // A client sees the finished product only: no provider, model or cost wording (owner rule 2026-09-16).
+  await expect(page.getByText(/Local-first|External provider|Provider use|External cost/)).toHaveCount(0);
 
   const [supplierQuoteId] = await captureAndProjectOffers(page, token);
   await page.goto(`/procurement/supplier-quotes/${supplierQuoteId}`);

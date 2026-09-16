@@ -431,7 +431,7 @@ export interface SourcingCandidateSearchResult {
  * manufacturer → distributor → reseller and pages them by offset/limit; `message` is already
  * one sentence in the rep's words for every non-Ready status and is shown verbatim.
  */
-export type SupplierDiscoveryStatus = "Ready" | "NotConfigured" | "ConsentRequired" | "NoResults" | "Error";
+export type SupplierDiscoveryStatus = "Ready" | "NotConfigured" | "NoResults" | "Error";
 export type SupplierDiscoveryRole = "Manufacturer" | "Distributor" | "Reseller";
 
 export interface SupplierDiscoveryHit {

@@ -361,12 +361,6 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
           ))}
         </Box>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', md: 'flex-end' } }}>
-          <Chip
-            size="small"
-            label={item.externalAiUsed ? 'External provider used' : 'Local-first'}
-            color={item.externalAiUsed ? 'warning' : 'default'}
-            variant="outlined"
-          />
           {held && onRetryHold && (
             <Tooltip title="Replays this file from its stored original. Releases every held file in this batch — no re-upload needed.">
               <span>
@@ -671,14 +665,6 @@ export default function LeadIngestionBatchPage() {
           {pendingCount > 0
             ? `${pendingCount} document${pendingCount === 1 ? '' : 's'} still processing. This page updates itself.`
             : `Processing complete: ${batch.logicalInquiries} inquiries classified${batch.rejected > 0 ? `, including ${batch.rejected} rejected or unsupported` : ' with no processing failures'}.`}
-        </Typography>
-        <Typography
-          variant="caption"
-          sx={{ color: batch.externalOccurrences > 0 ? 'warning.main' : 'text.secondary' }}
-        >
-          {batch.externalOccurrences > 0
-            ? `${batch.localFirstOccurrences ?? 0} local-first and ${batch.externalOccurrences} external occurrence${batch.externalOccurrences === 1 ? '' : 's'}. ${batch.externalCost == null ? 'Provider cost is not priced.' : `Recorded external cost: ${batch.externalCost.toFixed(4)}.`}`
-            : `${batch.localFirstOccurrences ?? 0} reconciled occurrence${batch.localFirstOccurrences === 1 ? '' : 's'} used local-first processing. No external provider use is recorded.`}
         </Typography>
       </Stack>
 

@@ -44,13 +44,6 @@ async function createAndPublish(
 }
 
 test.describe.serial('Wave 1 enterprise platform parity', () => {
-  test('commercial taxonomy and document skill studio', async ({ page }) => {
-    await login(page);
-    await createAndPublish(page, '/admin/platform/taxonomy',
-      'Commercial Taxonomy & Document Skills', 'CommercialTaxonomy', 'Wave 1 Customer RFQ Taxonomy');
-    await page.screenshot({ path: `${evidenceDir}/01-taxonomy-studio.png`, fullPage: true });
-  });
-
   test('human action and exception center', async ({ page }) => {
     const token = await login(page);
     const actionTitle = `Review uncertain customer reference ${runId}`;
@@ -77,51 +70,12 @@ test.describe.serial('Wave 1 enterprise platform parity', () => {
     await page.screenshot({ path: `${evidenceDir}/02-human-action-center.png`, fullPage: true });
   });
 
-  test('AI trust and governance center', async ({ page }) => {
-    await login(page);
-    await page.goto('/admin/platform/ai-trust');
-    await expect(page.getByRole('heading', { name: 'AI Trust & Governance' })).toBeVisible();
-    await expect(page.getByText('Disabled', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Edit policy' }).click();
-    await page.getByLabel('Change reason').fill('Authenticated Wave 1 policy verification.');
-    await page.getByRole('button', { name: 'Save governed policy' }).click();
-    await page.getByRole('tab', { name: 'Audit & rollback' }).click();
-    await expect(page.getByText('POLICY_UPDATED', { exact: true }).first()).toBeVisible();
-    await page.screenshot({ path: `${evidenceDir}/03-ai-trust-center.png`, fullPage: true });
-  });
-
-  test('model rule and dataset lifecycle studio', async ({ page }) => {
-    await login(page);
-    await createAndPublish(page, '/admin/platform/lifecycle',
-      'Model, Rule & Dataset Lifecycle', 'Rule', 'Wave 1 Confidence Review Rule');
-    await page.screenshot({ path: `${evidenceDir}/04-lifecycle-studio.png`, fullPage: true });
-  });
-
   test('integration hub and connector SDK', async ({ page }) => {
     await login(page);
     await createAndPublish(page, '/admin/platform/integrations',
       'Integration Hub & Connector SDK', 'Connector', 'Wave 1 Sandbox REST Connector');
     await expect(page.getByText('Connector SDK v1.0')).toBeVisible();
     await page.screenshot({ path: `${evidenceDir}/05-integration-hub.png`, fullPage: true });
-  });
-
-  test('test simulation and release center', async ({ page }) => {
-    await login(page);
-    await page.goto('/admin/platform/releases');
-    await expect(page.getByRole('heading', { name: 'Test, Simulation & Release Center' })).toBeVisible();
-    await page.getByRole('button', { name: 'Create governed artifact' }).click();
-    const dialog = page.getByRole('dialog', { name: 'Create governed artifact' });
-    await dialog.getByRole('combobox').click();
-    await page.getByRole('option', { name: 'TestSuite' }).click();
-    await dialog.getByRole('textbox', { name: /^Name/ }).fill(`Wave 1 Contract Suite ${runId}`);
-    await dialog.getByRole('textbox', { name: /^Stable key/ }).fill(`wave-1-contract-suite-${runId}`);
-    await dialog.getByRole('button', { name: 'Create draft' }).click();
-    await page.getByRole('button', { name: 'Run simulation' }).click();
-    await expect(page.getByText(/Suite v1: 1\/1 tests passed/)).toBeVisible();
-    await page.getByRole('button', { name: 'Send to test' }).click();
-    await page.getByRole('button', { name: 'Publish' }).click();
-    await expect(page.getByText('v1 · Production')).toBeVisible();
-    await page.screenshot({ path: `${evidenceDir}/06-test-release-center.png`, fullPage: true });
   });
 
   test('commercial document archive and search', async ({ page }) => {
@@ -142,22 +96,16 @@ test.describe.serial('Wave 1 enterprise platform parity', () => {
     await page.screenshot({ path: `${evidenceDir}/07-document-archive.png`, fullPage: true });
   });
 
-  test('quality analytics center', async ({ page }) => {
+  test('platform raw materials are not tenant screens', async ({ page }) => {
+    // Owner decision 2026-09-16: model policy, taxonomy and document skills, model lifecycle,
+    // quality thresholds and release control are configured at Platform Admin level. A tenant
+    // manager who types the old address gets the not-found page, not the studio.
     await login(page);
-    await page.goto('/admin/platform/quality');
-    await expect(page.getByRole('heading', { name: 'Quality Analytics Center' })).toBeVisible();
-    await expect(page.getByText(/require an independently labeled evaluation corpus/)).toBeVisible();
-    await expect(page.getByText(/Insufficient evidence/).first()).toBeVisible();
-    await page.getByRole('tab', { name: 'Metric Definitions' }).click();
-    await expect(page.getByRole('heading', { name: 'Quality Metric Definitions' })).toBeVisible();
-    await page.getByRole('button', { name: 'Create governed artifact' }).click();
-    const dialog = page.getByRole('dialog', { name: 'Create governed artifact' });
-    await dialog.getByRole('textbox', { name: /^Name/ }).fill(`Wave 1 Quality Definition ${runId}`);
-    await dialog.getByRole('textbox', { name: /^Stable key/ }).fill(`wave-1-quality-definition-${runId}`);
-    await dialog.getByRole('button', { name: 'Create draft' }).click();
-    await page.getByRole('button', { name: 'Send to test' }).click();
-    await page.getByRole('button', { name: 'Publish' }).click();
-    await expect(page.getByText('v1 · Production')).toBeVisible();
-    await page.screenshot({ path: `${evidenceDir}/08-quality-analytics.png`, fullPage: true });
+    for (const route of ['/admin/platform/ai-trust', '/admin/platform/taxonomy', '/admin/platform/lifecycle', '/admin/platform/quality', '/admin/platform/releases']) {
+      await page.goto(route);
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText('Page not found');
+      await expect(page.getByText(/ollama|egress|model policy|token limit/i)).toHaveCount(0);
+    }
+    await page.screenshot({ path: `${evidenceDir}/06-platform-screens-not-for-tenants.png`, fullPage: true });
   });
 });
