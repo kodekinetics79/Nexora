@@ -43,6 +43,7 @@ import {
 } from "../../Suppliers/supplierRfqReadiness";
 import NextStepPanel from "../../../components/common/NextStepPanel";
 import { useAuth } from "../../../context/AuthContext";
+import businessUnitService from "../../../api/services/businessUnitService";
 import { statusLabel } from "../../../utils/statusLabels";
 import { REFRESH_ON_RETURN_PARAM } from "./sourcingCaseReturn";
 
@@ -137,6 +138,15 @@ function SourcingCasePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const { hasPermission, userData } = useAuth();
+  // The email introduces the request in the company's own name, so the preview does too.
+  const companyQuery = useQuery({
+    queryKey: ["business-unit-name", userData?.businessUnitId],
+    queryFn: () => businessUnitService.getById(userData!.businessUnitId!),
+    enabled: Boolean(userData?.businessUnitId),
+    staleTime: 10 * 60 * 1000,
+    retry: false,
+  });
+  const companyName = companyQuery.data?.businessUnitName?.trim() || "Your company";
   const [candidateLimit, setCandidateLimit] = useState<CandidateLimit>(10);
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<number[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -804,7 +814,7 @@ function SourcingCasePage() {
           >
             <Typography variant="body2">{"Dear <supplier name>,"}</Typography>
             <Typography variant="body2" sx={{ mt: 1.5, textWrap: "pretty" }}>
-              Your company invites you to submit a quotation for the following request. We&apos;d appreciate your best
+              {companyName} invites you to submit a quotation for the following request. We&apos;d appreciate your best
               pricing and lead times.
             </Typography>
             {query.data && (
