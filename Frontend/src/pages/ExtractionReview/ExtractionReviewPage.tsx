@@ -304,7 +304,7 @@ const ExtractionReviewPage: React.FC = () => {
                   <CaughtUpIcon sx={{ fontSize: 56, color: 'success.main', opacity: 0.85 }} />
                   <Typography sx={{ fontWeight: 800 }}>No documents awaiting review — you're all caught up</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Successfully persisted Leads that require human validation will appear here.
+                    Documents that need a person&apos;s check will appear here.
                   </Typography>
                 </Box>
               ),
