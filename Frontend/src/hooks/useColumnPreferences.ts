@@ -209,9 +209,14 @@ export const useColumnPreferences = (
         placed.add(column.key);
       }
 
-      // Anything this page renders that the server catalog does not list stays visible at the
-      // end. Losing a column because the catalog drifted is worse than an unordered extra.
-      for (const def of defs) if (!placed.has(def.field)) ordered.push(def);
+      // Anything this page renders that the server catalog does not list stays visible — losing a
+      // column because the catalog drifted is worse than an unordered extra — but it goes BEFORE
+      // the row-actions column, which is the last thing on every grid. Appended after it, the
+      // Customers grid once showed Account team, Sector and Region dangling past its buttons.
+      const extras = defs.filter((def) => !placed.has(def.field));
+      const actionsIndex = ordered.findIndex((def) => def.field === 'actions');
+      if (actionsIndex >= 0) ordered.splice(actionsIndex, 0, ...extras);
+      else ordered.push(...extras);
 
       return ordered;
     },
