@@ -192,21 +192,28 @@ const leadStatus = (row: LeadResponseDTO): StatusMeta => {
 type OwnerView = 'unassigned' | 'mine' | 'all';
 
 /**
- * The list opens on somebody's real working set, not on "every row ever".
+ * "All inquiries" opens on everyone's inquiries.
  *
- * A manager's job on this screen is the pile nobody has picked up; a rep's is their own. Both are
- * one click from everything, the toggle shows which one is on, and an empty result says which
- * filter emptied it — so a narrowed default is never mistaken for an empty pipeline.
- *
- * Falls back to "Everyone" only when the session carries no identity to compute a working set
- * from: guessing at that point would be a filter the reader cannot see the reason for.
+ * The tab is called "All inquiries" and it sits beside "Unassigned" and "Assigned", which are the
+ * narrowed lists. Opening it pre-narrowed to Unassigned made a manager's first screen read
+ * "0 inquiries · Every inquiry here already has an owner" under a tab that promised everything —
+ * a filtered-to-zero sentence on a list the reader had not filtered. The pile nobody has picked
+ * up, and a rep's own pile, stay one click away on the toggle and one tab away on the strip.
  */
-export const defaultOwnerView = (
-  myUserId: number | null | undefined,
-  isManager: boolean,
-): OwnerView => {
-  if (isManager) return 'unassigned';
-  return myUserId != null ? 'mine' : 'all';
+export const DEFAULT_OWNER_VIEW: OwnerView = 'all';
+
+/**
+ * A manager or administrator who is not themselves a sales rep sees the "no Sales Rep profile"
+ * notice once; it is information for them, not a task. It stays for a rep, who cannot take work
+ * until an administrator acts, so the sentence and the person to ask must remain on screen.
+ */
+const REP_PROFILE_NOTICE_KEY_BASE = 'nexora.leadsPage.repProfileNoticeDismissed';
+const loadRepProfileNoticeDismissed = (): boolean => {
+  try {
+    return localStorage.getItem(userScopedKey(REP_PROFILE_NOTICE_KEY_BASE)) === '1';
+  } catch {
+    return false;
+  }
 };
 
 export const composeLeadsView = (
@@ -246,7 +253,16 @@ const LeadsPage: React.FC = () => {
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
   const [leadSource, setLeadSource] = useState('all');
-  const [ownerView, setOwnerView] = useState<OwnerView>(() => defaultOwnerView(myUserId, isManager));
+  const [ownerView, setOwnerView] = useState<OwnerView>(DEFAULT_OWNER_VIEW);
+  const [repProfileNoticeDismissed, setRepProfileNoticeDismissed] = useState<boolean>(loadRepProfileNoticeDismissed);
+  const dismissRepProfileNotice = () => {
+    setRepProfileNoticeDismissed(true);
+    try {
+      localStorage.setItem(userScopedKey(REP_PROFILE_NOTICE_KEY_BASE), '1');
+    } catch {
+      // Storage unavailable — the notice returns next visit, which is the safe direction.
+    }
+  };
   /**
    * "All inquiries" used to send NO queue view, and the server's default for no view is the
    * untriaged inbox (`LeadStatusId == null`, LeadRepository.GetLeadListAsync). Any lifecycle
@@ -380,10 +396,10 @@ const LeadsPage: React.FC = () => {
   /**
    * Whether this business unit has ANY live inquiry, independent of every filter on screen.
    *
-   * The grid opens narrowed (a manager sees "Unassigned", a rep sees "Mine"), so with zero leads
-   * in the tenant the first thing a rep read was "Every inquiry here already has an owner" — a
-   * filtered-to-zero sentence describing a list that had nothing to filter. True zero and
-   * filtered-to-zero must never read the same, and only an unfiltered count can tell them apart.
+   * The grid can be narrowed (to "Unassigned" or "Mine"), and with zero leads in the tenant the
+   * first thing a rep read was "Every inquiry here already has an owner" — a filtered-to-zero
+   * sentence describing a list that had nothing to filter. True zero and filtered-to-zero must
+   * never read the same, and only an unfiltered count can tell them apart.
    * One row is enough: only `totalCount` is read. Failure is silent here because the main query
    * reports its own failures and this one only decides which empty-state copy is honest.
    */
@@ -1392,8 +1408,13 @@ const LeadsPage: React.FC = () => {
 
       {/* Constraint 7: a control that cannot work is not silently missing. Said ONCE, in words,
           instead of a disabled button repeated down every row. */}
-      {whyICannotTakeLeads && (
-        <Alert severity="info" sx={{ mb: 1.5, borderRadius: 2 }}>
+      {whyICannotTakeLeads && !(isManager && repProfileNoticeDismissed) && (
+        <Alert
+          severity="info"
+          sx={{ mb: 1.5, borderRadius: 2 }}
+          onClose={isManager ? dismissRepProfileNotice : undefined}
+          slotProps={{ closeButton: { 'aria-label': 'Dismiss this notice' } }}
+        >
           <Typography variant="body2" sx={{ fontWeight: 700 }}>
             {isManager
               ? 'You can assign inquiries to other people, but not to yourself yet.'
