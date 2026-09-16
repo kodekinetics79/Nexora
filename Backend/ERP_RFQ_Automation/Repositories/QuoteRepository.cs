@@ -139,12 +139,11 @@ namespace ERP_RFQ_Automation.Repositories
             var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
 
             var dto = MapToDTO(quote, -1, reasonNames, staleDays); // -1 indicates detail view, load all items
-            dto.RevisionImpact = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
-                .OpenQuoteImpacts(_context, businessUnitId, id)
-                .AsNoTracking()
-                .OrderByDescending(impact => impact.Id)
-                .Select(impact => impact.ImpactType)
-                .FirstOrDefaultAsync();
+            // The type string AND what changed. The screen used to receive only the former and so
+            // could say "stale" without saying against what, or offer anything but "mark reviewed".
+            dto.RevisionImpactDetail = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .DescribeOpenQuoteImpactAsync(_context, businessUnitId, id);
+            dto.RevisionImpact = dto.RevisionImpactDetail?.ImpactType;
             return dto;
         }
 

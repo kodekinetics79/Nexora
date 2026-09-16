@@ -33,6 +33,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
 import { summariseStoredQuote } from './quoteTotals';
+import { describeRevisionImpact } from './revisionImpactText';
 import { alpha } from '@mui/material/styles';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
@@ -203,13 +204,32 @@ const QuoteViewPage: React.FC = () => {
     onError: () => toast.error('Failed to mark as responded')
   });
 
+  // Applying the customer's quantities changes the quote, its readiness and its price
+  // attestation at once; all three queries are refreshed, and awaited, before the rep is told.
+  const refreshAfterRevisionReview = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['quote-detail', id] }),
+    queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] }),
+    queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] }),
+  ]);
   const resolveImpactMutation = useMutation({
     mutationFn: () => quoteService.resolveRevisionImpact(Number(id)),
     onSuccess: () => {
-      toast.success('Revision review marked complete');
+      toast.success('Kept as quoted. The customer revision is recorded as reviewed.');
       queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
     },
-    onError: () => toast.error('The revision review could not be completed')
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The revision review could not be completed'), { duration: 8000 })
+  });
+  const applyImpactMutation = useMutation({
+    mutationFn: () => quoteService.applyRevisionQuantities(Number(id)),
+    onSuccess: async (result) => {
+      await refreshAfterRevisionReview();
+      const updated = result.linesUpdated === 1 ? '1 line' : `${result.linesUpdated} lines`;
+      const notOnQuote = result.linesNotOnQuote.length
+        ? ` Line${result.linesNotOnQuote.length === 1 ? '' : 's'} ${result.linesNotOnQuote.join(', ')} ${result.linesNotOnQuote.length === 1 ? 'is' : 'are'} new on the customer's document and not on this quote — add ${result.linesNotOnQuote.length === 1 ? 'it' : 'them'} if you are quoting ${result.linesNotOnQuote.length === 1 ? 'it' : 'them'}.`
+        : '';
+      toast.success(`New quantities applied to ${updated} and the quote re-totalled.${notOnQuote}`, { duration: notOnQuote ? 10000 : 5000 });
+    },
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The new quantities could not be applied'), { duration: 8000 })
   });
 
   const [awardOpen, setAwardOpen] = React.useState(false);
@@ -324,26 +344,36 @@ const QuoteViewPage: React.FC = () => {
         title: 'Inventory Revalidation Required',
         detail: 'Stock changed after this Quote Draft was prepared. Revalidate inventory before sending it to the customer.',
         action: 'Mark revalidation complete',
+        hasQuantityChanges: false,
       }
     : quote.revisionImpact
       ? {
-          title: 'Customer Revision Received',
-          detail: `This Quote Draft is stale and must be reviewed against Lead Revision ${quote.sourceLeadRevision}. The customer-issued document has not been overwritten.`,
-          action: 'Mark review complete',
+          // Says which revision ARRIVED, which one the draft was built on, and what changed —
+          // from the server's projection of the identity spine's own diff. It used to print the
+          // built-from revision as the thing to review against, and nothing about the change.
+          ...describeRevisionImpact(quote.revisionImpactDetail, quote.sourceLeadRevision, isDraftQuote),
+          action: 'Keep as quoted',
         }
       : null;
+  // A draft can take the customer's new quantities in place. A quote already with the customer
+  // cannot — it is revised — so there the only in-panel move is to record the review.
+  const isCustomerRevision = Boolean(quote.revisionImpact) && quote.revisionImpact !== 'INVENTORY_REVALIDATION_REQUIRED';
+  const canApplyRevision = isCustomerRevision && isDraftQuote
+    && (quote.revisionImpactDetail == null || revisionImpactPresentation?.hasQuantityChanges === true);
 
   // Which control is THE next step. Exactly one contained button per state; a contained button
   // that is also disabled points the rep at a dead end, so a blocked draft promotes Edit instead.
   const statusUpper = (quote.statusCode || quote.statusValue || '').toUpperCase();
   const isSentQuote = quote.statusValue === 'Sent';
   const isSuperseded = Boolean(revisionInfo?.supersededByQuoteNo);
-  const primaryAction: 'send' | 'edit' | 'responded' | 'outcome' | 'po' | 'pdf' | null =
+  // 'revision': a customer revision is open on a draft. The decision — apply or keep — lives in
+  // the panel's list item, and it is THE next step, so Edit steps back to outlined for that state.
+  const primaryAction: 'send' | 'edit' | 'responded' | 'outcome' | 'po' | 'pdf' | 'revision' | null =
     isSuperseded ? null
       : quote.statusValue === 'Accepted' ? 'po'
         : isSentQuote ? (quote.respondedOn ? 'outcome' : 'responded')
           : statusUpper === 'ORDERED' ? 'pdf'
-            : isDraftQuote ? (sendBlockedReason === null ? 'send' : 'edit')
+            : isDraftQuote ? (isCustomerRevision ? 'revision' : sendBlockedReason === null ? 'send' : 'edit')
               : null;
   const blockerRows = sendReadiness?.blockers?.length
     ? sendReadiness.blockers.map((blocker) => ({
@@ -377,6 +407,10 @@ const QuoteViewPage: React.FC = () => {
             ? (quote.respondedOn
               ? 'The customer replied. Record the outcome: won, lost or expired.'
               : 'Waiting for the customer. Mark "Customer responded" when they reply, or record the outcome.')
+            : isDraftQuote && isCustomerRevision
+              ? (canApplyRevision
+                ? `Revision ${quote.revisionImpactDetail?.toRevision ?? 'from the customer'} arrived after this draft. Apply the new quantities, or keep it as quoted.`
+                : 'A customer revision arrived after this draft. Review what changed, then keep it as quoted or edit the lines.')
             : isDraftQuote
               ? (sendBlockedReason === null
                 ? (blockerCount > 0
@@ -674,16 +708,37 @@ const QuoteViewPage: React.FC = () => {
                   <Typography variant="body2">{revisionImpactPresentation.detail}</Typography>
                 </Box>
                 {hasPermission('Quotations', 'edit') && (
-                  <Button
-                    color="inherit"
-                    size="small"
-                    variant="outlined"
-                    disabled={resolveImpactMutation.isPending}
-                    onClick={() => resolveImpactMutation.mutate()}
-                    sx={{ whiteSpace: 'nowrap' }}
-                  >
-                    {revisionImpactPresentation.action}
-                  </Button>
+                  <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
+                    {/* The decision, as two buttons: take the customer's new quantities (the
+                        draft is re-totalled and the review recorded), or keep what was quoted.
+                        One button — "Mark review complete" — let the draft go out with the OLD
+                        quantities and nothing on the screen said so. */}
+                    {canApplyRevision && (
+                      <Tooltip title="Update the quantities on this draft to the customer's new revision, re-total it, and record the review." describeChild>
+                        <Button
+                          size="small"
+                          variant="contained"
+                          disabled={applyImpactMutation.isPending || resolveImpactMutation.isPending}
+                          onClick={() => applyImpactMutation.mutate()}
+                          sx={{ whiteSpace: 'nowrap', fontWeight: 800 }}
+                        >
+                          {applyImpactMutation.isPending ? 'Applying…' : 'Apply the new quantities'}
+                        </Button>
+                      </Tooltip>
+                    )}
+                    <Tooltip title={isCustomerRevision ? 'Leave every quantity and price as quoted and record that the customer revision was reviewed.' : ''} describeChild>
+                      <Button
+                        color="inherit"
+                        size="small"
+                        variant={canApplyRevision || primaryAction !== 'revision' ? 'outlined' : 'contained'}
+                        disabled={resolveImpactMutation.isPending || applyImpactMutation.isPending}
+                        onClick={() => resolveImpactMutation.mutate()}
+                        sx={{ whiteSpace: 'nowrap' }}
+                      >
+                        {revisionImpactPresentation.action}
+                      </Button>
+                    </Tooltip>
+                  </Stack>
                 )}
               </Stack>
             )}

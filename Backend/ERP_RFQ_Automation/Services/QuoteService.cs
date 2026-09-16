@@ -112,6 +112,17 @@ namespace ERP_RFQ_Automation.Services
             long quoteId, long businessUnitId, CancellationToken ct = default);
         Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
             string idempotencyKey, CancellationToken ct = default);
+
+        /// <summary>
+        /// "Apply the new quantities": for every draft line that exists on the arriving lead
+        /// revision, set its quantity to the revision's, re-total the draft, and resolve the open
+        /// revision impact in the same transaction. Lines the draft has and the customer's document
+        /// never had are untouched; lines the revision added that the draft lacks are reported, not
+        /// invented. Refused (→ 409) on anything but a draft — a quote already with the customer is
+        /// revised, not edited.
+        /// </summary>
+        Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesAsync(long quoteId, long businessUnitId, string actor,
+            string idempotencyKey, CancellationToken ct = default);
     }
 
     public class QuoteService : IQuoteService
@@ -2830,25 +2841,217 @@ namespace ERP_RFQ_Automation.Services
                 return;
             }
 
-            foreach (var row in impacts)
+            AddImpactResolutionEvents(impacts.Select(row => (row.Impact, row.OccurrenceId)), quoteId, businessUnitId,
+                actor, idempotencyKey, applied: null);
+            await _context.SaveChangesAsync(ct);
+            if (transaction is not null) await transaction.CommitAsync(ct);
+        }
+
+        /// <summary>
+        /// The one way an impact is resolved: an append-only <c>REVISION_IMPACT_RESOLVED</c> audit
+        /// event whose correlation id names the impact (<see cref="ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries"/>).
+        /// "Keep as quoted" and "Apply the new quantities" both end here, so every reader agrees
+        /// the quote is no longer stale whichever the rep chose; the payload records which.
+        /// </summary>
+        private void AddImpactResolutionEvents(
+            IEnumerable<(ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact Impact, long OccurrenceId)> impacts,
+            long quoteId, long businessUnitId, string actor, string idempotencyKey,
+            IReadOnlyList<QuoteRevisionLineChangeDTO>? applied)
+        {
+            foreach (var (impact, occurrenceId) in impacts)
             {
-                var impact = row.Impact;
                 _context.Add(new ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent
                 {
                     BusinessUnitId = businessUnitId,
                     LeadId = impact.LeadId,
-                    OccurrenceId = row.OccurrenceId,
-                    EventType = "REVISION_IMPACT_RESOLVED",
-                    PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { impactId = impact.Id, quoteId }),
+                    OccurrenceId = occurrenceId,
+                    EventType = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.ResolvedEventType,
+                    PayloadJson = applied is null
+                        ? System.Text.Json.JsonSerializer.Serialize(new { impactId = impact.Id, quoteId, resolution = "KEPT_AS_QUOTED" })
+                        : System.Text.Json.JsonSerializer.Serialize(new
+                        {
+                            impactId = impact.Id, quoteId, resolution = "QUANTITIES_APPLIED",
+                            applied = applied.Select(x => new { line = x.Line, from = x.From, to = x.To })
+                        }),
                     ActorType = "User",
                     ActorId = actor,
-                    CorrelationId = $"quote-impact:{impact.Id}",
+                    CorrelationId = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.CorrelationIdFor(impact.Id),
                     IdempotencyKey = $"{idempotencyKey}:{impact.Id}",
                     OccurredAtUtc = DateTimeOffset.UtcNow
                 });
             }
+        }
+
+        public Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesAsync(long quoteId, long businessUnitId, string actor,
+            string idempotencyKey, CancellationToken ct = default)
+        {
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return ApplyRevisionQuantitiesCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return ApplyRevisionQuantitiesCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+            });
+        }
+
+        /// <summary>
+        /// Draft line → its RFQ line → the lead item revision the RFQ line was promoted from → that
+        /// item's row on the ARRIVING revision. The lead item id is the stable identity across
+        /// revisions; the buyer's line number is the fallback for legacy RFQ lines promoted before
+        /// <c>SourceLeadItemRevisionId</c> existed. A draft line with neither is the rep's own
+        /// addition and is left exactly as they wrote it.
+        /// </summary>
+        private async Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesCoreAsync(long quoteId, long businessUnitId,
+            string actor, string idempotencyKey, CancellationToken ct)
+        {
+            await using var transaction = _context.Database.IsNpgsql() && _context.Database.CurrentTransaction is null
+                ? await _context.Database.BeginTransactionAsync(ct)
+                : null;
+
+            if (_context.Database.IsNpgsql())
+            {
+                var lockKey = $"quote-impact-resolution:{businessUnitId}:{quoteId}";
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0))", ct);
+            }
+
+            var quote = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .Include(q => q.Status)
+                .SingleOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException();
+
+            var isDraft = string.Equals(quote.Status?.SetupCode, "DRAFT", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
+            if (!isDraft)
+                throw new InvalidOperationException(
+                    $"Quote {quote.QuoteNo} is already with the customer, so its quantities cannot be changed in place. "
+                    + "Issue it as a new revision and apply the customer's changes there.");
+
+            var impacts = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .OpenQuoteImpacts(_context, businessUnitId, quoteId)
+                .AsNoTracking()
+                .OrderBy(x => x.Id)
+                .Select(impact => new
+                {
+                    Impact = impact,
+                    OccurrenceId = _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>()
+                        .Where(revision => revision.BusinessUnitId == businessUnitId && revision.Id == impact.LeadRevisionId)
+                        .Select(revision => revision.EstablishedByOccurrenceId)
+                        .Single()
+                })
+                .ToListAsync(ct);
+            if (impacts.Count == 0)
+                throw new InvalidOperationException("There is no open customer revision on this quote to apply.");
+
+            var described = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .DescribeOpenQuoteImpactAsync(_context, businessUnitId, quoteId, ct);
+            var arrivingRevisionId = impacts[^1].Impact.LeadRevisionId;
+
+            // The arriving revision's lines, by lead item and by the buyer's line number.
+            var arrivingLines = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == arrivingRevisionId)
+                .Select(x => new { x.LeadItemId, x.SnapshotJson })
+                .ToListAsync(ct);
+            var byLeadItem = new Dictionary<long, (string Line, decimal? Quantity)>();
+            var byLineNo = new Dictionary<string, (string Line, decimal? Quantity)>(StringComparer.Ordinal);
+            var arrivingLabels = new List<string>();
+            foreach (var arriving in arrivingLines)
+            {
+                using var snapshot = System.Text.Json.JsonDocument.Parse(arriving.SnapshotJson);
+                var label = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                    .Text(snapshot.RootElement, "lineItemNo", "line") ?? string.Empty;
+                var quantity = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.QuantityValue(snapshot.RootElement);
+                if (arriving.LeadItemId is long leadItemId) byLeadItem[leadItemId] = (label, quantity);
+                if (NormalizeLineNo(label) is { } key) byLineNo.TryAdd(key, (label, quantity));
+                arrivingLabels.Add(label);
+            }
+
+            // The draft's RFQ lines and the lead item each was promoted from.
+            var rfqItemIds = quote.QuoteItems.Where(i => i.RfqitemId.HasValue).Select(i => i.RfqitemId!.Value).Distinct().ToList();
+            var rfqLines = await _context.Rfqitems.AsNoTracking()
+                .Where(r => rfqItemIds.Contains(r.Id))
+                .Select(r => new { r.Id, r.LineItemNo, r.SourceLeadItemRevisionId })
+                .ToDictionaryAsync(r => r.Id, ct);
+            var sourceItemRevisionIds = rfqLines.Values.Where(r => r.SourceLeadItemRevisionId.HasValue)
+                .Select(r => r.SourceLeadItemRevisionId!.Value).Distinct().ToList();
+            var sourceLeadItems = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && sourceItemRevisionIds.Contains(x.Id))
+                .Select(x => new { x.Id, x.LeadItemId })
+                .ToDictionaryAsync(x => x.Id, x => x.LeadItemId, ct);
+
+            var result = new QuoteRevisionApplyResultDTO
+            {
+                QuoteId = quote.Id,
+                FromRevision = described?.FromRevision ?? 0,
+                ToRevision = described?.ToRevision ?? 0
+            };
+            var matchedLabels = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in quote.QuoteItems.OrderBy(i => i.Id))
+            {
+                (string Line, decimal? Quantity)? target = null;
+                if (item.RfqitemId is long rfqItemId && rfqLines.TryGetValue(rfqItemId, out var rfqLine))
+                {
+                    if (rfqLine.SourceLeadItemRevisionId is long sourceId
+                        && sourceLeadItems.TryGetValue(sourceId, out var leadItemId)
+                        && leadItemId is long id && byLeadItem.TryGetValue(id, out var byItem))
+                        target = byItem;
+                    else if (NormalizeLineNo(rfqLine.LineItemNo ?? item.CustomerLineRef) is { } key
+                        && byLineNo.TryGetValue(key, out var byNo))
+                        target = byNo;
+                }
+                if (target is null) continue;
+
+                matchedLabels.Add(target.Value.Line);
+                if (target.Value.Quantity is not { } newQuantity || newQuantity <= 0m || newQuantity == item.Quantity) continue;
+
+                result.Applied.Add(new QuoteRevisionLineChangeDTO
+                {
+                    Line = target.Value.Line,
+                    Field = "quantity",
+                    From = item.Quantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture),
+                    To = newQuantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)
+                });
+                item.Quantity = newQuantity;
+                item.ModifiedBy = actor;
+                item.ModifiedDate = DateTime.UtcNow;
+            }
+            result.LinesUpdated = result.Applied.Count;
+            result.LinesNotOnQuote = arrivingLabels
+                .Where(label => !string.IsNullOrEmpty(label) && !matchedLabels.Contains(label))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (result.LinesUpdated > 0)
+            {
+                // Same arithmetic as every other write path: line nets, header discount, derived
+                // tax, and the stored total the customer's document prints.
+                await CalculateQuoteTotals(quote);
+                quote.ModifiedBy = actor;
+                quote.ModifiedDate = DateTime.UtcNow;
+            }
+            result.TotalAmount = quote.TotalAmount;
+
+            AddImpactResolutionEvents(impacts.Select(row => (row.Impact, row.OccurrenceId)), quoteId, businessUnitId,
+                actor, idempotencyKey, applied: result.Applied);
             await _context.SaveChangesAsync(ct);
             if (transaction is not null) await transaction.CommitAsync(ct);
+            return result;
+        }
+
+        /// <summary>"00020", "20" and "20 " are the same buyer line; "OPT-3" stays as it is.</summary>
+        private static string? NormalizeLineNo(string? lineNo)
+        {
+            if (string.IsNullOrWhiteSpace(lineNo)) return null;
+            var trimmed = lineNo.Trim().ToUpperInvariant();
+            if (trimmed.All(char.IsDigit))
+            {
+                var stripped = trimmed.TrimStart('0');
+                return stripped.Length == 0 ? "0" : stripped;
+            }
+            return trimmed;
         }
 
         public Task<QuoteResponseDTO> GetQuoteAsync(long id) => GetQuoteByIdAsync(id);
