@@ -1092,6 +1092,49 @@ namespace ERP_RFQ_Automation.Services
         }
 
         /// <summary>
+        /// The pure half of the seller-registration gate. A Saudi quotation carries the seller's
+        /// commercial registration (CR) and VAT registration numbers; a buyer's finance team looks
+        /// for them before it looks at the price. The document used to print "not on file" in
+        /// their place — the seller advertising its own omission on the customer's copy (D28).
+        /// The gap is now named HERE, to the seller, with the screen that fixes it, and the
+        /// document simply omits the line.
+        /// </summary>
+        internal static (string Message, string SetupLabel, string SetupPath)? SellerRegistrationBlocker(
+            string? commercialRegistration, string? taxRegistration)
+        {
+            var missingCr = string.IsNullOrWhiteSpace(commercialRegistration);
+            var missingVat = string.IsNullOrWhiteSpace(taxRegistration);
+            if (!missingCr && !missingVat) return null;
+
+            var what = missingCr && missingVat
+                ? "commercial registration (CR) and VAT registration numbers are"
+                : missingCr ? "commercial registration (CR) number is" : "VAT registration number is";
+            var them = missingCr && missingVat ? "them" : "it";
+            return ($"This quotation cannot be sent because the seller's {what} not on file. A Saudi quotation "
+                    + $"must show both, and the customer's finance team looks for them before the price. Add {them} "
+                    + "under Setup → Business Units, then send again.",
+                "Setup → Business Units", "/setup/business-unit");
+        }
+
+        /// <summary>
+        /// The lines of a BILL TO / SHIP TO block: only the parts that exist, city and country on
+        /// one line joined only when both are present, and "Address not on file" when there is
+        /// nothing at all. The block used to print "N/A" for a missing street and ", " for a missing
+        /// city-and-country pair (D29).
+        /// </summary>
+        internal static IReadOnlyList<string> AddressLines(string? line1, string? line2, string? city, string? country)
+        {
+            var lines = new List<string>();
+            if (!string.IsNullOrWhiteSpace(line1)) lines.Add(line1.Trim());
+            if (!string.IsNullOrWhiteSpace(line2)) lines.Add(line2.Trim());
+            var place = string.Join(", ", new[] { city, country }
+                .Where(part => !string.IsNullOrWhiteSpace(part)).Select(part => part!.Trim()));
+            if (place.Length > 0) lines.Add(place);
+            if (lines.Count == 0) lines.Add("Address not on file");
+            return lines;
+        }
+
+        /// <summary>
         /// The pure half of the tax gate: the first line that has no derived tax, phrased for the
         /// person who has to fix it. Lines are named by the buyer's own reference where there is
         /// one, because "line 3" means nothing to a rep looking at a bid list numbered 00010,
@@ -1543,20 +1586,22 @@ namespace ERP_RFQ_Automation.Services
                                     if (!string.IsNullOrWhiteSpace(companyEmail))
                                         details.Item().Text($"E: {companyEmail}").FontSize(8).FontColor(Colors.Grey.Medium);
 
-                                    // Registrations are printed as a NAMED GAP when absent rather
-                                    // than omitted. A Saudi buyer's finance team looks for the
-                                    // seller VAT number before it looks at the price; a line that
-                                    // is simply missing reads as an oversight by the reader,
-                                    // while "not on file" is unmistakably the sender's to fix —
-                                    // and the sender sees it on their own copy.
-                                    details.Item().PaddingTop(4).Text(
-                                        "CR: " + (string.IsNullOrWhiteSpace(sellerCommercialRegistration)
-                                            ? "not on file" : sellerCommercialRegistration))
-                                        .FontSize(8).FontColor(Colors.Grey.Medium);
-                                    details.Item().Text(
-                                        "VAT: " + (string.IsNullOrWhiteSpace(sellerTaxRegistration)
-                                            ? "not on file" : sellerTaxRegistration))
-                                        .FontSize(8).FontColor(Colors.Grey.Medium);
+                                    // Registrations appear only when they are on file. This used
+                                    // to print "CR: not on file" / "VAT: not on file", reasoning
+                                    // that a named gap beats silence — but the customer's copy is
+                                    // the wrong place to name it (D28). Send-readiness now refuses
+                                    // the send and names the gap to the seller instead
+                                    // (SellerRegistrationBlocker); the rep's preview still renders.
+                                    var registrationLines = new List<string>();
+                                    if (!string.IsNullOrWhiteSpace(sellerCommercialRegistration))
+                                        registrationLines.Add("CR: " + sellerCommercialRegistration);
+                                    if (!string.IsNullOrWhiteSpace(sellerTaxRegistration))
+                                        registrationLines.Add("VAT: " + sellerTaxRegistration);
+                                    for (var index = 0; index < registrationLines.Count; index++)
+                                    {
+                                        var item = index == 0 ? details.Item().PaddingTop(4) : details.Item();
+                                        item.Text(registrationLines[index]).FontSize(8).FontColor(Colors.Grey.Medium);
+                                    }
                                 });
                             });
 
@@ -1589,33 +1634,42 @@ namespace ERP_RFQ_Automation.Services
                         // Address Section
                         col.Item().Row(row =>
                         {
-                            void AddressBlock(string label, string name, string line1, string line2, string cityCountry, string email = null)
+                            // Only the parts that exist (AddressLines). "N/A" for a missing street
+                            // and ", " for a missing city-and-country pair used to print on the
+                            // customer's copy (D29).
+                            void AddressBlock(string label, string name, IReadOnlyList<string> lines, string email = null)
                             {
                                 row.RelativeItem().Border(1).BorderColor(Colors.Grey.Lighten4).Padding(12).Column(c =>
                                 {
                                     c.Item().Text(label).FontSize(8).ExtraBold().FontColor(primaryColor);
                                     c.Item().PaddingTop(5).Text(name).Bold().FontSize(11);
-                                    c.Item().Text(line1).FontSize(9);
-                                    if (!string.IsNullOrEmpty(line2)) c.Item().Text(line2).FontSize(9);
-                                    c.Item().Text(cityCountry).FontSize(9);
-                                    if (email != null) c.Item().PaddingTop(5).Text(email).FontSize(8).Italic();
+                                    foreach (var line in lines) c.Item().Text(line).FontSize(9);
+                                    if (!string.IsNullOrWhiteSpace(email)) c.Item().PaddingTop(5).Text(email).FontSize(8).Italic();
                                 });
                             }
 
+                            var customer = quote.Customer;
                             AddressBlock("BILL TO",
-                                quote.Customer?.Name ?? "Customer",
-                                quote.Customer?.BillingAddressLine1 ?? "N/A",
-                                quote.Customer?.BillingAddressLine2,
-                                $"{quote.Customer?.BillingCity ?? ""}, {quote.Customer?.BillingCountry ?? ""}",
-                                quote.Customer?.ContactEmail);
+                                customer?.Name ?? "Customer",
+                                AddressLines(customer?.BillingAddressLine1, customer?.BillingAddressLine2,
+                                    customer?.BillingCity, customer?.BillingCountry),
+                                customer?.ContactEmail);
 
                             row.ConstantItem(30); // Gap
 
+                            // The shipping address falls back to billing as a WHOLE, never field by
+                            // field: a shipping street paired with a billing city is an address
+                            // nobody has.
+                            var hasShipping = !string.IsNullOrWhiteSpace(customer?.ShippingAddressLine1)
+                                || !string.IsNullOrWhiteSpace(customer?.ShippingCity)
+                                || !string.IsNullOrWhiteSpace(customer?.ShippingCountry);
                             AddressBlock("SHIP TO",
-                                quote.Customer?.Name ?? "Customer",
-                                quote.Customer?.ShippingAddressLine1 ?? quote.Customer?.BillingAddressLine1 ?? "N/A",
-                                quote.Customer?.ShippingAddressLine2,
-                                $"{quote.Customer?.ShippingCity ?? quote.Customer?.BillingCity ?? ""}, {quote.Customer?.ShippingCountry ?? quote.Customer?.BillingCountry ?? ""}");
+                                customer?.Name ?? "Customer",
+                                hasShipping
+                                    ? AddressLines(customer?.ShippingAddressLine1, customer?.ShippingAddressLine2,
+                                        customer?.ShippingCity, customer?.ShippingCountry)
+                                    : AddressLines(customer?.BillingAddressLine1, customer?.BillingAddressLine2,
+                                        customer?.BillingCity, customer?.BillingCountry));
                         });
 
                         // Items Table
@@ -1831,6 +1885,13 @@ namespace ERP_RFQ_Automation.Services
             if (IssuerIdentityBlocker(sellerLegalName, config?.CompanyAddress, config?.CompanyPhone,
                     config?.CompanyEmail) is { } issuerGap)
                 Block("ISSUER_IDENTITY_INCOMPLETE", issuerGap.Message, issuerGap.SetupLabel, issuerGap.SetupPath);
+
+            // The seller's CR and VAT numbers. The renderer omits the lines when they are unset
+            // (it used to print "not on file" on the customer's copy); this is where the gap is
+            // named instead — to the seller, before the send, with the screen that fixes it.
+            if (SellerRegistrationBlocker(quote.BusinessUnit?.CommercialRegistrationNumber,
+                    quote.BusinessUnit?.TaxRegistrationNumber) is { } registrationGap)
+                Block("SELLER_REGISTRATION_INCOMPLETE", registrationGap.Message, registrationGap.SetupLabel, registrationGap.SetupPath);
 
             // The one gate whose failure the rep can do nothing about after the fact: a
             // non-transmitting sender dead-letters the delivery on its FIRST attempt, and the

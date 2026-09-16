@@ -151,6 +151,18 @@ namespace ERP_RFQ_Automation.Controllers
                 var businessUnit = await _repository.GetByIdAsync(id);
                 businessUnit.TaxRegistrationNumber = ERP_RFQ_Automation.Tax.TaxRegistrationNumbers
                     .Normalize(request.TaxRegistrationNumber);
+                // The CR travels on the same narrow route for the same reason the VAT does: a
+                // statutory identifier of the trading entity, which only the entity can state, and
+                // which its quotations must carry (QuoteService.SellerRegistrationBlocker). Null
+                // means "not sent" — older callers keep the stored value; "" clears it.
+                if (request.CommercialRegistrationNumber is not null)
+                {
+                    if (!ERP_RFQ_Automation.MasterData.CommercialRegistrationNumbers.TryCanonicalize(
+                            request.CommercialRegistrationNumber, "Commercial registration number",
+                            out var canonicalCr, out var crError))
+                        return BadRequest(crError);
+                    businessUnit.CommercialRegistrationNumber = canonicalCr;
+                }
                 businessUnit.ModifiedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
                     ?? User.FindFirst("email")?.Value
                     ?? User.Identity?.Name
@@ -186,6 +198,7 @@ namespace ERP_RFQ_Automation.Controllers
                 BusinessUnitName = businessUnit.BusinessUnitName,
                 Description = businessUnit.Description,
                 TaxRegistrationNumber = businessUnit.TaxRegistrationNumber,
+                CommercialRegistrationNumber = businessUnit.CommercialRegistrationNumber,
                 IsActive = businessUnit.IsActive,
                 CreatedBy = businessUnit.CreatedBy,
                 CreatedOn = businessUnit.CreatedOn,

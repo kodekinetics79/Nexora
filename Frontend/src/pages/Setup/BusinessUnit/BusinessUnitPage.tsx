@@ -48,8 +48,21 @@ const BusinessUnitPage: React.FC = () => {
     businessUnitName: '',
     description: '',
     taxRegistrationNumber: '',
+    commercialRegistrationNumber: '',
     isActive: true,
   });
+
+  // Mirrors ERP_RFQ_Automation.MasterData.CommercialRegistrationNumbers: all digits claims to be a
+  // Saudi CR and must then be exactly 10 of them; other formats are accepted.
+  const commercialRegistrationError = ((value?: string) => {
+    const cr = (value ?? '').replace(/[\s\-–—]/g, '').toUpperCase();
+    if (cr.length === 0) return undefined;
+    if (cr.length > 30) return 'Commercial registration number is longer than 30 characters.';
+    if (cr.length < 5) return 'Commercial registration number is too short to be a registration number.';
+    if (!/^[A-Z0-9]+$/.test(cr)) return 'Use only letters and digits (spaces and hyphens are removed automatically).';
+    if (/^\d+$/.test(cr) && cr.length !== 10) return 'A KSA commercial registration number is exactly 10 digits.';
+    return undefined;
+  })(formData.commercialRegistrationNumber);
 
   // Mirrors ERP_RFQ_Automation.Tax.TaxRegistrationNumbers: a value that CLAIMS to be Saudi (all
   // digits, leading 3) must be a well-formed 15-digit KSA VAT number; other formats are accepted.
@@ -73,16 +86,18 @@ const BusinessUnitPage: React.FC = () => {
     }),
   });
 
-  // The ONLY field of an existing business unit a tenant identity may change. Code, name,
+  // The ONLY fields of an existing business unit a tenant identity may change: its CR and VAT
+  // registration numbers — the statutory identifiers its quotations carry. Code, name,
   // description and activation state are control-plane facts and PUT /api/BusinessUnit/{id}
   // forbids tenant callers outright, so the edit dialog shows them read-only rather than
   // pretending to save them.
   const updateMutation = useMutation({
-    mutationFn: ({ id, taxRegistrationNumber }: { id: number; taxRegistrationNumber: string | null }) =>
-      businessUnitService.updateTaxRegistration(id, taxRegistrationNumber),
+    mutationFn: ({ id, taxRegistrationNumber, commercialRegistrationNumber }:
+      { id: number; taxRegistrationNumber: string | null; commercialRegistrationNumber: string }) =>
+      businessUnitService.updateTaxRegistration(id, taxRegistrationNumber, commercialRegistrationNumber),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['businessUnits'] });
-      enqueueSnackbar('Tax registration number updated', { variant: 'success' });
+      enqueueSnackbar('Registration numbers updated', { variant: 'success' });
       setIsModalOpen(false);
     },
     onError: (error: any) => handleApiError(error),
@@ -95,13 +110,14 @@ const BusinessUnitPage: React.FC = () => {
       businessUnitName: record.businessUnitName,
       description: record.description,
       taxRegistrationNumber: record.taxRegistrationNumber ?? '',
+      commercialRegistrationNumber: record.commercialRegistrationNumber ?? '',
       isActive: record.isActive,
     });
     setIsModalOpen(true);
   };
 
   const handleSave = () => {
-    if (taxRegistrationError) return;
+    if (taxRegistrationError || commercialRegistrationError) return;
 
     // Update only. There is no create path: POST /api/BusinessUnit is `return Forbid()`
     // unconditionally, so the branch that used to live here could do nothing but produce a 403
@@ -111,6 +127,7 @@ const BusinessUnitPage: React.FC = () => {
     updateMutation.mutate({
       id: selectedRecord.id,
       taxRegistrationNumber: (formData.taxRegistrationNumber ?? '').trim() || null,
+      commercialRegistrationNumber: (formData.commercialRegistrationNumber ?? '').trim(),
     });
   };
 
@@ -118,6 +135,15 @@ const BusinessUnitPage: React.FC = () => {
     { field: 'businessUnitCode', headerName: 'Code', flex: 0.8, minWidth: 100 },
     { field: 'businessUnitName', headerName: 'Name', flex: 1.5, minWidth: 200 },
     { field: 'description', headerName: 'Description', flex: 2, minWidth: 250 },
+    {
+      field: 'commercialRegistrationNumber',
+      headerName: 'CR Number',
+      flex: 1,
+      minWidth: 140,
+      renderCell: (params) => params.value
+        ? <span>{params.value}</span>
+        : <Chip label="Not set" color="warning" size="small" variant="outlined" />,
+    },
     {
       field: 'taxRegistrationNumber',
       headerName: 'VAT Registration',
@@ -147,7 +173,7 @@ const BusinessUnitPage: React.FC = () => {
       width: 80,
       sortable: false,
       renderCell: (params) => (
-        <IconButton size="small" color="primary" onClick={() => handleEdit(params.row)}>
+        <IconButton size="small" color="primary" aria-label="Edit business unit" onClick={() => handleEdit(params.row)}>
           <EditIcon fontSize="small" />
         </IconButton>
       ),
@@ -172,8 +198,8 @@ const BusinessUnitPage: React.FC = () => {
           */}
           <Typography variant="body2" color="text.secondary">
             The trading entities that issue your quotes and invoices. New business units are
-            provisioned by the platform, not created here — you can update the VAT / tax
-            registration number on each one.
+            provisioned by the platform, not created here — you can update each one's commercial
+            registration (CR) number and VAT / tax registration number, which its quotations carry.
           </Typography>
         </Box>
       </Box>
@@ -237,6 +263,18 @@ const BusinessUnitPage: React.FC = () => {
             <Grid size={{ xs: 12 }}>
               <TextField
                 fullWidth
+                label="Commercial Registration (CR) Number"
+                value={formData.commercialRegistrationNumber ?? ''}
+                onChange={(e) => setFormData({ ...formData, commercialRegistrationNumber: e.target.value })}
+                error={!!commercialRegistrationError}
+                placeholder="KSA CR: 10 digits"
+                helperText={commercialRegistrationError
+                  ?? 'This entity’s commercial registration, printed in the seller block of every quotation. A quote is not sent without it.'}
+              />
+            </Grid>
+            <Grid size={{ xs: 12 }}>
+              <TextField
+                fullWidth
                 label="VAT / Tax Registration Number"
                 value={formData.taxRegistrationNumber ?? ''}
                 onChange={(e) => setFormData({ ...formData, taxRegistrationNumber: e.target.value })}
@@ -259,7 +297,7 @@ const BusinessUnitPage: React.FC = () => {
           <Button 
             variant="contained" 
             onClick={handleSave} 
-            disabled={updateMutation.isPending || !!taxRegistrationError}
+            disabled={updateMutation.isPending || !!taxRegistrationError || !!commercialRegistrationError}
             sx={{ px: 4 }}
           >
             {updateMutation.isPending ? <CircularProgress size={24} /> : 'Save'}

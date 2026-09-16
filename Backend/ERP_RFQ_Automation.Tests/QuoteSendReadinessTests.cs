@@ -238,7 +238,11 @@ public class QuoteSendReadinessTests
 
     private static long SeedQuote(ErpRfqAutomationContext context, long? currencyId)
     {
-        Seed.EnsureBusinessUnit(context, Tenant);
+        // A registered seller: since D28 a Saudi quotation is not sent without the seller's CR and
+        // VAT numbers, and these cases are about the OTHER gates.
+        var unit = Seed.EnsureBusinessUnit(context, Tenant);
+        unit.CommercialRegistrationNumber = "1010123456";
+        unit.TaxRegistrationNumber = "300000000000003";
         context.SetupMasters.Add(new SetupMaster
         {
             SetupId = DraftStatusId, BusinessUnitId = Tenant, SetupType = "QuoteStatus",

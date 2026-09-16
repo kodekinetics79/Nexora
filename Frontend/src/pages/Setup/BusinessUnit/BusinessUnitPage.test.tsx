@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
@@ -80,6 +80,23 @@ describe('Setup › Business Units', () => {
     // Removing the create path must not turn the screen into a read-only wall with no purpose:
     // the VAT / tax registration number is genuinely tenant-editable and is why this screen exists.
     expect(screen.getByText(/tax\s*registration number/i)).toBeInTheDocument();
+  });
+
+  it('offers the commercial registration (CR) number beside the VAT number, and saves both', async () => {
+    // D28/D29: a Saudi quotation carries the seller's CR and VAT numbers, and send-readiness now
+    // refuses a quote without them, pointing here. Until now this screen offered only the VAT —
+    // the CR was writable by the platform control plane alone, so the blocker would have pointed
+    // at a door with no handle.
+    updateTaxRegistration.mockResolvedValue({});
+    renderPage();
+    await screen.findByText('Noor And Sons');
+    fireEvent.click(screen.getByRole('button', { name: /edit business unit/i }));
+
+    const cr = await screen.findByLabelText(/Commercial Registration \(CR\) Number/i);
+    fireEvent.change(cr, { target: { value: '1010-123456' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(updateTaxRegistration).toHaveBeenCalledWith(7, '300000000000003', '1010-123456'));
   });
 
   it('never calls the forbidden create endpoint', async () => {
