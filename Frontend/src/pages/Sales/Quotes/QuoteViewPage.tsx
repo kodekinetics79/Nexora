@@ -204,8 +204,11 @@ const QuoteViewPage: React.FC = () => {
     onError: () => toast.error('Failed to mark as responded')
   });
 
-  // Applying the customer's quantities changes the quote, its readiness and its price
-  // attestation at once; all three queries are refreshed, and awaited, before the rep is told.
+  // Both of these END a customer-revision review, and both must leave the screen agreeing with
+  // itself before the rep is told anything. The readiness list is served by its own query; when
+  // only the quote was invalidated, the panel item vanished while the list below it still said
+  // "This quote is stale…" until a manual reload. The invalidations are awaited, so the toast is
+  // the last thing to happen, not the first.
   const refreshAfterRevisionReview = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ['quote-detail', id] }),
     queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] }),
@@ -213,9 +216,9 @@ const QuoteViewPage: React.FC = () => {
   ]);
   const resolveImpactMutation = useMutation({
     mutationFn: () => quoteService.resolveRevisionImpact(Number(id)),
-    onSuccess: () => {
+    onSuccess: async () => {
+      await refreshAfterRevisionReview();
       toast.success('Kept as quoted. The customer revision is recorded as reviewed.');
-      queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
     },
     onError: (error) => toast.error(presentableErrorMessage(error, 'The revision review could not be completed'), { duration: 8000 })
   });

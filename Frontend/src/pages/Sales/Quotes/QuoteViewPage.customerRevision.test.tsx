@@ -176,6 +176,22 @@ describe('QuoteViewPage — a customer revision arrived after the draft', () => 
     expect(toastMock.success.mock.calls[0][0]).toMatch(/2 lines/i);
   });
 
+  it('keep as quoted resolves the impact and refreshes the readiness list without a reload', async () => {
+    getById.mockResolvedValueOnce(staleDraft()).mockResolvedValue(reviewedDraft());
+    getSendReadiness.mockResolvedValueOnce(staleReadiness).mockResolvedValue(clearReadiness);
+    renderQuote();
+
+    expect(await screen.findByText(/This quote is stale because a customer revision was received/i)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /keep as quoted/i }));
+
+    await waitFor(() => expect(resolveRevisionImpact).toHaveBeenCalledWith(91));
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalled());
+    // The readiness query was asked again — the defect was that it never was.
+    expect(getSendReadiness.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/This quote is stale because a customer revision was received/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Revision 4 arrived after this draft/i)).not.toBeInTheDocument();
+  });
+
   it('still reads correctly on an older server that sends only the impact type', async () => {
     getById.mockResolvedValue({ ...staleDraft(), revisionImpactDetail: null });
     renderQuote();
