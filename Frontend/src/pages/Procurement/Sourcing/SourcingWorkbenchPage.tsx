@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link as RouterLink, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -415,6 +415,11 @@ function SourcingWorkbenchPage() {
   const [pricingSelection, setPricingSelection] = useState<{ awardId: number; quoteItemId: number; landedUnitCost: number; currencyCode: string } | null>(null);
   const [memoryLineId, setMemoryLineId] = useState<number | null>(null);
   const [poOpen, setPoOpen] = useState(false);
+  // D16: the Decision column is the point of the table and sat 14 columns to the right, off-screen
+  // at 1600px with no scroll cue. "Compare supplier offers" now lands the buyer ON the recommended
+  // row's decision control, and the column itself is pinned to the right edge (see DataTable).
+  const decisionControls = useRef(new Map<number, HTMLButtonElement>());
+  const [focusDecisionRequested, setFocusDecisionRequested] = useState(false);
   const [approveOrder, setApproveOrder] =
     useState<SupplierPurchaseOrder | null>(null);
   const [issueOrder, setIssueOrder] =
@@ -635,7 +640,7 @@ function SourcingWorkbenchPage() {
           : repliesNotCaptured.length > 0
             ? { tone: "warning", sentence: `${repliesNotCaptured.length} supplier repl${repliesNotCaptured.length === 1 ? "y is" : "ies are"} in but not captured yet. Capture ${repliesNotCaptured.length === 1 ? "it" : "them"} from the Solicitations tab.`, action: <Button variant="contained" onClick={() => setTab(1)}>Capture the reply</Button> }
             : linesAwaitingAward.length > 0
-              ? { tone: "warning", sentence: `Offers are in for ${linesAwaitingAward.length} line${linesAwaitingAward.length === 1 ? "" : "s"}. Compare them and approve the best one.`, action: <Button variant="contained" onClick={() => setTab(2)}>Compare supplier offers</Button> }
+              ? { tone: "warning", sentence: `Offers are in for ${linesAwaitingAward.length} line${linesAwaitingAward.length === 1 ? "" : "s"}. Compare them and approve the best one.`, action: <Button variant="contained" onClick={() => { setTab(2); setFocusDecisionRequested(true); }}>Compare supplier offers</Button> }
               : shortAskedDeclined.length > 0
                 ? { tone: "warning", sentence: `Every supplier asked for ${shortAskedDeclined.length} line${shortAskedDeclined.length === 1 ? "" : "s"} has declined or let the request expire. Ask a different supplier.`, action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortAskedDeclined[0])}>Ask another supplier</Button> : undefined }
                 : shortNotAsked.length > 0
@@ -665,6 +670,19 @@ function SourcingWorkbenchPage() {
                             : awaitingSuppliers.length > 0
                               ? { tone: "info", sentence: `Every line is covered, but ${awaitingSuppliers.length} supplier RFQ${awaitingSuppliers.length === 1 ? " is" : "s are"} still open. Nothing else is waiting on you.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
                               : { tone: "success", sentence: "Every line is covered from stock or an approved offer. Nothing is waiting on suppliers.", action: rfqId ? <Button variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined };
+
+  useEffect(() => {
+    if (!focusDecisionRequested || tab !== 2 || !comparisonsQuery.data) return;
+    const targetLine = linesAwaitingAward[0];
+    const comparison = targetLine ? comparisonsQuery.data[targetLine.id] : undefined;
+    const targetOfferId = comparison?.recommendedSupplierQuotedItemId
+      ?? orderedOffers.find((offer) => offer.rfqItemId === targetLine?.id)?.id;
+    const control = targetOfferId == null ? undefined : decisionControls.current.get(targetOfferId);
+    if (!control) return;
+    control.scrollIntoView?.({ block: "center", inline: "end" });
+    control.focus();
+    setFocusDecisionRequested(false);
+  }, [focusDecisionRequested, tab, comparisonsQuery.data, linesAwaitingAward, orderedOffers]);
 
   const openSourcingCase = useMutation({
     mutationFn: async (line: (typeof unresolvedLines)[number]) =>
@@ -1083,7 +1101,7 @@ function SourcingWorkbenchPage() {
                 <TableCell>How the score is made up</TableCell>
                 <TableCell>Evidence</TableCell>
                 <TableCell align="right">Still to source</TableCell>
-                <TableCell align="right">Decision</TableCell>
+                <TableCell align="right" data-pinned="right">Decision</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -1302,7 +1320,7 @@ function SourcingWorkbenchPage() {
                   <TableCell align="right">
                     {remainingRequirement(offer.rfqItemId)}
                   </TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" data-pinned="right">
                     <Stack spacing={0.5} sx={{ alignItems: "flex-end" }}>
                       {/* The score chip sits BESIDE the landed-cost fact and never replaces it.
                           When the recommendation is not the cheapest offer, it says what the
@@ -1369,6 +1387,10 @@ function SourcingWorkbenchPage() {
                             variant={canApprove ? "contained" : "outlined"}
                             startIcon={<AssignmentTurnedIn />}
                             disabled={!canApprove}
+                            ref={(element: HTMLButtonElement | null) => {
+                              if (element) decisionControls.current.set(offer.id, element);
+                              else decisionControls.current.delete(offer.id);
+                            }}
                             sx={{ display: canAward ? "inline-flex" : "none" }}
                             onClick={() => setAwardOffer(offer)}
                           >
@@ -1852,7 +1874,27 @@ function DataTable({
   const count = body?.props?.children?.length ?? 0;
   return (
     <Paper variant="outlined" sx={{ overflowX: "auto" }}>
-      <Table size="small" sx={{ minWidth: 900, "& thead .MuiTableCell-root": { fontWeight: 700, bgcolor: "action.hover", whiteSpace: "nowrap" }, "& tbody tr:hover": { bgcolor: "action.hover" } }}>
+      <Table
+        size="small"
+        sx={{
+          minWidth: 900,
+          "& thead .MuiTableCell-root": { fontWeight: 700, bgcolor: "action.hover", whiteSpace: "nowrap" },
+          "& tbody tr:hover": { bgcolor: "action.hover" },
+          // D16. A cell marked data-pinned="right" stays at the right edge while the table scrolls,
+          // so the decision is on screen at every width. Opaque, with a left border and shadow, so
+          // it reads as pinned rather than as a column that happens to be last. Declared after the
+          // thead rule on purpose: same specificity, and the later one wins the header background.
+          "& .MuiTableCell-root[data-pinned='right']": {
+            position: "sticky",
+            right: 0,
+            zIndex: 1,
+            bgcolor: "background.paper",
+            borderLeft: "1px solid",
+            borderColor: "divider",
+            boxShadow: "-8px 0 12px -10px rgba(0,0,0,0.35)",
+          },
+        }}
+      >
         {children}
       </Table>
       {count === 0 && (
