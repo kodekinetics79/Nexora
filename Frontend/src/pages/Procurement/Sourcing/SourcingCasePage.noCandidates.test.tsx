@@ -103,12 +103,15 @@ describe('SourcingCasePage — no known supplier is a next step, not a dead end'
     expect(ask.className).toContain('MuiButton-outlined');
   });
 
-  it('shows why a blocked supplier cannot be asked in one line, with every reason one hover away', async () => {
-    getSourcingCase.mockResolvedValue(sourcingCase([candidate({ blockingReasons: ['Supplier approval is required', 'Supplier verification status must be VERIFIED'] })]));
+  it('shows every reason a blocked supplier cannot be asked, in words, with nothing hidden behind "N more"', async () => {
+    // 2026-09-15: "Supplier approval is required · 3 more" sent the manager to a second screen to
+    // find out what the three were. Every blocker is now on the row, in the rep's words.
+    getSourcingCase.mockResolvedValue(sourcingCase([candidate({ blockingReasons: ['Supplier approval or explicit provisional approval is required', 'Supplier verification status must be VERIFIED'] })]));
     renderPage();
 
-    expect(await screen.findByText('Needs approval')).toBeInTheDocument();
-    expect(screen.getByText('Supplier approval is required · 1 more')).toBeInTheDocument();
+    expect(await screen.findByText(/Not approved/)).toBeInTheDocument();
+    expect(screen.getByText(/Not verified/)).toBeInTheDocument();
+    expect(screen.queryByText(/· 1 more/)).not.toBeInTheDocument();
     expect(screen.getByText('Tags name this part or its maker')).toBeInTheDocument();
     expect(screen.queryByText('Persisted tenant relationship')).not.toBeInTheDocument();
   });
@@ -124,12 +127,14 @@ describe('SourcingCasePage — no known supplier is a next step, not a dead end'
     expect(screen.getByText('1 of 1 can be asked · 1 ticked')).toBeInTheDocument();
   });
 
-  it('keeps the server sentence once a supplier can be asked', async () => {
+  it('tells the rep to tick once a supplier can be asked, instead of the server\'s "Select suppliers for outreach"', async () => {
+    // The sentence follows the ticks (D13, 2026-09-15): none ticked → tell them to tick.
     getSourcingCase.mockResolvedValue({ ...sourcingCase([candidate({ eligibleForSupplierRfq: true, blockingReasons: [] })], 'CANDIDATES_READY'), nextAction: 'Select suppliers for outreach' });
     renderPage();
 
     const panel = await screen.findByTestId('sourcing-case-next-step');
-    expect(within(panel).getByText('Select suppliers for outreach')).toBeInTheDocument();
+    expect(within(panel).getByText(/Tick the suppliers you want to ask/)).toBeInTheDocument();
+    expect(within(panel).queryByText('Select suppliers for outreach')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Add a supplier' })).not.toBeInTheDocument();
   });
 });
