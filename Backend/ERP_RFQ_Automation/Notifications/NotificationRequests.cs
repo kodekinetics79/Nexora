@@ -45,9 +45,41 @@ namespace ERP_RFQ_Automation.Notifications
         public string BuyerCompany { get; set; } = "Nexora";
         public string RfqNumber { get; set; } = string.Empty;
         public string RfqTitle { get; set; } = string.Empty;
+
+        /// <summary>
+        /// One-line plain-text description of what is wanted. Rendered only when
+        /// <see cref="Lines"/> is empty — the shape of messages queued before the per-line
+        /// contract existed.
+        /// </summary>
         public string ItemSummary { get; set; } = string.Empty;
+
+        /// <summary>
+        /// What the supplier is asked to quote, one entry per line. Each becomes its own row in
+        /// the email so the supplier sees the description, maker, part number, quantity with its
+        /// unit and the needed-by date rather than a line id.
+        /// </summary>
+        public List<RfqToSupplierLine> Lines { get; set; } = new();
+
         public string DueDate { get; set; } = string.Empty;
         public string Message { get; set; } = "Please submit your best pricing and lead times.";
+    }
+
+    /// <summary>One line of a supplier RFQ, already formatted for display.</summary>
+    public sealed class RfqToSupplierLine
+    {
+        public string LineNumber { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public string? Maker { get; set; }
+        public string? MakerPartNumber { get; set; }
+        /// <summary>The buyer's own material or stock code for the item, when their document gave one.</summary>
+        public string? MaterialCode { get; set; }
+        /// <summary>Quantity already formatted, e.g. "12".</summary>
+        public string Quantity { get; set; } = string.Empty;
+        public string? UnitOfMeasure { get; set; }
+        /// <summary>Needed-by date already formatted, or null when the buyer gave none.</summary>
+        public string? RequiredBy { get; set; }
+        /// <summary>The buyer's approved-maker list when the line names no single maker.</summary>
+        public string? AcceptableMakers { get; set; }
     }
 
     /// <summary>Delivery of a prepared quotation to a buyer.</summary>

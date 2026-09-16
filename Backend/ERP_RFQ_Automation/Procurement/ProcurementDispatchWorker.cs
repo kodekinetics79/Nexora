@@ -133,8 +133,25 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                     BusinessUnitId = payload.BusinessUnitId.ToString(),
                     SupplierName = payload.SupplierName,
                     RfqNumber = payload.RfqNumber,
-                    RfqTitle = $"Request for quotation {payload.RfqNumber}",
+                    // Says what is being asked, not which record it is. The customer is not
+                    // named: suppliers are promised the customer's prices and margins stay
+                    // private, and the customer's identity is kept with them.
+                    RfqTitle = payload.Lines is { Count: > 0 }
+                        ? $"Request for quotation for {payload.Lines.Count} line{(payload.Lines.Count == 1 ? "" : "s")}"
+                        : $"Request for quotation {payload.RfqNumber}",
                     ItemSummary = payload.ItemSummary,
+                    Lines = (payload.Lines ?? Array.Empty<SolicitationDispatchLine>()).Select(line => new RfqToSupplierLine
+                    {
+                        LineNumber = line.LineNumber,
+                        Description = line.Description,
+                        Maker = line.Maker,
+                        MakerPartNumber = line.MakerPartNumber,
+                        MaterialCode = line.MaterialCode,
+                        Quantity = line.Quantity.ToString("0.####"),
+                        UnitOfMeasure = line.UnitOfMeasure,
+                        RequiredBy = line.RequiredOn?.ToString("yyyy-MM-dd"),
+                        AcceptableMakers = line.AcceptableMakers
+                    }).ToList(),
                     DueDate = payload.DueOn?.ToString("yyyy-MM-dd") ?? "Please respond promptly",
                     CtaPath = $"/procurement/rfqs/{payload.RfqId}/sourcing"
                 }, providerCts.Token);

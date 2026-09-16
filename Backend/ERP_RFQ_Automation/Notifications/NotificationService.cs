@@ -63,6 +63,10 @@ namespace ERP_RFQ_Automation.Notifications
                 ["rfqNumber"] = request.RfqNumber,
                 ["rfqTitle"] = request.RfqTitle,
                 ["itemSummary"] = request.ItemSummary,
+                // The renderer substitutes raw text, so the per-line rows are built (and
+                // HTML-encoded) here rather than trusting a product description with markup.
+                ["itemRowsHtml"] = RfqToSupplierLineFormatter.HtmlRows(request.Lines, request.ItemSummary),
+                ["itemRowsText"] = RfqToSupplierLineFormatter.TextRows(request.Lines, request.ItemSummary),
                 ["dueDate"] = request.DueDate,
                 ["message"] = request.Message,
                 ["ctaUrl"] = ResolveCta(request.CtaPath),

@@ -489,9 +489,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             _db.Add(solicitation);
             await _db.SaveChangesAsync(ct);
             solicitation.SupplierRfqNumber = $"SRFQ-{command.BusinessUnitId:D4}-{solicitation.Id:D8}";
+            var preparedLines = new[]
+            {
+                await DescribeLineForSupplierAsync(rfqItem, sourcingCase.UnfulfilledQuantity, ct)
+            };
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
-                solicitation.SupplierRfqNumber, $"{sourcingCase.RfqItemId}: {sourcingCase.UnfulfilledQuantity:0.####}", command.DueOn));
+                solicitation.SupplierRfqNumber, SummariseLinesForSupplier(preparedLines), command.DueOn, preparedLines));
             candidate.Selected = true;
             candidate.UpdatedOn = now;
             sourcingCase.Status = SourcingCaseStatuses.OutreachReady;
@@ -931,9 +935,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             _db.Add(solicitation);
             await _db.SaveChangesAsync(ct);
 
+            var describedLines = new List<SolicitationDispatchLine>(requestedLines.Count);
+            foreach (var requestedLine in requestedLines)
+                describedLines.Add(await DescribeLineForSupplierAsync(
+                    requestedLine, requestedQuantities[requestedLine.Id], ct));
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name, rfq.Rfqno,
-                string.Join(", ", requestedQuantities.OrderBy(x => x.Key).Select(x => $"{x.Key}: {x.Value:0.####}")), command.DueOn));
+                SummariseLinesForSupplier(describedLines), command.DueOn, describedLines));
             _db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
             {
                 BusinessUnitId = command.BusinessUnitId,
@@ -3329,8 +3337,94 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     {
         if (businessUnitId <= 0) throw new ProcurementValidationException("A valid authenticated business unit is required.");
     }
+
+    /// <summary>
+    /// Describes one RFQ line in the words a supplier needs. The quantity is the sourcing
+    /// shortfall (what we actually need bought), never the customer's full demand. The
+    /// customer's unit price is deliberately not read: the send dialog promises suppliers never
+    /// see target prices or margins, and the customer's name is left out for the same reason.
+    /// </summary>
+    private async Task<SolicitationDispatchLine> DescribeLineForSupplierAsync(
+        Rfqitem line, decimal quantity, CancellationToken ct)
+    {
+        var maker = Clean(line.ManufacturerName);
+        string? acceptableMakers = null;
+        if (maker is null)
+        {
+            // A line with no single maker may still carry the customer's approved-maker list,
+            // captured verbatim from their document. The RFQ line holds a copy taken at
+            // promotion; older RFQ lines predate that copy and are read through the lead line
+            // that produced them.
+            acceptableMakers = ApprovedMakers(line.ExtraFields);
+            if (acceptableMakers is null && line.SourceLeadItemRevisionId.HasValue)
+            {
+                var leadExtraFields = await _db.Set<LeadIdentity.LeadItemRevision>().AsNoTracking()
+                    .Where(x => x.Id == line.SourceLeadItemRevisionId.Value && x.LeadItem != null)
+                    .Select(x => x.LeadItem!.ExtraFields)
+                    .FirstOrDefaultAsync(ct);
+                acceptableMakers = ApprovedMakers(leadExtraFields);
+            }
+        }
+        return new SolicitationDispatchLine(
+            Clean(line.LineItemNo) ?? line.Id.ToString(),
+            Clean(line.ProductShortDescription) ?? Clean(line.ProductShortName) ?? Clean(line.ItemText),
+            maker,
+            Clean(line.ManufacturerPartNumber),
+            Clean(line.ItemMaterialCode),
+            quantity,
+            Clean(line.UnitOfMeasure),
+            line.RequiredDesiredDate,
+            acceptableMakers);
+    }
+
+    private static string? ApprovedMakers(string? extraFieldsJson)
+    {
+        var extra = ExtraFieldsJson.Deserialize(extraFieldsJson);
+        if (extra is null) return null;
+        foreach (var (key, value) in extra)
+            if (string.Equals(key.Trim(), "Approved manufacturers", StringComparison.OrdinalIgnoreCase))
+                return Clean(value);
+        return null;
+    }
+
+    /// <summary>
+    /// Plain-text fallback for readers that only know <see cref="SolicitationDispatchPayload.ItemSummary"/>.
+    /// Reads as a sentence a supplier could act on, never as an internal id and a number.
+    /// </summary>
+    internal static string SummariseLinesForSupplier(IReadOnlyList<SolicitationDispatchLine> lines) =>
+        string.Join("; ", lines.Select(line =>
+        {
+            var what = line.Description ?? line.MakerPartNumber ?? line.MaterialCode ?? "item";
+            var quantity = $"{line.Quantity:0.####}{(line.UnitOfMeasure is null ? "" : " " + line.UnitOfMeasure)}";
+            return $"Line {line.LineNumber}: {what} — {quantity}";
+        }));
+
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
 
+/// <summary>
+/// What the supplier is asked to quote, one entry per RFQ line the solicitation covers.
+/// Written into the outbox payload so the email can list each line in the words a supplier
+/// needs (what, whose make, which part, how many, by when) instead of an internal line id.
+/// Never carries the customer's target price, the customer's name, or any margin figure.
+/// </summary>
+internal sealed record SolicitationDispatchLine(
+    string LineNumber,
+    string? Description,
+    string? Maker,
+    string? MakerPartNumber,
+    string? MaterialCode,
+    decimal Quantity,
+    string? UnitOfMeasure,
+    DateTime? RequiredOn,
+    string? AcceptableMakers);
+
+/// <summary>
+/// The governed envelope a queued supplier RFQ travels in. <see cref="Lines"/> is newer than
+/// <see cref="ItemSummary"/>: messages queued before it existed deserialize with a null
+/// collection and the dispatcher falls back to the plain-text summary, so nothing already in
+/// the outbox is stranded by the upgrade.
+/// </summary>
 internal sealed record SolicitationDispatchPayload(
     long SolicitationId,
     long BusinessUnitId,
@@ -3339,7 +3433,8 @@ internal sealed record SolicitationDispatchPayload(
     string SupplierName,
     string RfqNumber,
     string ItemSummary,
-    DateTime? DueOn);
+    DateTime? DueOn,
+    IReadOnlyList<SolicitationDispatchLine>? Lines = null);
 
 internal sealed record CandidateEvidence(
     long SupplierId,

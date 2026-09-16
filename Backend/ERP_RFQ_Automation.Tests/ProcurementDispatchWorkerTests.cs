@@ -37,6 +37,63 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task Queued_lines_reach_the_supplier_email_under_a_title_that_says_what_is_asked()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending(payloadJson: JsonSerializer.Serialize(new
+        {
+            SolicitationId = 72_030,
+            BusinessUnitId = 72_001,
+            RfqId = DispatchFixture.Rfq,
+            ToEmail = "supplier@example.test",
+            SupplierName = "Supplier One",
+            RfqNumber = "SRFQ-0001-00000001",
+            ItemSummary = "Line 3: Ball valve 2 in — 12 EA",
+            DueOn = DateTime.UtcNow.AddDays(3),
+            Lines = new[]
+            {
+                new
+                {
+                    LineNumber = "3", Description = "Ball valve 2 in", Maker = "Velan", MakerPartNumber = "VB-200",
+                    MaterialCode = "100234", Quantity = 12m, UnitOfMeasure = "EA",
+                    RequiredOn = (DateTime?)new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc), AcceptableMakers = (string?)null
+                }
+            }
+        }));
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var request = fixture.Notification.LastRequest;
+        Assert.NotNull(request);
+        Assert.Equal("Request for quotation for 1 line", request!.RfqTitle);
+        var line = Assert.Single(request.Lines);
+        Assert.Equal("3", line.LineNumber);
+        Assert.Equal("Ball valve 2 in", line.Description);
+        Assert.Equal("Velan", line.Maker);
+        Assert.Equal("VB-200", line.MakerPartNumber);
+        Assert.Equal("100234", line.MaterialCode);
+        Assert.Equal("12", line.Quantity);
+        Assert.Equal("EA", line.UnitOfMeasure);
+        Assert.Equal("2026-10-01", line.RequiredBy);
+    }
+
+    [Fact]
+    public async Task A_message_queued_before_lines_existed_still_sends_with_its_summary()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var request = fixture.Notification.LastRequest;
+        Assert.NotNull(request);
+        Assert.Empty(request!.Lines);
+        Assert.Equal("10 x NX-100", request.ItemSummary);
+        Assert.Equal("Request for quotation RFQ-DISPATCH-1", request.RfqTitle);
+        Assert.Equal(ProcurementOutboxStatuses.Sent, (await fixture.StateAsync()).Message.Status);
+    }
+
+    [Fact]
     public async Task Provider_invoked_failure_is_terminal_uncertain_and_not_automatically_retried()
     {
         using var fixture = new DispatchFixture(new RecordingNotification { Result = false });
