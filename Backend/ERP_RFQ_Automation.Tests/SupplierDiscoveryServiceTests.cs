@@ -23,7 +23,7 @@ public sealed class SupplierDiscoveryServiceTests
     // ---- gates ---------------------------------------------------------------
 
     [Fact]
-    public async Task Without_a_search_key_the_rep_is_told_to_ask_the_administrator_and_nothing_is_searched()
+    public async Task Without_a_search_key_the_rep_sees_a_neutral_not_available_message_and_nothing_is_searched()
     {
         using var harness = new Harness(apiKey: null);
         var caseId = await harness.CreateCaseAsync("no-key");
@@ -38,21 +38,38 @@ public sealed class SupplierDiscoveryServiceTests
         Assert.Equal(Part, result.SearchedFor.PartNumber);
     }
 
-    [Fact]
-    public async Task Without_the_companys_consent_the_search_is_refused_before_a_query_leaves()
+    // The search engine behind discovery is Nexora's raw material, set once at platform level.
+    // A client sees the finished result and never the ingredient: no provider name, no setting
+    // key, no "ask your administrator" (the tenant admin cannot set it anyway).
+    [Theory]
+    [InlineData("ollama")]
+    [InlineData("ApiKey")]
+    [InlineData("SupplierDiscovery:")]
+    [InlineData("administrator")]
+    [InlineData("search key")]
+    public void Tenant_facing_discovery_messages_never_name_the_provider_or_the_platform_setting(string forbidden)
     {
+        var tenantFacing = new[] { SupplierDiscoveryService.NotConfiguredMessage, SupplierDiscoveryService.ErrorMessage };
+        foreach (var message in tenantFacing)
+            Assert.DoesNotContain(forbidden, message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task The_search_runs_without_any_consent_step_because_buying_the_product_is_the_consent()
+    {
+        // Owner, 2026-09-16: a tenant that bought Nexora agreed to external providers and AI
+        // features; a "switch it on" gate has no business reason. Even a trust chain that would
+        // deny ollama.com must not stop the search — the only gate is the search key.
         using var harness = new Harness();
         harness.Trust.Decision = AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.NotAuthorized);
-        var caseId = await harness.CreateCaseAsync("no-consent");
+        harness.Provider.Answer = _ => StandardResults();
+        var caseId = await harness.CreateCaseAsync("bought-the-product");
 
         var result = await harness.Discover(caseId);
 
-        Assert.Equal(SupplierDiscoveryStatuses.ConsentRequired, result.Status);
-        Assert.Equal(SupplierDiscoveryService.ConsentRequiredMessage, result.Message);
-        Assert.Empty(harness.Provider.Queries);
-        Assert.Equal(AiPurposes.SupplierDiscovery, harness.Trust.LastPurpose);
-        Assert.Equal("https://ollama.com", harness.Trust.LastDestination!.Endpoint);
-        Assert.False(harness.Trust.LastUnstructured);
+        Assert.Equal(SupplierDiscoveryStatuses.Ready, result.Status);
+        Assert.NotEmpty(harness.Provider.Queries);
+        Assert.Null(harness.Trust.LastPurpose);
     }
 
     [Fact]
@@ -418,7 +435,7 @@ public sealed class SupplierDiscoveryServiceTests
         public async Task<T> Run<T>(Func<SupplierDiscoveryService, Task<T>> operation)
         {
             await using var context = Context();
-            var service = new SupplierDiscoveryService(context, Provider, Trust, new ProcurementApplicationService(context),
+            var service = new SupplierDiscoveryService(context, Provider, new ProcurementApplicationService(context),
                 _configuration, new NoopLogger<SupplierDiscoveryService>());
             return await operation(service);
         }

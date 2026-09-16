@@ -23,11 +23,11 @@ namespace ERP_RFQ_Automation.Procurement.Discovery;
 /// </summary>
 public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
 {
+    // Tenant-facing. Never names the provider or the setting: the search engine behind this is
+    // Nexora's raw material, configured once at platform level, and clients only see the finished
+    // result (owner decision, 2026-09-16). The platform-side detail goes to the log below.
     public const string NotConfiguredMessage =
-        "Internet supplier search is not set up for this company yet. Ask your administrator to add the search key (SupplierDiscovery:ApiKey).";
-
-    public const string ConsentRequiredMessage =
-        "Internet search is switched off for this company. Turn it on under Setup → AI governance, then try again.";
+        "Internet supplier search is not available right now. Nexora is finishing the setup; add the supplier yourself in the meantime.";
 
     public const string ErrorMessage =
         "The internet search did not answer. Try again in a minute, or add the supplier yourself.";
@@ -36,7 +36,6 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
 
     private readonly ErpRfqAutomationContext _db;
     private readonly ISupplierWebSearchProvider _provider;
-    private readonly IAiExternalProviderTrust _trust;
     private readonly IProcurementApplicationService _procurement;
     private readonly IConfiguration _configuration;
     private readonly ILogger<SupplierDiscoveryService> _log;
@@ -44,14 +43,12 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
     public SupplierDiscoveryService(
         ErpRfqAutomationContext db,
         ISupplierWebSearchProvider provider,
-        IAiExternalProviderTrust trust,
         IProcurementApplicationService procurement,
         IConfiguration configuration,
         ILogger<SupplierDiscoveryService> log)
     {
         _db = db;
         _provider = provider;
-        _trust = trust;
         _procurement = procurement;
         _configuration = configuration;
         _log = log;
@@ -180,17 +177,16 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
             new(status, message, searchedFor, 0, offset, limit, false, null, []);
 
         if (SupplierDiscoveryConfiguration.ApiKey(_configuration) is null)
-            return Empty(SupplierDiscoveryStatuses.NotConfigured, NotConfiguredMessage);
-
-        var consent = await _trust.EvaluateAsync(businessUnitId, _provider.Destination,
-            AiPurposes.SupplierDiscovery, unstructuredPayload: false, ct);
-        if (!consent.Allowed)
         {
-            _log.LogInformation(
-                "SupplierDiscovery refused for tenant {Tenant}: {Reason} for {Destination}.",
-                businessUnitId, consent.Reason, _provider.Destination.Endpoint);
-            return Empty(SupplierDiscoveryStatuses.ConsentRequired, ConsentRequiredMessage);
+            _log.LogWarning(
+                "Supplier discovery is not configured at platform level: set SupplierDiscovery:ApiKey (or Ollama:ApiKey). Business unit {BusinessUnitId} saw the neutral not-available message.",
+                businessUnitId);
+            return Empty(SupplierDiscoveryStatuses.NotConfigured, NotConfiguredMessage);
         }
+
+        // No consent step. A company that bought Nexora bought this: external suppliers and AI
+        // features are part of the terms, so the only thing that can stop a search is a
+        // missing search key (owner decision, 2026-09-16).
 
         if (identity.IsEmpty)
             return Empty(SupplierDiscoveryStatuses.NoResults,
