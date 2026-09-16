@@ -249,12 +249,11 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         if (!string.Equals(current.Supplier.ContactEmail?.Trim(), payload.ToEmail.Trim(),
                 StringComparison.OrdinalIgnoreCase))
             return "SUPPLIER_CONTACT_CHANGED";
-        if (current.Supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved
-                or SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional)
-            || current.Supplier.VerificationStatus != SupplierVerificationStatuses.Verified
-            || current.Supplier.ComplianceStatus != SupplierComplianceStatuses.Cleared
-            || current.Supplier.RiskStatus is SupplierRiskStatuses.High or SupplierRiskStatuses.Blocked
-            || current.Supplier.ReadinessStatus != SupplierReadinessStatuses.Ready)
+        // The same rule the request was prepared under: asking for a price needs a supplier nobody
+        // has shut out. Approval, verification, compliance and readiness are checked when a price is
+        // picked (owner decision 2026-09-16). A copy of the old rule here silently dead-lettered every
+        // request to a newly found supplier.
+        if (ProcurementApplicationService.SupplierAskBlockingReasons(current.Supplier).Count > 0)
             return "SUPPLIER_GOVERNANCE_NOT_READY";
         return null;
     }

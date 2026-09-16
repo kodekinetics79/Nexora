@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.DTOs.BusinessUnit;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
@@ -125,6 +126,37 @@ public sealed class SupplierReadinessGatingTests
                 && x.EventType == "SUPPLIER_RFQ_CREATED")
             .SingleAsync();
         Assert.Contains("\"Quantity\":7", createdEvent.PayloadJson);
+    }
+
+    [Theory]
+    [InlineData(SolicitationStatus.DeliveryFailed)]
+    [InlineData(SolicitationStatus.Sent)]
+    [InlineData(SolicitationStatus.Responded)]
+    public async Task The_rep_can_ask_the_same_supplier_again(SolicitationStatus earlier)
+    {
+        // The last email failed, the supplier has not answered, or their price has expired: asking
+        // again is the rep's choice and makes a new numbered request.
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            new CreateSourcingCaseCommand(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId,
+                10, false, $"again-{earlier}", "qa", $"corr-again-{earlier}")));
+        var candidate = Assert.Single(created.Candidates);
+        var first = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+            $"again-first-{earlier}", "qa", $"corr-again-first-{earlier}")));
+        await using (var setup = fixture.Context())
+        {
+            var row = await setup.Set<ERP_RFQ_Automation.Agent.Models.SupplierSolicitation>().SingleAsync(x => x.Id == first.SupplierSolicitationId);
+            row.Status = earlier;
+            await setup.SaveChangesAsync();
+        }
+
+        var second = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, first.SourcingCaseVersion,
+            $"again-second-{earlier}", "qa", $"corr-again-second-{earlier}")));
+
+        Assert.NotEqual(first.SupplierSolicitationId, second.SupplierSolicitationId);
     }
 
     [Theory]

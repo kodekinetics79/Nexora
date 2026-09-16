@@ -448,6 +448,23 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task A_newly_found_supplier_that_is_not_approved_yet_still_receives_the_request()
+    {
+        // Live on 2026-09-16: two suppliers found on the internet for RB75-50 were ticked and sent,
+        // and the dispatcher's own copy of the old approval rule dead-lettered both. Asking for a
+        // price needs a supplier nobody has shut out; approval comes when its price is picked.
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+        await fixture.MakeSupplierNewlyFoundAsync();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(1, fixture.Notification.SendCount);
+        Assert.Equal(SolicitationStatus.Sent, state.Solicitation.Status);
+    }
+
+    [Fact]
     public async Task Provider_timeout_is_terminal_delivery_uncertain_without_resend()
     {
         var notification = new RecordingNotification { PauseDelivery = true };
@@ -788,6 +805,17 @@ public sealed class ProcurementDispatchWorkerTests
                 await db.ProcurementOutboxMessages.AsNoTracking().SingleAsync(),
                 await db.Set<SupplierSolicitation>().AsNoTracking().SingleAsync(),
                 await db.ProcurementEvents.AsNoTracking().ToListAsync());
+        }
+
+        public async Task MakeSupplierNewlyFoundAsync()
+        {
+            await using var db = _database.ContextFor(null);
+            var supplier = await db.Suppliers.SingleAsync(x => x.Id == Supplier);
+            supplier.GovernanceStatus = SupplierGovernanceStatuses.Discovered;
+            supplier.VerificationStatus = SupplierVerificationStatuses.Pending;
+            supplier.ComplianceStatus = SupplierComplianceStatuses.Pending;
+            supplier.ReadinessStatus = SupplierReadinessStatuses.ReviewRequired;
+            await db.SaveChangesAsync();
         }
 
         public async Task BlockSupplierAsync()

@@ -676,6 +676,8 @@ const procurementService = {
      * request details. Omit or send blank and the email keeps its standard sentence.
      */
     message?: string | null,
+    /** How many to ask for. Omit and the server asks for the line's shortfall. */
+    quantity?: number | null,
   ): Promise<SupplierRfqPreparationOutcome[]> => {
     const results: SupplierRfqPreparationOutcome[] = [];
     let version = expectedVersion;
@@ -684,7 +686,7 @@ const procurementService = {
         const prepared = unwrap(
           await axiosInstance.post<PreparedSupplierRfqResult>(
           `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`,
-          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null },
+          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null, quantity: quantity ?? null },
           {
             headers: commandHeaders(
               `prepare-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,
@@ -709,8 +711,8 @@ const procurementService = {
         results.push({ supplierId, succeeded: true, queued });
         version = queued.sourcingCaseVersion;
       } catch (error) {
+        // One supplier refusing does not stop the others being asked; the case version only moves on success.
         results.push({ supplierId, succeeded: false, error });
-        break;
       }
     }
     return results;

@@ -477,11 +477,18 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 x.BusinessUnitId == command.BusinessUnitId
                 && x.SourcingCaseId == sourcingCase.Id
                 && x.SupplierId == command.SupplierId, ct);
+            // Asking the same supplier again is the rep's choice: the last email failed, their price
+            // expired, or they have not answered. Only a request still being sent is left alone; a
+            // prepared one is picked up below.
+            if (existingPrepared is not null && existingPrepared.Status != SolicitationStatus.PendingDispatch)
+            {
+                if (existingPrepared.Status == SolicitationStatus.Dispatching)
+                    throw new ProcurementConflictException(
+                        $"{supplier.Name} is being emailed right now. Wait a moment before asking them again.");
+                existingPrepared = null;
+            }
             if (existingPrepared is not null)
             {
-                if (existingPrepared.Status != SolicitationStatus.PendingDispatch)
-                    throw new ProcurementConflictException(
-                        "Supplier outreach already exists for this candidate. Review its current delivery or response status.");
                 var alreadyQueued = await _db.ProcurementOutboxMessages.AnyAsync(x =>
                     x.BusinessUnitId == command.BusinessUnitId
                     && x.SupplierSolicitationId == existingPrepared.Id, ct);
