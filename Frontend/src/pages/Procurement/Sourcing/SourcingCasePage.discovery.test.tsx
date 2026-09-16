@@ -123,6 +123,8 @@ describe('SourcingCasePage — suppliers from the internet', () => {
     const panel = await screen.findByTestId('sourcing-case-next-step');
     await waitFor(() => expect(within(panel).getByText('Internet search is not switched on for your company yet. Ask your administrator.')).toBeInTheDocument());
     expect(within(panel).getByText(/No supplier on your list is linked to LV431831 yet/)).toBeInTheDocument();
+    // Said once, in the Next step; the internet section does not repeat it.
+    expect(screen.getAllByText('Internet search is not switched on for your company yet. Ask your administrator.')).toHaveLength(1);
     const add = screen.getByRole('button', { name: 'Add a supplier' });
     expect(add.className).toContain('MuiButton-contained');
     expect(screen.queryByRole('button', { name: /to my suppliers/ })).not.toBeInTheDocument();

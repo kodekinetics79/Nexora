@@ -638,7 +638,10 @@ function SourcingCasePage() {
             </Stack>
           )}
 
-          {!discoverySearching && discoveryMessage && (
+          {/* One sentence, once. When the list above is empty the Next step panel already carries the
+              server's sentence, so this section repeats it only when a transport error needs its
+              Try again button, or when known suppliers exist and the panel is talking about them. */}
+          {!discoverySearching && discoveryMessage && (!noKnownSupplier || discovery.isError) && (
             <Alert
               severity="info"
               action={discovery.isError ? <Button color="inherit" onClick={() => discovery.refetch()}>Try again</Button> : undefined}
