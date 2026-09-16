@@ -7,6 +7,7 @@ const WarehousePage = lazyWithRetry(() => import('./Warehouse/WarehousePage'));
 const UomPage = lazyWithRetry(() => import('./UOM/UomPage'));
 const LocationMaster = lazyWithRetry(() => import('./Location/LocationMaster'));
 const QuoteFormatPage = lazyWithRetry(() => import('./QuoteFormat/QuoteFormatPage'));
+const SupplierEmailPage = lazyWithRetry(() => import('./SupplierEmail/SupplierEmailPage'));
 const BusinessUnitPage = lazyWithRetry(() => import('./BusinessUnit/BusinessUnitPage'));
 const PriceStructurePage = lazyWithRetry(() => import('./PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazyWithRetry(() => import('./Sla/SlaSettingsPage'));
@@ -69,6 +70,9 @@ export const SETUP_ROUTES: SetupRoute[] = [
   // onto "Business Units". "Locations" is not a permission module and nothing enforces it.
   { path: 'locations', moduleName: 'Business Units', component: LocationMaster },
   { path: 'quote-format', moduleName: 'Quote Configuration', component: QuoteFormatPage },
+  // The wording around supplier RFQ emails (subject, greeting, opening, message, signature). It is
+  // company-facing document wording like the quote format, so it shares that module.
+  { path: 'supplier-email', moduleName: 'Quote Configuration', component: SupplierEmailPage },
   { path: 'business-unit', moduleName: 'Business Units', component: BusinessUnitPage },
   // Margin and mark-up structures a quote line is priced against — guarded by "Quotations",
   // the module that owns quote pricing. Stored as Setup_Master rows, so the server rule is

@@ -27,6 +27,11 @@ vi.mock('../../context/AuthContext', () => ({
   }),
 }));
 
+// The dialog has its own tests; here it only needs to prove the account menu opens it.
+vi.mock('./MySupplierEmailDialog', () => ({
+  default: () => <div role="dialog" aria-label="My supplier email" />,
+}));
+
 import Navbar from './Navbar';
 
 const hit = (entity: SearchHit['entity'], id: number, title: string): SearchHit => ({
@@ -192,5 +197,14 @@ describe('Navbar global search', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Workspace home' }));
 
     expect(screen.getByRole('status', { name: 'current route' })).toHaveTextContent('/dashboard');
+  });
+
+  it('opens My supplier email from the account menu', async () => {
+    renderNavbar();
+
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'My supplier email' }));
+
+    expect(await screen.findByRole('dialog', { name: 'My supplier email' })).toBeInTheDocument();
   });
 });
