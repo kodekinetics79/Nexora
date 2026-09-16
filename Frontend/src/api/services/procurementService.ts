@@ -494,6 +494,25 @@ const commandHeaders = (key: string) => ({
   "X-Correlation-ID": crypto.randomUUID(),
 });
 
+/**
+ * The server names a solicitation's lines `rfqItemIds`; every screen here reads
+ * `requestedRfqItemIds`. With the two names apart, each solicitation looked line-less: the
+ * workbench said "no supplier has been asked" after a send, and "Capture response" refused
+ * with "no verified RFQ line linkage" — the supplier side was unreachable after the first
+ * email (found driving the journey on 2026-09-15). Both names are accepted here, once, so no
+ * screen has to know which one the server chose.
+ */
+export function normalizeWorkbench(workbench: SourcingWorkbench): SourcingWorkbench {
+  const solicitations = (workbench.solicitations ?? []).map((solicitation) => {
+    const raw = solicitation as SupplierSolicitation & { rfqItemIds?: number[] | null };
+    return {
+      ...solicitation,
+      requestedRfqItemIds: raw.requestedRfqItemIds ?? raw.rfqItemIds ?? [],
+    };
+  });
+  return { ...workbench, solicitations };
+}
+
 const procurementService = {
   getPurchaseOrders: async (
     search = "",
@@ -508,9 +527,11 @@ const procurementService = {
 
   getWorkbench: async (rfqId?: number): Promise<SourcingWorkbench> =>
     rfqId
-      ? unwrap(
-          await axiosInstance.get<SourcingWorkbench>(
-            `/api/procurement/rfqs/${rfqId}/workbench`,
+      ? normalizeWorkbench(
+          unwrap(
+            await axiosInstance.get<SourcingWorkbench>(
+              `/api/procurement/rfqs/${rfqId}/workbench`,
+            ),
           ),
         )
       : Promise.reject(
