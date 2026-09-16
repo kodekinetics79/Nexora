@@ -28,11 +28,15 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { ArrowBack, PersonAdd, PersonSearch, Refresh, Send } from "@mui/icons-material";
+import { ArrowBack, HowToReg, PersonAdd, PersonSearch, Refresh, Send } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
 import procurementService, {
   type SourcingCaseCandidate,
 } from "../../../api/services/procurementService";
+import supplierService from "../../../api/services/supplierService";
+import {
+  APPROVE_FOR_RFQS_LABEL, approveForRfqs, approveForRfqsReason, blockerWords, presetClearsAllBlockers,
+} from "../../Suppliers/supplierRfqReadiness";
 import NextStepPanel from "../../../components/common/NextStepPanel";
 import { useAuth } from "../../../context/AuthContext";
 import { statusLabel } from "../../../utils/statusLabels";
@@ -93,7 +97,7 @@ function SourcingCasePage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
-  const { hasPermission } = useAuth();
+  const { hasPermission, userData } = useAuth();
   const [candidateLimit, setCandidateLimit] = useState<CandidateLimit>(10);
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<number[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -137,6 +141,13 @@ function SourcingCasePage() {
   const canAddSupplier = hasPermission("Suppliers", "create");
   const noKnownSupplier = !candidatesFrozen && candidates.length === 0;
   const noneReady = !candidatesFrozen && candidates.length > 0 && eligibleCandidates.length === 0;
+  // A manager may approve a supplier for RFQs from the row — the same guarded write the supplier
+  // page makes (server: manager role + Suppliers: Edit) — but only when approval alone would make
+  // it askable. A missing email, an inactive record or a High risk verdict is not fixed by a click here.
+  const canApproveInline = userData.isManager === true && hasPermission("Suppliers", "edit") && !candidatesFrozen;
+  const approvableCandidates = candidates.filter(
+    (candidate) => !isCandidateReady(candidate) && presetClearsAllBlockers(candidate.blockingReasons),
+  );
   // Same wording pattern as the "cannot prepare Supplier RFQs" notice below: a disabled control
   // says which of its two gates is shut, so the reader knows whether to ask for a permission or
   // simply that the step has passed.
@@ -190,6 +201,29 @@ function SourcingCasePage() {
       return next;
     }, { replace: true });
   }, [refreshOnReturn, query.data, canRefreshCandidates, refreshMutate, candidateLimit, setSearchParams]);
+
+  // Fetch the supplier for its concurrency token, record the working combination with a reason that
+  // names this screen (it lands on the supplier's change history), then let the list refresh itself.
+  const approveCandidate = useMutation({
+    mutationFn: async (candidate: SourcingCaseCandidate) => {
+      const supplier = await supplierService.getById(candidate.supplierId);
+      const decision = approveForRfqs(supplier);
+      if (!decision) {
+        throw new Error(`${candidate.supplierName} carries a High or Blocked risk verdict. A manager lowers it on the supplier page first.`);
+      }
+      await supplierService.govern(supplier.id, {
+        ...decision,
+        expectedConcurrencyToken: supplier.concurrencyToken ?? "",
+        reason: approveForRfqsReason(userData.userName || userData.email, "from the sourcing case"),
+      });
+      return candidate;
+    },
+    onSuccess: (candidate) => {
+      toast.success(`${candidate.supplierName} approved for RFQs.`);
+      refreshMutate(candidateLimit);
+    },
+    onError: (error) => toast.error(errorMessage(error, "The supplier could not be approved.")),
+  });
 
   const prepareSupplierRfqs = useMutation({
     mutationFn: async () => {
@@ -316,7 +350,9 @@ function SourcingCasePage() {
             ? "Add one with this part number or its maker in Tags, then press Refresh candidates."
             : "Ask someone who can add suppliers to add one with this part number or its maker in Tags."}`
           : noneReady
-            ? "None of these suppliers can be asked yet. Open each one and have a manager approve it, then press Refresh candidates."
+            ? (canApproveInline && approvableCandidates.length > 0
+              ? "None of these suppliers can be asked yet. Press Approve for RFQs beside a supplier you trust; the list refreshes on its own."
+              : "None of these suppliers can be asked yet. A manager approves them for RFQs on the supplier page, then press Refresh candidates.")
             : sourcingCase.nextAction}
         testId="sourcing-case-next-step"
         action={outreachAlreadySent
@@ -410,16 +446,29 @@ function SourcingCasePage() {
                       {isCandidateReady(candidate) ? (
                         <Chip size="small" color="success" variant="outlined" label="Yes" sx={{ fontWeight: 700 }} />
                       ) : (() => {
-                        const reasons = candidate.blockingReasons?.length ? candidate.blockingReasons : ["A dispatch contact is required."];
+                        // Every blocker, in the buyer's words; nothing hides behind "3 more".
+                        const reasons = candidate.blockingReasons?.length ? candidate.blockingReasons : ["A verified dispatch contact is required"];
+                        const approvable = presetClearsAllBlockers(reasons);
+                        const approvingThis = approveCandidate.isPending && approveCandidate.variables?.supplierId === candidate.supplierId;
                         return (
-                          <Tooltip describeChild title={<Stack component="ul" sx={{ m: 0, pl: 2 }}>{reasons.map((reason) => <li key={reason}>{reason}</li>)}</Stack>}>
-                            <Stack spacing={0.5} sx={{ alignItems: "flex-start", maxWidth: 260 }}>
-                              <Chip size="small" color="warning" variant="outlined" label={candidate.contactEmail ? "Needs approval" : "Needs a contact email"} sx={{ fontWeight: 700 }} />
-                              <Typography variant="caption" color="text.secondary">
-                                {reasons[0]}{reasons.length > 1 ? ` · ${reasons.length - 1} more` : ""}
-                              </Typography>
-                            </Stack>
-                          </Tooltip>
+                          <Stack spacing={0.5} sx={{ alignItems: "flex-start", maxWidth: 280 }}>
+                            <Chip size="small" color="warning" variant="outlined" sx={{ fontWeight: 700 }}
+                              label={!candidate.contactEmail ? "Needs a contact email" : approvable ? "Needs approval" : "Blocked"} />
+                            <Box component="ul" sx={{ m: 0, pl: 2 }}>
+                              {reasons.map((reason) => (
+                                <Typography key={reason} component="li" variant="caption" color="text.secondary" sx={{ display: "list-item" }}>
+                                  {blockerWords(reason)}
+                                </Typography>
+                              ))}
+                            </Box>
+                            {canApproveInline && approvable && (
+                              <Tooltip describeChild title="Records Approved, Verified, Compliance cleared, Risk Low and Ready for RFQs on this supplier, with a reason naming you and this case, then refreshes the list.">
+                                <Button size="small" variant="outlined" startIcon={<HowToReg />} onClick={() => approveCandidate.mutate(candidate)} disabled={approveCandidate.isPending}>
+                                  {approvingThis ? "Approving…" : APPROVE_FOR_RFQS_LABEL}
+                                </Button>
+                              </Tooltip>
+                            )}
+                          </Stack>
                         );
                       })()}
                     </TableCell>
