@@ -260,7 +260,11 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
   const { hasPermission } = useAuth();
   const held = isInfrastructureHold(item);
   const classificationPending = item.classification.replaceAll('_', '').toLowerCase() === 'pending';
+  const exactDuplicate = item.classification.replaceAll('_', '').toLowerCase() === 'exactduplicate';
   const hasExtractionScore = !held && !classificationPending;
+  // A hash match is a certainty, not a score: "0% confidence" on a byte-for-byte repeat read as
+  // "the system is not sure this is a duplicate", which is the opposite of what happened.
+  const scoreLabel = exactDuplicate ? 'Same file, matched by content' : confidenceLabel(item.confidence, hasExtractionScore);
   // Opening the record is a Leads read. Fit/participation and RFQ promotion remain separately
   // gated inside the workbench, matching their server actions.
   const canOpenWorkbench = commercialActionPermissions(hasPermission).canOpenLeadWorkbench;
@@ -296,7 +300,7 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
           </Typography>
           <Typography variant="caption" color="text.secondary">
             Received {timestampLabel(item.ingestedAtUtc)}
-            {' | '}{readable(item.processingPath)}{' | '}{confidenceLabel(item.confidence, hasExtractionScore)}
+            {' | '}{readable(item.processingPath)}{' | '}{scoreLabel}
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
             Security {readable(item.securityStatus || 'Pending')} updated {timestampLabel(item.securityScanUpdatedAtUtc || item.lastUpdatedAtUtc)}
@@ -567,6 +571,7 @@ export default function LeadIngestionBatchPage() {
         batch={batch}
         onDecide={(leadId) => navigate(`/procurement/leads/${leadId}/workbench`)}
         onOpenInquiries={() => navigate('/procurement/leads/all')}
+        onOpenLead={(leadId) => navigate(`/procurement/leads/view/${leadId}`)}
       />
       <Grid container spacing={1} sx={{ mb: 1.5 }}>
         {metrics.map((metric) => (

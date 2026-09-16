@@ -493,6 +493,50 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             .Include(x => x.MatchCandidates).ThenInclude(x => x.CandidateLead)
             .OrderBy(x => x.Id).ToListAsync(ct);
         var intakeById = intakeOccurrences.ToDictionary(x => x.Id);
+
+        // S1: an exact duplicate is a terminal outcome, not a step. The page needs the ORIGINAL to
+        // say "same file as X, on Y's desk" — for a hash match caught at intake that original is the
+        // source occurrence the intake row points at, reconciled into a lead in an earlier batch.
+        var originalIntakeIds = intakeOccurrences
+            .Where(x => x.OriginalOccurrenceId.HasValue)
+            .Select(x => x.OriginalOccurrenceId!.Value)
+            .Distinct().ToArray();
+        var duplicateOfByIntake = originalIntakeIds.Length == 0
+            ? new Dictionary<long, DuplicateOfDto>()
+            : (await (
+                from identity in _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                where identity.BusinessUnitId == bu
+                      && identity.SourceDocumentOccurrenceId.HasValue
+                      && originalIntakeIds.Contains(identity.SourceDocumentOccurrenceId.Value)
+                      && identity.LeadId.HasValue
+                join customer in _db.Customers.AsNoTracking() on identity.Lead!.CustomerId equals (long?)customer.Id into customers
+                from customer in customers.DefaultIfEmpty()
+                select new
+                {
+                    SourceOccurrenceId = identity.SourceDocumentOccurrenceId!.Value,
+                    LeadId = identity.LeadId!.Value,
+                    identity.CreatedAtUtc,
+                    identity.Lead!.Rfqno,
+                    identity.Lead.CommercialCaseReference,
+                    identity.Lead.BuyersName,
+                    CustomerName = customer != null ? customer.Name : null,
+                    OwnerFirst = identity.Lead.AssignToNavigation != null ? identity.Lead.AssignToNavigation.FirstName : null,
+                    OwnerLast = identity.Lead.AssignToNavigation != null ? identity.Lead.AssignToNavigation.LastName : null
+                }).ToListAsync(ct))
+              .GroupBy(x => x.SourceOccurrenceId)
+              .ToDictionary(g => g.Key, g =>
+              {
+                  // Ordered here, not in SQL: the SQLite test provider cannot ORDER BY DateTimeOffset.
+                  var first = g.OrderByDescending(x => x.CreatedAtUtc).First();
+                  return new DuplicateOfDto(first.LeadId, first.Rfqno, first.CommercialCaseReference,
+                      first.CustomerName ?? first.BuyersName, OwnerName(first.OwnerFirst, first.OwnerLast));
+              });
+        var reconciledLeadCustomerIds = rows.Where(x => x.Lead?.CustomerId != null).Select(x => x.Lead!.CustomerId!.Value).Distinct().ToArray();
+        var customerNames = reconciledLeadCustomerIds.Length == 0
+            ? new Dictionary<long, string>()
+            : await _db.Customers.AsNoTracking().Where(c => reconciledLeadCustomerIds.Contains(c.Id))
+                .ToDictionaryAsync(c => c.Id, c => c.Name, ct);
+
         var items = rows.Select(x =>
         {
             var intake = x.SourceDocumentOccurrenceId.HasValue
@@ -519,7 +563,12 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 ExtractionStatus = job?.Status.ToString(),
                 ExtractionUpdatedAtUtc = job is null ? null : AsUtc(job.UpdatedOn),
                 RecoverableSecurityHold = intake is not null && IsRecoverableSecurityHold(
-                    intake.IntakeStatus, intake.LastErrorCode, intake.SourceMetadataJson)
+                    intake.IntakeStatus, intake.LastErrorCode, intake.SourceMetadataJson),
+                DuplicateOf = x.Classification == LeadOccurrenceClassification.ExactDuplicate && x.Lead is not null
+                    ? new DuplicateOfDto(x.Lead.Id, x.Lead.Rfqno, x.Lead.CommercialCaseReference,
+                        (x.Lead.CustomerId.HasValue ? customerNames.GetValueOrDefault(x.Lead.CustomerId.Value) : null) ?? x.Lead.BuyersName,
+                        OwnerName(x.Lead.AssignToNavigation?.FirstName, x.Lead.AssignToNavigation?.LastName))
+                    : null
             };
         }).ToList();
 
@@ -569,7 +618,10 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 ExtractionUpdatedAtUtc = intake.ExtractionJobId.HasValue
                     && extractionJobs.GetValueOrDefault(intake.ExtractionJobId.Value) is { } job
                         ? AsUtc(job.UpdatedOn)
-                        : null
+                        : null,
+                DuplicateOf = exactDuplicate && intake.OriginalOccurrenceId.HasValue
+                    ? duplicateOfByIntake.GetValueOrDefault(intake.OriginalOccurrenceId.Value)
+                    : null
             });
         }
 
@@ -596,6 +648,11 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         int Count(LeadOccurrenceClassification c) => rows.Count(x => x.Classification == c);
         static DateTimeOffset AsUtc(DateTime value) =>
             new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
+        static string? OwnerName(string? first, string? last)
+        {
+            var name = $"{first} {last}".Trim();
+            return name.Length == 0 ? null : name;
+        }
     }
 
     // Single source of truth, shared with SecurityScanRecoveryService: what this read model counts as

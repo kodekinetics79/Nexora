@@ -35,6 +35,21 @@ export interface DocumentProgress {
 
 const norm = (value: string | null | undefined) => (value ?? '').replaceAll('_', '').toLowerCase();
 
+export const isExactDuplicate = (item: BatchReconciliationItemDTO) => norm(item.classification) === 'exactduplicate';
+
+/**
+ * A hash match is a finished outcome, not a step: nothing will be read and no customer will be
+ * identified, so the sentence names the inquiry the file repeats and whose desk it is on.
+ */
+export const duplicateSentence = (item: BatchReconciliationItemDTO): string => {
+  const original = item.duplicateOf;
+  if (!original) return 'This is the same file as one you already have. Nothing to do.';
+  const label = original.rfqNo || original.nexoraSerial || `inquiry ${original.leadId}`;
+  const customer = original.customerName ? ` (${original.customerName})` : '';
+  const desk = original.ownerName ? `, already on ${original.ownerName}'s desk` : ', which has no owner yet';
+  return `This is the same file as ${label}${customer}${desk}. Nothing to do.`;
+};
+
 /** The one step a document is on right now, and how far it has come. */
 export const documentProgress = (item: BatchReconciliationItemDTO): DocumentProgress => {
   const security = norm(item.securityStatus);
@@ -51,14 +66,18 @@ export const documentProgress = (item: BatchReconciliationItemDTO): DocumentProg
   if (held) return finish(1, 'held', 'Held: the safety scanner is offline. The file is stored safely and can be released with Retry.');
   if (security === 'quarantined' || security === 'rejected') return finish(1, 'failed', 'Did not pass the safety check. Nothing from this file was read.');
   if (classification === 'rejectedorunprocessable') return finish(2, 'failed', 'Could not be read. See the reason on the file below.');
+  // A byte-for-byte repeat is finished the moment it is recognised: nothing is read and no
+  // customer is identified, so it must be decided BEFORE the extraction checks below — a hash
+  // match caught at intake has no extraction job at all and sat on "Queued to be read" or
+  // "Identifying the customer" forever.
+  if (classification === 'exactduplicate') return finish(5, 'done', duplicateSentence(item));
   if (security === '' || security === 'pending') return finish(1, 'active', 'Checking the file is safe to open.');
   if (extraction === 'failed' || extraction === 'deadletter') return finish(2, 'failed', 'Reading stopped with an error. See the reason on the file below.');
   if (extraction === '' || extraction === 'pending' || extraction === 'leased') return finish(2, 'active', 'Queued to be read. Large bid lists take a few minutes.');
   if (extraction === 'extracting') return finish(2, 'active', 'Reading the document: headers, dates, lines and part numbers.');
   if (extraction === 'persisting') return finish(2, 'active', 'Saving what it read, line by line, with its evidence.');
   if (classification === 'pending') return finish(3, 'active', 'Comparing with inquiries you already have.');
-  const verdict = classification === 'exactduplicate' ? 'Same document as one you already have.'
-    : classification === 'revision' ? 'A new revision of an inquiry you already have.'
+  const verdict = classification === 'revision' ? 'A new revision of an inquiry you already have.'
       : classification === 'possiblematchreviewrequired' ? 'Might be a repeat of an earlier inquiry; a person decides.'
         : 'A new inquiry.';
   if (customer.startsWith('automatched') || customer === 'humanconfirmed' || customer === 'confirmed') {
@@ -100,9 +119,11 @@ export interface UploadProgressPanelProps {
   batch: BatchReconciliationDTO;
   onDecide: (leadId: number) => void;
   onOpenInquiries: () => void;
+  /** Opens an existing inquiry's record — the original a duplicate upload repeats. */
+  onOpenLead: (leadId: number) => void;
 }
 
-const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDecide, onOpenInquiries }) => {
+const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDecide, onOpenInquiries, onOpenLead }) => {
   const progress = batch.items.map((item) => ({ item, progress: documentProgress(item) }));
   const notYetRecorded = Math.max(batch.filesReceived - batch.items.length, 0);
   const total = Math.max(batch.filesReceived, batch.items.length);
@@ -117,8 +138,20 @@ const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({ batch, onDeci
     .map(({ item }) => item.leadId as number);
   const failed = progress.filter(({ progress: p }) => p.state === 'failed').length;
   const complete = running === 0 && notYetRecorded === 0;
+  const duplicates = progress.filter(({ item }) => isExactDuplicate(item)).map(({ item }) => item);
+  const onlyDuplicates = complete && duplicates.length > 0 && duplicates.length === progress.length;
+  const theDuplicate = onlyDuplicates && duplicates.length === 1 ? duplicates[0] : null;
 
-  const nextStep = complete
+  const nextStep = complete && onlyDuplicates
+    // Every file was a repeat. One contained button, to the inquiry the file repeats; when the
+    // original is unknown (never reconciled) the list of inquiries is the honest fallback.
+    ? theDuplicate?.duplicateOf
+      ? { tone: 'info' as const, title: 'Nothing to do', sentence: duplicateSentence(theDuplicate),
+          action: <Button variant="contained" onClick={() => onOpenLead(theDuplicate.duplicateOf!.leadId)} sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>Open the original</Button> }
+      : { tone: 'info' as const, title: 'Nothing to do',
+          sentence: theDuplicate ? duplicateSentence(theDuplicate) : `All ${duplicates.length} files are the same as inquiries you already have. Nothing to do.`,
+          action: <Button variant="outlined" onClick={onOpenInquiries} sx={{ whiteSpace: 'nowrap' }}>Open inquiries</Button> }
+    : complete
     ? readyLeads.length === 1
       ? { tone: 'success' as const, title: 'Done', sentence: `Your document is read${failed ? `, ${failed} could not be` : ''}. One inquiry is ready. Decide whether to quote it.`,
           action: <Button variant="contained" onClick={() => onDecide(readyLeads[0])} sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>Decide</Button> }

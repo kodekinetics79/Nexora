@@ -13,6 +13,15 @@ const batch = (items: BatchReconciliationItemDTO[], filesReceived = items.length
   externalOccurrences: 0, awaitingSecurityScan: 0, localFirstOccurrences: 0, items,
 });
 
+/** Exactly what the batch API returns for a file the hash caught at intake: no lead, no score, no customer. */
+const intakeDuplicate = (duplicateOf: BatchReconciliationItemDTO['duplicateOf']) => item({
+  occurrenceId: 0, classification: 'ExactDuplicate', leadId: null, confidence: 0, processingPath: 'IntakeResolved',
+  customerResolutionStatus: 'Awaiting customer resolution', securityStatus: 'Cleared', intakeStatus: 'Resolved',
+  fileName: 'AJP-RFQ-2026-0917 (1).pdf', duplicateOf,
+});
+
+const handlers = () => ({ onDecide: vi.fn(), onOpenInquiries: vi.fn(), onOpenLead: vi.fn() });
+
 describe('documentProgress — the step a document is on, in the rep\'s words', () => {
   it('walks safety check → reading → matching → customer → ready', () => {
     expect(documentProgress(item({ securityStatus: 'Pending' }))).toMatchObject({ step: 1, state: 'active' });
@@ -28,11 +37,24 @@ describe('documentProgress — the step a document is on, in the rep\'s words', 
     expect(documentProgress(item({ securityStatus: 'Cleared', extractionStatus: 'DeadLetter' }))).toMatchObject({ step: 2, state: 'failed' });
     expect(documentProgress(item({ recoverableSecurityHold: true }))).toMatchObject({ step: 1, state: 'held' });
   });
+
+  it('treats an exact duplicate as finished, naming the original instead of identifying a customer', () => {
+    const progress = documentProgress(intakeDuplicate({ leadId: 41, rfqNo: 'AJP-RFQ-2026-0917', customerName: 'Aramco', ownerName: 'Oze Khan' }));
+    expect(progress).toMatchObject({ step: 5, state: 'done' });
+    expect(progress.stages.every((s) => s === 'done')).toBe(true);
+    expect(progress.sentence).toBe("This is the same file as AJP-RFQ-2026-0917 (Aramco), already on Oze Khan's desk. Nothing to do.");
+    expect(progress.sentence).not.toMatch(/Identifying the customer/);
+  });
+
+  it('still finishes an exact duplicate whose original is unknown, without pretending to know it', () => {
+    const progress = documentProgress(intakeDuplicate(null));
+    expect(progress).toMatchObject({ step: 5, state: 'done', sentence: 'This is the same file as one you already have. Nothing to do.' });
+  });
 });
 
 describe('UploadProgressPanel', () => {
   it('keeps the rep on the page while the document is being read', () => {
-    render(<UploadProgressPanel batch={batch([item({ securityStatus: 'Cleared', extractionStatus: 'Extracting' })], 2)} onDecide={vi.fn()} onOpenInquiries={vi.fn()} />);
+    render(<UploadProgressPanel batch={batch([item({ securityStatus: 'Cleared', extractionStatus: 'Extracting' })], 2)} {...handlers()} />);
     expect(screen.getByText(/Reading your documents/)).toBeInTheDocument();
     expect(screen.getByText(/0 of 2 finished/)).toBeInTheDocument();
     expect(screen.getByText(/Reading the document: headers, dates, lines and part numbers/)).toBeInTheDocument();
@@ -40,16 +62,35 @@ describe('UploadProgressPanel', () => {
   });
 
   it('says done and offers Decide when the one inquiry is ready', () => {
-    const onDecide = vi.fn();
-    render(<UploadProgressPanel batch={batch([item({ securityStatus: 'Cleared', extractionStatus: 'Succeeded', classification: 'New', leadId: 42, customerResolutionStatus: 'AUTO_MATCHED_CONTACT_UNRESOLVED' })])} onDecide={onDecide} onOpenInquiries={vi.fn()} />);
+    const h = handlers();
+    render(<UploadProgressPanel batch={batch([item({ securityStatus: 'Cleared', extractionStatus: 'Succeeded', classification: 'New', leadId: 42, customerResolutionStatus: 'AUTO_MATCHED_CONTACT_UNRESOLVED' })])} {...h} />);
     expect(screen.getByText('Done')).toBeInTheDocument();
     expect(screen.getByText(/One inquiry is ready/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Decide' }));
-    expect(onDecide).toHaveBeenCalledWith(42);
+    expect(h.onDecide).toHaveBeenCalledWith(42);
   });
 
-  it('says nothing new to decide when every document was a repeat', () => {
-    render(<UploadProgressPanel batch={batch([item({ securityStatus: 'Cleared', extractionStatus: 'Duplicate', classification: 'ExactDuplicate', leadId: 9, customerResolutionStatus: 'AUTO_MATCHED' })])} onDecide={vi.fn()} onOpenInquiries={vi.fn()} />);
-    expect(screen.getByText(/Nothing new to decide/)).toBeInTheDocument();
+  it('closes an exact-duplicate upload with the original named and one button that opens it', () => {
+    const h = handlers();
+    render(<UploadProgressPanel batch={batch([intakeDuplicate({ leadId: 41, rfqNo: 'AJP-RFQ-2026-0917', customerName: 'Aramco', ownerName: 'Oze Khan' })], 1)} {...h} />);
+    expect(screen.getByText('Nothing to do')).toBeInTheDocument();
+    expect(screen.queryByText(/Reading your document/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Identifying the customer/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/% confidence/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("This is the same file as AJP-RFQ-2026-0917 (Aramco), already on Oze Khan's desk. Nothing to do.").length).toBeGreaterThan(0);
+    const [only] = screen.getAllByRole('button');
+    expect(only).toHaveTextContent('Open the original');
+    expect(only).toHaveClass('MuiButton-contained');
+    fireEvent.click(only);
+    expect(h.onOpenLead).toHaveBeenCalledWith(41);
+    expect(h.onDecide).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the inquiries list when a repeat has no known original', () => {
+    const h = handlers();
+    render(<UploadProgressPanel batch={batch([item({ securityStatus: 'Cleared', extractionStatus: 'Duplicate', classification: 'ExactDuplicate', leadId: 9, customerResolutionStatus: 'AUTO_MATCHED' })])} {...h} />);
+    expect(screen.getByText('Nothing to do')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open inquiries' }));
+    expect(h.onOpenInquiries).toHaveBeenCalled();
   });
 });

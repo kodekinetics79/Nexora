@@ -523,6 +523,20 @@ export interface BatchReconciliationItemDTO {
    * back to the error code (see src/utils/intakeErrors.ts).
    */
   recoverableSecurityHold?: boolean;
+  /**
+   * For an ExactDuplicate: the inquiry this file repeats byte for byte, so the batch page can name
+   * it and open it. Null when the original was never reconciled into a lead. Source:
+   * DuplicateOfDto in Backend/ERP_RFQ_Automation/LeadIdentity/LeadIdentityContracts.cs.
+   */
+  duplicateOf?: DuplicateOfDTO | null;
+}
+
+export interface DuplicateOfDTO {
+  leadId: number;
+  rfqNo?: string | null;
+  nexoraSerial?: string | null;
+  customerName?: string | null;
+  ownerName?: string | null;
 }
 
 export interface LeadMatchCandidateDTO {
