@@ -41,6 +41,10 @@ import NextStepPanel from '../../../components/common/NextStepPanel';
 import procurementService from '../../../api/services/procurementService';
 import { statusLabel } from '../../../utils/statusLabels';
 
+/** The one blocker that the send flow itself resolves (see PriceConfirmationDialog). */
+const isAttestationBlocker = (blocker: { code?: string | null }) =>
+  (blocker.code || '').toUpperCase() === 'PRICE_ATTESTATION_REQUIRED';
+
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -288,7 +292,14 @@ const QuoteViewPage: React.FC = () => {
   // renderer will, so it cannot disagree with them. The client heuristics remain as the fallback
   // for a failed or in-flight readiness call, so a broken query never makes this screen worse
   // than it was.
-  const serverBlocker = sendReadiness?.blockers?.[0];
+  // The price-source confirmation (R5) is satisfied INSIDE the send flow: Send opens the recipient
+  // dialog, then the price-confirmation dialog, then the quote goes. So that blocker must never
+  // disable Send — with it as the last item, a fully priced, dated and formatted quote could not
+  // be sent from its own screen at all (found driving the journey on 2026-09-15). It stays in the
+  // list below, worded as the step Send will take, and every other blocker still gates.
+  const gatingBlockers = (sendReadiness?.blockers ?? []).filter((blocker) => !isAttestationBlocker(blocker));
+  const attestationPending = (sendReadiness?.blockers ?? []).some(isAttestationBlocker);
+  const serverBlocker = gatingBlockers[0];
   const sendBlockedReason: { text: string; link?: { label: string; to: string } } | null = serverBlocker
     ? {
         text: serverBlocker.message,
@@ -296,7 +307,7 @@ const QuoteViewPage: React.FC = () => {
           ? { label: `Open ${serverBlocker.setupLabel}`, to: serverBlocker.setupPath }
           : undefined,
       }
-    : sendReadiness?.canSend
+    : sendReadiness && (sendReadiness.canSend || (gatingBlockers.length === 0 && attestationPending))
       ? null
       : quote.revisionImpact
         ? { text: 'Review the customer revision before sending.' }
@@ -337,7 +348,9 @@ const QuoteViewPage: React.FC = () => {
   const blockerRows = sendReadiness?.blockers?.length
     ? sendReadiness.blockers.map((blocker) => ({
         key: blocker.code,
-        text: blocker.message,
+        text: isAttestationBlocker(blocker) && gatingBlockers.length === 0
+          ? 'Confirm where the prices came from — your sales manager, or a supplier quote. Press Send to customer; you confirm it there, then the quote goes.'
+          : blocker.message,
         link: blocker.setupPath && blocker.setupLabel
           ? { label: `Open ${blocker.setupLabel}`, to: blocker.setupPath }
           : undefined,
