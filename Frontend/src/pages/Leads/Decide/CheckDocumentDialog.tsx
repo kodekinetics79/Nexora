@@ -20,7 +20,13 @@ import {
   Select,
   Stack,
   Switch,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
   TablePagination,
+  TableRow,
   TextField,
   Typography,
   useMediaQuery,
@@ -30,7 +36,12 @@ import { Close as CloseIcon } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import leadService, { type LeadItemResponseDTO } from '../../../api/services/leadService';
 import extractionReviewService, { type ReviewItemPayload } from '../../../api/services/extractionReviewService';
-import type { LeadDecisionEvidenceDTO, LeadDecisionLineDTO, LeadDecisionWorkbenchDTO } from '../../../api/services/leadDecisionService';
+import leadDecisionService, {
+  type LeadDecisionEvidenceDTO,
+  type LeadDecisionLineDTO,
+  type LeadDecisionWorkbenchDTO,
+  type SourceGridSheetDTO,
+} from '../../../api/services/leadDecisionService';
 import { downloadAuthenticatedFile, fetchAuthenticatedObjectUrl, openAuthenticatedFile } from '../../../utils/authenticatedFile';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { inspectableEvidenceUrl } from '../Workbench/evidenceRules';
@@ -152,23 +163,160 @@ export const buildReviewItems = (
 /**
  * How a document can be shown, decided from what the workbench already knows about the file so
  * nothing is downloaded only to be discarded. Browsers frame PDFs, images and HTML; they will
- * not frame CSV or plain text (shown as text here) and cannot draw Office files at all.
+ * not frame plain text (shown as text here) and cannot draw Office files at all. A spreadsheet
+ * — the most common shape an RFQ arrives in — is drawn from its cells, which the server reads
+ * from the same retained bytes the parser read.
  */
-export type DocumentKind = 'frame' | 'image' | 'text' | 'file';
+export type DocumentKind = 'frame' | 'image' | 'text' | 'sheet' | 'file';
 
 export const documentKind = (contentType: string, name: string): DocumentKind => {
   const type = contentType.toLowerCase();
   const file = name.toLowerCase();
   if (type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|tiff?)$/.test(file)) return 'image';
   if (/pdf|html/.test(type) || /\.(pdf|html?)$/.test(file)) return 'frame';
-  // Office types also end in "xml" (spreadsheetml, wordprocessingml); only bare data types count.
-  if (/^text\//.test(type) || /^application\/(json|xml|csv)$/.test(type) || /\.(csv|txt|json|xml|md)$/.test(file)) return 'text';
+  if (/spreadsheetml|ms-excel|\/csv$/.test(type) || /\.(xlsx|xlsm|xls|csv)$/.test(file)) return 'sheet';
+  // Office types also end in "xml" (wordprocessingml); only bare data types count.
+  if (/^text\//.test(type) || /^application\/(json|xml)$/.test(type) || /\.(txt|json|xml|md)$/.test(file)) return 'text';
   return 'file';
+};
+
+/** Where a line's value sits in a spreadsheet: `'Sheet1'!B12` names the sheet and the row. */
+export interface SourceCell {
+  sheet: string;
+  row: number;
+}
+
+export const parseSourceAddress = (address: string | null | undefined): SourceCell | null => {
+  const match = /^\s*(?:'((?:[^']|'')*)'|([^!]+))!\$?[A-Za-z]{1,3}\$?(\d+)\s*$/.exec(address ?? '');
+  if (!match) return null;
+  const sheet = (match[1] ?? match[2] ?? '').replace(/''/g, "'").trim();
+  const row = Number(match[3]);
+  return Number.isFinite(row) && row > 0 ? { sheet, row } : null;
+};
+
+/** The cell a line was read from, from whichever of its source fields names one. */
+export const lineSourceCell = (line: Pick<LeadDecisionLineDTO, 'sourceAddress' | 'sourceFields'>): SourceCell | null =>
+  parseSourceAddress(line.sourceAddress)
+    ?? (line.sourceFields ?? []).map((field) => parseSourceAddress(field.sourceAddress)).find((cell) => cell != null)
+    ?? null;
+
+const cellRange = (sheet: SourceGridSheetDTO): number =>
+  sheet.rows.reduce((widest, row) => Math.max(widest, row.cells.length), 0);
+
+/**
+ * The source spreadsheet as a table: the heading row the parser read the columns from, then the
+ * rows, with the row the rep is checking marked and scrolled to. A row is numbered as the
+ * spreadsheet numbers it, so "row 12" here is row 12 in Excel.
+ */
+const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string; focus: SourceCell | null; fallback: React.ReactNode }> = ({
+  evidence, path, focus, fallback,
+}) => {
+  const grid = useQuery({
+    queryKey: ['source-grid', path],
+    queryFn: () => leadDecisionService.getSourceGrid(path),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const sheets = grid.data?.sheets ?? [];
+  const [chosenSheet, setChosenSheet] = React.useState<string | null>(null);
+  // The sheet the checked line came from wins; the rep can still turn to another.
+  const sheetName = chosenSheet
+    ?? (focus && sheets.some((sheet) => sheet.name === focus.sheet) ? focus.sheet : sheets[0]?.name ?? null);
+  const sheet = sheets.find((candidate) => candidate.name === sheetName) ?? sheets[0];
+  const focusedRow = focus && sheet && sheet.name === focus.sheet ? focus.row : null;
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (focusedRow == null) return;
+    containerRef.current?.querySelector<HTMLElement>(`[data-source-row="${focusedRow}"]`)
+      ?.scrollIntoView?.({ block: 'center' });
+  }, [focusedRow, sheet?.name]);
+
+  if (grid.isPending) {
+    return (
+      <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
+        <CircularProgress size={28} />
+      </Box>
+    );
+  }
+  // The cells could not be read (an older retained file, a format the reader does not know):
+  // the file itself is still one click away.
+  if (grid.isError || !sheet) return <>{fallback}</>;
+
+  const width = cellRange(sheet);
+  const headerRow = sheet.headerRowNumber ?? null;
+  const headings = sheet.rows.find((row) => row.number === headerRow) ?? null;
+  const bodyRows = sheet.rows.filter((row) => row !== headings);
+
+  return (
+    <Box ref={containerRef}>
+      {sheets.length > 1 ? (
+        <Stack direction="row" spacing={1} sx={{ mb: 1, flexWrap: 'wrap' }} aria-label="Sheets">
+          {sheets.map((candidate) => (
+            <Chip
+              key={candidate.name}
+              label={candidate.name}
+              size="small"
+              variant={candidate.name === sheet.name ? 'filled' : 'outlined'}
+              color={candidate.name === sheet.name ? 'primary' : 'default'}
+              onClick={() => setChosenSheet(candidate.name)}
+            />
+          ))}
+        </Stack>
+      ) : null}
+      <TableContainer
+        sx={{ maxHeight: { xs: '48vh', md: '70vh' }, border: 1, borderColor: 'divider', borderRadius: 2, bgcolor: 'background.paper' }}
+      >
+        <Table size="small" stickyHeader aria-label={evidence.name} sx={{ '& td, & th': { whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }}>
+          <TableHead>
+            <TableRow>
+              <TableCell sx={{ color: 'text.secondary', fontWeight: 400, width: 48 }}>#</TableCell>
+              {Array.from({ length: width }, (_cell, index) => (
+                <TableCell key={index} sx={{ fontWeight: 700 }}>{headings?.cells[index] ?? ''}</TableCell>
+              ))}
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {bodyRows.map((row) => {
+              const focused = row.number === focusedRow;
+              return (
+                <TableRow
+                  key={row.number}
+                  data-source-row={row.number}
+                  aria-selected={focused}
+                  selected={focused}
+                  sx={focused ? { '& td': { fontWeight: 700, borderTop: 2, borderBottom: 2, borderColor: 'primary.main' } } : undefined}
+                >
+                  <TableCell sx={{ color: focused ? 'primary.main' : 'text.secondary' }}>{row.number}</TableCell>
+                  {Array.from({ length: width }, (_cell, index) => (
+                    <TableCell key={index}>{row.cells[index] ?? ''}</TableCell>
+                  ))}
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </TableContainer>
+      <Stack direction="row" spacing={1.5} sx={{ mt: 0.75, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Typography variant="caption" color="text.secondary">
+          {focusedRow != null
+            ? `Row ${focusedRow} is the line you are checking.`
+            : sheet.truncated ? 'The first rows of the sheet are shown.' : `${bodyRows.length} rows as the spreadsheet holds them.`}
+        </Typography>
+        <Link component="button" type="button" variant="caption" onClick={() => void openAuthenticatedFile(path)} sx={{ fontWeight: 700 }}>
+          Open the file
+        </Link>
+        <Link component="button" type="button" variant="caption" onClick={() => void downloadAuthenticatedFile(path, evidence.name)} sx={{ fontWeight: 700 }}>
+          Download
+        </Link>
+      </Stack>
+    </Box>
+  );
 };
 
 type ViewerState = { url: string; kind: DocumentKind; text?: string } | { error: string } | null;
 
-const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = ({ evidence }) => {
+const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus?: SourceCell | null }> = ({ evidence, focus = null }) => {
   const [state, setState] = React.useState<ViewerState>(null);
   const path = evidence ? inspectableEvidenceUrl(evidence) : null;
   const name = evidence?.name ?? '';
@@ -178,7 +326,7 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = (
     let url: string | null = null;
     let cancelled = false;
     setState(null);
-    if (!path || knownKind === 'file') return undefined;
+    if (!path || knownKind === 'file' || knownKind === 'sheet') return undefined;
     fetchAuthenticatedObjectUrl(path)
       .then(async (result) => {
         // The server's content type wins over the file name once the bytes are here.
@@ -216,6 +364,7 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null }> = (
     </Alert>
   );
   if (knownKind === 'file') return fileOffer;
+  if (knownKind === 'sheet') return <SourceGridView evidence={evidence} path={path} focus={focus} fallback={fileOffer} />;
   if (!state) {
     return (
       <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
@@ -275,6 +424,8 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
   const seeded = React.useRef<number | null>(null);
   const [page, setPage] = React.useState(0);
   const [scrollTarget, setScrollTarget] = React.useState<number | null>(null);
+  // The line the document pane follows: the one the rep came from, then whichever they work on.
+  const [activeLineId, setActiveLineId] = React.useState<number | null>(null);
 
   const leadQuery = useQuery({
     queryKey: ['lead-detail', leadId],
@@ -409,10 +560,18 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
   };
 
   React.useEffect(() => {
-    if (!open || focusLineId == null) return;
+    if (!open) return;
+    setActiveLineId(focusLineId ?? null);
+    if (focusLineId == null) return;
     goToLine(focusLineId);
     // Re-run once the record has loaded, so the rows exist to scroll to.
   }, [open, focusLineId, leadQuery.data]);
+
+  /** The cell the followed line was read from, so the source pane can mark its row. */
+  const focusCell = React.useMemo(() => {
+    const followed = workbench.lines.find((line) => line.revisionLineId === activeLineId);
+    return followed ? lineSourceCell(followed) : null;
+  }, [workbench.lines, activeLineId]);
 
   React.useEffect(() => {
     if (scrollTarget == null) return;
@@ -467,7 +626,7 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
             ) : inspectable[0] ? (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>{inspectable[0].name}</Typography>
             ) : null}
-            <DocumentViewer evidence={inspectable[evidenceIndex] ?? null} />
+            <DocumentViewer evidence={inspectable[evidenceIndex] ?? null} focus={focusCell} />
           </Box>
 
           <Box component="section" aria-label="Lines to check" sx={{ flex: '1 1 42%', minWidth: 0 }}>
@@ -577,7 +736,10 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                     <Box
                       key={line.revisionLineId}
                       id={`check-line-${line.revisionLineId}`}
-                      sx={{ p: 1.5, border: 1, borderColor: line.revisionLineId === focusLineId ? 'primary.main' : 'divider', borderRadius: 2 }}
+                      // Working on a line makes the source pane follow it to its row.
+                      onFocusCapture={() => setActiveLineId(line.revisionLineId)}
+                      onClick={() => setActiveLineId(line.revisionLineId)}
+                      sx={{ p: 1.5, border: 1, borderColor: line.revisionLineId === activeLineId ? 'primary.main' : 'divider', borderRadius: 2 }}
                     >
                       <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', mb: 1 }}>
                         <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>Line {label}</Typography>

@@ -304,7 +304,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                     ? criticalEvidence.Complete
                         ? lead.CommercialFactsVerified
                             ? "Exact retained source evidence covers identity, quantity, and unit; the commercial facts are verified."
-                            : "Exact retained source evidence exists; commercial verification is still required."
+                            : "Read from the document; not yet checked by a person."
                         : $"The retained source does not yet prove {string.Join(", ", criticalEvidence.Missing())}. Correct and approve the extraction before committing a Bid line."
                     : "No persisted field evidence maps to this canonical Lead line.",
                 lineDecision is null ? null : new LineParticipationDto(lineDecision.Choice.ToString(),

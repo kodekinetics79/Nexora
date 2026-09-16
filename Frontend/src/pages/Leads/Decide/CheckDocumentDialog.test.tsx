@@ -12,9 +12,12 @@ import type { LeadDecisionLineDTO, LeadDecisionWorkbenchDTO } from '../../../api
 const snack = vi.fn();
 vi.mock('notistack', () => ({ useSnackbar: () => ({ enqueueSnackbar: snack }) }));
 
-const api = { getById: vi.fn(), submitReview: vi.fn(), fetchObjectUrl: vi.fn() };
+const api = { getById: vi.fn(), submitReview: vi.fn(), fetchObjectUrl: vi.fn(), getSourceGrid: vi.fn() };
 vi.mock('../../../api/services/leadService', () => ({
   default: { getById: (...args: unknown[]) => api.getById(...args) },
+}));
+vi.mock('../../../api/services/leadDecisionService', () => ({
+  default: { getSourceGrid: (...args: unknown[]) => api.getSourceGrid(...args) },
 }));
 vi.mock('../../../api/services/extractionReviewService', () => ({
   default: { submitReview: (...args: unknown[]) => api.submitReview(...args) },
@@ -25,7 +28,7 @@ vi.mock('../../../utils/authenticatedFile', () => ({
   downloadAuthenticatedFile: vi.fn(),
 }));
 
-import CheckDocumentDialog, { CHECK_LINES_PER_PAGE, DEFAULT_CHECK_REASON } from './CheckDocumentDialog';
+import CheckDocumentDialog, { CHECK_LINES_PER_PAGE, DEFAULT_CHECK_REASON, lineSourceCell, parseSourceAddress } from './CheckDocumentDialog';
 
 const line = (overrides: Partial<LeadDecisionLineDTO> & { id: number }): LeadDecisionLineDTO => ({
   revisionLineId: overrides.id * 10,
@@ -90,10 +93,26 @@ const pickOption = async (comboboxName: string, optionName: string | RegExp) => 
   fireEvent.click(within(await screen.findByRole('listbox')).getByRole('option', { name: optionName }));
 };
 
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const bidListGrid = {
+  sheets: [{
+    name: 'Sheet1',
+    headerRowNumber: 2,
+    truncated: false,
+    rows: [
+      { number: 1, cells: ['Al Jazirah — request for quotation', '', ''] },
+      { number: 2, cells: ['Item', 'Qty', 'Unit'] },
+      { number: 3, cells: ['Control module', '3', 'EA'] },
+      { number: 4, cells: ['Cable gland kit', '4', 'EA'] },
+    ],
+  }],
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   api.getById.mockResolvedValue(lead);
   api.fetchObjectUrl.mockResolvedValue({ url: 'blob:doc', contentType: 'application/pdf', blob: new Blob(['%PDF']) });
+  api.getSourceGrid.mockResolvedValue(bidListGrid);
   api.submitReview.mockResolvedValue({ ...lead, reviewVersion: 4 });
 });
 
@@ -138,25 +157,69 @@ describe('CheckDocumentDialog', () => {
     expect(snack).toHaveBeenCalledWith('Confirmed against the document.', { variant: 'success' });
   });
 
-  it('shows a spreadsheet or text document as text, and lists one file once', async () => {
-    api.fetchObjectUrl.mockResolvedValue({ url: 'blob:csv', contentType: 'text/csv', blob: new Blob(['RFQ,Item\nSEC-1,Control module']) });
+  it('shows a plain-text document as text, and lists one file once', async () => {
+    api.fetchObjectUrl.mockResolvedValue({ url: 'blob:txt', contentType: 'text/plain', blob: new Blob(['RFQ SEC-1\nControl module x3']) });
     const evidence = workbench().evidence[0];
     renderDialog({ workbench: workbench({ evidence: [
-      { ...evidence, name: 'inquiry.csv', mediaType: 'text/csv' },
-      { ...evidence, name: 'inquiry.csv', mediaType: 'text/csv', occurrenceId: 10 },
+      { ...evidence, name: 'inquiry.txt', mediaType: 'text/plain' },
+      { ...evidence, name: 'inquiry.txt', mediaType: 'text/plain', occurrenceId: 10 },
     ] }) });
-    expect(await screen.findByLabelText('inquiry.csv')).toHaveTextContent('SEC-1,Control module');
-    expect(screen.queryByTitle('inquiry.csv')).not.toBeInTheDocument();
-    expect(screen.getAllByText('inquiry.csv')).toHaveLength(1);
+    expect(await screen.findByLabelText('inquiry.txt')).toHaveTextContent('Control module x3');
+    expect(screen.queryByTitle('inquiry.txt')).not.toBeInTheDocument();
+    expect(screen.getAllByText('inquiry.txt')).toHaveLength(1);
   });
 
-  it('offers to open or download a spreadsheet the browser cannot draw, without downloading it first', async () => {
-    const evidence = { ...workbench().evidence[0], name: 'bid-list.xlsx', mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-    renderDialog({ workbench: workbench({ evidence: [evidence] }) });
-    expect(await screen.findByRole('button', { name: 'Open in a new tab' })).toBeInTheDocument();
-    expect(screen.getByText(/is a file the browser cannot show here/)).toBeInTheDocument();
-    expect(screen.queryByLabelText('bid-list.xlsx')).not.toBeInTheDocument();
-    expect(api.fetchObjectUrl).not.toHaveBeenCalled();
+  describe('a spreadsheet source', () => {
+    const sheetEvidence = { ...workbench().evidence[0], name: 'bid-list.xlsx', mediaType: XLSX, downloadUrl: '/api/File/source-document/9' };
+    const sheetLines = [
+      line({ id: 1, description: 'Control module', verificationStatus: 'NEEDS_CHECK', unitOfMeasure: null, currency: null, sourceAddress: "'Sheet1'!B3",
+        sourceFields: [{ field: 'ProductShortName', rawValue: 'Control module', sourceAddress: "'Sheet1'!B3" }] }),
+      line({ id: 2, description: 'Cable gland kit', verificationStatus: 'NEEDS_CHECK', sourceFields: [{ field: 'Quantity', rawValue: '4', sourceAddress: "'Sheet1'!C4" }] }),
+    ];
+
+    it('draws the rows the parser read as a table, headings first, and marks the row of the line being checked', async () => {
+      renderDialog({ workbench: workbench({ evidence: [sheetEvidence], lines: sheetLines }), focusLineId: 10 });
+
+      const table = await screen.findByRole('table', { name: 'bid-list.xlsx' });
+      expect(api.getSourceGrid).toHaveBeenCalledWith('/api/File/source-document/9');
+      // The heading row the parser located, not the title above it, heads the table.
+      expect(within(table).getByRole('columnheader', { name: 'Qty' })).toBeInTheDocument();
+      expect(within(table).getByText('Al Jazirah — request for quotation')).toBeInTheDocument();
+      // Row 3 in Excel is row 3 here, and it is the one marked.
+      const marked = within(table).getByRole('row', { selected: true });
+      expect(marked).toHaveTextContent('3Control module3EA');
+      expect(screen.getByText('Row 3 is the line you are checking.')).toBeInTheDocument();
+      // Nothing was downloaded to the browser, and nobody was told the file cannot be shown.
+      expect(api.fetchObjectUrl).not.toHaveBeenCalled();
+      expect(screen.queryByText(/cannot show here/)).not.toBeInTheDocument();
+    });
+
+    it('follows the line the rep works on to its row', async () => {
+      renderDialog({ workbench: workbench({ evidence: [sheetEvidence], lines: sheetLines }), focusLineId: 10 });
+      const table = await screen.findByRole('table', { name: 'bid-list.xlsx' });
+      expect(within(table).getByRole('row', { selected: true })).toHaveTextContent('Control module');
+
+      fireEvent.focus(screen.getByRole('spinbutton', { name: 'Quantity, line 00002' }));
+      expect(within(table).getByRole('row', { selected: true })).toHaveTextContent('Cable gland kit');
+    });
+
+    it('offers to open or download the file when its cells cannot be read, without downloading it first', async () => {
+      api.getSourceGrid.mockRejectedValue(new Error('Unsupported'));
+      renderDialog({ workbench: workbench({ evidence: [sheetEvidence] }) });
+      expect(await screen.findByRole('button', { name: 'Open in a new tab' })).toBeInTheDocument();
+      expect(screen.getByText(/is a file the browser cannot show here/)).toBeInTheDocument();
+      expect(api.fetchObjectUrl).not.toHaveBeenCalled();
+    });
+
+    it('reads a cell address as the parser writes it', () => {
+      expect(parseSourceAddress("'Sheet1'!B12")).toEqual({ sheet: 'Sheet1', row: 12 });
+      expect(parseSourceAddress("'Bid ''24'!AA7")).toEqual({ sheet: "Bid '24", row: 7 });
+      expect(parseSourceAddress('CSV!E3')).toEqual({ sheet: 'CSV', row: 3 });
+      expect(parseSourceAddress('row 4')).toBeNull();
+      expect(parseSourceAddress(null)).toBeNull();
+      expect(lineSourceCell({ sourceAddress: null, sourceFields: [{ field: 'Quantity', rawValue: '4', sourceAddress: "'Sheet1'!C4" }] }))
+        .toEqual({ sheet: 'Sheet1', row: 4 });
+    });
   });
 
   it('frames an HTML document rather than printing its tags', async () => {

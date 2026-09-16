@@ -216,9 +216,38 @@ export interface RfqRevisionImpactResolutionResult {
   replayed: boolean;
 }
 
+/** One row of a source spreadsheet, numbered as the spreadsheet numbers it. */
+export interface SourceGridRowDTO {
+  number: number;
+  cells: string[];
+}
+
+export interface SourceGridSheetDTO {
+  name: string;
+  /** The row the parser read the column headings from, when it found one. */
+  headerRowNumber?: number | null;
+  rows: SourceGridRowDTO[];
+  /** True when the sheet had more rows or columns than are returned. */
+  truncated: boolean;
+}
+
+/** The cells of a retained spreadsheet source, as the parser read them. */
+export interface SourceGridDTO {
+  sheets: SourceGridSheetDTO[];
+}
+
 const leadDecisionService = {
   getWorkbench: async (leadId: number): Promise<LeadDecisionWorkbenchDTO> => {
     const response = await axiosInstance.get<LeadDecisionWorkbenchDTO>(`/api/leads/${leadId}/decision-workbench`);
+    return response.data;
+  },
+
+  /**
+   * The rows of a retained spreadsheet source (.xlsx, .xls, .csv), read from the same bytes the
+   * parser read. `documentPath` is the evidence's download path; the grid sits beside it.
+   */
+  getSourceGrid: async (documentPath: string): Promise<SourceGridDTO> => {
+    const response = await axiosInstance.get<SourceGridDTO>(`${documentPath}/grid`);
     return response.data;
   },
 
