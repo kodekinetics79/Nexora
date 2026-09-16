@@ -119,6 +119,14 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
             var notification = scope.ServiceProvider.GetRequiredService<INotificationService>();
+            // The request goes out in the company's own name. The supplier is this company's
+            // supplier; the platform is the paper it is written on and is not named (owner rule,
+            // 2026-09-16).
+            var buyerCompany = await scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>()
+                .BusinessUnits.AsNoTracking()
+                .Where(x => x.Id == payload.BusinessUnitId)
+                .Select(x => x.BusinessUnitName)
+                .FirstOrDefaultAsync(ct);
             using var providerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             providerCts.CancelAfter(_providerCallTimeout);
             providerInvoked = true;
@@ -132,6 +140,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                     TenantId = payload.BusinessUnitId.ToString(),
                     BusinessUnitId = payload.BusinessUnitId.ToString(),
                     SupplierName = payload.SupplierName,
+                    BuyerCompany = string.IsNullOrWhiteSpace(buyerCompany) ? RfqToSupplierNotification.BuyerCompanyFallback : buyerCompany.Trim(),
                     RfqNumber = payload.RfqNumber,
                     // Says what is being asked, not which record it is. The customer is not
                     // named: suppliers are promised the customer's prices and margins stay

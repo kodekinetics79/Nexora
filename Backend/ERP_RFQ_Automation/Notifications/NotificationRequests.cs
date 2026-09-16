@@ -42,7 +42,11 @@ namespace ERP_RFQ_Automation.Notifications
     public sealed class RfqToSupplierNotification : NotificationRequestBase
     {
         public string SupplierName { get; set; } = string.Empty;
-        public string BuyerCompany { get; set; } = "Nexora";
+
+        /// <summary>When the business unit has no name on record. Never the platform's name: the supplier is the company's, not ours.</summary>
+        public const string BuyerCompanyFallback = "The buyer";
+
+        public string BuyerCompany { get; set; } = BuyerCompanyFallback;
         public string RfqNumber { get; set; } = string.Empty;
         public string RfqTitle { get; set; } = string.Empty;
 

@@ -533,6 +533,35 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task The_request_goes_out_in_the_companys_own_name_never_the_platforms()
+    {
+        // Suppliers received "Nexora invites you to submit a quotation" and a subject "from Nexora".
+        // The supplier is the tenant's supplier; the email introduces the tenant.
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+        fixture.SeedBusinessUnitName("Dispatch Trading Co.");
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        Assert.Equal("Dispatch Trading Co.", fixture.Notification.LastRequest!.BuyerCompany);
+    }
+
+    [Fact]
+    public async Task Without_a_company_name_on_record_the_email_still_does_not_name_the_platform()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        // The fixture's own seed may give the business unit a name; either way the platform is not it.
+        var buyer = fixture.Notification.LastRequest!.BuyerCompany;
+        Assert.False(string.IsNullOrWhiteSpace(buyer));
+        Assert.DoesNotContain("nexora", buyer, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("nexora", RfqToSupplierNotification.BuyerCompanyFallback, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task A_payload_queued_without_a_message_sends_the_standard_sentence()
     {
         using var fixture = new DispatchFixture();
@@ -618,6 +647,21 @@ public sealed class ProcurementDispatchWorkerTests
         public ProcurementDispatchWorker Worker { get; }
         public ProcurementDispatchHeartbeat Heartbeat { get; }
         public List<long?> ResolvedTenantScopes { get; } = [];
+
+        public void SeedBusinessUnitName(string name)
+        {
+            using var db = _database.ContextFor(null);
+            var unit = db.BusinessUnits.SingleOrDefault(x => x.Id == Tenant);
+            if (unit is null)
+                db.BusinessUnits.Add(new BusinessUnit
+                {
+                    Id = Tenant, BusinessUnitCode = "DT", BusinessUnitName = name, IsActive = true,
+                    CreatedBy = "test", CreatedOn = DateTime.UtcNow
+                });
+            else
+                unit.BusinessUnitName = name;
+            db.SaveChanges();
+        }
 
         public void SeedPending(
             string? payloadJson = null,
