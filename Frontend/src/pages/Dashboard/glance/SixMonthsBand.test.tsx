@@ -25,6 +25,10 @@ describe('SixMonthsBand populated', () => {
     const requests = screen.getByTestId('six-months-requests');
     expect(within(requests).queryAllByTestId('six-months-empty-column')).toHaveLength(0);
     expect(requests).toHaveAttribute('aria-label', expect.stringContaining('Sep 11'));
+    // Named for what the server counts — RFQs by month — not the lead count the bands above
+    // call "requests received"; "Sep: 1 requests received" beside six leads was a contradiction.
+    expect(requests).toHaveAttribute('aria-label', expect.stringMatching(/^RFQs created, /));
+    expect(screen.queryByText(/Requests received/)).not.toBeInTheDocument();
 
     // The current figure is read off the mark, not off the axis.
     const endpoint = within(screen.getByTestId('six-months-value')).getByTestId('six-months-endpoint');
@@ -34,7 +38,7 @@ describe('SixMonthsBand populated', () => {
   it('carries the month axis and both units, so no mark needs a legend to decode', () => {
     render(<SixMonthsBand points={populated} />);
 
-    expect(screen.getByText(/Requests received · count/)).toBeInTheDocument();
+    expect(screen.getByText(/RFQs created · count/)).toBeInTheDocument();
     expect(screen.getByText(/Order value · SAR/)).toBeInTheDocument();
     const months = within(screen.getByTestId('six-months-value')).getAllByText('Sep');
     expect(months.length).toBeGreaterThan(0);
