@@ -649,6 +649,15 @@ const LeadsPage: React.FC = () => {
   const decisionSummaries = decisionQuery.data?.summaries;
   const decisionsLoading = visibleLeadIds.length > 0 && decisionQuery.isPending;
 
+  /**
+   * Where clicking a row's NAME — its serial or RFQ number — takes the reader: the same place the
+   * row's own button goes. "Decide" when the reader may decide, the inquiry record otherwise. One
+   * target for the name and the button, so the two can never disagree about what "open" means.
+   */
+  const openLeadPath = (lead: LeadResponseDTO): string => commercialAccess.canOpenLeadWorkbench
+    ? `/procurement/leads/${lead.id}/workbench`
+    : `/procurement/leads/view/${lead.id}`;
+
   const columns: GridColDef<LeadResponseDTO>[] = [
     {
       field: 'nexoraSerial',
@@ -664,7 +673,7 @@ const LeadsPage: React.FC = () => {
       renderCell: (p) => {
         const serial = p.row.nexoraSerial || p.row.commercialCaseReference;
         return serial ? (
-          <Link component="button" type="button" underline="hover" onClick={() => navigate(`/leads/view/${p.row.id}`)}
+          <Link component="button" type="button" underline="hover" onClick={() => navigate(openLeadPath(p.row))}
             sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem' }}>
             {serial}
           </Link>
@@ -690,7 +699,7 @@ const LeadsPage: React.FC = () => {
             component="button"
             type="button"
             underline="hover"
-            onClick={() => navigate(`/leads/view/${p.row.id}`)}
+            onClick={() => navigate(openLeadPath(p.row))}
             sx={{ fontWeight: 500, fontSize: '0.85rem', color: 'primary.main', textAlign: 'left' }}
           >
             {raw}
