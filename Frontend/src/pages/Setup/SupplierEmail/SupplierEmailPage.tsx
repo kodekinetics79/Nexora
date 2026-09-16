@@ -72,6 +72,10 @@ const payloadFrom = (form: SupplierEmailTexts, defaults: SupplierEmailTexts): Su
   return payload;
 };
 
+/** "a@x.com, b@y.com; c@z.com" → ["a@x.com","b@y.com","c@z.com"], lower-cased and without repeats. */
+const splitAddresses = (text: string): string[] =>
+  [...new Set(text.split(/[,;\s]+/).map((part) => part.trim().toLowerCase()).filter(Boolean))];
+
 const SupplierEmailPage: React.FC = () => {
   const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
@@ -93,17 +97,23 @@ const SupplierEmailPage: React.FC = () => {
   const companyName = businessUnitQuery.data?.businessUnitName?.trim() || 'Your company';
 
   const [form, setForm] = useState<SupplierEmailTexts | null>(null);
+  const [copies, setCopies] = useState({ cc: '', bcc: '' });
   const inputRefs = useRef<Partial<Record<SupplierEmailField, HTMLInputElement | HTMLTextAreaElement | null>>>({});
   const lastFocused = useRef<{ key: SupplierEmailField; start: number; end: number }>({
     key: 'defaultMessage', start: -1, end: -1,
   });
 
   useEffect(() => {
-    if (settingsQuery.data) setForm(formFrom(settingsQuery.data));
+    if (settingsQuery.data) {
+      setForm(formFrom(settingsQuery.data));
+      setCopies({ cc: (settingsQuery.data.defaultCc ?? []).join(', '), bcc: (settingsQuery.data.defaultBcc ?? []).join(', ') });
+    }
   }, [settingsQuery.data]);
 
   const saveMutation = useMutation({
-    mutationFn: (body: SupplierEmailCompanyUpdate) => supplierEmailSettingsService.saveCompany(body),
+    mutationFn: (body: SupplierEmailCompanyUpdate) => supplierEmailSettingsService.saveCompany({
+      ...body, defaultCc: splitAddresses(copies.cc), defaultBcc: splitAddresses(copies.bcc),
+    }),
     onSuccess: (saved) => {
       queryClient.setQueryData(['supplier-email-settings', 'company'], saved);
       queryClient.invalidateQueries({ queryKey: ['supplier-email-settings'] });
@@ -118,7 +128,10 @@ const SupplierEmailPage: React.FC = () => {
     [settingsQuery.data, defaults],
   );
   const payload = form && defaults ? payloadFrom(form, defaults) : null;
-  const changed = Boolean(
+  const copiesChanged = Boolean(settingsQuery.data) && (
+    splitAddresses(copies.cc).join(',') !== (settingsQuery.data?.defaultCc ?? []).join(',')
+    || splitAddresses(copies.bcc).join(',') !== (settingsQuery.data?.defaultBcc ?? []).join(','));
+  const changed = copiesChanged || Boolean(
     payload && savedPayload && FIELD_KEYS.some((key) => payload[key] !== savedPayload[key]),
   );
   const atDefaults = Boolean(form && defaults && FIELD_KEYS.every((key) => form[key] === defaults[key]));
@@ -253,6 +266,27 @@ const SupplierEmailPage: React.FC = () => {
                   slotProps={{ htmlInput: { maxLength: field.maxLength } }}
                 />
               ))}
+
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                <TextField
+                  fullWidth
+                  label="Always CC"
+                  placeholder="purchasing@yourcompany.com"
+                  value={copies.cc}
+                  disabled={!canEdit}
+                  onChange={(event) => setCopies((current) => ({ ...current, cc: event.target.value }))}
+                  helperText="Copied on every supplier request. Separate addresses with commas."
+                />
+                <TextField
+                  fullWidth
+                  label="Always BCC"
+                  placeholder="archive@yourcompany.com"
+                  value={copies.bcc}
+                  disabled={!canEdit}
+                  onChange={(event) => setCopies((current) => ({ ...current, bcc: event.target.value }))}
+                  helperText="Blind-copied on every request. Reps can change both when they send."
+                />
+              </Stack>
 
               <Box>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>

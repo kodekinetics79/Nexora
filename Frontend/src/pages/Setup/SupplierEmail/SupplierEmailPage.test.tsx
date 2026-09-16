@@ -132,6 +132,24 @@ describe('Setup › Supplier Email', () => {
       opening: 'We would like a price for:',
       defaultMessage: null,
       signOff: 'Best,\nAisha Noor\nSales',
+      defaultCc: [],
+      defaultBcc: [],
+    });
+  });
+
+  it('saves Always CC and Always BCC as clean address lists', async () => {
+    mocks.getCompany.mockResolvedValue(company({}));
+    renderPage();
+    await screen.findByLabelText('Greeting');
+
+    fireEvent.change(screen.getByLabelText('Always CC'), { target: { value: 'Purchasing@Noor.example; manager@noor.example' } });
+    fireEvent.change(screen.getByLabelText('Always BCC'), { target: { value: 'archive@noor.example' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(mocks.saveCompany).toHaveBeenCalled());
+    expect(mocks.saveCompany.mock.calls[0][0]).toMatchObject({
+      defaultCc: ['purchasing@noor.example', 'manager@noor.example'],
+      defaultBcc: ['archive@noor.example'],
     });
   });
 
@@ -145,7 +163,7 @@ describe('Setup › Supplier Email', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(mocks.saveCompany).toHaveBeenCalledWith({
-      subject: null, greeting: null, opening: null, defaultMessage: null, signOff: null,
+      subject: null, greeting: null, opening: null, defaultMessage: null, signOff: null, defaultCc: [], defaultBcc: [],
     }));
   });
 

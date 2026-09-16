@@ -19,6 +19,7 @@ import {
 } from "@mui/material";
 import { Send } from "@mui/icons-material";
 import supplierEmailSettingsService from "../../../api/services/supplierEmailSettingsService";
+import type { SupplierEmailWordingEdit } from "../../../api/services/procurementService";
 import procurementService, {
   type SourcingCase,
   type SupplierDiscoveryHit,
@@ -87,6 +88,14 @@ export default function FindSupplierDialog({
   const [failures, setFailures] = React.useState<string[]>([]);
   const [sendFrom, setSendFrom] = React.useState<number | "">("");
   const [savedDefault, setSavedDefault] = React.useState(false);
+  const [cc, setCc] = React.useState("");
+  const [bcc, setBcc] = React.useState("");
+  const copiesTouched = React.useRef(false);
+  const [newEmail, setNewEmail] = React.useState("");
+  const [newName, setNewName] = React.useState("");
+  const [addError, setAddError] = React.useState<string | null>(null);
+  const [editing, setEditing] = React.useState(false);
+  const [wording, setWording] = React.useState({ subject: "", greeting: "", opening: "", signOff: "" });
   const messageTouched = React.useRef(false);
 
   // The rep's own default message (or the company's), and the company mailboxes to send from.
@@ -157,6 +166,11 @@ export default function FindSupplierDialog({
     if (!open) {
       initialised.current = false;
       setSendFrom("");
+      copiesTouched.current = false;
+      setEditing(false);
+      setNewEmail("");
+      setNewName("");
+      setAddError(null);
       return;
     }
     if (initialised.current || !sourcingCase || !line) return;
@@ -181,10 +195,53 @@ export default function FindSupplierDialog({
     }
   }, [open, presetMessage, effective.data]);
   React.useEffect(() => {
+    if (!open || copiesTouched.current || !effective.data) return;
+    setCc((effective.data.defaultCc ?? []).join(", "));
+    setBcc((effective.data.defaultBcc ?? []).join(", "));
+  }, [open, effective.data]);
+
+  React.useEffect(() => {
     if (!open || sendFrom !== "" || !mailboxes.data) return;
     const preferred = mailboxes.data.mailboxes.find((mailbox) => mailbox.isDefault) ?? mailboxes.data.mailboxes[0];
     if (preferred) setSendFrom(preferred.mailboxId);
   }, [open, sendFrom, mailboxes.data]);
+
+  const splitAddresses = (text: string) =>
+    [...new Set(text.split(/[,;\s]+/).map((part) => part.trim().toLowerCase()).filter(Boolean))];
+  const ccList = splitAddresses(cc);
+  const bccList = splitAddresses(bcc);
+  const badCopy = [...ccList, ...bccList].find((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(address));
+  const wordingEdit: SupplierEmailWordingEdit | null = editing ? {
+    subject: wording.subject.trim() || null,
+    greeting: wording.greeting.trim() || null,
+    opening: wording.opening.trim() || null,
+    signOff: wording.signOff.trim() || null,
+  } : null;
+
+  const startEditing = () => {
+    if (!editing && effective.data) {
+      setWording({
+        subject: effective.data.subject, greeting: effective.data.greeting,
+        opening: effective.data.opening, signOff: effective.data.signOff,
+      });
+    }
+    setEditing((value) => !value);
+  };
+
+  const addByEmail = useMutation({
+    mutationFn: () => procurementService.addSupplierByEmail(sourcingCase!.id, newEmail.trim(), newName),
+    onSuccess: async (added) => {
+      setAddError(null);
+      setNewEmail("");
+      setNewName("");
+      await caseQuery.refetch();
+      setTicked((current) => new Set([...current, `s-${added.supplierId}`]));
+    },
+    onError: (error: unknown) => {
+      const e = error as { response?: { data?: { detail?: string; title?: string } }; message?: string };
+      setAddError(e?.response?.data?.detail || e?.message || "That supplier could not be added.");
+    },
+  });
 
   const saveMyDefault = useMutation({
     mutationFn: async () => {
@@ -205,13 +262,19 @@ export default function FindSupplierDialog({
   const dueOnIso = replyBy ? new Date(`${replyBy}T17:00:00`).toISOString() : null;
 
   // The email below is written by the server exactly as it will be sent, and follows what the rep types.
-  const [previewInput, setPreviewInput] = React.useState({ quantity: 0, message: "", dueOn: null as string | null, sendFromMailboxId: null as number | null });
+  const [previewInput, setPreviewInput] = React.useState({
+    quantity: 0, message: "", dueOn: null as string | null, sendFromMailboxId: null as number | null,
+    cc: [] as string[], bcc: [] as string[], wording: null as SupplierEmailWordingEdit | null,
+  });
+  const copiesKey = `${ccList.join(",")}|${bccList.join(",")}|${badCopy ?? ""}`;
+  const wordingKey = JSON.stringify(wordingEdit);
   React.useEffect(() => {
     const timer = window.setTimeout(() => setPreviewInput({
       quantity: quantityOk ? quantityNumber : 0, message, dueOn: dueOnIso, sendFromMailboxId: sendFrom === "" ? null : sendFrom,
+      cc: badCopy ? [] : ccList, bcc: badCopy ? [] : bccList, wording: wordingEdit,
     }), 400);
     return () => window.clearTimeout(timer);
-  }, [quantityOk, quantityNumber, message, dueOnIso, sendFrom]);
+  }, [quantityOk, quantityNumber, message, dueOnIso, sendFrom, copiesKey, wordingKey]);
   const preview = useQuery({
     queryKey: ["find-supplier-email", sourcingCase?.id, previewInput],
     queryFn: () => procurementService.previewSupplierRfqEmail(sourcingCase!.id, {
@@ -219,6 +282,9 @@ export default function FindSupplierDialog({
       message: previewInput.message.trim() || null,
       dueOn: previewInput.dueOn,
       sendFromMailboxId: previewInput.sendFromMailboxId,
+      cc: previewInput.cc,
+      bcc: previewInput.bcc,
+      wording: previewInput.wording,
     }),
     enabled: open && Boolean(sourcingCase),
     retry: false,
@@ -244,6 +310,7 @@ export default function FindSupplierDialog({
         message.trim() || null,
         quantityNumber,
         sendFrom === "" ? null : sendFrom,
+        { cc: ccList, bcc: bccList, wording: wordingEdit },
       );
       const failed = results.filter((result) => !result.succeeded).map((result) => {
         const error = result.error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | undefined;
@@ -340,7 +407,37 @@ export default function FindSupplierDialog({
               ? <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>None of your suppliers is linked to this part yet.</Typography>
               : ownRows.map(renderRow)}
 
-            <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>From the internet</Typography>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.5, alignItems: { sm: "flex-start" } }}>
+              <TextField
+                size="small"
+                label="Add a supplier by email"
+                placeholder="sales@supplier.com"
+                value={newEmail}
+                onChange={(event) => { setNewEmail(event.target.value); setAddError(null); }}
+                onKeyDown={(event) => { if (event.key === "Enter" && newEmail.trim()) { event.preventDefault(); addByEmail.mutate(); } }}
+                error={Boolean(addError)}
+                helperText={addError ?? "A supplier you know that is not listed."}
+                sx={{ flex: 2 }}
+              />
+              <TextField
+                size="small"
+                label="Company name (optional)"
+                value={newName}
+                onChange={(event) => setNewName(event.target.value)}
+                helperText=" "
+                sx={{ flex: 1.4 }}
+              />
+              <Button
+                variant="outlined"
+                disabled={!newEmail.trim() || addByEmail.isPending}
+                onClick={() => addByEmail.mutate()}
+                sx={{ mt: { sm: 0.25 }, whiteSpace: "nowrap" }}
+              >
+                {addByEmail.isPending ? "Adding…" : "Add and tick"}
+              </Button>
+            </Stack>
+
+            <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 1 }}>From the internet</Typography>
             {internet.isLoading && (
               <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", py: 1 }} role="status">
                 <CircularProgress size={16} />
@@ -406,6 +503,27 @@ export default function FindSupplierDialog({
                 </Typography>
               )
             )}
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 1 }}>
+              <TextField
+                size="small"
+                fullWidth
+                label="CC"
+                placeholder="colleague@yourcompany.com"
+                value={cc}
+                onChange={(event) => { copiesTouched.current = true; setCc(event.target.value); }}
+                error={Boolean(badCopy && ccList.includes(badCopy))}
+                helperText={badCopy && ccList.includes(badCopy) ? `"${badCopy}" is not an email address` : "Separate addresses with commas"}
+              />
+              <TextField
+                size="small"
+                fullWidth
+                label="BCC"
+                value={bcc}
+                onChange={(event) => { copiesTouched.current = true; setBcc(event.target.value); }}
+                error={Boolean(badCopy && bccList.includes(badCopy))}
+                helperText={badCopy && bccList.includes(badCopy) ? `"${badCopy}" is not an email address` : "Suppliers do not see these"}
+              />
+            </Stack>
             <TextField
               label="Your message"
               size="small"
@@ -426,6 +544,34 @@ export default function FindSupplierDialog({
               {savedDefault && <Typography variant="caption" color="success.main">Saved. Your next requests start with this message.</Typography>}
               {saveMyDefault.isError && <Typography variant="caption" color="error.main">Could not save it just now.</Typography>}
             </Stack>
+            <Link component="button" type="button" variant="body2" underline="hover" sx={{ mt: 1.5, display: "block" }} onClick={startEditing}>
+              {editing ? "Use the saved wording" : "Edit the email for this send"}
+            </Link>
+            {editing && (
+              <Stack spacing={1.25} sx={{ mt: 1.5, p: 1.5, border: 1, borderColor: "divider", borderRadius: 1 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Changes apply to this send only. [Supplier name], [Company name] and [RFQ number] are filled in for each supplier.
+                </Typography>
+                <TextField size="small" fullWidth label="Subject line" value={wording.subject}
+                  onChange={(event) => setWording((current) => ({ ...current, subject: event.target.value }))}
+                  slotProps={{ htmlInput: { maxLength: 200 } }} />
+                <TextField size="small" fullWidth label="Greeting" value={wording.greeting}
+                  onChange={(event) => setWording((current) => ({ ...current, greeting: event.target.value }))}
+                  slotProps={{ htmlInput: { maxLength: 200 } }} />
+                <TextField size="small" fullWidth multiline minRows={2} label="Opening sentence" value={wording.opening}
+                  onChange={(event) => setWording((current) => ({ ...current, opening: event.target.value }))}
+                  slotProps={{ htmlInput: { maxLength: 1000 } }} />
+                <Box sx={{ p: 1, borderRadius: 1, bgcolor: "action.hover" }}>
+                  <Typography variant="caption" color="text.secondary">
+                    The part details (description, part number, makers, quantity, needed-by date) are added here and cannot be edited.
+                  </Typography>
+                </Box>
+                <TextField size="small" fullWidth multiline minRows={3} label="Sign-off and signature" value={wording.signOff}
+                  onChange={(event) => setWording((current) => ({ ...current, signOff: event.target.value }))}
+                  slotProps={{ htmlInput: { maxLength: 1000 } }} />
+              </Stack>
+            )}
+
             <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>What each supplier receives</Typography>
             <Box
               data-testid="supplier-email-preview"
@@ -435,6 +581,12 @@ export default function FindSupplierDialog({
                 <>
                   {preview.data.from && (
                     <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>From: {preview.data.from}</Typography>
+                  )}
+                  {(preview.data.cc?.length ?? 0) > 0 && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>CC: {preview.data.cc!.join(", ")}</Typography>
+                  )}
+                  {(preview.data.bcc?.length ?? 0) > 0 && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>BCC: {preview.data.bcc!.join(", ")}</Typography>
                   )}
                   {preview.data.replyTo && (
                     <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>Replies to: {preview.data.replyTo}</Typography>
@@ -467,7 +619,7 @@ export default function FindSupplierDialog({
         <Button
           variant="contained"
           startIcon={send.isPending ? <CircularProgress size={16} color="inherit" /> : <Send />}
-          disabled={!sourcingCase || send.isPending || tickedRows.length === 0 || !quantityOk}
+          disabled={!sourcingCase || send.isPending || tickedRows.length === 0 || !quantityOk || Boolean(badCopy)}
           onClick={() => send.mutate()}
         >
           {sendLabel}

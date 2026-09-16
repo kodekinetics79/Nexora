@@ -498,6 +498,13 @@ export interface QueuedSupplierRfqResult {
   replayed: boolean;
 }
 
+/** Per-send wording; placeholders allowed. Null parts use the saved wording. */
+export interface SupplierEmailWordingEdit { subject?: string | null; greeting?: string | null; opening?: string | null; signOff?: string | null }
+
+export interface SupplierRfqEmailPreview {
+  subject: string; body: string; from?: string | null; replyTo?: string | null; cc?: string[] | null; bcc?: string[] | null;
+}
+
 export interface SupplierRfqPreparationOutcome {
   supplierId: number;
   succeeded: boolean;
@@ -660,15 +667,31 @@ const procurementService = {
       ),
     ),
 
+  /** A supplier typed in by email: an existing supplier with that email, or a new one tagged for this part. */
+  addSupplierByEmail: async (sourcingCaseId: number, email: string, name?: string | null): Promise<AdoptedDiscoveredSupplier> =>
+    unwrap(
+      await axiosInstance.post<AdoptedDiscoveredSupplier>(
+        `/api/procurement/sourcing-cases/${sourcingCaseId}/suppliers-by-email`,
+        { email, name: name?.trim() || null },
+      ),
+    ),
+
   /** The exact email a supplier would receive for this line (subject and plain text), before anything is sent. */
   previewSupplierRfqEmail: async (
     sourcingCaseId: number,
-    request: { quantity?: number | null; message?: string | null; dueOn?: string | null; sendFromMailboxId?: number | null },
-  ): Promise<{ subject: string; body: string; from?: string | null; replyTo?: string | null }> =>
+    request: {
+      quantity?: number | null; message?: string | null; dueOn?: string | null; sendFromMailboxId?: number | null;
+      cc?: string[]; bcc?: string[]; wording?: SupplierEmailWordingEdit | null;
+    },
+  ): Promise<SupplierRfqEmailPreview> =>
     unwrap(
-      await axiosInstance.post<{ subject: string; body: string; from?: string | null; replyTo?: string | null }>(
+      await axiosInstance.post<SupplierRfqEmailPreview>(
         `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs/preview`,
-        { quantity: request.quantity ?? null, message: request.message ?? null, dueOn: request.dueOn ?? null, sendFromMailboxId: request.sendFromMailboxId ?? null },
+        {
+          quantity: request.quantity ?? null, message: request.message ?? null, dueOn: request.dueOn ?? null,
+          sendFromMailboxId: request.sendFromMailboxId ?? null, cc: request.cc ?? [], bcc: request.bcc ?? [],
+          wording: request.wording ?? null,
+        },
       ),
     ),
 
@@ -692,6 +715,8 @@ const procurementService = {
     quantity?: number | null,
     /** The company mailbox to send from. Omit for the company's default. */
     sendFromMailboxId?: number | null,
+    /** CC, BCC and this send's own wording. */
+    extras?: { cc?: string[]; bcc?: string[]; wording?: SupplierEmailWordingEdit | null },
   ): Promise<SupplierRfqPreparationOutcome[]> => {
     const results: SupplierRfqPreparationOutcome[] = [];
     let version = expectedVersion;
@@ -700,7 +725,9 @@ const procurementService = {
         const prepared = unwrap(
           await axiosInstance.post<PreparedSupplierRfqResult>(
           `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`,
-          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null, quantity: quantity ?? null, ...(sendFromMailboxId ? { sendFromMailboxId } : {}) },
+          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null, quantity: quantity ?? null, ...(sendFromMailboxId ? { sendFromMailboxId } : {}),
+            ...(extras?.cc?.length ? { cc: extras.cc } : {}), ...(extras?.bcc?.length ? { bcc: extras.bcc } : {}),
+            ...(extras?.wording ? { wording: extras.wording } : {}) },
           {
             headers: commandHeaders(
               `prepare-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,

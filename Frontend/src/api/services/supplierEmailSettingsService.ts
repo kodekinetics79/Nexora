@@ -16,11 +16,17 @@ export interface SupplierEmailTexts {
   signOff: string;
 }
 
+/** Company-wide addresses copied on every supplier request (pre-fill; the rep can change them per send). */
+export interface SupplierEmailCopies {
+  defaultCc?: string[] | null;
+  defaultBcc?: string[] | null;
+}
+
 export type SupplierEmailField = keyof SupplierEmailTexts;
 
 export type SupplierEmailCompanyUpdate = { [K in SupplierEmailField]: string | null };
 
-export interface SupplierEmailCompanySettings extends SupplierEmailCompanyUpdate {
+export interface SupplierEmailCompanySettings extends SupplierEmailCompanyUpdate, SupplierEmailCopies {
   /** The Nexora defaults used for any field left blank. */
   defaults: SupplierEmailTexts;
   updatedBy: string | null;
@@ -54,7 +60,7 @@ const supplierEmailSettingsService = {
   getCompany: async (): Promise<SupplierEmailCompanySettings> =>
     unwrap(await axiosInstance.get<SupplierEmailCompanySettings>(`${BASE}/company`)),
 
-  saveCompany: async (body: SupplierEmailCompanyUpdate): Promise<SupplierEmailCompanySettings> =>
+  saveCompany: async (body: SupplierEmailCompanyUpdate & SupplierEmailCopies): Promise<SupplierEmailCompanySettings> =>
     unwrap(await axiosInstance.put<SupplierEmailCompanySettings>(`${BASE}/company`, body)),
 
   getMine: async (): Promise<SupplierEmailMineSettings> =>
@@ -63,8 +69,8 @@ const supplierEmailSettingsService = {
   saveMine: async (body: SupplierEmailMineUpdate): Promise<SupplierEmailMineSettings> =>
     unwrap(await axiosInstance.put<SupplierEmailMineSettings>(`${BASE}/mine`, body)),
 
-  getEffective: async (): Promise<SupplierEmailTexts> =>
-    unwrap(await axiosInstance.get<SupplierEmailTexts>(`${BASE}/effective`)),
+  getEffective: async (): Promise<SupplierEmailTexts & SupplierEmailCopies> =>
+    unwrap(await axiosInstance.get<SupplierEmailTexts & SupplierEmailCopies>(`${BASE}/effective`)),
 
   /** The company's outgoing mailboxes (one marked default) and where supplier replies go. */
   getSendFrom: async (): Promise<SupplierEmailSendFrom> =>

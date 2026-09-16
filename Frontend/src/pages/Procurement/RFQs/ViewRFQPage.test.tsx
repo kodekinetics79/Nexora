@@ -573,7 +573,8 @@ describe('ViewRFQPage — a line without a product says so, and is not offered a
     fireEvent.click(within(dialog).getByRole('button', { name: 'Send to 1 supplier' }));
 
     await waitFor(() => expect(prepareSupplierRfqs).toHaveBeenCalledWith(
-      44, [61], 4, expect.any(String), null, 'Please submit your best pricing and lead times.', 10, null));
+      44, [61], 4, expect.any(String), null, 'Please submit your best pricing and lead times.', 10, null,
+      { cc: [], bcc: [], wording: null }));
     expect(adoptDiscoveredSuppliers).toHaveBeenCalledWith(44, ['hit-1']);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
