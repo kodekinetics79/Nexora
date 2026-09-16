@@ -49,6 +49,7 @@ import {
   WarningAmber,
 } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
+import rfqService from "../../../api/services/rfqService";
 import NextStepPanel from "../../../components/common/NextStepPanel";
 import procurementService, {
   INCOTERMS_2020,
@@ -545,6 +546,8 @@ function SourcingWorkbenchPage() {
     hasPermission("Supplier History", "create");
   const canCapture = hasPermission("Supplier History", "create");
   const canAward = hasPermission("Supplier History", "edit");
+  // Same gate as the RFQ page's Prepare Quote Draft and the endpoint behind both.
+  const canPrepareQuote = hasPermission("Quotations", "create");
   const canCreatePo =
     hasPermission("Orders", "create") &&
     hasPermission("Supplier History", "edit");
@@ -571,6 +574,28 @@ function SourcingWorkbenchPage() {
   const openQuoteButton = workbench?.customerQuoteDraft
     ? <Button variant="contained" startIcon={<OpenInNew />} onClick={() => navigate(`/sales/quotes/view/${workbench.customerQuoteDraft!.quoteId}`)}>Open the quote</Button>
     : undefined;
+  // D18. The panel used to send the rep "back to the RFQ" to press Prepare Quote Draft while the
+  // row's "Price customer quote" sat disabled. Same endpoint as that button; then the pricing
+  // dialog opens on the first awarded line, so the award becomes a price in one motion.
+  const prepareQuoteDraft = useMutation({
+    mutationFn: () => rfqService.prepareQuoteDraft(rfqId as number),
+    onSuccess: (quote: { id: number; quoteNo?: string | null; quoteItems?: Array<{ id: number; rfqItemId?: number | null }> | null }) => {
+      toast.success(`Quote ${quote.quoteNo ?? "draft"} prepared. Price each line from its approved offer.`);
+      refresh();
+      setTab(2);
+      const first = approvedUnconverted
+        .map((award) => ({ award, line: (quote.quoteItems ?? []).find((item) => item.rfqItemId === award.rfqItemId) }))
+        .find((candidate) => candidate.line);
+      if (first?.line) {
+        setPricingSelection({
+          awardId: first.award.id, quoteItemId: first.line.id,
+          landedUnitCost: first.award.landedUnitCost, currencyCode: first.award.currencyCode,
+        });
+      }
+    },
+    onError: (error) => toast.error(errorMessage(error, "The customer quote could not be prepared. Open the RFQ to see what it still needs.")),
+  });
+
   const nextStep: { tone: "info" | "warning" | "error" | "success"; sentence: string; action?: React.ReactNode } | null = !workbench
     ? null
     : workbench.lines.length === 0
@@ -593,7 +618,14 @@ function SourcingWorkbenchPage() {
                   : awaitingSuppliers.length > 0 && unresolvedLines.some((line) => !awardedLineIds.has(line.id))
                     ? { tone: "info", sentence: `Waiting for ${awaitingSuppliers.length} supplier${awaitingSuppliers.length === 1 ? "" : "s"} to reply. When a reply arrives, capture it from the Solicitations tab.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
                     : approvedUnconverted.length > 0 && !workbench.customerQuoteDraft
-                      ? { tone: "info", sentence: "Every short line has an approved supplier offer. Go back to the RFQ and prepare the customer quote draft.", action: rfqId ? <Button variant="contained" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined }
+                      // D18: the draft is one call. Make it here and land on the pricing step,
+                      // instead of sending the rep back to the RFQ to find the button.
+                      ? { tone: "info", sentence: canPrepareQuote
+                            ? `Every short line has an approved supplier offer. Prepare the customer quote, then price ${approvedUnconverted.length === 1 ? "its line" : "each line"} from the offer.`
+                            : "Every short line has an approved supplier offer. Ask someone who can create quotations to prepare the customer quote from the RFQ.",
+                          action: rfqId && canPrepareQuote
+                            ? <Button variant="contained" startIcon={<PriceCheck />} loading={prepareQuoteDraft.isPending} onClick={() => prepareQuoteDraft.mutate()}>Prepare the customer quote</Button>
+                            : rfqId ? <Button variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined }
                       : unpricedWithAward.length > 0
                         ? { tone: "info", sentence: `Quote ${workbench.customerQuoteDraft?.quoteNumber} has ${unpricedWithAward.length} unpriced line${unpricedWithAward.length === 1 ? "" : "s"} with an approved offer. Price ${unpricedWithAward.length === 1 ? "it" : "them"} from the offer.`, action: <Button variant="contained" onClick={() => setTab(2)}>Price from the offer</Button> }
                         : unpricedDraftLines.length > 0
@@ -1335,16 +1367,17 @@ function SourcingWorkbenchPage() {
                         <Tooltip
                           title={(
                             <>
-                              Draft the customer quote first — open{" "}
+                              Prepare the quote draft first — open{" "}
                               <Link component={RouterLink} to={`/procurement/rfqs/view/${rfqId}`} color="inherit" sx={{ fontWeight: 700 }}>
                                 the RFQ
                               </Link>{" "}
-                              and choose Prepare Quote Draft.
+                              and press Prepare Quote Draft.
                             </>
                           )}
                         >
-                          {/* Focusable while disabled so a keyboard user can reach the reason. */}
-                          <span tabIndex={quoteLine ? undefined : 0}>
+                          {/* Focusable while disabled so a keyboard user can reach the reason,
+                              and labelled so a screen reader hears it without hovering. */}
+                          <span tabIndex={0} aria-label="Prepare the quote draft first — open the RFQ and press Prepare Quote Draft">
                             <Button size="small" startIcon={<PriceCheck />} disabled>Price customer quote</Button>
                           </span>
                         </Tooltip>
