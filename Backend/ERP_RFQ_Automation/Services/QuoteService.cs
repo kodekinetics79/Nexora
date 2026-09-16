@@ -2222,14 +2222,14 @@ namespace ERP_RFQ_Automation.Services
             var correlation = $"quote-send:{quote.Id}";
             await _sales.AppendActivityAsync(quote.BusinessUnitId, new AppendCommercialActivityCommand(
                 owner, CommercialActivityType.QuoteSent, "Quote", quote.Id,
-                lead?.CustomerId, null, quote.SentOn.Value, "SENT", $"quote:{quote.Id}:sent",
+                lead?.CustomerId, null, WeightedEligibleRepScoringEngine.AsUtc(quote.SentOn.Value), "SENT", $"quote:{quote.Id}:sent",
                 actor, correlation, $"quote:{quote.Id}:sent-activity"), ct);
             var staleDays = await _context.Set<SlaPolicy>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == quote.BusinessUnitId).Select(x => (int?)x.StaleQuoteDays)
                 .SingleOrDefaultAsync(ct) ?? SlaPolicy.Default(quote.BusinessUnitId).StaleQuoteDays;
             await _sales.CreateFollowUpAsync(quote.BusinessUnitId, new CreateFollowUpTaskCommand(
                 owner, "Quote", quote.Id, lead?.CustomerId,
-                quote.SentOn.Value.AddDays(staleDays), 2, "QUOTE_RESPONSE",
+                WeightedEligibleRepScoringEngine.AsUtc(quote.SentOn.Value).AddDays(staleDays), 2, "QUOTE_RESPONSE",
                 actor, correlation, $"quote:{quote.Id}:sent-follow-up"), ct);
         }
 
