@@ -84,7 +84,7 @@ public sealed class ProcurementController(
         {
             var result = await service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
                 TenantId(), sourcingCaseId, request.SupplierId, request.DueOn, request.ExpectedVersion,
-                IdempotencyKey(), Actor(), CorrelationId(), request.Message), RequestAborted);
+                IdempotencyKey(), Actor(), CorrelationId(), request.Message, request.Quantity), RequestAborted);
             return Created($"/api/procurement/solicitations/{result.SupplierSolicitationId}", result);
         });
 
@@ -402,7 +402,8 @@ public sealed record AdoptDiscoveredSuppliersRequest(IReadOnlyCollection<string>
 /// <c>Message</c> is the rep's own words to the supplier, shown in the email after the line
 /// table. Optional; blank means the standard sentence. Plain text, at most 2,000 characters.
 /// </summary>
-public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion, string? Message = null);
+/// <summary><paramref name="Quantity"/>: how many the rep asks for; the shortfall when omitted.</summary>
+public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion, string? Message = null, decimal? Quantity = null);
 public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);
 
 /// <summary>The operator states they checked with the supplier and the RFQ never arrived.</summary>

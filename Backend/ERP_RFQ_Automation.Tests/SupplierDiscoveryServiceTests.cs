@@ -348,10 +348,11 @@ public sealed class SupplierDiscoveryServiceTests
         Assert.Equal(caseBefore.Version + 1, caseAfter.Version);
         var candidate = caseAfter.Candidates.Single(x => x.SupplierId == gulf.SupplierId);
         Assert.Equal(SourcingCandidateEvidenceTypes.SupplierMetadata, candidate.EvidenceType);
-        Assert.False(candidate.EligibleForSupplierRfq);
-        Assert.Contains("Supplier approval or explicit provisional approval is required", candidate.BlockingReasons);
+        // A found company with an address can be asked straight away; approval comes when its price is picked.
+        Assert.True(candidate.EligibleForSupplierRfq);
         var makerCandidate = caseAfter.Candidates.Single(x => x.SupplierId == se.SupplierId);
-        Assert.Contains("A verified dispatch contact is required", makerCandidate.BlockingReasons);
+        Assert.False(makerCandidate.EligibleForSupplierRfq);
+        Assert.Contains("No email address to send the request to", makerCandidate.BlockingReasons);
         // The supplier the company already had keeps its place.
         Assert.Contains(caseAfter.Candidates, x => x.SupplierId == ProcurementTestData.Supplier);
     }

@@ -525,17 +525,12 @@ namespace ERP_RFQ_Automation.Controllers
             var reasons = new List<string>();
             if (supplier.IsActive != true) reasons.Add("Supplier is inactive");
             if (string.IsNullOrWhiteSpace(supplier.ContactEmail)) reasons.Add("Dispatch email is missing");
-            if (supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved
-                    or SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional))
-                reasons.Add("Governance approval is required");
-            if (supplier.VerificationStatus != SupplierVerificationStatuses.Verified)
-                reasons.Add("Supplier identity is not verified");
-            if (supplier.ComplianceStatus != SupplierComplianceStatuses.Cleared)
-                reasons.Add("Compliance is not cleared");
+            // Asking for a price needs an address and a supplier nobody has shut out; approval is
+            // checked when a price is picked (same rule as ProcurementApplicationService.SupplierAskBlockingReasons).
+            if (supplier.GovernanceStatus is SupplierGovernanceStatuses.Blocked or SupplierGovernanceStatuses.Inactive)
+                reasons.Add("Supplier is blocked");
             if (supplier.RiskStatus is SupplierRiskStatuses.High or SupplierRiskStatuses.Blocked)
                 reasons.Add("Supplier risk blocks outreach");
-            if (supplier.ReadinessStatus != SupplierReadinessStatuses.Ready)
-                reasons.Add("Supplier is not READY for outreach");
             return reasons;
         }
 

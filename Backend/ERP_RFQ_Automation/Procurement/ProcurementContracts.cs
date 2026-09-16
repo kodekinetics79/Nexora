@@ -102,7 +102,8 @@ public sealed record PrepareSupplierRfqCommand(
     string IdempotencyKey,
     string Actor,
     string CorrelationId,
-    string? Message = null);
+    string? Message = null,
+    decimal? Quantity = null);
 
 public sealed record QueuePreparedSupplierRfqCommand(
     long BusinessUnitId,

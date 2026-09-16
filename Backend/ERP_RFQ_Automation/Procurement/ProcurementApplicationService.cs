@@ -419,6 +419,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
         ValidateSolicitationDueOn(command.DueOn);
         var buyerMessage = NormaliseBuyerMessage(command.Message);
+        // The rep chooses how many to ask for (owner, 2026-09-16: "rep chooses per line"); the
+        // shortfall is only the default.
+        if (command.Quantity is { } askedFor && (askedFor <= 0 || askedFor > 1_000_000_000m))
+            throw new ProcurementValidationException("Ask for a quantity greater than zero.");
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
@@ -434,7 +438,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 command.SupplierId,
                 command.DueOn,
                 command.ExpectedVersion,
-                Message = buyerMessage
+                Message = buyerMessage,
+                command.Quantity
             });
             var replay = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == solicitationKey, ct);
@@ -461,11 +466,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 throw new ProcurementConflictException("The Sourcing Case changed; refresh before preparing Supplier RFQ.");
             var candidate = sourcingCase.Candidates.SingleOrDefault(x => x.SupplierId == command.SupplierId)
                 ?? throw new ProcurementValidationException("Supplier is not a persisted candidate for this Sourcing Case.");
-            var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct);
-            var supplierBlockers = SupplierRfqBlockingReasons(supplier);
+            var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct, forAsking: true);
+            var supplierBlockers = SupplierAskBlockingReasons(supplier);
             if (supplierBlockers.Count > 0)
                 throw new ProcurementValidationException(
-                    $"The selected supplier is not ready for a Supplier RFQ: {string.Join("; ", supplierBlockers)}");
+                    $"{supplier.Name} cannot be asked: {string.Join("; ", supplierBlockers)}.");
             var existingPrepared = await _db.Set<SupplierSolicitation>()
                 .OrderByDescending(x => x.Id)
                 .FirstOrDefaultAsync(x =>
@@ -494,7 +499,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     ? null
                     : JsonSerializer.Deserialize<SolicitationDispatchPayload>(preparationEvent.PayloadJson);
                 if (originalPayload is null || originalPayload.DueOn != command.DueOn
-                    || !string.Equals(originalPayload.Message, buyerMessage, StringComparison.Ordinal))
+                    || !string.Equals(originalPayload.Message, buyerMessage, StringComparison.Ordinal)
+                    || (command.Quantity is { } asked && originalPayload.Lines?.FirstOrDefault()?.Quantity != asked))
                     throw new ProcurementConflictException(
                         "A prepared Supplier RFQ already exists with different delivery terms. Review or cancel it before preparing another.");
                 // The dispatch address was corrected after this Supplier RFQ was prepared: the
@@ -562,7 +568,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             solicitation.SupplierRfqNumber = $"SRFQ-{command.BusinessUnitId:D4}-{solicitation.Id:D8}";
             var preparedLines = new[]
             {
-                await DescribeLineForSupplierAsync(rfqItem, sourcingCase.UnfulfilledQuantity, ct)
+                await DescribeLineForSupplierAsync(rfqItem, command.Quantity ?? sourcingCase.UnfulfilledQuantity, ct)
             };
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
@@ -651,11 +657,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     && x.SupplierSolicitationId == solicitation.Id, ct))
                 throw new ProcurementConflictException("This Supplier RFQ already has a dispatch record.");
 
-            var supplier = await RequireSupplierAsync(command.BusinessUnitId, solicitation.SupplierId, ct);
-            var blockers = SupplierRfqBlockingReasons(supplier);
+            var supplier = await RequireSupplierAsync(command.BusinessUnitId, solicitation.SupplierId, ct, forAsking: true);
+            var blockers = SupplierAskBlockingReasons(supplier);
             if (blockers.Count > 0)
                 throw new ProcurementValidationException(
-                    $"The Supplier is no longer ready for outreach: {string.Join("; ", blockers)}");
+                    $"{supplier.Name} can no longer be asked: {string.Join("; ", blockers)}.");
             var rfqItem = await _db.Rfqitems.SingleAsync(x => x.Id == sourcingCase.RfqItemId
                 && x.Rfqid == sourcingCase.RfqId, ct);
             var currentShortfall = await GetNetSourcingRequirementAsync(command.BusinessUnitId, rfqItem, ct);
@@ -960,11 +966,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             }
 
             var rfq = await RequireRfqAsync(command.BusinessUnitId, command.RfqId, ct);
-            var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct);
-            var supplierBlockers = SupplierRfqBlockingReasons(supplier);
+            var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct, forAsking: true);
+            var supplierBlockers = SupplierAskBlockingReasons(supplier);
             if (supplierBlockers.Count > 0)
                 throw new ProcurementValidationException(
-                    $"The selected Supplier is not eligible for RFQ outreach: {string.Join("; ", supplierBlockers)}.");
+                    $"{supplier.Name} cannot be asked: {string.Join("; ", supplierBlockers)}.");
             var requestedLines = await _db.Rfqitems.Where(x => x.Rfqid == command.RfqId && command.RfqItemIds.Contains(x.Id))
                 .OrderBy(x => x.Id).ToListAsync(ct);
             if (requestedLines.Count != command.RfqItemIds.Count)
@@ -1239,7 +1245,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 throw new ProcurementValidationException("Every quoted product and line must belong to the solicited RFQ.");
             if (rfqLines.Values.Any(x => string.IsNullOrWhiteSpace(x.UnitOfMeasure)))
                 throw new ProcurementValidationException("Every quoted RFQ line requires a verified unit of measure.");
-            await RequireSupplierAsync(command.BusinessUnitId, solicitation.SupplierId, ct);
+            // Their reply is recorded whatever their approval: we asked them. Approval is checked
+            // when their price is picked.
+            await RequireSupplierAsync(command.BusinessUnitId, solicitation.SupplierId, ct, forAsking: true);
             if (!solicitation.SourcingCaseId.HasValue || string.IsNullOrWhiteSpace(solicitation.NexoraSerial))
                 throw new ProcurementValidationException("Canonical Sourcing Case and Nexora Serial lineage are required.");
             var sourcingCase = await _db.SourcingCases.AsNoTracking().SingleOrDefaultAsync(x =>
@@ -2629,7 +2637,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         return rows.Where(x => suppliers.ContainsKey(x.SupplierId)).Select(x =>
         {
             var supplier = suppliers[x.SupplierId];
-            var blockers = SupplierRfqBlockingReasons(supplier);
+            var blockers = SupplierAskBlockingReasons(supplier);
             return new SourcingCandidateView(x.Id, x.SupplierId, supplier.Name, supplier.ContactEmail,
                 x.Rank, x.EvidenceType, x.RecommendationReason, x.EvidenceScore, x.EvidenceFreshOn, x.Selected,
                 supplier.GovernanceStatus, supplier.VerificationStatus, supplier.ComplianceStatus,
@@ -2637,6 +2645,28 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         }).ToArray();
     }
 
+    /// <summary>
+    /// What stops a supplier being ASKED for a price. Asking is not a commitment, so it needs only
+    /// an address to send to and a supplier nobody has shut out. Approval, verification, compliance
+    /// and readiness are checked when a price is picked and an order is raised
+    /// (<see cref="SupplierRfqBlockingReasons"/>), which is where they protect the company (owner
+    /// decision 2026-09-16: "tick who to ask, send, next line").
+    /// </summary>
+    internal static IReadOnlyCollection<string> SupplierAskBlockingReasons(Supplier supplier)
+    {
+        var reasons = new List<string>();
+        if (supplier.IsActive != true)
+            reasons.Add("Supplier is inactive");
+        if (string.IsNullOrWhiteSpace(supplier.ContactEmail))
+            reasons.Add("No email address to send the request to");
+        if (supplier.GovernanceStatus is SupplierGovernanceStatuses.Blocked or SupplierGovernanceStatuses.Inactive)
+            reasons.Add("Supplier is blocked");
+        if (supplier.RiskStatus is "BLOCKED" or "HIGH")
+            reasons.Add("Supplier risk blocks outreach");
+        return reasons;
+    }
+
+    /// <summary>What stops a supplier's price being picked or an order being raised with them.</summary>
     private static IReadOnlyCollection<string> SupplierRfqBlockingReasons(Supplier supplier)
     {
         var reasons = new List<string>();
@@ -3414,12 +3444,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         return null;
     }
 
-    private async Task<Supplier> RequireSupplierAsync(long businessUnitId, long supplierId, CancellationToken ct)
+    private async Task<Supplier> RequireSupplierAsync(long businessUnitId, long supplierId, CancellationToken ct, bool forAsking = false)
     {
         var supplier = await _db.Suppliers.SingleOrDefaultAsync(x => x.Buid == businessUnitId &&
             x.Id == supplierId && x.IsActive != false, ct)
             ?? throw new ProcurementValidationException("Supplier was not found in the authenticated tenant.");
-        var blockers = SupplierRfqBlockingReasons(supplier);
+        var blockers = forAsking ? SupplierAskBlockingReasons(supplier) : SupplierRfqBlockingReasons(supplier);
         if (blockers.Count > 0)
             throw new ProcurementValidationException($"Supplier is not eligible: {string.Join("; ", blockers)}.");
         return supplier;

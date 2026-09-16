@@ -70,9 +70,11 @@ public sealed class Phase1SupplierOnboardingSeamTests
             var found = candidates.Candidates.SingleOrDefault(x => x.SupplierId == SupplierId);
             Assert.True(found is not null,
                 "the preferred-supplier edge did not discover the supplier at all");
-            Assert.False(found!.EligibleForSupplierRfq,
-                "an ungoverned supplier was offered as an ELIGIBLE sourcing candidate");
-            Assert.NotEmpty(found.BlockingReasons);
+            // Since 2026-09-16 an ungoverned supplier with an address CAN be asked for a price;
+            // governance is enforced when its price is picked. What must still refuse is a
+            // supplier nobody can send to.
+            Assert.True(found!.EligibleForSupplierRfq,
+                $"a discovered supplier with an address could not be asked: {string.Join("; ", found.BlockingReasons)}");
         }
 
         // ---- governance, through the service that owns it -----------------------------------
