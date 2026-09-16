@@ -20,7 +20,8 @@ public sealed record SupplierDiscoveryStoredHit(
     string? Country,
     string Why,
     string? ContactEmail,
-    int ProviderOrder);
+    int ProviderOrder,
+    bool ContactLookedUp = false);
 
 /// <summary>
 /// Turns a raw search result into a hit the rep can read: which company, what kind, where, why it
@@ -50,7 +51,11 @@ public static class SupplierDiscoveryClassifier
         "nsnlookup.com", "listofcompaniesin.com", "webportunities.net", "opencorporates.com", "dnb.com",
         "zoominfo.com", "crunchbase.com", "bloomberg.com", "kompass.com", "europages.com", "thomasnet.com",
         "yellowpages.com", "yelp.com", "glassdoor.com", "indeed.com", "companieshouse.gov.uk", "bizearch.com",
-        "cybo.com", "hotfrog.com", "manta.com", "tofler.in", "zaubacorp.com"
+        "cybo.com", "hotfrog.com", "manta.com", "tofler.in", "zaubacorp.com",
+        // More marketplaces, and blog hosts: a page on wordpress.com is somebody's post, not a company.
+        "newegg.com", "walmart.com", "etsy.com", "rakuten.com", "ubuy.com", "ubuy.com.sa", "ubuy.sa", "ubuy.ae", "ubuy.co.in",
+        "wordpress.com", "blogspot.com", "medium.com",
+        "wixsite.com", "weebly.com", "sites.google.com", "github.io", "tumblr.com", "substack.com"
     ];
 
     // Labels that mark a host as public sector, academic or a museum, whichever country it is in:
@@ -70,10 +75,19 @@ public static class SupplierDiscoveryClassifier
         @"^(how to|what is|what are|why |where to|top \d+|best \d+|\d+ best|guide to|a guide|the ultimate|everything you)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // A page that says the company makes the product itself.
+    // A page that says the company makes the product itself: "we manufacture", "manufacturer of
+    // industrial gloves", "Gloves Manufacturer" as the site's tagline. A product page that lists
+    // "Manufacturer: Saft" in its specification is a dealer's page and matches SpecLabel instead.
     private static readonly Regex ManufacturerWords = new(
-        @"\b(manufacturer|manufacturers|manufacturing company|we manufacture|our factory|factory direct|oem manufacturer)\b",
+        @"\b(we manufacture|we are (a|the) (leading |largest |trusted )?manufacturer|our (factory|factories|plant)|manufacturers? (of|and|&)\b|manufacturing company|oem manufacturer|manufacturers?\s*$)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex SpecLabel = new(
+        @"\b(manufacturer|brand|mfr|mfg|make)\s*[:：]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Search engines hand back page text with its markdown: "## Saft Connected Energy Division
+    // #### Africa & Middle…". The rep reads a sentence, not markup.
+    private static readonly Regex MarkdownNoise = new(@"(^|\s)#{1,6}\s*|[*_`|>]+|\[([^\]]*)\]\([^)]*\)|-{3,}", RegexOptions.Compiled);
 
     // A segment that ends in what the company does or sells is a tagline, not its name:
     // "welding gloves manufacturer", "Industrial Gloves Supplier", "Ready Stock".
@@ -214,7 +228,10 @@ public static class SupplierDiscoveryClassifier
             role,
             Country(domain, result.Title + " " + result.Snippet),
             Why(role, result.Snippet, makers, partNumbers),
-            FirstEmail(result.Snippet),
+            // Only an address on the company's own domain: a dealer's page quoting the maker's
+            // sales address must not become the dealer's contact (xeostech.com carried
+            // lithiumsales@saftbatteries.com on 2026-09-16). Anything else is looked up later.
+            SupplierContactFinder.PickEmail(domain, [result]),
             providerOrder);
     }
 
@@ -238,7 +255,8 @@ public static class SupplierDiscoveryClassifier
 
         // "North Gloves Industry - Gloves Manufacturer": makes the product itself, so it sits with the
         // makers, above the dealers, which is the order the rep asked for.
-        if (ManufacturerWords.IsMatch(title) || ManufacturerWords.IsMatch(snippet))
+        var specPage = SpecLabel.IsMatch(title) || SpecLabel.IsMatch(snippet);
+        if (!specPage && (ManufacturerWords.IsMatch(title) || ManufacturerWords.IsMatch(snippet)))
             return SupplierRoles.Manufacturer;
 
         var siteName = NonAlphanumeric.Replace(CompanyName(title, domain).ToLowerInvariant(), string.Empty);
@@ -278,7 +296,7 @@ public static class SupplierDiscoveryClassifier
     /// </summary>
     public static string Why(string role, string snippet, IReadOnlyList<string> makers, IReadOnlyList<string> partNumbers)
     {
-        var text = Whitespace.Replace(snippet ?? string.Empty, " ").Trim();
+        var text = Whitespace.Replace(MarkdownNoise.Replace(snippet ?? string.Empty, "$1$2 "), " ").Trim();
         var maker = makers.FirstOrDefault(x => text.Contains(x, StringComparison.OrdinalIgnoreCase));
         var part = partNumbers.FirstOrDefault(x => text.Contains(x, StringComparison.OrdinalIgnoreCase));
 
@@ -347,8 +365,11 @@ public static class SupplierDiscoveryClassifier
         if (text.Contains(',') || text.Contains('®') || text.Contains('™')) return false;
         if (TaglineEnding.IsMatch(text)) return false;
         var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        // "POLAT 301" is a product code, not a company: a word that is only digits gives it away.
-        return words.Length <= 6 && !words.Any(x => x.All(char.IsDigit));
+        // "POLAT 301" and "Saft LS14500 AX Lithium Thionyl Chloride" are product lines, not
+        // companies: a word that is only digits, or a code mixing letters and digits, gives it away.
+        return words.Length <= 6
+            && !words.Any(x => x.All(char.IsDigit))
+            && !words.Any(x => x.Length >= 4 && x.Any(char.IsDigit) && x.Any(char.IsLetter));
     }
 
     /// <summary>"North Gloves Industry" yes; "Hot mill gloves" no. Short joining words ("and", "of", "&") do not count.</summary>

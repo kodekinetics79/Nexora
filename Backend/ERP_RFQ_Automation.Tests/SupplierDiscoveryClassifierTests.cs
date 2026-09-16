@@ -106,8 +106,52 @@ public sealed class SupplierDiscoveryClassifierTests
     [InlineData("Heat gloves - Industrial & Heavy Duty Gloves Supplier", "astrosaudi.com", "Astrosaudi")]
     [InlineData("Kevlar gloves | Ready Stock", "areejintl.com", "Areejintl")]
     [InlineData("Heat gloves | Gulf Switchgear Trading Co.", "gulfswitchgear.com", "Gulf Switchgear Trading Co.")]
+    [InlineData("Saft LS14500 AX Lithium Thionyl Chloride", "batteryspecialists.example", "Batteryspecialists")]
     public void A_title_that_is_the_pages_function_or_a_product_line_is_not_a_company_name(string title, string domain, string expected)
         => Assert.Equal(expected, SupplierDiscoveryClassifier.CompanyName(title, domain));
+
+    [Fact]
+    public void An_address_in_the_excerpt_counts_only_when_it_is_on_the_companys_own_domain()
+    {
+        var dealer = SupplierDiscoveryClassifier.Classify(new WebSearchResult(
+            "Saft LS14500 | Xeostech", "https://xeostech.com/saft", "Saft Connected Energy: lithiumsales@saftbatteries.com"),
+            ["SAFT"], ["LS14500-AX"], 0, ["BATTERY"]);
+        Assert.NotNull(dealer);
+        Assert.Null(dealer!.ContactEmail);
+
+        var own = SupplierDiscoveryClassifier.Classify(new WebSearchResult(
+            "Saft LS14500 | Xeostech", "https://xeostech.com/saft", "Ask us: sales@xeostech.com"),
+            ["SAFT"], ["LS14500-AX"], 0, ["BATTERY"]);
+        Assert.Equal("sales@xeostech.com", own!.ContactEmail);
+    }
+
+    [Fact]
+    public void A_dealers_product_page_that_labels_the_maker_is_not_the_manufacturer_and_markdown_is_stripped_from_why()
+    {
+        // Live on 2026-09-16 for LS14500-AX: Newegg and a trading company ranked as "Manufacturer"
+        // because their specification tables say "Manufacturer: Saft".
+        var dealer = SupplierDiscoveryClassifier.Role("fpgt-trading.example",
+            "Saft LS14500 AX Lithium Battery | FPGT General Trading LLC",
+            "Manufacturer: Saft. Part number LS14500-AX. In stock, ships worldwide.", ["SAFT"]);
+        Assert.Equal(SupplierRoles.Reseller, dealer);
+
+        var maker = SupplierDiscoveryClassifier.Role("cellpack.example", "Cell Pack Solutions - Battery Pack Manufacturer",
+            "We manufacture custom battery packs in the UK.", ["SAFT"]);
+        Assert.Equal(SupplierRoles.Manufacturer, maker);
+
+        Assert.Null(SupplierDiscoveryClassifier.Classify(
+            new WebSearchResult("Saft power NI-CD Batteries | Energy Corner", "https://energycorner.wordpress.com/x", "Saft batteries"),
+            ["SAFT"], ["LS14500-AX"], 0, ["BATTERY"]));
+        Assert.Null(SupplierDiscoveryClassifier.Classify(
+            new WebSearchResult("Saft LS14500 | Newegg", "https://www.newegg.com/p/1", "LS14500-AX"),
+            ["SAFT"], ["LS14500-AX"], 0, ["BATTERY"]));
+
+        var why = SupplierDiscoveryClassifier.Why(SupplierRoles.Reseller,
+            "## Saft Connected Energy Division Serving your needs around the world Sales offices, production sites & distributors #### Africa & Middle East",
+            [], []);
+        Assert.DoesNotContain("#", why);
+        Assert.StartsWith("Saft Connected Energy Division", why);
+    }
 
     [Fact]
     public void An_article_about_buying_the_product_is_dropped_and_a_self_described_maker_ranks_as_manufacturer()

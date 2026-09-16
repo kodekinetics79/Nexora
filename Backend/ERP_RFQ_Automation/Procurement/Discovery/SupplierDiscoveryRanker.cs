@@ -3,7 +3,7 @@ using ERP_RFQ_Automation.Models;
 namespace ERP_RFQ_Automation.Procurement.Discovery;
 
 /// <summary>A supplier already on this company's list, reduced to what the ranker needs to recognise it in a hit.</summary>
-public sealed record KnownSupplier(long Id, string Name, string? Website)
+public sealed record KnownSupplier(long Id, string Name, string? Website, string? ContactEmail = null)
 {
     public string? Domain => SupplierDiscoveryClassifier.RegistrableDomain(Website);
 }
@@ -41,8 +41,10 @@ public static class SupplierDiscoveryRanker
                 var known = byDomain.TryGetValue(hit.Domain, out var byWebsite) ? byWebsite
                     : byName.TryGetValue(NormaliseName(hit.Name), out var byTitle) ? byTitle
                     : null;
+                // A company already on the list is asked at the address on its record; the search's
+                // address stands in only while the record has none.
                 return (Hit: new SupplierDiscoveryHit(hit.Id, hit.Name, hit.Website, hit.Domain, hit.Role, hit.Country,
-                    hit.Why, hit.ContactEmail, known?.Id), hit.ProviderOrder);
+                    hit.Why, known?.ContactEmail ?? hit.ContactEmail, known?.Id), hit.ProviderOrder);
             })
             .OrderBy(x => SupplierRoles.RankOrder(x.Hit.Role))
             .ThenBy(x => x.Hit.ExistingSupplierId.HasValue ? 0 : 1)

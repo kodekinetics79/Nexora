@@ -363,6 +363,8 @@ builder.Services.AddHttpClient<ERP_RFQ_Automation.Procurement.Discovery.OllamaWe
     .RedactLoggedHeaders(OutboundHttpRedaction.SensitiveHeaders);
 builder.Services.AddScoped<ERP_RFQ_Automation.Procurement.Discovery.ISupplierWebSearchProvider>(services =>
     services.GetRequiredService<ERP_RFQ_Automation.Procurement.Discovery.OllamaWebSearchProvider>());
+builder.Services.AddScoped<ERP_RFQ_Automation.Procurement.Discovery.ISupplierContactFinder,
+    ERP_RFQ_Automation.Procurement.Discovery.SupplierContactFinder>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Procurement.Discovery.ISupplierDiscoveryService,
     ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryService>();
 builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService>();

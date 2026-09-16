@@ -154,6 +154,69 @@ public sealed class SupplierDiscoveryServiceTests
     }
 
     [Fact]
+    public async Task A_company_found_without_an_address_gets_one_looked_up_once_and_the_answer_is_kept()
+    {
+        // Live on 2026-09-16: six of nine companies found for LS14500-AX arrived with "No contact
+        // email" and could not be asked. The lookup runs for the page shown, the answer is cached,
+        // and a repeat costs nothing.
+        using var harness = new Harness();
+        harness.Provider.Answer = _ => StandardResults();
+        harness.Contacts.Answer = domain => domain == "cheapbreakers.example" ? "sales@cheapbreakers.example" : null;
+        var caseId = await harness.CreateCaseAsync("contacts");
+
+        var first = await harness.Discover(caseId);
+        var cheap = first.Hits.Single(x => x.Domain == "cheapbreakers.example");
+        Assert.Equal("sales@cheapbreakers.example", cheap.ContactEmail);
+        // Every page hit without an address was asked about, and only those: gulfswitchgear.com
+        // came with sales@ in its excerpt, so it was not.
+        Assert.Contains("cheapbreakers.example", harness.Contacts.LookedUp);
+        Assert.Contains("se.com", harness.Contacts.LookedUp);
+        Assert.DoesNotContain("gulfswitchgear.com", harness.Contacts.LookedUp);
+        var lookups = harness.Contacts.LookedUp.Count;
+
+        var second = await harness.Discover(caseId);
+        Assert.True(second.FromCache);
+        Assert.Equal("sales@cheapbreakers.example", second.Hits.Single(x => x.Domain == "cheapbreakers.example").ContactEmail);
+        Assert.Equal(lookups, harness.Contacts.LookedUp.Count);
+
+        // Adopting carries the found address onto the new supplier.
+        var adopted = await harness.Adopt(caseId, cheap.Id);
+        Assert.Equal("sales@cheapbreakers.example", adopted.Adopted.Single().ContactEmail);
+        Assert.False(adopted.Adopted.Single().NeedsContactEmail);
+    }
+
+    [Fact]
+    public async Task A_supplier_already_on_the_list_without_an_address_gets_the_looked_up_one_on_its_record()
+    {
+        // The owner added nine companies on 2026-09-16 before the lookup existed; six had no
+        // address. Opening the case again fills the record in, so they can be asked.
+        using var harness = new Harness();
+        harness.Provider.Answer = _ => StandardResults();
+        var caseId = await harness.CreateCaseAsync("known-contacts");
+        var first = await harness.Discover(caseId);
+        var cheap = first.Hits.Single(x => x.Domain == "cheapbreakers.example");
+        Assert.Null(cheap.ContactEmail);
+        var adopted = (await harness.Adopt(caseId, cheap.Id)).Adopted.Single();
+        Assert.True(adopted.NeedsContactEmail);
+
+        // The lookup ran once and found nothing; a later search must not spend a second call on
+        // the same company, so the address arrives when the cache expires and the search runs again.
+        harness.Contacts.Answer = domain => domain == "cheapbreakers.example" ? "rfq@cheapbreakers.example" : null;
+        await using (var context = harness.Context())
+        {
+            var row = await context.SupplierDiscoverySearches.SingleAsync(x => x.BusinessUnitId == harness.Scenario.BusinessUnitId);
+            row.SearchedAtUtc = DateTime.UtcNow.AddDays(-40);
+            await context.SaveChangesAsync();
+        }
+        var again = await harness.Discover(caseId);
+        var known = again.Hits.Single(x => x.Domain == "cheapbreakers.example");
+        Assert.Equal(adopted.SupplierId, known.ExistingSupplierId);
+        Assert.Equal("rfq@cheapbreakers.example", known.ContactEmail);
+        await using (var context = harness.Context())
+            Assert.Equal("rfq@cheapbreakers.example", (await context.Suppliers.SingleAsync(x => x.Id == adopted.SupplierId)).ContactEmail);
+    }
+
+    [Fact]
     public async Task The_customers_approved_maker_list_on_the_line_widens_the_search()
     {
         using var harness = new Harness();
@@ -387,6 +450,7 @@ public sealed class SupplierDiscoveryServiceTests
     {
         public ProcurementScenario Scenario { get; } = new();
         public StubProvider Provider { get; } = new();
+        public StubContacts Contacts { get; } = new();
         public StubTrust Trust { get; } = new();
         public long LastCaseId { get; private set; }
         private readonly IConfiguration _configuration;
@@ -436,7 +500,7 @@ public sealed class SupplierDiscoveryServiceTests
         {
             await using var context = Context();
             var service = new SupplierDiscoveryService(context, Provider, new ProcurementApplicationService(context),
-                _configuration, new NoopLogger<SupplierDiscoveryService>());
+                _configuration, Contacts, new NoopLogger<SupplierDiscoveryService>());
             return await operation(service);
         }
 
@@ -456,6 +520,18 @@ public sealed class SupplierDiscoveryServiceTests
             Queries.Add(query);
             Assert.Equal(SupplierDiscoveryConfiguration.ProviderMaxResultsPerQuery, maxResults);
             return Task.FromResult(Answer(query));
+        }
+    }
+
+    private sealed class StubContacts : ISupplierContactFinder
+    {
+        public List<string> LookedUp { get; } = [];
+        public Func<string, string?> Answer { get; set; } = _ => null;
+
+        public Task<string?> FindEmailAsync(string domain, string supplierName, CancellationToken ct)
+        {
+            LookedUp.Add(domain);
+            return Task.FromResult(Answer(domain));
         }
     }
 

@@ -38,19 +38,27 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
     private readonly ISupplierWebSearchProvider _provider;
     private readonly IProcurementApplicationService _procurement;
     private readonly IConfiguration _configuration;
+    private readonly ISupplierContactFinder _contacts;
     private readonly ILogger<SupplierDiscoveryService> _log;
+
+    /// <summary>How many contact lookups one page may spend, and how many run at once.</summary>
+    public const int MaxContactLookupsPerPage = 10;
+    private const int ContactLookupConcurrency = 4;
+    private static readonly TimeSpan ContactLookupTimeout = TimeSpan.FromSeconds(12);
 
     public SupplierDiscoveryService(
         ErpRfqAutomationContext db,
         ISupplierWebSearchProvider provider,
         IProcurementApplicationService procurement,
         IConfiguration configuration,
+        ISupplierContactFinder contacts,
         ILogger<SupplierDiscoveryService> log)
     {
         _db = db;
         _provider = provider;
         _procurement = procurement;
         _configuration = configuration;
+        _contacts = contacts;
         _log = log;
     }
 
@@ -112,6 +120,7 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
 
         var adopted = new List<AdoptedDiscoveredSupplier>();
         var created = new List<(string HitId, Supplier Supplier)>();
+        var lookedUpDuringAdopt = false;
         foreach (var hitId in hitIds)
         {
             var hit = storedHits[hitId];
@@ -120,6 +129,15 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
                 adopted.Add(new AdoptedDiscoveredSupplier(hitId, existing.Id, existing.Name, existing.ContactEmail,
                     string.IsNullOrWhiteSpace(existing.ContactEmail), AlreadyExisted: true));
                 continue;
+            }
+
+            // A ticked company with no address yet gets one more look before it joins the list.
+            if (hit.ContactEmail is null && !hit.ContactLookedUp)
+            {
+                var found = await _contacts.FindEmailAsync(hit.Domain, hit.Name, ct);
+                hit = hit with { ContactEmail = found, ContactLookedUp = true };
+                storedHits[hitId] = hit;
+                lookedUpDuringAdopt = true;
             }
 
             // Two suppliers cannot share one dispatch address (UX_Suppliers_BU_ContactEmail), so an
@@ -148,7 +166,9 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
             created.Add((hitId, supplier));
         }
 
-        if (created.Count > 0)
+        if (lookedUpDuringAdopt)
+            cached.HitsJson = JsonSerializer.Serialize(storedHits.Values.OrderBy(x => x.ProviderOrder).ToList(), Json);
+        if (created.Count > 0 || lookedUpDuringAdopt)
             await _db.SaveChangesAsync(ct);
         foreach (var (hitId, supplier) in created)
             adopted.Add(new AdoptedDiscoveredSupplier(hitId, supplier.Id, supplier.Name, supplier.ContactEmail,
@@ -255,10 +275,46 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
 
         var known = await _db.Suppliers.AsNoTracking()
             .Where(x => x.Buid == businessUnitId)
-            .Select(x => new KnownSupplier(x.Id, x.Name, x.Website))
+            .Select(x => new KnownSupplier(x.Id, x.Name, x.Website, x.ContactEmail))
             .ToListAsync(ct);
         var ranked = SupplierDiscoveryRanker.Rank(hits, known);
         var page = SupplierDiscoveryRanker.Page(ranked, offset, limit);
+
+        // A company the rep can see but cannot ask is half an answer. For the hits on this page
+        // that arrived without an address, ask the internet for one now, remember the answer in
+        // the cache, and rank again so the rows carry it.
+        var wanting = page.Where(x => x.ContactEmail is null).Select(x => x.Id).ToArray();
+        if (wanting.Length > 0)
+        {
+            var enriched = await LookUpContactsAsync(cached, hits, wanting, ct);
+            if (enriched is not null)
+            {
+                hits = enriched;
+                // A company the rep already added but could not ask gets the address on its record
+                // now, unless another supplier already uses it (one dispatch address per supplier).
+                var knownWithoutEmail = page.Where(x => x.ExistingSupplierId is not null && x.ContactEmail is null)
+                    .Select(x => (SupplierId: x.ExistingSupplierId!.Value, Found: hits.FirstOrDefault(h => h.Id == x.Id)?.ContactEmail))
+                    .Where(x => x.Found is not null).ToArray();
+                if (knownWithoutEmail.Length > 0)
+                {
+                    var inUse = known.Where(x => x.ContactEmail is not null).Select(x => x.ContactEmail!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var ids = knownWithoutEmail.Select(x => x.SupplierId).ToArray();
+                    var records = await _db.Suppliers.Where(x => ids.Contains(x.Id)).ToListAsync(ct);
+                    foreach (var (supplierId, found) in knownWithoutEmail)
+                    {
+                        var record = records.FirstOrDefault(x => x.Id == supplierId);
+                        if (record is null || record.ContactEmail is not null || inUse.Contains(found!)) continue;
+                        record.ContactEmail = found;
+                        inUse.Add(found!);
+                    }
+                    await _db.SaveChangesAsync(ct);
+                    known = known.Select(k => records.FirstOrDefault(r => r.Id == k.Id) is { ContactEmail: not null } r
+                        ? k with { ContactEmail = r.ContactEmail } : k).ToList();
+                }
+                ranked = SupplierDiscoveryRanker.Rank(hits, known);
+                page = SupplierDiscoveryRanker.Page(ranked, offset, limit);
+            }
+        }
         var knownCount = ranked.Count(x => x.ExistingSupplierId.HasValue);
         var message = fromCache
             ? $"Found {ranked.Count} {Plural(ranked.Count, "company", "companies")} on the internet for {identity.Subject()} (searched {searchedAt:d MMM}). "
@@ -269,6 +325,50 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
 
         return new SupplierDiscoveryResult(SupplierDiscoveryStatuses.Ready, message, searchedFor,
             ranked.Count, offset, limit, fromCache, searchedAt, page);
+    }
+
+    /// <summary>
+    /// Looks up an enquiry address for the given hits, a few at a time and never more than
+    /// <see cref="MaxContactLookupsPerPage"/> per call, and writes the answers back to the cache.
+    /// Returns null when nothing changed.
+    /// </summary>
+    private async Task<IReadOnlyList<SupplierDiscoveryStoredHit>?> LookUpContactsAsync(
+        SupplierDiscoverySearch? cached, IReadOnlyList<SupplierDiscoveryStoredHit> hits, IReadOnlyList<string> hitIds, CancellationToken ct)
+    {
+        var byId = hits.ToDictionary(x => x.Id, StringComparer.Ordinal);
+        var todo = hitIds.Where(id => byId.TryGetValue(id, out var hit) && hit.ContactEmail is null && !hit.ContactLookedUp)
+            .Take(MaxContactLookupsPerPage).ToArray();
+        if (todo.Length == 0) return null;
+
+        using var gate = new SemaphoreSlim(ContactLookupConcurrency);
+        var results = await Task.WhenAll(todo.Select(async id =>
+        {
+            await gate.WaitAsync(ct);
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(ContactLookupTimeout);
+                var hit = byId[id];
+                return (id, Email: await _contacts.FindEmailAsync(hit.Domain, hit.Name, timeout.Token));
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }));
+
+        foreach (var (id, email) in results)
+            byId[id] = byId[id] with { ContactEmail = email, ContactLookedUp = true };
+        var updated = hits.Select(x => byId[x.Id]).ToList();
+        _log.LogInformation("SupplierDiscovery contact lookup: {Found} of {Tried} companies now have an address.",
+            results.Count(x => x.Email is not null), results.Length);
+
+        if (cached is not null)
+        {
+            cached.HitsJson = JsonSerializer.Serialize(updated, Json);
+            await _db.SaveChangesAsync(ct);
+        }
+        return updated;
     }
 
     private async Task<List<SupplierDiscoveryStoredHit>> SearchLiveAsync(
