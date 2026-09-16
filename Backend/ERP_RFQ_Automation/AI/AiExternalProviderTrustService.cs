@@ -183,6 +183,19 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
                         && AiProviderEndpoint.ModelMatches(x.Model, provider.Model))
             .ToList();
 
+        // A grant this code wrote earlier, before a purpose existed, is configuration nobody
+        // authored — widening it to the current auto-provision list is the same act as writing
+        // it fresh. A grant a PERSON wrote is left exactly as they wrote it, whatever it lacks:
+        // internet supplier discovery on such a tenant stays switched off until they add it.
+        foreach (var grant in matching.Where(x => x.IsActive(now) && x.AuthorizedBy == AutoProvisionActor))
+        {
+            if (AutoProvisionPurposes.All(grant.CoversPurpose))
+                continue;
+            grant.AllowedPurposes = string.Join(",", AutoProvisionPurposes);
+            grant.UpdatedOn = now;
+            wrote = true;
+        }
+
         // A human said no. Leave it alone — that is the whole point of a revocable control.
         if (!matching.Any(x => x.IsRevoked) && !matching.Any(x => x.IsActive(now)))
         {
@@ -225,8 +238,8 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
         }
     }
 
-    private static readonly string[] AutoProvisionPurposes =
-        [AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent];
+    internal static readonly string[] AutoProvisionPurposes =
+        [AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent, AiPurposes.SupplierDiscovery];
 
     /// <summary>
     /// The same chain, evaluated to the END instead of stopping at the first closed lock.
@@ -722,7 +735,7 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (parsed.Length == 0)
             throw new PlatformGovernanceValidationException("At least one AI purpose must be authorized.");
-        var known = new[] { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent };
+        var known = new[] { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent, AiPurposes.SupplierDiscovery };
         var unknown = parsed.Where(p => !known.Contains(p, StringComparer.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0)
             throw new PlatformGovernanceValidationException(

@@ -35,7 +35,9 @@ const FullNoBidCommitDialog: React.FC<FullNoBidCommitDialogProps> = ({
   const [reasonCode, setReasonCode] = React.useState('');
   const [notes, setNotes] = React.useState('');
   const [page, setPage] = React.useState(0);
-  const governedReasons = reasonCodes.filter((reason) => reason.appliesTo.includes('NoBid'));
+  // Turning the whole request down is recorded against the quote-outcome list, not the reasons a
+  // single line is skipped for; the server refuses a line-skip-only reason here.
+  const governedReasons = reasonCodes.filter((reason) => reason.appliesTo.includes('Decline'));
 
   React.useEffect(() => {
     if (!open) return;

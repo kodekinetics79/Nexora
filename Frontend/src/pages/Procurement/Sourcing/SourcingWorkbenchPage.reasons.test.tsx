@@ -90,7 +90,7 @@ describe('SourcingWorkbenchPage — disabled controls print their reason', () =>
     const price = await screen.findByRole('button', { name: /price customer quote/i });
     expect(price).toBeDisabled();
     fireEvent.mouseOver(price.parentElement as HTMLElement);
-    expect(await screen.findByText(/draft the customer quote first/i)).toBeInTheDocument();
+    expect(await screen.findByText(/prepare the quote draft first/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /the rfq/i })).toHaveAttribute('href', '/procurement/rfqs/view/5');
   });
 });

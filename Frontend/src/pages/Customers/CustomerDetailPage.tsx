@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -26,6 +26,9 @@ import commercialLearningService from '../../api/services/commercialLearningServ
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
 import ChangeHistoryPanel from '../../components/common/ChangeHistoryPanel';
 import { useAuth } from '../../context/AuthContext';
+import AccountOwnerDialog from '../SalesManagement/AccountOwnerDialog';
+import { AccountTeamGap, NO_HISTORY_YET, healthBandWord, healthWord, metricWithStatus } from './customerWords';
+import { formatDateSafe } from '../../utils/dates';
 
 const healthWindow = () => {
   const to = new Date();
@@ -34,7 +37,7 @@ const healthWindow = () => {
   return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
 };
 
-const metricValue = (value: number | null | undefined, suffix = '') => value == null ? 'Insufficient evidence' : `${value.toLocaleString()}${suffix}`;
+const metricValue = (value: number | null | undefined, suffix = '') => value == null ? NO_HISTORY_YET : `${value.toLocaleString()}${suffix}`;
 
 const InfoRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
   <Box sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, gap: { xs: 0.25, sm: 2 }, py: 0.9, borderBottom: '1px solid', borderColor: 'divider', alignItems: { xs: 'flex-start', sm: 'center' }, minWidth: 0, '&:last-child': { border: 'none' } }}>
@@ -79,7 +82,7 @@ const Section: React.FC<{ title: string; icon: React.ReactNode; children: React.
 const CustomerDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { hasPermission } = useAuth();
+  const { hasPermission, userData } = useAuth();
   const customerId = Number(id);
   const validCustomerId = Number.isInteger(customerId) && customerId > 0;
   const canViewCustomers = hasPermission('Customers');
@@ -89,6 +92,10 @@ const CustomerDetailPage: React.FC = () => {
   const canViewCommercialContext = canViewCustomers && canViewQuotes && canViewOrders && canViewRfqs;
   const canViewMemory = canViewCustomers && canViewQuotes;
   const canViewHealth = canViewCommercialContext;
+  const canEditCustomer = hasPermission('Customers', 'edit');
+  // Handing an account to a person is a manager's decision; the server answers 403 otherwise.
+  const canSetAccountOwner = (userData?.isManager === true || userData?.isSuperAdmin === true) && canEditCustomer;
+  const [ownerDialogOpen, setOwnerDialogOpen] = useState(false);
 
   const customerQuery = useQuery({
     queryKey: ['customer-detail', customerId],
@@ -191,7 +198,19 @@ const CustomerDetailPage: React.FC = () => {
           <Section title="Account ownership and active work" icon={<OwnershipIcon sx={{ fontSize: 16 }} />}>
             {!canViewCustomers ? <Alert severity="info">Customer view permission is required.</Alert> : ownership.isLoading ? <CircularProgress size={20} /> : ownership.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void ownership.refetch()}>Retry</Button>}>Account ownership could not be loaded.</Alert> : ownership.data ? (
               <Grid container spacing={2} sx={{ alignItems: 'center' }}>
-                <Grid size={{ xs: 12, sm: 4 }}><InfoRow label="Account owner" value={ownership.data.ownerName ?? 'Unassigned'} /></Grid>
+                <Grid size={{ xs: 12, sm: 4 }}><InfoRow label="Account owner" value={(
+                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span>{ownership.data.ownerName ?? 'Unassigned'}</span>
+                    {/* The fact used to sit here with nothing to press. */}
+                    {canSetAccountOwner ? (
+                      <Button size="small" variant="outlined" onClick={() => setOwnerDialogOpen(true)} sx={{ textTransform: 'none', fontWeight: 700 }}>
+                        {ownership.data.ownerUserId ? 'Change account owner' : 'Set account owner'}
+                      </Button>
+                    ) : !ownership.data.ownerUserId && (
+                      <Typography component="span" variant="caption" color="text.secondary">Ask a sales manager to set one.</Typography>
+                    )}
+                  </Stack>
+                )} /></Grid>
                 <Grid size={{ xs: 6, sm: 2 }}><InfoRow label="Open inquiries" value={ownership.data.openLeads} /></Grid>
                 <Grid size={{ xs: 6, sm: 2 }}><InfoRow label="Open quotes" value={ownership.data.openQuotes} /></Grid>
                 <Grid size={{ xs: 12, sm: 4 }}>
@@ -221,7 +240,7 @@ const CustomerDetailPage: React.FC = () => {
                   ['Orders, 24 months', context.data?.ordersLast24Months],
                 ].map(([label, value]) => <Grid key={String(label)} size={{ xs: 6, sm: 4, lg: 2 }}>
                   <Typography variant="caption" color="text.secondary">{label}</Typography>
-                  <Typography sx={{ fontSize: '1.2rem', fontWeight: 800 }}>{value ?? 'Insufficient evidence'}</Typography>
+                  <Typography sx={{ fontSize: '1.2rem', fontWeight: 800 }}>{value ?? NO_HISTORY_YET}</Typography>
                 </Grid>)}
               </Grid>
               {context.data?.orderValueStatus !== 'no_data' && <Box sx={{ mt: 2 }}>
@@ -239,17 +258,19 @@ const CustomerDetailPage: React.FC = () => {
           <Section title="Follow-up and next action" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
             {!canViewHealth ? <Alert severity="info">Customer, RFQ, quotation, and order view permissions are required.</Alert> : health.isLoading ? <CircularProgress size={20} /> : health.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void health.refetch()}>Retry</Button>}>Server-calculated customer health could not be loaded.</Alert> : health.data ? <>
               {health.data.dataCompleteness.status === 'partial' && <Alert severity="warning" sx={{ mb: 1 }}>This health view is partial because the bounded source limit was reached for: {health.data.dataCompleteness.incompleteSources.join(', ')}.</Alert>}
-              <InfoRow label="Account health" value={<Chip size="small" label={health.data.healthBand || 'Insufficient evidence'} color={health.data.healthBand.toLowerCase().includes('risk') ? 'error' : health.data.healthBand.toLowerCase().includes('healthy') ? 'success' : 'default'} />} />
-              <InfoRow label="Next action" value={health.data.nextBestAction?.title ?? 'Insufficient evidence for a next action'} />
+              <InfoRow label="Account health" value={<Chip size="small" label={healthBandWord(health.data.healthBand)} color={health.data.healthBand.toLowerCase().includes('risk') ? 'error' : health.data.healthBand.toLowerCase().includes('healthy') ? 'success' : 'default'} />} />
+              <InfoRow label="Next action" value={health.data.nextBestAction?.title ?? 'Not enough history yet to suggest a next step'} />
               <InfoRow label="Action evidence" value={health.data.nextBestAction?.explanation ?? (health.data.healthReasons.join('; ') || 'The server returned no qualifying evidence.')} />
-              <InfoRow label="RFQ trend" value={`${health.data.rfqTrend.currentCount} current vs ${health.data.rfqTrend.previousCount} previous; ${metricValue(health.data.rfqTrend.changePercent, '%')} (${health.data.rfqTrend.status})`} />
-              <InfoRow label="Quote coverage" value={`${health.data.quoteCoverage.quotedRfqCount} of ${health.data.quoteCoverage.rfqCount}; ${metricValue(health.data.quoteCoverage.coveragePercent, '%')} (${health.data.quoteCoverage.status})`} />
-              <InfoRow label="Quote conversion" value={`${metricValue(health.data.conversion.ratePercent, '%')} (${health.data.conversion.status})`} />
-              <InfoRow label="Margin status" value={`${health.data.margin.status}${health.data.margin.grossMarginPercent == null ? health.data.margin.reason ? `: ${health.data.margin.reason}` : '' : `: ${health.data.margin.grossMarginPercent.toLocaleString()}%`}`} />
+              {/* Figures with their status in plain words — never "(insufficient-evidence)" or a
+                  landed-cost sentence written for an engineer. */}
+              <InfoRow label="RFQ trend" value={`${health.data.rfqTrend.currentCount} current vs ${health.data.rfqTrend.previousCount} previous; ${metricWithStatus(health.data.rfqTrend.changePercent, '%', health.data.rfqTrend.status)}`} />
+              <InfoRow label="Quote coverage" value={`${health.data.quoteCoverage.quotedRfqCount} of ${health.data.quoteCoverage.rfqCount}; ${metricWithStatus(health.data.quoteCoverage.coveragePercent, '%', health.data.quoteCoverage.status)}`} />
+              <InfoRow label="Quote conversion" value={metricWithStatus(health.data.conversion.ratePercent, '%', health.data.conversion.status)} />
+              <InfoRow label="Margin" value={health.data.margin.grossMarginPercent == null ? healthWord(health.data.margin.status) || NO_HISTORY_YET : `${health.data.margin.grossMarginPercent.toLocaleString()}%`} />
               <InfoRow label="Follow-up" value={`${health.data.followUp.openCount} open; ${health.data.followUp.overdueCount} overdue; ${metricValue(health.data.followUp.effectivenessPercent, '%')} effectiveness`} />
               <InfoRow label="Revision burden" value={`${health.data.revisionBurden.revisionCount} revisions; fields ${health.data.revisionBurden.changedFieldCount}/${health.data.revisionBurden.comparedFieldCount} changed (${metricValue(health.data.revisionBurden.fieldChangePercent, '%')}); lines ${health.data.revisionBurden.changedLineCount}/${health.data.revisionBurden.comparedLineCount} changed (${metricValue(health.data.revisionBurden.lineChangePercent, '%')})`} />
-              <InfoRow label="Last commercial activity" value={health.data.lastCommercialActivity ? `${health.data.lastCommercialActivity.reference}${health.data.lastCommercialActivity.occurredOn ? ` on ${new Date(health.data.lastCommercialActivity.occurredOn).toLocaleDateString()}` : ''}` : 'Insufficient evidence'} />
-              <InfoRow label="Evidence period" value={`${new Date(health.data.period.from).toLocaleDateString()} to ${new Date(health.data.period.to).toLocaleDateString()}`} />
+              <InfoRow label="Last commercial activity" value={health.data.lastCommercialActivity ? `${health.data.lastCommercialActivity.reference}${health.data.lastCommercialActivity.occurredOn ? ` on ${formatDateSafe(health.data.lastCommercialActivity.occurredOn)}` : ''}` : 'None recorded yet'} />
+              <InfoRow label="Evidence period" value={`${formatDateSafe(health.data.period.from)} to ${formatDateSafe(health.data.period.to)}`} />
               {health.data.healthReasons.length > 0 && <Stack component="ul" spacing={0.5} sx={{ pl: 2.5 }}>
                 {health.data.healthReasons.map(reason => <Typography component="li" variant="body2" key={reason}>{reason}</Typography>)}
               </Stack>}
@@ -261,7 +282,7 @@ const CustomerDetailPage: React.FC = () => {
                 </Box>)}
               </Box>}
               {health.data.nextBestAction?.actionRoute?.startsWith('/') && <Button variant="outlined" endIcon={<OpenIcon />} onClick={() => navigate(health.data!.nextBestAction!.actionRoute)}>Open next action</Button>}
-            </> : <Typography color="text.secondary" variant="body2">Insufficient customer-health evidence for this period.</Typography>}
+            </> : <Typography color="text.secondary" variant="body2">Not enough history yet for this customer.</Typography>}
           </Section>
         </Grid>
 
@@ -293,14 +314,14 @@ const CustomerDetailPage: React.FC = () => {
           <Section title="Accepted price evidence" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
             {!canViewHealth ? <Alert severity="info">Customer, RFQ, quotation, and order view permissions are required.</Alert> : health.isLoading ? <CircularProgress size={20} /> : health.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void health.refetch()}>Retry</Button>}>Accepted price evidence could not be loaded.</Alert> : health.data?.acceptedPrices.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Accepted customer prices"><TableHead><TableRow><TableCell>Part</TableCell><TableCell>Quantity</TableCell><TableCell>Accepted unit price</TableCell><TableCell>Evidence</TableCell></TableRow></TableHead><TableBody>
               {health.data.acceptedPrices.map((item, index) => <TableRow hover key={`${item.evidence.recordType}-${item.evidence.recordId}-${index}`}><TableCell>{item.partNumber || item.description || 'Part not resolved'}</TableCell><TableCell>{item.quantity.toLocaleString()}</TableCell><TableCell>{item.currencyCode} {item.unitPrice.toLocaleString(undefined, { maximumFractionDigits: 4 })}</TableCell><TableCell>{item.evidence.reference}</TableCell></TableRow>)}
-            </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">Insufficient accepted-price evidence for this period.</Typography>}
+            </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No accepted prices recorded yet.</Typography>}
           </Section>
         </Grid>
 
         <Grid size={{ xs: 12 }}>
           <Section title="Recent Customer RFQs" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
             {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>RFQ history could not be loaded.</Alert> : context.data?.recentRfqs.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Recent customer RFQs"><TableHead><TableRow><TableCell>RFQ</TableCell><TableCell>Contact</TableCell><TableCell>Received</TableCell><TableCell>Deadline</TableCell><TableCell>Status</TableCell><TableCell>Lines</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
-              {context.data.recentRfqs.map(rfq => <TableRow hover key={rfq.rfqId}><TableCell>{rfq.rfqNo}</TableCell><TableCell>{rfq.contactName ?? 'Not recorded'}</TableCell><TableCell>{new Date(rfq.receivedOn).toLocaleDateString()}</TableCell><TableCell>{rfq.bidClosingOn ? new Date(rfq.bidClosingOn).toLocaleDateString() : 'Not recorded'}</TableCell><TableCell>{rfq.status ?? 'Not recorded'}</TableCell><TableCell>{rfq.lineCount}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/procurement/rfqs/view/${rfq.rfqId}`)}>Open</Button></TableCell></TableRow>)}
+              {context.data.recentRfqs.map(rfq => <TableRow hover key={rfq.rfqId}><TableCell>{rfq.rfqNo}</TableCell><TableCell>{rfq.contactName ?? 'Not recorded'}</TableCell><TableCell>{formatDateSafe(rfq.receivedOn)}</TableCell><TableCell>{rfq.bidClosingOn ? formatDateSafe(rfq.bidClosingOn) : 'Not recorded'}</TableCell><TableCell>{rfq.status ?? 'Not recorded'}</TableCell><TableCell>{rfq.lineCount}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/procurement/rfqs/view/${rfq.rfqId}`)}>Open</Button></TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No Customer RFQs recorded.</Typography>}
           </Section>
         </Grid>
@@ -308,7 +329,7 @@ const CustomerDetailPage: React.FC = () => {
         <Grid size={{ xs: 12 }}>
           <Section title="Recent quote outcomes" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
             {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Quote history could not be loaded.</Alert> : context.data?.recentQuotes.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Recent customer quote outcomes"><TableHead><TableRow><TableCell>Quote</TableCell><TableCell>Contact</TableCell><TableCell>Date</TableCell><TableCell>Outcome</TableCell><TableCell>Outcome evidence</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
-              {context.data.recentQuotes.map(quote => <TableRow hover key={quote.quoteId}><TableCell>{quote.quoteNo}</TableCell><TableCell>{quote.contactName ?? 'Not recorded'}</TableCell><TableCell>{quote.quoteDate ? new Date(quote.quoteDate).toLocaleDateString() : 'Not recorded'}</TableCell><TableCell><Chip size="small" label={quote.outcome} color={quote.outcome === 'won' ? 'success' : quote.outcome === 'lost' ? 'error' : 'default'} /></TableCell><TableCell>{quote.outcomeReasonName || quote.statusValue || 'No decision recorded'}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/quotes/view/${quote.quoteId}`)}>Open</Button></TableCell></TableRow>)}
+              {context.data.recentQuotes.map(quote => <TableRow hover key={quote.quoteId}><TableCell>{quote.quoteNo}</TableCell><TableCell>{quote.contactName ?? 'Not recorded'}</TableCell><TableCell>{quote.quoteDate ? formatDateSafe(quote.quoteDate) : 'Not recorded'}</TableCell><TableCell><Chip size="small" label={quote.outcome} color={quote.outcome === 'won' ? 'success' : quote.outcome === 'lost' ? 'error' : 'default'} /></TableCell><TableCell>{quote.outcomeReasonName || quote.statusValue || 'No decision recorded'}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/quotes/view/${quote.quoteId}`)}>Open</Button></TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No quote history recorded.</Typography>}
           </Section>
         </Grid>
@@ -316,7 +337,7 @@ const CustomerDetailPage: React.FC = () => {
         <Grid size={{ xs: 12 }}>
           <Section title="Recent Customer Orders" icon={<ShippingIcon sx={{ fontSize: 16 }} />}>
             {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Order history could not be loaded.</Alert> : context.data?.recentOrders.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Recent customer orders"><TableHead><TableRow><TableCell>Order</TableCell><TableCell>Contact</TableCell><TableCell>Date</TableCell><TableCell>Status</TableCell><TableCell>Total</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
-              {context.data.recentOrders.map(order => <TableRow hover key={order.orderId}><TableCell>{order.orderNo}</TableCell><TableCell>{order.contactName ?? 'Not recorded'}</TableCell><TableCell>{new Date(order.orderDate).toLocaleDateString()}</TableCell><TableCell>{order.status ?? 'Not recorded'}</TableCell><TableCell>{order.currencyCode ? `${order.currencyCode} ` : ''}{order.totalAmount.toLocaleString()}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/orders/${order.orderId}`)}>Open</Button></TableCell></TableRow>)}
+              {context.data.recentOrders.map(order => <TableRow hover key={order.orderId}><TableCell>{order.orderNo}</TableCell><TableCell>{order.contactName ?? 'Not recorded'}</TableCell><TableCell>{formatDateSafe(order.orderDate)}</TableCell><TableCell>{order.status ?? 'Not recorded'}</TableCell><TableCell>{order.currencyCode ? `${order.currencyCode} ` : ''}{order.totalAmount.toLocaleString()}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/orders/${order.orderId}`)}>Open</Button></TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No Customer Orders recorded.</Typography>}
           </Section>
         </Grid>
@@ -347,10 +368,16 @@ const CustomerDetailPage: React.FC = () => {
             <InfoRow label="Region" value={customer.regionName ?? <Gap>Not stated</Gap>} />
             <InfoRow
               label="Account team"
-              value={customer.accountTeamName ?? (
-                <Typography component="span" sx={{ color: 'warning.main', fontSize: '0.875rem', fontWeight: 700 }}>
-                  No account team — readable tenant-wide
-                </Typography>
+              value={(
+                <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                  {customer.accountTeamName ? <span>{customer.accountTeamName}</span> : <AccountTeamGap variant="detail" />}
+                  {/* The team is set on the customer's own edit form — the same PUT the form already uses. */}
+                  {canEditCustomer && (
+                    <Button size="small" variant="outlined" onClick={() => navigate(`/customers?edit=${customer.id}`)} sx={{ textTransform: 'none', fontWeight: 700 }}>
+                      {customer.accountTeamName ? 'Change account team' : 'Set account team'}
+                    </Button>
+                  )}
+                </Stack>
               )}
             />
           </Section>
@@ -393,6 +420,14 @@ const CustomerDetailPage: React.FC = () => {
           </Section>
         </Grid>
       </Grid>
+
+      {ownership.data && (
+        <AccountOwnerDialog
+          key={`${ownership.data.customerId}-${ownership.data.version}-${ownerDialogOpen ? 'open' : 'closed'}`}
+          target={ownerDialogOpen ? ownership.data : null}
+          onClose={() => setOwnerDialogOpen(false)}
+        />
+      )}
     </Box>
   );
 };

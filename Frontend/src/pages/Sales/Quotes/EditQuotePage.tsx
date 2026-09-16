@@ -37,6 +37,11 @@ interface QuoteItem {
   productName: string;
   itemDescription: string;
   quantity: number;
+  // The line's link to the RFQ item it prices. Prepare Quote Draft writes it and it is the
+  // ONLY join between this line and the supplier award behind its cost (QuoteViewPage.sourceFor
+  // matches awards by it). Never edited here; echoed back on save so a price change cannot
+  // silently cut the line loose from its award (D20).
+  rfqItemId?: number | null;
   // Read-only carriers from the source RFQ line: shown, never edited here, and
   // echoed back on save so an edit round-trip cannot strip them.
   unitOfMeasure?: string | null;
@@ -140,6 +145,7 @@ const EditQuotePage: React.FC = () => {
       setCurrencyCode(quote.currencyCode ?? null);
       setItems(quote.quoteItems.map(i => ({
         id: i.id,
+        rfqItemId: i.rfqItemId ?? null,
         productId: i.productId ?? null,
         productName: i.productName || '',
         itemDescription: i.itemDescription || '',
@@ -348,7 +354,8 @@ const EditQuotePage: React.FC = () => {
       modifiedBy: userData?.userName || 'System',
       totalAmount: grandTotal,
       quoteItems: items.map((item, index) => ({
-        id: item.id, productId: item.productId, itemDescription: item.itemDescription || item.productName,
+        id: item.id, rfqItemId: item.rfqItemId ?? null,
+        productId: item.productId, itemDescription: item.itemDescription || item.productName,
         quantity: item.quantity, unitPrice: item.unitPrice,
         totalAmount: pricedByItemIndex.get(index)?.taxableBase ?? 0,
         unitOfMeasure: item.unitOfMeasure || null, customerLineRef: item.customerLineRef || null,

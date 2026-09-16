@@ -90,6 +90,64 @@ describe('a long bid list', () => {
   });
 });
 
+describe('why a line is skipped', () => {
+  it('offers only reasons a line is not quoted, never how a quote ended', () => {
+    render(
+      <LinesTable
+        leadId={407}
+        lines={[line(1)]}
+        decisions={{ 10: { decision: 'NoBid' } }}
+        unitOptions={[{ code: 'EA', label: 'Each' }]}
+        currencyOptions={[{ code: 'SAR', label: 'Saudi riyal' }]}
+        reasonCodes={[
+          { code: 'OUT_OF_SCOPE', label: 'Outside approved product scope', appliesTo: ['NoBid'] },
+          { code: 'PRICE', label: 'Price too high', appliesTo: ['NoBid', 'Decline'] },
+          { code: 'LOST_COMPETITOR', label: 'Lost to competitor', appliesTo: ['Decline'] },
+          { code: 'AUTO_EXPIRED', label: 'Expired automatically', appliesTo: ['Decline'] },
+        ]}
+        readOnly={false}
+        onChange={vi.fn()}
+        onOpenDocument={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Why skip line 00001' }));
+    const options = within(screen.getByRole('listbox')).getAllByRole('option').map((option) => option.textContent);
+    expect(options).toEqual(['Outside approved product scope', 'Price too high']);
+  });
+});
+
+describe('a line a person has not yet checked', () => {
+  const table = (lines: LeadDecisionLineDTO[]) => (
+    <LinesTable
+      leadId={407}
+      lines={lines}
+      decisions={{ 10: { decision: 'Bid', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR' } }}
+      unitOptions={[{ code: 'EA', label: 'Each' }]}
+      currencyOptions={[{ code: 'SAR', label: 'Saudi riyal' }]}
+      reasonCodes={[]}
+      readOnly={false}
+      onChange={vi.fn()}
+      onOpenDocument={vi.fn()}
+    />
+  );
+
+  it('says a line read from the document cells was read, not that Nexora is unsure of it', () => {
+    // A native spreadsheet parse: item, quantity and unit are each an exact cell.
+    render(table([{ ...line(1), verificationStatus: 'NEEDS_CHECK', sourceEvidenceComplete: true }]));
+    expect(screen.getByText(/Read from the document; not yet checked by a person\./)).toBeInTheDocument();
+    expect(screen.queryByText(/not sure it read this line/)).toBeNull();
+    // The check stays one click away; it is offered, not demanded as doubt.
+    expect(screen.getByRole('button', { name: 'Check line 00001' })).toBeInTheDocument();
+  });
+
+  it('only doubts a line the retained evidence does not cover', () => {
+    render(table([{ ...line(1), verificationStatus: 'NEEDS_CHECK', sourceEvidenceComplete: false }]));
+    expect(screen.getByText(/Nexora is not sure it read this line correctly\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Read from the document/)).toBeNull();
+  });
+});
+
 describe('the unit of measure on a line', () => {
   const unitOptions = [{ code: 'EA', label: 'Each' }, { code: 'SET', label: 'Set' }];
   const table = (lines: LeadDecisionLineDTO[], decisions: DecisionMap, extra: Partial<LinesTableProps> = {}) => (

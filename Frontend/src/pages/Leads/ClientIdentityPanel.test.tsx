@@ -328,7 +328,9 @@ describe('ClientIdentityPanel — resolved', () => {
     expect(link).toHaveAttribute('href', '/customers/42');
     expect(screen.getByText('Confirmed by a person')).toBeInTheDocument();
     expect(screen.getByText('Why')).toBeInTheDocument();
-    expect(screen.getByText(/Matched because the sender's email address is on file/)).toBeInTheDocument();
+    // A person confirmed this client, so the panel says that, not what the machine once matched on:
+    // the status is the current truth and the resolver's sentence is history (ClientCell.matchExplanation).
+    expect(screen.getByText('Customer and contact confirmed by a colleague.')).toBeInTheDocument();
     // A resolved lead needs no suggestions.
     expect(getClientCandidates).not.toHaveBeenCalled();
   });
@@ -377,7 +379,7 @@ describe('ClientIdentityPanel — resolved', () => {
       />,
     );
 
-    expect(await screen.findByText(/a colleague already chose this customer/)).toBeInTheDocument();
+    expect(await screen.findByText('Customer and contact confirmed by a colleague.')).toBeInTheDocument();
   });
 
   /**

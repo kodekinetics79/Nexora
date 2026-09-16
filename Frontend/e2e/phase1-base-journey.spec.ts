@@ -364,8 +364,10 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
     expect((await quoteResponse.json()).revisionImpact).toBe('DRAFT_STALE_REVIEW_REQUIRED');
     await page.goto(`/sales/quotes/view/${partialQuoteId}`);
-    await expect(page.getByText('Customer Revision Received', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Mark review complete' })).toBeVisible();
+    // The panel names the revision and offers the two honest choices: apply the new quantities,
+    // or keep the draft as quoted (which records the review).
+    await expect(page.getByText('Customer revision received', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Keep as quoted' })).toBeVisible();
     await page.getByRole('button', { name: 'Open Canonical Lead' }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/leads/view/${env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID}$`));
     await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();

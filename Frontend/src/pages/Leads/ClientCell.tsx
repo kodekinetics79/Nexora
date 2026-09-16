@@ -178,11 +178,31 @@ export const matchReasonText = (reasonCode?: string | null): string | null => {
  * company names it quotes.
  */
 export const matchExplanation = (lead: ClientIdentityLike): string | null => {
+  // A person's decision outranks the machine's sentence. The resolver writes its explanation
+  // when IT ran, and a colleague confirming the customer afterwards does not rewrite it, so a
+  // confirmed lead carried "Client evidence was found but matched no customer in this tenant."
+  // in its tooltip while the cell showed the confirmed name. The status is the current truth;
+  // the sentence is history, and it is not shown once a person has decided.
+  const confirmed = confirmedExplanation(lead.customerMatchStatus);
+  if (confirmed) return confirmed;
   const authored = (lead.customerMatchExplanation ?? '').trim();
   if (authored) return authored;
   const reason = matchReasonText(lead.customerMatchReasonCode);
   if (!reason) return null;
   return `Matched because ${reason}.`;
+};
+
+/**
+ * The sentence for a client a PERSON confirmed, derived from the status alone. The list payload
+ * carries no "who", so the confirmer is "a colleague"; the point is that the reader learns the
+ * customer is settled and whether the contact still is not, rather than what the machine once thought.
+ */
+export const confirmedExplanation = (status?: string | null): string | null => {
+  switch ((status ?? '').trim().toUpperCase()) {
+    case 'CONFIRMED': return 'Customer and contact confirmed by a colleague.';
+    case 'CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED': return 'Customer confirmed by a colleague; contact still unknown.';
+    default: return null;
+  }
 };
 
 /** Whole-percent confidence, or null when the backend did not send one. */

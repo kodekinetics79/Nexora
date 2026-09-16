@@ -44,13 +44,8 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/admin/operations': 'Tenant Admin Operations',
 
   // Platform governance
-  '/admin/platform/taxonomy': 'Taxonomy & Skill Studio',
-  '/admin/platform/ai-trust': 'AI Trust Center',
-  '/admin/platform/lifecycle': 'Model & Rule Lifecycle',
   '/admin/platform/integrations': 'Integration Hub',
-  '/admin/platform/releases': 'Test & Release Center',
   '/admin/platform/archive': 'Commercial Document Archive',
-  '/admin/platform/quality': 'Quality Analytics',
   '/admin/platform/retention': 'Storage & Retention',
 
   // Sales management

@@ -25,7 +25,7 @@ import {
   ErrorOutlined as NeedsCheckDotIcon,
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
-import { ChevronDown, ChevronUp, Cloud, Cpu, FileSearch } from 'lucide-react';
+import { ChevronDown, ChevronUp, FileSearch } from 'lucide-react';
 import { useSnackbar } from 'notistack';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type {
@@ -44,11 +44,13 @@ import ColumnPreferences from '../../components/common/ColumnPreferences';
 import { useAuth } from '../../context/AuthContext';
 import { openAuthenticatedFile } from '../../utils/authenticatedFile';
 import FieldEvidencePopover from './FieldEvidencePopover';
+import uomService from '../../api/services/uomService';
 import {
   checkLine,
   summariseChecks,
   checkHeadline,
   documentAssertions,
+  foldUnit,
   type CheckableLine,
   type FieldCheckSignal,
 } from './needsCheck';
@@ -196,18 +198,6 @@ const clearDraft = (leadId: number) => {
 const readable = (text?: string | null): string =>
   (text || 'Not recorded').replaceAll('_', ' ').toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
 
-const costLabel = (
-  amount: number | null | undefined,
-  currency: string | null | undefined,
-  status: string | null | undefined,
-): string => {
-  const normalizedStatus = (status || '').toUpperCase();
-  if (amount == null || !Number.isFinite(amount) || normalizedStatus.includes('UNKNOWN') || normalizedStatus.includes('UNAVAILABLE') || normalizedStatus.includes('UNPRICED')) {
-    return 'Cost unavailable';
-  }
-  return `${currency || 'Currency not recorded'} ${amount.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
-};
-
 const evidenceValue = (value: string | number | null | undefined): string => value == null || value === '' ? 'Not linked' : String(value);
 
 const toDateInput = (value?: string | null): string => {
@@ -295,6 +285,26 @@ const ExtractionReviewDetailPage: React.FC = () => {
     enabled: !!id && Number.isFinite(leadId),
     retry: false,
   });
+  // The tenant's own units, so a line whose unit is a word the business has never transacted in
+  // ("BANANAS") is flagged instead of passing as verified. Undefined until loaded — and if the
+  // call fails — so an outage never turns into a page full of false flags.
+  const tenantUnits = useQuery({
+    queryKey: ['uom', 'tenant'],
+    queryFn: () => uomService.listForTenant(),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const knownUnits = useMemo<ReadonlySet<string> | undefined>(() => {
+    if (!tenantUnits.data) return undefined;
+    const folded = new Set<string>();
+    for (const unit of tenantUnits.data) {
+      for (const spelling of [unit.uomCode, unit.uomName]) {
+        const key = spelling ? foldUnit(spelling) : '';
+        if (key) folded.add(key);
+      }
+    }
+    return folded;
+  }, [tenantUnits.data]);
 
   const [header, setHeader] = useState<ReviewHeaderState>({
     rfqno: '', buyersName: '', bidClosingDate: '', requiredDeliveryDate: '',
@@ -436,10 +446,10 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   // What this document states at all. A unit of measure no line carries is a
   // unit the buyer never wrote, not a value we failed to read.
-  const assertions = useMemo(() => documentAssertions(items), [items]);
+  const assertions = useMemo(() => documentAssertions(items, knownUnits), [items, knownUnits]);
   const summary = useMemo(
-    () => summariseChecks(items, flaggedByLine),
-    [items, flaggedByLine],
+    () => summariseChecks(items, flaggedByLine, knownUnits),
+    [items, flaggedByLine, knownUnits],
   );
 
   const hasAuthoritativeSource = (lead?.attachments?.length ?? 0) > 0
@@ -1459,8 +1469,9 @@ function ProcessingEvidencePanel({ evidence, loading, failed, expanded, onToggle
   const latestOccurrence = evidence.occurrences[evidence.occurrences.length - 1];
   const latestJob = evidence.jobs[evidence.jobs.length - 1];
   const latestRun = evidence.runs[evidence.runs.length - 1];
-  const isExternal = evidence.externalRequestCount > 0;
-  const localRate = `${Math.round(evidence.localRequestRate * 100)}%`;
+  // Outcome only. Which model or provider read the document, its share of the work and what it
+  // cost Nexora are platform raw materials and stay in Platform Admin (owner decision, 2026-09-16).
+  const aiSteps = evidence.aiRequests.length;
   return (
     <Paper variant="outlined" sx={{ mb: 3, p: 2.5 }}>
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' } }}>
@@ -1468,20 +1479,17 @@ function ProcessingEvidencePanel({ evidence, loading, failed, expanded, onToggle
           <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap', mb: 0.5 }}>
             <FileSearch size={20} />
             <Typography sx={{ fontWeight: 900 }}>Processing evidence</Typography>
-            <Chip size="small" icon={isExternal ? <Cloud size={15} /> : <Cpu size={15} />} color={isExternal ? 'warning' : 'success'} label={isExternal ? 'External provider used' : 'Local processing'} />
             <Chip size="small" variant="outlined" label={readable(latestRun?.status ?? latestJob?.status)} />
           </Stack>
-          <Typography variant="body2" color="text.secondary">Authoritative path, OCR outcome, provider use, and cost linkage for this extraction.</Typography>
+          <Typography variant="body2" color="text.secondary">How this document was read, and the record that traces it.</Typography>
         </Box>
         <Button variant="outlined" startIcon={expanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />} onClick={onToggle}>{expanded ? 'Hide evidence' : 'Show evidence'}</Button>
       </Stack>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(5, minmax(0, 1fr))' }, gap: 2, mt: 2 }}>
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(3, minmax(0, 1fr))' }, gap: 2, mt: 2 }}>
         <Box><Typography variant="caption" color="text.secondary">Processing path</Typography><Typography sx={{ fontWeight: 700 }}>{readable(latestRun?.processingPath)}</Typography></Box>
         <Box><Typography variant="caption" color="text.secondary">OCR outcome</Typography><Typography sx={{ fontWeight: 700 }}>{readable(latestRun?.ocrStatus)}</Typography></Box>
         <Box><Typography variant="caption" color="text.secondary">OCR pages</Typography><Typography sx={{ fontWeight: 700 }}>{latestRun?.ocrPageCount ?? 'Not recorded'}</Typography></Box>
-        <Box><Typography variant="caption" color="text.secondary">Local model share</Typography><Typography sx={{ fontWeight: 700 }}>{localRate}</Typography><Typography variant="caption" color="text.secondary">{evidence.localRequestCount} local · {evidence.externalRequestCount} external</Typography></Box>
-        <Box><Typography variant="caption" color="text.secondary">External provider cost</Typography><Typography sx={{ fontWeight: 700 }}>{costLabel(evidence.externalCostAmount, evidence.externalCostCurrency, evidence.externalCostStatus)}</Typography><Typography variant="caption" color="text.secondary">{readable(evidence.externalCostStatus)}</Typography></Box>
       </Box>
 
       {expanded && <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
@@ -1501,15 +1509,10 @@ function ProcessingEvidencePanel({ evidence, loading, failed, expanded, onToggle
           <EvidenceField label="Run attempt" value={latestRun ? `${latestRun.attemptNumber}` : 'Not recorded'} />
         </Box>
 
-        <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Provider decisions</Typography>
-        {evidence.aiRequests.length === 0 ? <Typography variant="body2" color="text.secondary">No model-provider call is linked to this extraction.</Typography> : <Stack spacing={1}>
-          {evidence.aiRequests.map((call) => <Box key={call.requestId} sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr 1fr' }, gap: 1, py: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
-            <Box><Typography variant="body2" sx={{ fontWeight: 700 }}>{call.provider}{call.model ? ` · ${call.model}` : ''}</Typography><Typography variant="caption" color="text.secondary">{call.version} · {call.reason} · {call.attempts.length} attempt{call.attempts.length === 1 ? '' : 's'}{call.budgetWarning ? ' · budget warning' : ''}</Typography></Box>
-            <EvidenceField label="Location" value={readable(call.providerClass)} />
-            <EvidenceField label="Result" value={readable(call.result)} />
-            <EvidenceField label="Cost" value={`${costLabel(call.estimatedCost, call.costCurrency, call.costStatus)} · ${readable(call.costStatus)}${call.costPricingVersion ? ` · ${call.costPricingVersion}` : ''}`} />
-          </Box>)}
-        </Stack>}
+        <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>AI assistance</Typography>
+        <Typography variant="body2" color="text.secondary">
+          {aiSteps === 0 ? 'This document was read without AI assistance.' : `Nexora used AI assistance in ${aiSteps} reading step${aiSteps === 1 ? '' : 's'}.`}
+        </Typography>
       </Box>}
     </Paper>
   );

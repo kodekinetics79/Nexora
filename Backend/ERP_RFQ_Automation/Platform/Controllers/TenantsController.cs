@@ -1202,7 +1202,7 @@ public class TenantsController : ControllerBase
             || string.IsNullOrWhiteSpace(request.AllowedProvider) || string.IsNullOrWhiteSpace(request.AllowedModel)))
             return BadRequest(new { error = "External processing requires redaction, privacy review, provider and model." });
         var allowedPurposeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent };
+            { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent, AiPurposes.SupplierDiscovery };
         var purposes = (request.AllowedPurposes ?? [])
             .Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()).Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();

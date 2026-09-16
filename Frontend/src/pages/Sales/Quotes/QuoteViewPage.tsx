@@ -33,6 +33,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
 import { summariseStoredQuote } from './quoteTotals';
+import { describeRevisionImpact } from './revisionImpactText';
 import { alpha } from '@mui/material/styles';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
@@ -40,6 +41,15 @@ import CommercialLineIntelligence from '../../../components/common/CommercialLin
 import NextStepPanel from '../../../components/common/NextStepPanel';
 import procurementService from '../../../api/services/procurementService';
 import { statusLabel } from '../../../utils/statusLabels';
+
+/** The one blocker that the send flow itself resolves (see PriceConfirmationDialog). */
+const isAttestationBlocker = (blocker: { code?: string | null }) =>
+  (blocker.code || '').toUpperCase() === 'PRICE_ATTESTATION_REQUIRED';
+/**
+ * The readiness codes that mean "the send already happened; the system is finishing it"
+ * (QuoteService.EvaluateSendReadinessAsync). Not a defect the rep can fix, so not listed as one.
+ */
+const DELIVERY_PENDING_CODES: readonly string[] = ['DELIVERY_IN_FLIGHT', 'DELIVERY_STATUS_PENDING'];
 
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -130,10 +140,23 @@ const QuoteViewPage: React.FC = () => {
   const [extendValidityOpen, setExtendValidityOpen] = React.useState(false);
   const [followUpOpen, setFollowUpOpen] = React.useState(false);
   const [priceConfirmOpen, setPriceConfirmOpen] = React.useState(false);
-  const [pendingRecipient, setPendingRecipient] = React.useState('');
+  // The recipient AND the words. The rep reviews and may edit the subject and message in the
+  // send dialog (owner ask 2026-09-15); both travel with the send once the prices are confirmed.
+  const [pendingSend, setPendingSend] = React.useState<{ recipientEmail: string; subject?: string; body?: string }>({ recipientEmail: '' });
   const [holdInfo, setHoldInfo] = React.useState<string | null>(null);
+  // The default covering e-mail the server would send, fetched only while the dialog is open so
+  // the rep sees — and can change — exactly what the customer will read.
+  const emailDraftQuery = useQuery({
+    queryKey: ['quote-email-draft', id],
+    queryFn: () => quoteService.getEmailDraft(Number(id)),
+    enabled: !!id && emailOpen,
+    staleTime: 5 * 60 * 1000,
+  });
   const sendMutation = useMutation({
-    mutationFn: (recipientEmail: string) => quoteService.sendEmail(Number(id), recipientEmail),
+    mutationFn: (send: { recipientEmail: string; subject?: string; body?: string }) =>
+      send.subject !== undefined || send.body !== undefined
+        ? quoteService.sendEmail(Number(id), send.recipientEmail, { subject: send.subject, body: send.body })
+        : quoteService.sendEmail(Number(id), send.recipientEmail),
     onSuccess: (result) => {
       if (result.priceAttestationRequired) {
         // The prices changed between the confirmation and the send — confirm again.
@@ -180,7 +203,7 @@ const QuoteViewPage: React.FC = () => {
       quoteService.confirmPriceAttestation(Number(id), source, reference),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
-      sendMutation.mutate(pendingRecipient);
+      sendMutation.mutate(pendingSend);
     },
     onError: (error: any) => {
       const message = error?.response?.data?.message || 'The price confirmation could not be recorded.';
@@ -199,13 +222,35 @@ const QuoteViewPage: React.FC = () => {
     onError: () => toast.error('Failed to mark as responded')
   });
 
+  // Both of these END a customer-revision review, and both must leave the screen agreeing with
+  // itself before the rep is told anything. The readiness list is served by its own query; when
+  // only the quote was invalidated, the panel item vanished while the list below it still said
+  // "This quote is stale…" until a manual reload. The invalidations are awaited, so the toast is
+  // the last thing to happen, not the first.
+  const refreshAfterRevisionReview = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['quote-detail', id] }),
+    queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] }),
+    queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] }),
+  ]);
   const resolveImpactMutation = useMutation({
     mutationFn: () => quoteService.resolveRevisionImpact(Number(id)),
-    onSuccess: () => {
-      toast.success('Revision review marked complete');
-      queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
+    onSuccess: async () => {
+      await refreshAfterRevisionReview();
+      toast.success('Kept as quoted. The customer revision is recorded as reviewed.');
     },
-    onError: () => toast.error('The revision review could not be completed')
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The revision review could not be completed'), { duration: 8000 })
+  });
+  const applyImpactMutation = useMutation({
+    mutationFn: () => quoteService.applyRevisionQuantities(Number(id)),
+    onSuccess: async (result) => {
+      await refreshAfterRevisionReview();
+      const updated = result.linesUpdated === 1 ? '1 line' : `${result.linesUpdated} lines`;
+      const notOnQuote = result.linesNotOnQuote.length
+        ? ` Line${result.linesNotOnQuote.length === 1 ? '' : 's'} ${result.linesNotOnQuote.join(', ')} ${result.linesNotOnQuote.length === 1 ? 'is' : 'are'} new on the customer's document and not on this quote — add ${result.linesNotOnQuote.length === 1 ? 'it' : 'them'} if you are quoting ${result.linesNotOnQuote.length === 1 ? 'it' : 'them'}.`
+        : '';
+      toast.success(`New quantities applied to ${updated} and the quote re-totalled.${notOnQuote}`, { duration: notOnQuote ? 10000 : 5000 });
+    },
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The new quantities could not be applied'), { duration: 8000 })
   });
 
   const [awardOpen, setAwardOpen] = React.useState(false);
@@ -288,7 +333,25 @@ const QuoteViewPage: React.FC = () => {
   // renderer will, so it cannot disagree with them. The client heuristics remain as the fallback
   // for a failed or in-flight readiness call, so a broken query never makes this screen worse
   // than it was.
-  const serverBlocker = sendReadiness?.blockers?.[0];
+  // The price-source confirmation (R5) is satisfied INSIDE the send flow: Send opens the recipient
+  // dialog, then the price-confirmation dialog, then the quote goes. So that blocker must never
+  // disable Send — with it as the last item, a fully priced, dated and formatted quote could not
+  // be sent from its own screen at all (found driving the journey on 2026-09-15). It stays in the
+  // list below, worded as the step Send will take, and every other blocker still gates.
+  const gatingBlockers = (sendReadiness?.blockers ?? []).filter((blocker) => !isAttestationBlocker(blocker));
+  const attestationPending = (sendReadiness?.blockers ?? []).some(isAttestationBlocker);
+  const serverBlocker = gatingBlockers[0];
+  // A send that already happened is not something to fix. When the readiness list's reason is
+  // the queued (or delivered-but-status-pending) delivery, the panel says who it went to and
+  // when, and offers nothing — the header used to say "queued" while the panel said "Fix the
+  // item below, then send the quote."
+  const deliveryPending = sendReadiness?.blockers?.find((b) => DELIVERY_PENDING_CODES.includes(b.code)) ?? null;
+  const deliveryHandedOver = sendReadiness?.deliveryRequestedOn
+    ? dayjs(/Z|[+-]\d\d:\d\d$/.test(sendReadiness.deliveryRequestedOn) ? sendReadiness.deliveryRequestedOn : `${sendReadiness.deliveryRequestedOn}Z`)
+    : null;
+  const deliveryPendingText = deliveryPending
+    ? `Sent to ${sendReadiness?.deliveryRecipient || 'the customer'} at ${deliveryHandedOver?.isValid() ? deliveryHandedOver.format('HH:mm on D MMM') : 'the last send'}. Being delivered — nothing to do.`
+    : null;
   const sendBlockedReason: { text: string; link?: { label: string; to: string } } | null = serverBlocker
     ? {
         text: serverBlocker.message,
@@ -296,7 +359,7 @@ const QuoteViewPage: React.FC = () => {
           ? { label: `Open ${serverBlocker.setupLabel}`, to: serverBlocker.setupPath }
           : undefined,
       }
-    : sendReadiness?.canSend
+    : sendReadiness && (sendReadiness.canSend || (gatingBlockers.length === 0 && attestationPending))
       ? null
       : quote.revisionImpact
         ? { text: 'Review the customer revision before sending.' }
@@ -313,45 +376,62 @@ const QuoteViewPage: React.FC = () => {
         title: 'Inventory Revalidation Required',
         detail: 'Stock changed after this Quote Draft was prepared. Revalidate inventory before sending it to the customer.',
         action: 'Mark revalidation complete',
+        hasQuantityChanges: false,
       }
     : quote.revisionImpact
       ? {
-          title: 'Customer Revision Received',
-          detail: `This Quote Draft is stale and must be reviewed against Lead Revision ${quote.sourceLeadRevision}. The customer-issued document has not been overwritten.`,
-          action: 'Mark review complete',
+          // Says which revision ARRIVED, which one the draft was built on, and what changed —
+          // from the server's projection of the identity spine's own diff. It used to print the
+          // built-from revision as the thing to review against, and nothing about the change.
+          ...describeRevisionImpact(quote.revisionImpactDetail, quote.sourceLeadRevision, isDraftQuote),
+          action: 'Keep as quoted',
         }
       : null;
+  // A draft can take the customer's new quantities in place. A quote already with the customer
+  // cannot — it is revised — so there the only in-panel move is to record the review.
+  const isCustomerRevision = Boolean(quote.revisionImpact) && quote.revisionImpact !== 'INVENTORY_REVALIDATION_REQUIRED';
+  const canApplyRevision = isCustomerRevision && isDraftQuote
+    && (quote.revisionImpactDetail == null || revisionImpactPresentation?.hasQuantityChanges === true);
 
   // Which control is THE next step. Exactly one contained button per state; a contained button
   // that is also disabled points the rep at a dead end, so a blocked draft promotes Edit instead.
   const statusUpper = (quote.statusCode || quote.statusValue || '').toUpperCase();
   const isSentQuote = quote.statusValue === 'Sent';
   const isSuperseded = Boolean(revisionInfo?.supersededByQuoteNo);
-  const primaryAction: 'send' | 'edit' | 'responded' | 'outcome' | 'po' | 'pdf' | null =
+  // 'revision': a customer revision is open on a draft. The decision — apply or keep — lives in
+  // the panel's list item, and it is THE next step, so Edit steps back to outlined for that state.
+  const primaryAction: 'send' | 'edit' | 'responded' | 'outcome' | 'po' | 'pdf' | 'revision' | null =
     isSuperseded ? null
       : quote.statusValue === 'Accepted' ? 'po'
         : isSentQuote ? (quote.respondedOn ? 'outcome' : 'responded')
           : statusUpper === 'ORDERED' ? 'pdf'
-            : isDraftQuote ? (sendBlockedReason === null ? 'send' : 'edit')
+            : isDraftQuote && deliveryPending ? null
+            : isDraftQuote ? (isCustomerRevision ? 'revision' : sendBlockedReason === null ? 'send' : 'edit')
               : null;
-  const blockerRows = sendReadiness?.blockers?.length
-    ? sendReadiness.blockers.map((blocker) => ({
+  // The pending delivery is the panel's sentence, not a row in the "fix these" list.
+  const listedBlockers = (sendReadiness?.blockers ?? []).filter((blocker) => blocker !== deliveryPending);
+  const blockerRows = listedBlockers.length
+    ? listedBlockers.map((blocker) => ({
         key: blocker.code,
-        text: blocker.message,
+        text: isAttestationBlocker(blocker) && gatingBlockers.length === 0
+          ? 'Confirm where the prices came from — your sales manager, or a supplier quote. Press Send to customer; you confirm it there, then the quote goes.'
+          : blocker.message,
         link: blocker.setupPath && blocker.setupLabel
           ? { label: `Open ${blocker.setupLabel}`, to: blocker.setupPath }
           : undefined,
       }))
-    : sendBlockedReason ? [{ key: 'client', ...sendBlockedReason }] : [];
+    : sendBlockedReason && !deliveryPending ? [{ key: 'client', ...sendBlockedReason }] : [];
   // Pre-send gates only matter while the quote can still be sent; on an ordered or closed
   // quote they would argue with the sentence that says it is finished.
   const showPreSendGates = isDraftQuote || isSentQuote;
-  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || (showPreSendGates && (supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null));
+  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || deliveryPending !== null || (showPreSendGates && (supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null));
   // The sentence that tells the rep what happens next, in every state, derived from facts the
   // page already holds. The screen drives; the rep never has to work out the next move.
   const blockerCount = blockerRows.length + (showPreSendGates && revisionImpactPresentation ? 1 : 0) + (showPreSendGates && supplierValidityWarnings.length > 0 ? 1 : 0);
   const nextStepText = revisionInfo?.supersededByQuoteNo
     ? `A newer revision replaces this quote. Work on ${revisionInfo.supersededByQuoteNo} instead.`
+    : deliveryPendingText && (isDraftQuote || isSentQuote)
+      ? deliveryPendingText
     : statusUpper === 'ORDERED'
       ? 'This quote became an order. Export the PDF if the customer needs a copy; nothing else is left to do here.'
       : quote.outcomeOn && statusUpper !== 'ACCEPTED'
@@ -364,6 +444,10 @@ const QuoteViewPage: React.FC = () => {
             ? (quote.respondedOn
               ? 'The customer replied. Record the outcome: won, lost or expired.'
               : 'Waiting for the customer. Mark "Customer responded" when they reply, or record the outcome.')
+            : isDraftQuote && isCustomerRevision
+              ? (canApplyRevision
+                ? `Revision ${quote.revisionImpactDetail?.toRevision ?? 'from the customer'} arrived after this draft. Apply the new quantities, or keep it as quoted.`
+                : 'A customer revision arrived after this draft. Review what changed, then keep it as quoted or edit the lines.')
             : isDraftQuote
               ? (sendBlockedReason === null
                 ? (blockerCount > 0
@@ -377,7 +461,7 @@ const QuoteViewPage: React.FC = () => {
     && quote.statusValue?.toUpperCase() !== 'ORDERED'
     && (isDraftQuote || isSentQuote)
     ? (
-      <Tooltip title={sendBlockedReason ? `${blockerCount || 1} thing${(blockerCount || 1) === 1 ? '' : 's'} must be fixed first — see the list below` : ''}>
+      <Tooltip title={deliveryPending ? 'Already handed to delivery — nothing to do.' : sendBlockedReason ? `${blockerCount || 1} thing${(blockerCount || 1) === 1 ? '' : 's'} must be fixed first — see the list below` : ''}>
         <Box
           component="span"
           role={sendBlockedReason ? 'button' : undefined}
@@ -459,7 +543,8 @@ const QuoteViewPage: React.FC = () => {
     </Tooltip>
   ) : null;
   // The control that belongs beside the next-step sentence. The rail keeps the rest.
-  const panelAction = primaryAction === 'send' ? sendControl
+  const panelAction = deliveryPendingText ? null
+    : primaryAction === 'send' ? sendControl
     : primaryAction === 'edit' ? editControl
       : primaryAction === 'responded' ? respondedControl
         : primaryAction === 'outcome' ? outcomeControl
@@ -644,8 +729,8 @@ const QuoteViewPage: React.FC = () => {
           warning inside the totals card, and the same fact was worded differently in each. */}
       {(showBlockerPanel || nextStepText) && (
         <NextStepPanel
-          tone={showPreSendGates && (revisionImpactPresentation || supplierValidityWarnings.length > 0) ? 'error' : showBlockerPanel ? 'warning' : primaryAction === 'send' ? 'success' : 'info'}
-          title={showBlockerPanel ? (isDraftQuote ? 'Before this quote can be sent' : 'Needs attention') : 'Next step'}
+          tone={deliveryPendingText ? 'info' : showPreSendGates && (revisionImpactPresentation || supplierValidityWarnings.length > 0) ? 'error' : showBlockerPanel ? 'warning' : primaryAction === 'send' ? 'success' : 'info'}
+          title={deliveryPendingText ? 'Being delivered' : showBlockerPanel ? (isDraftQuote ? 'Before this quote can be sent' : 'Needs attention') : 'Next step'}
           sentence={nextStepText ?? blockerRows[0]?.text ?? ''}
           action={panelAction}
           testId="quote-next-step"
@@ -661,16 +746,37 @@ const QuoteViewPage: React.FC = () => {
                   <Typography variant="body2">{revisionImpactPresentation.detail}</Typography>
                 </Box>
                 {hasPermission('Quotations', 'edit') && (
-                  <Button
-                    color="inherit"
-                    size="small"
-                    variant="outlined"
-                    disabled={resolveImpactMutation.isPending}
-                    onClick={() => resolveImpactMutation.mutate()}
-                    sx={{ whiteSpace: 'nowrap' }}
-                  >
-                    {revisionImpactPresentation.action}
-                  </Button>
+                  <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
+                    {/* The decision, as two buttons: take the customer's new quantities (the
+                        draft is re-totalled and the review recorded), or keep what was quoted.
+                        One button — "Mark review complete" — let the draft go out with the OLD
+                        quantities and nothing on the screen said so. */}
+                    {canApplyRevision && (
+                      <Tooltip title="Update the quantities on this draft to the customer's new revision, re-total it, and record the review." describeChild>
+                        <Button
+                          size="small"
+                          variant="contained"
+                          disabled={applyImpactMutation.isPending || resolveImpactMutation.isPending}
+                          onClick={() => applyImpactMutation.mutate()}
+                          sx={{ whiteSpace: 'nowrap', fontWeight: 800 }}
+                        >
+                          {applyImpactMutation.isPending ? 'Applying…' : 'Apply the new quantities'}
+                        </Button>
+                      </Tooltip>
+                    )}
+                    <Tooltip title={isCustomerRevision ? 'Leave every quantity and price as quoted and record that the customer revision was reviewed.' : ''} describeChild>
+                      <Button
+                        color="inherit"
+                        size="small"
+                        variant={canApplyRevision || primaryAction !== 'revision' ? 'outlined' : 'contained'}
+                        disabled={resolveImpactMutation.isPending || applyImpactMutation.isPending}
+                        onClick={() => resolveImpactMutation.mutate()}
+                        sx={{ whiteSpace: 'nowrap' }}
+                      >
+                        {revisionImpactPresentation.action}
+                      </Button>
+                    </Tooltip>
+                  </Stack>
                 )}
               </Stack>
             )}
@@ -868,16 +974,21 @@ const QuoteViewPage: React.FC = () => {
       <EmailPromptDialog
         open={emailOpen}
         title={`Email quote ${quote.quoteNo}`}
-        initialEmail={quote.customerEmail || ''}
+        initialEmail={quote.customerEmail || emailDraftQuery.data?.recipientEmail || ''}
+        initialSubject={emailDraftQuery.data?.subject}
+        initialBody={emailDraftQuery.data?.body}
+        attachmentName={emailDraftQuery.data?.attachmentFileName ?? `Quote_${quote.quoteNo}.pdf`}
+        draftLoading={emailOpen && emailDraftQuery.isPending}
         loading={sendMutation.isPending}
-        composerFields="recipient-only"
+        composerFields="message"
         confirmLabel="Send quote"
         businessUnitId={businessUnitId}
         customerId={quote.customerId ?? null}
         onCancel={() => setEmailOpen(false)}
-        onConfirm={(email) => {
-          // R5: choosing the recipient no longer sends. The prices are confirmed first.
-          setPendingRecipient(email);
+        onConfirm={(email, subject, body) => {
+          // R5: choosing the recipient no longer sends. The prices are confirmed first; the
+          // reviewed words travel with the send.
+          setPendingSend({ recipientEmail: email, subject, body });
           setEmailOpen(false);
           setPriceConfirmOpen(true);
         }}
@@ -887,7 +998,7 @@ const QuoteViewPage: React.FC = () => {
         open={priceConfirmOpen}
         quoteId={Number(id)}
         quoteNo={quote.quoteNo}
-        recipientEmail={pendingRecipient}
+        recipientEmail={pendingSend.recipientEmail}
         submitting={confirmPriceMutation.isPending || sendMutation.isPending}
         onCancel={() => setPriceConfirmOpen(false)}
         onConfirm={(source, reference) => confirmPriceMutation.mutate({ source, reference })}

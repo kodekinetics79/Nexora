@@ -36,6 +36,8 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
         /// yet. Annotation only: it sits beside the governance columns below, never among them.
         /// </summary>
         public string? Tier { get; set; }
+        public string? Website { get; set; }
+        public string? Role { get; set; }
 
         public string GovernanceStatus { get; set; } = null!;
         public string VerificationStatus { get; set; } = null!;

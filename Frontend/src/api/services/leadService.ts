@@ -523,6 +523,41 @@ export interface BatchReconciliationItemDTO {
    * back to the error code (see src/utils/intakeErrors.ts).
    */
   recoverableSecurityHold?: boolean;
+  /**
+   * For an ExactDuplicate: the inquiry this file repeats byte for byte, so the batch page can name
+   * it and open it. Null when the original was never reconciled into a lead. Source:
+   * DuplicateOfDto in Backend/ERP_RFQ_Automation/LeadIdentity/LeadIdentityContracts.cs.
+   */
+  duplicateOf?: DuplicateOfDTO | null;
+  /** The customer's own RFQ number on the lead this row belongs to. */
+  customerReference?: string | null;
+  /** For a Revision: what the new document changed, one entry per line/field. Empty when nothing commercial moved. */
+  changes?: LeadRevisionChangeDTO[];
+  /** Set when the lead has already become an RFQ; the page opens it instead of offering Decide. */
+  rfq?: LeadRfqLinkDTO | null;
+}
+
+export interface DuplicateOfDTO {
+  leadId: number;
+  rfqNo?: string | null;
+  nexoraSerial?: string | null;
+  customerName?: string | null;
+  ownerName?: string | null;
+}
+
+export interface LeadRevisionChangeDTO {
+  /** The customer's line number; null for a header field. */
+  line?: string | null;
+  /** In a salesperson's words: "qty", "unit", "part", "closing date", or "line" when a line was added/removed. */
+  field: string;
+  from?: string | null;
+  to?: string | null;
+}
+
+export interface LeadRfqLinkDTO {
+  rfqId: number;
+  rfqNo: string;
+  ownerName?: string | null;
 }
 
 export interface LeadMatchCandidateDTO {

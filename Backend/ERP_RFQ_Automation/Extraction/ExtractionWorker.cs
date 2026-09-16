@@ -1469,6 +1469,73 @@ public sealed class LeadPersister : ILeadPersister
     /// audit trail for one a named person looked at.</summary>
     internal const string AutoVerifyActor = "system:auto-verified-high-confidence";
 
+    /// <summary>
+    /// Recorded as the approver when the facts were read straight from the document's own cells
+    /// (a spreadsheet, a portal table) with no model in the loop and every quote-critical value
+    /// backed by exact cell evidence. Distinct from <see cref="AutoVerifyActor"/> so the audit
+    /// trail says WHY nobody looked: not "the model was confident" but "there was nothing to
+    /// guess".
+    /// </summary>
+    internal const string DeterministicReadActor = "system:verified-deterministic-read";
+
+    /// <summary>True when the approver is one of this class's system verifiers, so a person can
+    /// still open the extraction review and approve (or correct) what the system verified.</summary>
+    internal static bool IsSystemVerifier(string? actor)
+        => string.Equals(actor, AutoVerifyActor, StringComparison.Ordinal)
+            || string.Equals(actor, DeterministicReadActor, StringComparison.Ordinal);
+
+    /// <summary>
+    /// A read with no model in it: the structured mapper (spreadsheet, CSV, Word/portal table) or
+    /// a canonical import. Its "confidence" is not a probability that the value is right — the
+    /// value IS the cell — so the model-confidence threshold has nothing to say about it.
+    /// </summary>
+    internal static bool IsDeterministicRead(ChunkedExtractionOutcome outcome)
+        => outcome.CanonicalImport is not null
+            || outcome.ProcessingPath == ExtractionProcessingPath.DeterministicRules;
+
+    /// <summary>Why a lead is verified without a person, or that it is not.</summary>
+    internal enum AutoVerification
+    {
+        None,
+        /// <summary>A model read whose confidence cleared the configured threshold.</summary>
+        HighConfidence,
+        /// <summary>A cell read: every quote-critical value is an exact cell of the document.</summary>
+        DeterministicRead
+    }
+
+    /// <summary>
+    /// Whether the single lead this outcome becomes is verified without a person.
+    ///
+    /// <para>Common to both routes: a clean outcome, one inquiry (a split is always a person's
+    /// call), a positive quantity on every line (confidence cannot make an unusable demand true),
+    /// and server-owned exact evidence proving identity, quantity and unit on every line
+    /// (confidence alone is not provenance). Then: a model read must also clear the configured
+    /// confidence threshold, and is never verified where none is configured; a deterministic
+    /// read has no model confidence to clear and is verified on the evidence alone.</para>
+    ///
+    /// <para>A six-line spreadsheet parsed natively used to reach the decision screen as
+    /// "Nexora is not sure it read this line correctly" six times over, because the only route to
+    /// verification was the model threshold — and an unstated header date alone drags the blended
+    /// figure under it. The threshold governs model-authored facts; it never governed cells.</para>
+    /// </summary>
+    internal static AutoVerification DecideAutoVerification(
+        ChunkedExtractionOutcome outcome,
+        IReadOnlyList<LeadExtractionResult> results,
+        long jobId,
+        decimal? minConfidence)
+    {
+        if (outcome.Status != ExtractionOutcomeStatus.Ok || results.Count != 1) return AutoVerification.None;
+        var items = results[0].Items;
+        if (items is not { Count: > 0 }) return AutoVerification.None;
+        if (!items.All(item => item.Quantity is > 0)) return AutoVerification.None;
+        if (!items.All(item => HasCompleteCriticalEvidence(item, jobId))) return AutoVerification.None;
+        if (IsDeterministicRead(outcome)) return AutoVerification.DeterministicRead;
+        if (minConfidence is null) return AutoVerification.None;
+        return ClampConfidence(results[0].OverallConfidence) >= minConfidence
+            ? AutoVerification.HighConfidence
+            : AutoVerification.None;
+    }
+
     public LeadPersister(
         ErpRfqAutomationContext context,
         ILogger<LeadPersister> log,
@@ -1743,20 +1810,14 @@ public sealed class LeadPersister : ILeadPersister
         var leads = new List<Lead>(results.Count);
         // A split document is never auto-verified: deciding that one message was really several
         // separate enquiries is exactly the judgement a person should confirm.
-        var mayAutoVerify = _autoVerifyMinConfidence is not null
-            && outcome.Status == ExtractionOutcomeStatus.Ok
-            && results.Count == 1
-            // Confidence cannot make an unusable demand quantity true. A clean document-level
-            // extraction may legitimately preserve 0, negative or TBD as a null line value;
-            // those lines require a person and may never turn the ingest green through the
-            // confidence shortcut.
-            && results[0].Items is { Count: > 0 }
-            && results[0].Items.All(item => item.Quantity is > 0)
-            // Confidence alone is not provenance. Auto-verification is allowed only when
-            // server-owned exact evidence already proves identity, quantity and UOM for every
-            // line. Conversational spans earn that status through deterministic matching below;
-            // model-authored confidence and unverified prose never do.
-            && results[0].Items.All(item => HasCompleteCriticalEvidence(item, job.Id));
+        //
+        // A deterministic read is verified on its evidence alone. A six-line spreadsheet parsed
+        // natively — no model, every quantity and unit an exact cell — used to reach the decision
+        // screen as "Nexora is not sure it read this line correctly" six times over, because the
+        // only route to verification was the MODEL-confidence threshold, and a cell read has no
+        // model confidence to clear (an unstated header date alone drags the blended figure under
+        // the bar). The threshold still governs model-authored facts; it never governed cells.
+        var verification = DecideAutoVerification(outcome, results, job.Id, _autoVerifyMinConfidence);
         for (var g = 0; g < results.Count; g++)
         {
             var splitNote = results.Count > 1
@@ -1764,11 +1825,12 @@ public sealed class LeadPersister : ILeadPersister
                 : string.Empty;
             var lead = BuildLead(job, metadata, results[g], ingest, now,
                 $"{reviewNote}{splitNote}{sourceNote}");
-            if (mayAutoVerify && lead.Aiconfidence >= _autoVerifyMinConfidence)
+            if (verification != AutoVerification.None)
             {
                 lead.RequiresCommercialReview = false;
                 lead.CommercialFactsVerified = true;
-                lead.ReviewApprovedBy = AutoVerifyActor;
+                lead.ReviewApprovedBy = verification == AutoVerification.DeterministicRead
+                    ? DeterministicReadActor : AutoVerifyActor;
                 lead.ReviewApprovedOn = now;
             }
             leads.Add(lead);

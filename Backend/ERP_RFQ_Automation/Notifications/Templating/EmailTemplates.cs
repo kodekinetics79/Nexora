@@ -148,10 +148,10 @@ Review it here: {{ctaUrl}}
 <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:8px 0; border-collapse:collapse;">
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px; width:40%;">RFQ number</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{rfqNumber}}</td></tr>
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Title</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{rfqTitle}}</td></tr>
-  <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Items</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{itemSummary}}</td></tr>
+{{itemRowsHtml}}
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Respond by</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{dueDate}}</td></tr>
 </table>
-<p style="margin:0 0 8px 0;">{{message}}</p>
+<p style="margin:0 0 8px 0;">{{messageHtml}}</p>
 """ + CtaButton),
                     Text = """
 Request for Quotation {{rfqNumber}}
@@ -162,7 +162,7 @@ Dear {{supplierName}},
 
 RFQ number: {{rfqNumber}}
 Title:      {{rfqTitle}}
-Items:      {{itemSummary}}
+{{itemRowsText}}
 Respond by: {{dueDate}}
 
 {{message}}

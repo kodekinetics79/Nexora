@@ -34,7 +34,6 @@ import {
   Security as SecurityIcon,
   UploadFile as FilesIcon,
 } from '@mui/icons-material';
-import dayjs from 'dayjs';
 import leadService from '../../api/services/leadService';
 import type { BatchReconciliationItemDTO, LeadMatchCandidateDTO, MatchReviewDecisionAction } from '../../api/services/leadService';
 import { clientStatusLabel } from './ClientCell';
@@ -51,6 +50,7 @@ import {
 } from '../../utils/intakeErrors';
 import { BatchMetricFilterCard } from './BatchMetricFilterCard';
 import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
+import { formatDateTime } from '../../utils/dates';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
@@ -114,11 +114,9 @@ const confidenceLabel = (confidence: number, scored = true): string => scored
   ? `${Math.round(confidence * 100)}% confidence`
   : 'Not yet scored';
 
-const timestampLabel = (value?: string | null): string => {
-  if (!value || !dayjs(value).isValid()) return 'time unavailable';
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
-  return `${dayjs(value).format('DD MMM YYYY, HH:mm')} (${zone})`;
-};
+// The shared style, in the reader's own zone and without a zone name: "(America/New_York)" on a
+// Riyadh rep's screen was the browser's guess at a zone the server never stated.
+const timestampLabel = (value?: string | null): string => formatDateTime(value, 'time unavailable');
 
 const evidenceObject = (value: string): Record<string, unknown> | null => {
   try {
@@ -260,7 +258,11 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
   const { hasPermission } = useAuth();
   const held = isInfrastructureHold(item);
   const classificationPending = item.classification.replaceAll('_', '').toLowerCase() === 'pending';
+  const exactDuplicate = item.classification.replaceAll('_', '').toLowerCase() === 'exactduplicate';
   const hasExtractionScore = !held && !classificationPending;
+  // A hash match is a certainty, not a score: "0% confidence" on a byte-for-byte repeat read as
+  // "the system is not sure this is a duplicate", which is the opposite of what happened.
+  const scoreLabel = exactDuplicate ? 'Same file, matched by content' : confidenceLabel(item.confidence, hasExtractionScore);
   // Opening the record is a Leads read. Fit/participation and RFQ promotion remain separately
   // gated inside the workbench, matching their server actions.
   const canOpenWorkbench = commercialActionPermissions(hasPermission).canOpenLeadWorkbench;
@@ -296,7 +298,7 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
           </Typography>
           <Typography variant="caption" color="text.secondary">
             Received {timestampLabel(item.ingestedAtUtc)}
-            {' | '}{readable(item.processingPath)}{' | '}{confidenceLabel(item.confidence, hasExtractionScore)}
+            {' | '}{readable(item.processingPath)}{' | '}{scoreLabel}
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
             Security {readable(item.securityStatus || 'Pending')} updated {timestampLabel(item.securityScanUpdatedAtUtc || item.lastUpdatedAtUtc)}
@@ -359,12 +361,6 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
           ))}
         </Box>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', md: 'flex-end' } }}>
-          <Chip
-            size="small"
-            label={item.externalAiUsed ? 'External provider used' : 'Local-first'}
-            color={item.externalAiUsed ? 'warning' : 'default'}
-            variant="outlined"
-          />
           {held && onRetryHold && (
             <Tooltip title="Replays this file from its stored original. Releases every held file in this batch — no re-upload needed.">
               <span>
@@ -567,6 +563,8 @@ export default function LeadIngestionBatchPage() {
         batch={batch}
         onDecide={(leadId) => navigate(`/procurement/leads/${leadId}/workbench`)}
         onOpenInquiries={() => navigate('/procurement/leads/all')}
+        onOpenLead={(leadId) => navigate(`/procurement/leads/view/${leadId}`)}
+        onOpenRfq={(rfqId) => navigate(`/procurement/rfqs/view/${rfqId}`)}
       />
       <Grid container spacing={1} sx={{ mb: 1.5 }}>
         {metrics.map((metric) => (
@@ -667,14 +665,6 @@ export default function LeadIngestionBatchPage() {
           {pendingCount > 0
             ? `${pendingCount} document${pendingCount === 1 ? '' : 's'} still processing. This page updates itself.`
             : `Processing complete: ${batch.logicalInquiries} inquiries classified${batch.rejected > 0 ? `, including ${batch.rejected} rejected or unsupported` : ' with no processing failures'}.`}
-        </Typography>
-        <Typography
-          variant="caption"
-          sx={{ color: batch.externalOccurrences > 0 ? 'warning.main' : 'text.secondary' }}
-        >
-          {batch.externalOccurrences > 0
-            ? `${batch.localFirstOccurrences ?? 0} local-first and ${batch.externalOccurrences} external occurrence${batch.externalOccurrences === 1 ? '' : 's'}. ${batch.externalCost == null ? 'Provider cost is not priced.' : `Recorded external cost: ${batch.externalCost.toFixed(4)}.`}`
-            : `${batch.localFirstOccurrences ?? 0} reconciled occurrence${batch.localFirstOccurrences === 1 ? '' : 's'} used local-first processing. No external provider use is recorded.`}
         </Typography>
       </Stack>
 

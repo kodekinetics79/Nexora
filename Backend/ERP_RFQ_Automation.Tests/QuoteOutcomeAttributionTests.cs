@@ -77,6 +77,34 @@ public sealed class QuoteOutcomeAttributionTests
         Assert.All(warnings, x => Assert.Contains("fallback lead owner", x.Message));
     }
 
+    /// <summary>
+    /// Production shape after a rep pressed "Customer responded": <c>Quote.RespondedOn</c> comes
+    /// back from a <c>timestamp without time zone</c> column with <see cref="DateTimeKind.Unspecified"/>.
+    /// The outcome path handed it straight to <c>AppendActivityAsync</c>, whose <c>RequireUtc</c>
+    /// threw "OccurredAtUtc must be UTC." — so the customer said yes and the system answered 500
+    /// (QT-0926-0001, local stack, 2026-09-15). Same trap as the profile editor's EffectiveFromUtc.
+    /// </summary>
+    [Fact]
+    public async Task Recording_won_after_the_customer_responded_survives_a_database_kind_timestamp()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        await SeedAsync(context, defaultOwner: DefaultOwnerId);
+        var quote = await context.Quotes.SingleAsync(x => x.Id == QuoteId);
+        quote.RespondedOn = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-3), DateTimeKind.Unspecified);
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+        var service = Service(context, new CapturingLogger<QuoteOutcomeService>());
+
+        await service.SetOutcomeAsync(QuoteId, Tenant, "rep@tenant.test", "won");
+
+        context.ChangeTracker.Clear();
+        var activities = await context.Set<CommercialActivity>().AsNoTracking()
+            .Where(x => x.AggregateType == "Quote" && x.AggregateId == QuoteId)
+            .ToListAsync();
+        Assert.Contains(activities, x => x.ActivityType == CommercialActivityType.Won);
+    }
+
     // ------------------------------------------------------------------------ test plumbing
 
     private static QuoteOutcomeService Service(ErpRfqAutomationContext context, ILogger<QuoteOutcomeService> logger)

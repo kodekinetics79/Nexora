@@ -21,17 +21,20 @@ public sealed class LeadParticipationService : ILeadParticipationService
     private readonly ILeadDecisionService _decisionIntelligence;
     private readonly ILeadConversionIntelligence _conversionIntelligence;
     private readonly ILeadOutcomeReasons _leadOutcomeReasons;
+    private readonly ILineSkipReasons _lineSkipReasons;
 
     public LeadParticipationService(
         ErpRfqAutomationContext db,
         ILeadDecisionService decisionIntelligence,
         ILeadConversionIntelligence conversionIntelligence,
-        ILeadOutcomeReasons leadOutcomeReasons)
+        ILeadOutcomeReasons leadOutcomeReasons,
+        ILineSkipReasons? lineSkipReasons = null)
     {
         _db = db;
         _decisionIntelligence = decisionIntelligence;
         _conversionIntelligence = conversionIntelligence;
         _leadOutcomeReasons = leadOutcomeReasons;
+        _lineSkipReasons = lineSkipReasons ?? new LineSkipReasons(db);
     }
 
     // Keeps focused domain tests and non-DI composition roots source-compatible while routing
@@ -271,11 +274,15 @@ public sealed class LeadParticipationService : ILeadParticipationService
                 if (line.Quantity is { } suppliedQuantity && !FitsPersistedQuantity(suppliedQuantity))
                     throw new ArgumentException(
                         $"Quantity for revision line {line.LeadItemRevisionId} must be positive and fit decimal(20,6) without rounding.");
+                // A skipped line takes a reason from the tenant's line-skip list. The quote-outcome
+                // list is still accepted so a draft saved before the lists were separated commits
+                // unchanged; the screen offers only line-skip reasons.
                 if (line.Choice == LeadLineParticipationChoice.NoBid
                     && (string.IsNullOrWhiteSpace(line.ReasonCode)
-                        || await _leadOutcomeReasons.ResolveAsync(businessUnitId, line.ReasonCode.Trim(), ct) is null))
+                        || (!await _lineSkipReasons.IsGovernedAsync(businessUnitId, line.ReasonCode.Trim(), ct)
+                            && await _leadOutcomeReasons.ResolveAsync(businessUnitId, line.ReasonCode.Trim(), ct) is null)))
                     throw new ArgumentException(
-                        $"No-bid revision line {line.LeadItemRevisionId} requires a reason from this business unit's governed outcome-reason list.");
+                        $"No-bid revision line {line.LeadItemRevisionId} requires a reason from this business unit's line-skip reason list.");
                 if (line.Choice == LeadLineParticipationChoice.Clarify
                     && (string.IsNullOrWhiteSpace(line.ReasonCode)
                         || !GovernedClarificationReasonCodes.Contains(line.ReasonCode.Trim(), StringComparer.OrdinalIgnoreCase)))

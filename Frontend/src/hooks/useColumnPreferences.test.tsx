@@ -149,7 +149,7 @@ describe('useColumnPreferences', () => {
       expect(screen.getByTestId('order').textContent).toBe('docId,name,createdOn,actions'));
   });
 
-  it('keeps a page column the server catalog does not list rather than dropping it', async () => {
+  it('keeps a page column the server catalog does not list, ahead of Actions rather than dangling past it', async () => {
     service.getColumns.mockResolvedValue(response());
 
     render(
@@ -157,8 +157,10 @@ describe('useColumnPreferences', () => {
       { wrapper },
     );
 
+    // Actions is the last thing on every grid. The Customers grid once showed Account team,
+    // Sector and Region appended after its buttons because the catalog had drifted.
     await waitFor(() =>
-      expect(screen.getByTestId('order').textContent).toBe('docId,name,createdOn,actions,brandNewColumn'));
+      expect(screen.getByTestId('order').textContent).toBe('docId,name,createdOn,brandNewColumn,actions'));
   });
 
   it('falls back to the page defaults when preferences cannot be loaded', async () => {

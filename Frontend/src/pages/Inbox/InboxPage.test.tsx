@@ -43,6 +43,7 @@ const api = {
   needsReview: vi.fn(),
   outstandingLeads: vi.fn(),
   assignedLeads: vi.fn(),
+  leadList: vi.fn(),
   rfqs: vi.fn(),
   supplierInbox: vi.fn(),
   quotes: vi.fn(),
@@ -62,6 +63,7 @@ vi.mock('../../api/services/leadService', () => ({
   default: {
     getOutstandingLeads: (...args: unknown[]) => api.outstandingLeads(...args),
     getAssignedLeads: (...args: unknown[]) => api.assignedLeads(...args),
+    getAll: (...args: unknown[]) => api.leadList(...args),
   },
 }));
 vi.mock('../../api/services/rfqService', () => ({
@@ -98,6 +100,7 @@ const allQueuesEmpty = () => {
   api.stoppedMail.mockResolvedValue(readTriagePage({ items: [], totalCount: 0, pageNumber: 1, pageSize: 25 }, 1));
   api.needsReview.mockResolvedValue(empty);
   api.outstandingLeads.mockResolvedValue(empty);
+  api.leadList.mockResolvedValue(empty);
   api.assignedLeads.mockResolvedValue(empty);
   api.rfqs.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 25, totalPages: 0 });
   api.supplierInbox.mockResolvedValue([]);
@@ -134,6 +137,31 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe('enquiries without an owner tells the truth about unowned enquiries', () => {
+  it('says how many unowned enquiries are still being checked instead of "Every enquiry has an owner"', async () => {
+    // The routing queue (accepted, unclaimed) is empty ...
+    api.outstandingLeads.mockResolvedValue(empty);
+    // ... but the Leads list, Owner = Unassigned, has two open enquiries nobody has accepted yet.
+    api.leadList.mockResolvedValue({ ...empty, totalCount: 2, pageSize: 1 });
+
+    renderInbox();
+
+    const owners = await screen.findByRole('region', { name: 'Enquiries without an owner' });
+    expect(await within(owners).findByText('2 unowned enquiries are still being checked — see Documents to check')).toBeInTheDocument();
+    expect(within(owners).queryByText('Every enquiry has an owner')).not.toBeInTheDocument();
+    expect(within(owners).getByRole('button', { name: 'Open Documents to check' })).toBeInTheDocument();
+    expect(api.leadList).toHaveBeenCalledWith(expect.objectContaining({ view: 'open,unassigned', pageSize: 1 }));
+    // The screen is not "clear" while unowned work exists upstream of the routing queue.
+    expect(screen.queryByText('You are clear.')).not.toBeInTheDocument();
+  });
+
+  it('keeps "Every enquiry has an owner" when the unassigned list really is empty', async () => {
+    renderInbox();
+    const owners = await screen.findByRole('region', { name: 'Enquiries without an owner' });
+    expect(await within(owners).findByText('Every enquiry has an owner')).toBeInTheDocument();
+  });
 });
 
 describe('what is waiting on you', () => {

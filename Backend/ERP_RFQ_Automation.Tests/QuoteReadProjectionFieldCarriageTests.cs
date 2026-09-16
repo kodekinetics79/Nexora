@@ -310,6 +310,79 @@ public sealed class QuoteReadProjectionFieldCarriageTests
         Assert.Equal(currencyBefore, currencyAfter);
     }
 
+    /// <summary>
+    /// D20. The Edit screen's line payload has never carried <c>RfqItemId</c>, and
+    /// <c>UpdateQuoteAsync</c> assigned it unconditionally — so pressing "Update Quote" to change a
+    /// price or a quantity NULLED the link Prepare Quote Draft wrote from every line to its RFQ item.
+    ///
+    /// <para>That link is the only thing joining a quoted line to the supplier award that priced
+    /// it. <c>QuoteViewPage.sourceFor()</c> matches awards by it, so after one save every line reads
+    /// "Cost Source Pending", the award→price trace is gone, and the PO raised later has nothing to
+    /// follow back to the supplier. Silent data loss on the routine edit path.</para>
+    ///
+    /// <para>This test sends what the screen actually sends — a price change with the line's
+    /// <c>RfqItemId</c> left unset — and asserts the stored link survives.</para>
+    /// </summary>
+    [Fact]
+    public async Task SavingAPriceChangeFromTheEditScreen_KeepsTheLinesLinkToItsRfqItem()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        await SeedTenantAsync(db);
+        var rfqItemId = await SeedRfqLineAsync(db);
+
+        var service = new QuoteService(db, null!, null!);
+        var request = ExportQuoteRequest();
+        request.RfqId = RfqId;
+        request.QuoteItems[0].RfqItemId = rfqItemId;
+        var created = await service.CreateQuoteAsync(request);
+
+        var linkBefore = (await db.QuoteItems.AsNoTracking().SingleAsync()).RfqitemId;
+        Assert.Equal(rfqItemId, linkBefore);
+        db.ChangeTracker.Clear();
+
+        var read = await new QuoteRepository(db).GetByIdAsync(created.Id, BusinessUnitId);
+
+        await service.UpdateQuoteAsync(created.Id, new QuoteUpdateRequestDTO
+        {
+            Id = created.Id,
+            QuoteNo = read.QuoteNo,
+            CustomerId = read.CustomerId,
+            QuoteDate = read.QuoteDate,
+            ValidUntil = read.ValidUntil,
+            StatusId = read.StatusId,
+            CurrencyId = read.CurrencyId,
+            TotalAmount = read.TotalAmount,
+            HeaderRemarks = read.HeaderRemarks,
+            ModifiedBy = "test",
+            DiscountTypeId = read.DiscountTypeId,
+            DiscountValue = read.DiscountValue,
+            QuoteItems = read.QuoteItems.Select(i => new QuoteItemUpdateRequestDTO
+            {
+                Id = i.Id,
+                // RfqItemId deliberately NOT set — this is the defect, reproduced.
+                ProductId = i.ProductId,
+                ItemDescription = i.ItemDescription,
+                UnitOfMeasure = i.UnitOfMeasure,
+                CustomerLineRef = i.CustomerLineRef,
+                Quantity = i.Quantity,
+                // The one thing the rep came here to do.
+                UnitPrice = i.UnitPrice + 50m,
+                TotalAmount = i.TotalAmount,
+                Discount = i.Discount,
+                DiscountTypeId = i.DiscountTypeId,
+                DiscountValue = i.DiscountValue,
+                TaxCategory = i.TaxCategory,
+                TaxCategoryReason = i.TaxCategoryReason,
+                DeliveryLeadTime = i.DeliveryLeadTime,
+            }).ToList(),
+        });
+
+        var afterEdit = await db.QuoteItems.AsNoTracking().SingleAsync();
+        Assert.Equal(1_050m, afterEdit.UnitPrice);
+        Assert.Equal(rfqItemId, afterEdit.RfqitemId);
+    }
+
     private static QuoteCreateRequestDTO ExportQuoteRequest()
     {
         var request = StandardQuoteRequest();

@@ -346,11 +346,79 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         });
     }
 
+    /// <inheritdoc />
+    public async Task<SourcingCaseView> RefreshCandidatesAfterSupplierChangeAsync(
+        RefreshSourcingCandidatesCommand command, CancellationToken ct = default)
+    {
+        ValidateTenant(command.BusinessUnitId);
+        if (string.IsNullOrWhiteSpace(command.Actor))
+            throw new ProcurementValidationException("An authenticated actor is required.");
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var sourcingCase = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
+                ?? throw new ProcurementValidationException("Sourcing Case was not found in the authenticated tenant.");
+            if (sourcingCase.Status is SourcingCaseStatuses.Closed or SourcingCaseStatuses.Cancelled)
+                throw new ProcurementConflictException("A closed or cancelled Sourcing Case cannot take new suppliers.");
+
+            var now = DateTime.UtcNow;
+            var outreachStarted = await _db.Set<SupplierSolicitation>().AnyAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.SourcingCaseId == sourcingCase.Id, ct);
+            var previousCandidates = sourcingCase.Candidates.Select(ToCandidateSnapshot).ToArray();
+            var fresh = await ComputeCandidatesAsync(sourcingCase, sourcingCase.SearchLimit, now, ct);
+            if (!outreachStarted)
+            {
+                // Same rebuild the search button performs.
+                _db.SourcingCaseCandidates.RemoveRange(sourcingCase.Candidates);
+                sourcingCase.Candidates.Clear();
+                foreach (var candidate in fresh) sourcingCase.Candidates.Add(candidate);
+                sourcingCase.Status = sourcingCase.Candidates.Count == 0
+                    ? SourcingCaseStatuses.DiscoveryRequired : SourcingCaseStatuses.InternalSearch;
+                sourcingCase.NextAction = sourcingCase.Candidates.Count == 0
+                    ? "Review discovery options" : "Select suppliers for outreach";
+            }
+            else
+            {
+                // A prepared Supplier RFQ points at a candidate; those rows stay. Only the suppliers
+                // that are new to the case are appended, ranked after the ones already there.
+                var known = sourcingCase.Candidates.Select(x => x.SupplierId).ToHashSet();
+                var rank = sourcingCase.Candidates.Count == 0 ? 0 : sourcingCase.Candidates.Max(x => x.Rank);
+                foreach (var candidate in fresh.Where(x => !known.Contains(x.SupplierId)))
+                {
+                    candidate.Rank = ++rank;
+                    sourcingCase.Candidates.Add(candidate);
+                }
+            }
+            sourcingCase.Version++;
+            sourcingCase.UpdatedOn = now;
+            sourcingCase.UpdatedBy = command.Actor.Trim();
+            AddEvent(command.BusinessUnitId, "SourcingCase", sourcingCase.Id, sourcingCase.Version,
+                "SUPPLIER_CANDIDATES_REFRESHED", command.Actor, command.CorrelationId,
+                $"refresh:{sourcingCase.Id}:{sourcingCase.Version}:{Guid.NewGuid():N}",
+                JsonSerializer.Serialize(new
+                {
+                    Reason = "SUPPLIER_LIST_CHANGED",
+                    OutreachStarted = outreachStarted,
+                    Version = sourcingCase.Version,
+                    PreviousCandidates = previousCandidates,
+                    Candidates = sourcingCase.Candidates.Select(ToCandidateSnapshot).ToArray()
+                }), now);
+            await _db.SaveChangesAsync(ct);
+            var view = await ToSourcingCaseViewAsync(sourcingCase, ct);
+            await tx.CommitAsync(ct);
+            return view;
+        });
+    }
+
     public async Task<PreparedSupplierRfqResult> PrepareSupplierRfqAsync(
         PrepareSupplierRfqCommand command, CancellationToken ct = default)
     {
         ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
         ValidateSolicitationDueOn(command.DueOn);
+        var buyerMessage = NormaliseBuyerMessage(command.Message);
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
@@ -365,7 +433,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 command.SourcingCaseId,
                 command.SupplierId,
                 command.DueOn,
-                command.ExpectedVersion
+                command.ExpectedVersion,
+                Message = buyerMessage
             });
             var replay = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == solicitationKey, ct);
@@ -424,7 +493,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 var originalPayload = preparationEvent is null
                     ? null
                     : JsonSerializer.Deserialize<SolicitationDispatchPayload>(preparationEvent.PayloadJson);
-                if (originalPayload is null || originalPayload.DueOn != command.DueOn)
+                if (originalPayload is null || originalPayload.DueOn != command.DueOn
+                    || !string.Equals(originalPayload.Message, buyerMessage, StringComparison.Ordinal))
                     throw new ProcurementConflictException(
                         "A prepared Supplier RFQ already exists with different delivery terms. Review or cancel it before preparing another.");
                 // The dispatch address was corrected after this Supplier RFQ was prepared: the
@@ -481,6 +551,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 Status = SolicitationStatus.PendingDispatch,
                 Channel = "Email",
                 DueOn = command.DueOn,
+                BuyerMessage = buyerMessage,
                 Notes = command.DueOn is null ? $"Sourcing Case {sourcingCase.Id}"
                     : $"Sourcing Case {sourcingCase.Id}; Due {command.DueOn.Value:O}",
                 CreatedOn = now,
@@ -489,9 +560,14 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             _db.Add(solicitation);
             await _db.SaveChangesAsync(ct);
             solicitation.SupplierRfqNumber = $"SRFQ-{command.BusinessUnitId:D4}-{solicitation.Id:D8}";
+            var preparedLines = new[]
+            {
+                await DescribeLineForSupplierAsync(rfqItem, sourcingCase.UnfulfilledQuantity, ct)
+            };
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
-                solicitation.SupplierRfqNumber, $"{sourcingCase.RfqItemId}: {sourcingCase.UnfulfilledQuantity:0.####}", command.DueOn));
+                solicitation.SupplierRfqNumber, SummariseLinesForSupplier(preparedLines), command.DueOn, preparedLines,
+                buyerMessage));
             candidate.Selected = true;
             candidate.UpdatedOn = now;
             sourcingCase.Status = SourcingCaseStatuses.OutreachReady;
@@ -738,6 +814,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var poByAward = purchaseOrders.SelectMany(x => x.Lines.Select(line => new { line.SourcingAwardId, PurchaseOrderId = x.Id }))
             .ToDictionary(x => x.SourcingAwardId, x => x.PurchaseOrderId);
         var awardQuoteIds = awards.Where(x => x.SupplierQuotedItemId.HasValue).Select(x => x.SupplierQuotedItemId!.Value).ToHashSet();
+        var approvedQuantityByOffer = ApprovedQuantityByOffer(awards);
 
         // Every purchase order on the RFQ is loaded above because the panel below lists them all —
         // a cancelled order must stay visible. Only the ones that are actually committed supply may
@@ -812,7 +889,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var sourceLine = lines.SingleOrDefault(x => x.Id == row.RfqItemId);
             var comparison = ToComparisonLine(row, sourceLine?.ShortfallQuantity ?? 0m, supplier,
                 workbenchRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0),
-                sourceLine?.RequiredOn);
+                sourceLine?.RequiredOn, approvedQuantityByOffer.GetValueOrDefault(row.Id));
             return new SupplierOfferView(row.Id, row.SupplierSolicitationId ?? 0, row.RfqItemId ?? 0, row.SupplierId,
                 supplier?.Name ?? $"Supplier {row.SupplierId}", row.QuoteReference, row.QuoteRevision,
                 row.CurrencyId ?? 0, currencyCodes.GetValueOrDefault(row.CurrencyId ?? 0) ?? "N/A", row.Quantity,
@@ -931,9 +1008,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             _db.Add(solicitation);
             await _db.SaveChangesAsync(ct);
 
+            var describedLines = new List<SolicitationDispatchLine>(requestedLines.Count);
+            foreach (var requestedLine in requestedLines)
+                describedLines.Add(await DescribeLineForSupplierAsync(
+                    requestedLine, requestedQuantities[requestedLine.Id], ct));
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name, rfq.Rfqno,
-                string.Join(", ", requestedQuantities.OrderBy(x => x.Key).Select(x => $"{x.Key}: {x.Value:0.####}")), command.DueOn));
+                SummariseLinesForSupplier(describedLines), command.DueOn, describedLines));
             _db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
             {
                 BusinessUnitId = command.BusinessUnitId,
@@ -1301,6 +1382,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var rows = await _db.SupplierQuotedItems.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
             && x.RfqId == rfqItem.Rfqid && x.RfqItemId == rfqItemId && x.IsActive).ToListAsync(ct);
         var remainingRequirement = await GetNetSourcingRequirementAsync(businessUnitId, rfqItem, ct);
+        // D17: what each offer has itself been awarded, so the offer that covered the line is
+        // presented as awarded rather than as "cannot be awarded: already covered".
+        var approvedQuantityByOffer = ApprovedQuantityByOffer(await _db.Set<SourcingAward>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.RfqItemId == rfqItemId
+                && x.Status != "CANCELLED" && x.Status != "REJECTED")
+            .ToListAsync(ct));
         var supplierIds = rows.Select(x => x.SupplierId).Distinct().ToArray();
         var suppliers = await _db.Suppliers.AsNoTracking().Where(x => x.Buid == businessUnitId &&
             supplierIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
@@ -1314,7 +1401,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var lines = rows.Select(row => ToComparisonLine(row, remainingRequirement,
                 suppliers.GetValueOrDefault(row.SupplierId),
                 canonicalRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0),
-                rfqItem.RequiredDesiredDate))
+                rfqItem.RequiredDesiredDate,
+                approvedQuantityByOffer.GetValueOrDefault(row.Id)))
             .ToArray();
         var eligible = lines.Where(x => x.Eligible).ToArray();
         var currencies = eligible.Select(x => x.CurrencyId).Distinct().ToArray();
@@ -2406,6 +2494,17 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
     private async Task RefreshCandidatesAsync(SourcingCase sourcingCase, int limit, DateTime now, CancellationToken ct)
     {
+        foreach (var candidate in await ComputeCandidatesAsync(sourcingCase, limit, now, ct))
+            sourcingCase.Candidates.Add(candidate);
+    }
+
+    /// <summary>
+    /// The candidate rule, as a pure computation over the case and the tenant's supplier list, so a
+    /// caller can decide what to do with the result (replace the list, or append the newcomers).
+    /// </summary>
+    private async Task<IReadOnlyList<SourcingCaseCandidate>> ComputeCandidatesAsync(
+        SourcingCase sourcingCase, int limit, DateTime now, CancellationToken ct)
+    {
         var suppliers = await _db.Suppliers.AsNoTracking()
             .Where(x => x.Buid == sourcingCase.BusinessUnitId && x.IsActive == true)
             .Select(x => new { x.Id, x.Name, x.Tags })
@@ -2477,10 +2576,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
         var ranked = evidence.Values.OrderByDescending(x => x.Score)
             .ThenByDescending(x => x.FreshOn).ThenBy(x => x.SupplierId).Take(limit).ToArray();
+        var candidates = new List<SourcingCaseCandidate>(ranked.Length);
         for (var index = 0; index < ranked.Length; index++)
         {
             var row = ranked[index];
-            sourcingCase.Candidates.Add(new SourcingCaseCandidate
+            candidates.Add(new SourcingCaseCandidate
             {
                 BusinessUnitId = sourcingCase.BusinessUnitId,
                 SupplierId = row.SupplierId,
@@ -2494,6 +2594,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 UpdatedOn = now
             });
         }
+        return candidates;
     }
 
     private static void AddCandidateEvidence(Dictionary<long, CandidateEvidence> evidence, long supplierId,
@@ -2511,7 +2612,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var candidates = await ToCandidateViewsAsync(sourcingCase.BusinessUnitId, sourcingCase.Candidates, ct);
         return new SourcingCaseView(sourcingCase.Id, sourcingCase.CommercialDemandLineId,
             sourcingCase.RfqId, sourcingCase.RfqItemId, sourcingCase.NexoraSerial, sourcingCase.ProductId,
-            sourcingCase.RequestedPartNumber, sourcingCase.Description, sourcingCase.RequestedQuantity,
+            sourcingCase.RequestedPartNumber, Clean(sourcingCase.Manufacturer), sourcingCase.Description,
+            Clean(sourcingCase.UnitOfMeasure), sourcingCase.RequestedQuantity,
             sourcingCase.StockQuantity, sourcingCase.UnfulfilledQuantity, sourcingCase.RequiredOn,
             sourcingCase.SearchLimit, sourcingCase.Status, sourcingCase.NextAction, sourcingCase.Version, candidates);
     }
@@ -2643,6 +2745,21 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     /// persisted rather than discarded. Reject anything that could not be honoured: a non-UTC
     /// instant (the column and the dispatch payload are both UTC) or a deadline already past.
     /// </summary>
+    /// <summary>
+    /// The rep's message to the suppliers: trimmed, null when blank (the email then carries its
+    /// standard sentence), and refused past 2,000 characters in a sentence the rep can act on.
+    /// </summary>
+    internal const int BuyerMessageMaxLength = 2000;
+
+    private static string? NormaliseBuyerMessage(string? message)
+    {
+        var trimmed = Clean(message);
+        if (trimmed is not null && trimmed.Length > BuyerMessageMaxLength)
+            throw new ProcurementValidationException(
+                $"Your message to the suppliers can be at most {BuyerMessageMaxLength:N0} characters; it is {trimmed.Length:N0}.");
+        return trimmed;
+    }
+
     private static void ValidateSolicitationDueOn(DateTime? dueOn)
     {
         if (dueOn is null) return;
@@ -2652,8 +2769,19 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             throw new ProcurementValidationException("A Supplier RFQ response deadline must be in the future.");
     }
 
+    /// <summary>
+    /// Approved quantity per supplier quoted item. APPROVED and SPLIT_APPROVED both count — a split
+    /// is still an award — and a cancelled or rejected award covers nothing.
+    /// </summary>
+    private static Dictionary<long, decimal> ApprovedQuantityByOffer(IEnumerable<SourcingAward> awards)
+        => awards
+            .Where(x => x.SupplierQuotedItemId.HasValue && x.Status is ("APPROVED" or "SPLIT_APPROVED"))
+            .GroupBy(x => x.SupplierQuotedItemId!.Value)
+            .ToDictionary(x => x.Key, x => x.Sum(award => award.Quantity ?? 0m));
+
     private static QuoteComparisonLine ToComparisonLine(SupplierQuotedItem row, decimal remainingRequirement,
-        Supplier? supplier, SupplierQuotes.SupplierQuoteRevision? canonicalRevision, DateTime? requiredOn)
+        Supplier? supplier, SupplierQuotes.SupplierQuoteRevision? canonicalRevision, DateTime? requiredOn,
+        decimal approvedAwardQuantity = 0m)
     {
         var blockers = new List<string>();
         // The offer's own description of what is being quoted. Read once here and carried onto the
@@ -2677,8 +2805,23 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         if (row.LeadTimeDays is null or < 0) blockers.Add("lead time missing");
         var quoteCapacity = Math.Min(row.Quantity, row.AvailableQuantity ?? 0m);
         if (row.AvailableQuantity is null || quoteCapacity <= 0) blockers.Add("available quantity insufficient or unknown");
-        if (remainingRequirement <= 0) blockers.Add("sourcing requirement already covered");
-        if (row.MinimumOrderQuantity is > 0
+        // D17. The two coverage tests below ask "is there anything left for THIS offer to cover?".
+        // An offer's own approved award is the reason the line is covered, so it cannot also be the
+        // reason the offer "cannot be awarded": the buyer pressed Approve and the row they had just
+        // approved read "Not scored — this offer cannot be awarded as it stands: sourcing
+        // requirement already covered", chip and "Needs attention" banner included. Its own
+        // approved quantity is added back, so the awarded offer stays eligible while every OTHER
+        // offer on the covered line keeps the blocker. The award path passes nothing here on
+        // purpose — it must still refuse to award more than remains.
+        var coverageRequirement = remainingRequirement + approvedAwardQuantity;
+        if (coverageRequirement <= 0) blockers.Add("sourcing requirement already covered");
+        // MOQ is judged against what is LEFT to award, not against what this offer already has:
+        // an offer partly awarded cannot award the remainder below its minimum (governed, tested
+        // in Comparison_rejects_moq_that_exceeds_requirement_remaining_after_award). Only when
+        // nothing is left AND this offer's own award covered the line is there no further order
+        // for a minimum to apply to.
+        var furtherOrderPossible = remainingRequirement > 0 || approvedAwardQuantity <= 0;
+        if (furtherOrderPossible && row.MinimumOrderQuantity is > 0
             && (remainingRequirement < row.MinimumOrderQuantity || quoteCapacity < row.MinimumOrderQuantity))
             blockers.Add("minimum order quantity cannot be satisfied");
         if (row.ValidUntil is null || row.ValidUntil <= DateTime.UtcNow) blockers.Add("quote expired or validity missing");
@@ -3329,8 +3472,94 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     {
         if (businessUnitId <= 0) throw new ProcurementValidationException("A valid authenticated business unit is required.");
     }
+
+    /// <summary>
+    /// Describes one RFQ line in the words a supplier needs. The quantity is the sourcing
+    /// shortfall (what we actually need bought), never the customer's full demand. The
+    /// customer's unit price is deliberately not read: the send dialog promises suppliers never
+    /// see target prices or margins, and the customer's name is left out for the same reason.
+    /// </summary>
+    private async Task<SolicitationDispatchLine> DescribeLineForSupplierAsync(
+        Rfqitem line, decimal quantity, CancellationToken ct)
+    {
+        var maker = Clean(line.ManufacturerName);
+        string? acceptableMakers = null;
+        if (maker is null)
+        {
+            // A line with no single maker may still carry the customer's approved-maker list,
+            // captured verbatim from their document. The RFQ line holds a copy taken at
+            // promotion; older RFQ lines predate that copy and are read through the lead line
+            // that produced them.
+            acceptableMakers = ApprovedMakers(line.ExtraFields);
+            if (acceptableMakers is null && line.SourceLeadItemRevisionId.HasValue)
+            {
+                var leadExtraFields = await _db.Set<LeadIdentity.LeadItemRevision>().AsNoTracking()
+                    .Where(x => x.Id == line.SourceLeadItemRevisionId.Value && x.LeadItem != null)
+                    .Select(x => x.LeadItem!.ExtraFields)
+                    .FirstOrDefaultAsync(ct);
+                acceptableMakers = ApprovedMakers(leadExtraFields);
+            }
+        }
+        return new SolicitationDispatchLine(
+            Clean(line.LineItemNo) ?? line.Id.ToString(),
+            Clean(line.ProductShortDescription) ?? Clean(line.ProductShortName) ?? Clean(line.ItemText),
+            maker,
+            Clean(line.ManufacturerPartNumber),
+            Clean(line.ItemMaterialCode),
+            quantity,
+            Clean(line.UnitOfMeasure),
+            line.RequiredDesiredDate,
+            acceptableMakers);
+    }
+
+    private static string? ApprovedMakers(string? extraFieldsJson)
+    {
+        var extra = ExtraFieldsJson.Deserialize(extraFieldsJson);
+        if (extra is null) return null;
+        foreach (var (key, value) in extra)
+            if (string.Equals(key.Trim(), "Approved manufacturers", StringComparison.OrdinalIgnoreCase))
+                return Clean(value);
+        return null;
+    }
+
+    /// <summary>
+    /// Plain-text fallback for readers that only know <see cref="SolicitationDispatchPayload.ItemSummary"/>.
+    /// Reads as a sentence a supplier could act on, never as an internal id and a number.
+    /// </summary>
+    internal static string SummariseLinesForSupplier(IReadOnlyList<SolicitationDispatchLine> lines) =>
+        string.Join("; ", lines.Select(line =>
+        {
+            var what = line.Description ?? line.MakerPartNumber ?? line.MaterialCode ?? "item";
+            var quantity = $"{line.Quantity:0.####}{(line.UnitOfMeasure is null ? "" : " " + line.UnitOfMeasure)}";
+            return $"Line {line.LineNumber}: {what} — {quantity}";
+        }));
+
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
 
+/// <summary>
+/// What the supplier is asked to quote, one entry per RFQ line the solicitation covers.
+/// Written into the outbox payload so the email can list each line in the words a supplier
+/// needs (what, whose make, which part, how many, by when) instead of an internal line id.
+/// Never carries the customer's target price, the customer's name, or any margin figure.
+/// </summary>
+internal sealed record SolicitationDispatchLine(
+    string LineNumber,
+    string? Description,
+    string? Maker,
+    string? MakerPartNumber,
+    string? MaterialCode,
+    decimal Quantity,
+    string? UnitOfMeasure,
+    DateTime? RequiredOn,
+    string? AcceptableMakers);
+
+/// <summary>
+/// The governed envelope a queued supplier RFQ travels in. <see cref="Lines"/> is newer than
+/// <see cref="ItemSummary"/>: messages queued before it existed deserialize with a null
+/// collection and the dispatcher falls back to the plain-text summary, so nothing already in
+/// the outbox is stranded by the upgrade.
+/// </summary>
 internal sealed record SolicitationDispatchPayload(
     long SolicitationId,
     long BusinessUnitId,
@@ -3339,7 +3568,9 @@ internal sealed record SolicitationDispatchPayload(
     string SupplierName,
     string RfqNumber,
     string ItemSummary,
-    DateTime? DueOn);
+    DateTime? DueOn,
+    IReadOnlyList<SolicitationDispatchLine>? Lines = null,
+    string? Message = null);
 
 internal sealed record CandidateEvidence(
     long SupplierId,

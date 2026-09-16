@@ -253,17 +253,19 @@ export default function SixMonthsBand({
         </Typography>
       ) : null}
 
-      {/* Requests received — graphite, because a received request is volume that has already
-          settled into the past, not something the reader can still act on. */}
+      {/* RFQs created — graphite, because a created RFQ is volume that has already settled into
+          the past, not something the reader can still act on. Named for what the server counts
+          (Rfqs by CreatedDate month): "requests received" here read as the lead count the bands
+          above call by that name, and disagreed with it. */}
       <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: 'text.secondary' }}>
-        Requests received{empty ? '' : ' · count'}
+        RFQs created{empty ? '' : ' · count'}
       </Typography>
       <Box
         component="svg"
         data-testid="six-months-requests"
         viewBox={`0 0 ${VIEW_W} ${PANEL_H}`}
         role="img"
-        aria-label={`Requests received, ${countSummary}`}
+        aria-label={`RFQs created, ${countSummary}`}
         sx={{ display: 'block', width: '100%', height: 'auto', overflow: 'visible' }}
       >
         <defs>
@@ -290,7 +292,7 @@ export default function SixMonthsBand({
             );
           }
           return (
-            <Tooltip key={label + i} title={`${label}: ${row.count.toLocaleString('en-US')} requests received`}>
+            <Tooltip key={label + i} title={`${label}: ${row.count.toLocaleString('en-US')} RFQ${row.count === 1 ? '' : 's'} created`}>
               <path d={columnPath(x, barW, countY(row.count))} fill="url(#nx-six-months-column)" />
             </Tooltip>
           );
@@ -330,7 +332,7 @@ export default function SixMonthsBand({
       <Box component="table" sx={srOnly}>
         <caption>The last six months, company-wide</caption>
         <thead>
-          <tr><th scope="col">Month</th><th scope="col">Requests received</th><th scope="col">Order value</th></tr>
+          <tr><th scope="col">Month</th><th scope="col">RFQs created</th><th scope="col">Order value</th></tr>
         </thead>
         <tbody>
           {labels.map((label, i) => (

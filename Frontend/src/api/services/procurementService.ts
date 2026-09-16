@@ -26,6 +26,7 @@ export interface SourcingLine {
     | "IN_STOCK"
     | "PARTIAL"
     | "INCOMING"
+    | "COVERED"
     | "SHORTAGE"
     | "UNKNOWN"
     | "POSSIBLE_MATCH";
@@ -53,7 +54,10 @@ export interface SupplierSolicitation {
   deliveryOutcome?: "UNCERTAIN" | "NOT_DELIVERED" | null;
   sentOn?: string | null;
   respondedOn?: string | null;
+  /** The reply deadline the buyer gave the supplier, or null when none was set. */
+  dueOn?: string | null;
   updatedOn: string;
+  /** The RFQ lines this supplier was asked about. The server sends them as `rfqItemIds`. */
   requestedRfqItemIds: number[];
 }
 
@@ -401,7 +405,10 @@ export interface SourcingCase {
   nexoraSerial: string;
   productId?: number | null;
   requestedPartNumber?: string | null;
+  /** The maker named on the line, as the supplier email prints it. Null when the line named none. */
+  manufacturer?: string | null;
   description: string;
+  unitOfMeasure?: string | null;
   requestedQuantity: number;
   stockQuantity: number;
   unfulfilledQuantity: number;
@@ -420,6 +427,57 @@ export interface SourcingCandidateSearchResult {
   version: number;
   replayed: boolean;
   candidates: SourcingCaseCandidate[];
+}
+
+/**
+ * Internet supplier discovery for a sourcing case (POST .../discover). The server ranks hits
+ * manufacturer → distributor → reseller and pages them by offset/limit; `message` is already
+ * one sentence in the rep's words for every non-Ready status and is shown verbatim.
+ */
+export type SupplierDiscoveryStatus = "Ready" | "NotConfigured" | "NoResults" | "Error";
+export type SupplierDiscoveryRole = "Manufacturer" | "Distributor" | "Reseller";
+
+export interface SupplierDiscoveryHit {
+  id: string;
+  name: string;
+  website: string;
+  domain: string;
+  role: SupplierDiscoveryRole;
+  country: string | null;
+  why: string;
+  contactEmail: string | null;
+  /** Set when this hit is already one of the tenant's suppliers; the row then offers no tick box. */
+  existingSupplierId: number | null;
+}
+
+export interface SupplierDiscoveryResult {
+  status: SupplierDiscoveryStatus;
+  message: string;
+  searchedFor: {
+    maker: string | null;
+    partNumber: string | null;
+    description: string;
+    acceptableMakers: string[];
+  };
+  total: number;
+  offset: number;
+  limit: number;
+  fromCache: boolean;
+  searchedAtUtc: string;
+  hits: SupplierDiscoveryHit[];
+}
+
+export interface AdoptedDiscoveredSupplier {
+  hitId: string;
+  supplierId: number;
+  supplierName: string;
+  contactEmail: string | null;
+  needsContactEmail: boolean;
+  alreadyExisted: boolean;
+}
+
+export interface AdoptDiscoveredSuppliersResult {
+  adopted: AdoptedDiscoveredSupplier[];
 }
 
 export interface PreparedSupplierRfqResult {
@@ -494,6 +552,25 @@ const commandHeaders = (key: string) => ({
   "X-Correlation-ID": crypto.randomUUID(),
 });
 
+/**
+ * The server names a solicitation's lines `rfqItemIds`; every screen here reads
+ * `requestedRfqItemIds`. With the two names apart, each solicitation looked line-less: the
+ * workbench said "no supplier has been asked" after a send, and "Capture response" refused
+ * with "no verified RFQ line linkage" — the supplier side was unreachable after the first
+ * email (found driving the journey on 2026-09-15). Both names are accepted here, once, so no
+ * screen has to know which one the server chose.
+ */
+export function normalizeWorkbench(workbench: SourcingWorkbench): SourcingWorkbench {
+  const solicitations = (workbench.solicitations ?? []).map((solicitation) => {
+    const raw = solicitation as SupplierSolicitation & { rfqItemIds?: number[] | null };
+    return {
+      ...solicitation,
+      requestedRfqItemIds: raw.requestedRfqItemIds ?? raw.rfqItemIds ?? [],
+    };
+  });
+  return { ...workbench, solicitations };
+}
+
 const procurementService = {
   getPurchaseOrders: async (
     search = "",
@@ -508,9 +585,11 @@ const procurementService = {
 
   getWorkbench: async (rfqId?: number): Promise<SourcingWorkbench> =>
     rfqId
-      ? unwrap(
-          await axiosInstance.get<SourcingWorkbench>(
-            `/api/procurement/rfqs/${rfqId}/workbench`,
+      ? normalizeWorkbench(
+          unwrap(
+            await axiosInstance.get<SourcingWorkbench>(
+              `/api/procurement/rfqs/${rfqId}/workbench`,
+            ),
           ),
         )
       : Promise.reject(
@@ -558,6 +637,29 @@ const procurementService = {
       ),
     ),
 
+  discoverSuppliers: async (
+    sourcingCaseId: number,
+    page: { offset: number; limit: number },
+  ): Promise<SupplierDiscoveryResult> =>
+    unwrap(
+      await axiosInstance.post<SupplierDiscoveryResult>(
+        `/api/procurement/sourcing-cases/${sourcingCaseId}/discover`,
+        { offset: page.offset, limit: page.limit },
+      ),
+    ),
+
+  /** Makes the ticked hits tenant suppliers. The server re-runs the candidate search, so refetch the case afterwards. */
+  adoptDiscoveredSuppliers: async (
+    sourcingCaseId: number,
+    hitIds: string[],
+  ): Promise<AdoptDiscoveredSuppliersResult> =>
+    unwrap(
+      await axiosInstance.post<AdoptDiscoveredSuppliersResult>(
+        `/api/procurement/sourcing-cases/${sourcingCaseId}/discover/adopt`,
+        { hitIds },
+      ),
+    ),
+
   prepareSupplierRfqs: async (
     sourcingCaseId: number,
     supplierIds: number[],
@@ -569,6 +671,11 @@ const procurementService = {
      * local date string. Omit for no deadline.
      */
     dueOn?: string | null,
+    /**
+     * The rep's message to the suppliers, printed in every email of this send after the
+     * request details. Omit or send blank and the email keeps its standard sentence.
+     */
+    message?: string | null,
   ): Promise<SupplierRfqPreparationOutcome[]> => {
     const results: SupplierRfqPreparationOutcome[] = [];
     let version = expectedVersion;
@@ -577,7 +684,7 @@ const procurementService = {
         const prepared = unwrap(
           await axiosInstance.post<PreparedSupplierRfqResult>(
           `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`,
-          { supplierId, expectedVersion: version, dueOn: dueOn ?? null },
+          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null },
           {
             headers: commandHeaders(
               `prepare-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,

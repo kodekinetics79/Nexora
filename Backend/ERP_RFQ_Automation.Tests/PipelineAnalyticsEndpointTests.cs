@@ -109,6 +109,65 @@ public sealed class PipelineAnalyticsEndpointTests
             (await controller.GetPipelineAnalytics(from, DateTime.UtcNow.AddDays(2), default)).Result);
     }
 
+    /// <summary>
+    /// The period control sends "today" as a bare date. The window end is exclusive, so taking
+    /// that literally excluded everything created today: bands 2 and 3 showed 0 received /
+    /// 0 accepted / 0 quoted over six leads, an RFQ and a quote all dated today, and sealed
+    /// "17 Aug – 14 Sep" under the same "Last 30 days" button whose band 1 sealed "– 15 Sep".
+    /// A date-only end must reach the repository as the end of that day, clamped to now.
+    /// </summary>
+    [Fact]
+    public async Task A_date_only_to_of_today_covers_the_whole_of_today_up_to_now()
+    {
+        var repository = new CapturingDashboardRepository();
+        var controller = ControllerFor(repository, AccountScopeTier.Tenant,
+            Principal(BusinessUnitId, RoleId, UserId));
+        var today = DateTime.UtcNow.Date;
+        var from = today.AddDays(-29);
+        var createdToday = DateTime.UtcNow.AddMinutes(-2);
+
+        var result = await controller.GetPipelineAnalytics(from, today, default);
+
+        Assert.IsType<OkObjectResult>(result.Result);
+        Assert.Equal(from, repository.From);
+        Assert.NotNull(repository.To);
+        // Not midnight: a lead created two minutes ago falls inside [from, to).
+        Assert.True(repository.To > createdToday, $"to={repository.To:O} excludes a lead created today at {createdToday:O}");
+        Assert.True(repository.To <= DateTime.UtcNow.AddMinutes(1), "to must not run into the future");
+        Assert.True(repository.To <= today.AddDays(1), "to must not spill into tomorrow");
+    }
+
+    [Fact]
+    public async Task A_date_only_to_in_the_past_covers_the_whole_of_that_day()
+    {
+        var repository = new CapturingDashboardRepository();
+        var controller = ControllerFor(repository, AccountScopeTier.Tenant,
+            Principal(BusinessUnitId, RoleId, UserId));
+        var day = DateTime.UtcNow.Date.AddDays(-3);
+
+        var result = await controller.GetPipelineAnalytics(day.AddDays(-30), day, default);
+
+        Assert.IsType<OkObjectResult>(result.Result);
+        Assert.Equal(day.AddDays(1), repository.To);
+    }
+
+    [Fact]
+    public async Task The_gross_margin_band_applies_the_same_inclusive_end()
+    {
+        var margin = new CapturingGrossMarginService();
+        var controller = new WorkloadController(new CapturingDashboardRepository(), margin, new StubScopeResolver(AccountScopeTier.Tenant))
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext { User = Principal(BusinessUnitId, RoleId, UserId) } }
+        };
+        var today = DateTime.UtcNow.Date;
+
+        var result = await controller.GetGrossMargin(today.AddDays(-29), today, default);
+
+        Assert.IsType<OkObjectResult>(result.Result);
+        Assert.True(margin.To > DateTime.UtcNow.AddMinutes(-2), $"to={margin.To:O} stops at midnight");
+        Assert.True(margin.To <= DateTime.UtcNow.AddMinutes(1));
+    }
+
     private static WorkloadController ControllerFor(
         IDashboardRepository repository, AccountScopeTier tier, ClaimsPrincipal user)
         => new(repository, new UnusedGrossMarginService(), new StubScopeResolver(tier))
@@ -165,6 +224,25 @@ public sealed class PipelineAnalyticsEndpointTests
         public Task<DashboardRelease01DTO> GetRelease01Async(
             long businessUnitId, AccountTeamScope scope, DateTime from, DateTime to, DateTime generatedAt,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class CapturingGrossMarginService : IGrossMarginService
+    {
+        public DateTime From { get; private set; }
+        public DateTime To { get; private set; }
+
+        public Task<GrossMarginDTO> GetAsync(
+            long businessUnitId, DateTime from, DateTime to, DateTime generatedAt,
+            CancellationToken ct = default)
+        {
+            From = from;
+            To = to;
+            return Task.FromResult(new GrossMarginDTO());
+        }
+
+        public Task<CommercialCaseMarginEvidence> GetForCommercialCaseAsync(
+            long businessUnitId, long commercialCaseId, DateTime asOf, CancellationToken ct = default)
+            => throw new NotSupportedException();
     }
 
     private sealed class UnusedGrossMarginService : IGrossMarginService

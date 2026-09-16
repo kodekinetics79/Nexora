@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link as RouterLink, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -49,6 +49,7 @@ import {
   WarningAmber,
 } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
+import rfqService from "../../../api/services/rfqService";
 import NextStepPanel from "../../../components/common/NextStepPanel";
 import procurementService, {
   INCOTERMS_2020,
@@ -395,6 +396,10 @@ const ResolutionChip = ({ resolution }: { resolution: string }) => {
   );
 };
 
+/** "22 Sep" — the day a reply is due, said the way a buyer says it. */
+const dayMonth = (date: Date) =>
+  `${date.getDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getMonth()]}`;
+
 function SourcingWorkbenchPage() {
   const { rfqId: routeRfqId } = useParams<{ rfqId?: string }>();
   const rfqId = routeRfqId ? Number(routeRfqId) : undefined;
@@ -410,6 +415,11 @@ function SourcingWorkbenchPage() {
   const [pricingSelection, setPricingSelection] = useState<{ awardId: number; quoteItemId: number; landedUnitCost: number; currencyCode: string } | null>(null);
   const [memoryLineId, setMemoryLineId] = useState<number | null>(null);
   const [poOpen, setPoOpen] = useState(false);
+  // D16: the Decision column is the point of the table and sat 14 columns to the right, off-screen
+  // at 1600px with no scroll cue. "Compare supplier offers" now lands the buyer ON the recommended
+  // row's decision control, and the column itself is pinned to the right edge (see DataTable).
+  const decisionControls = useRef(new Map<number, HTMLButtonElement>());
+  const [focusDecisionRequested, setFocusDecisionRequested] = useState(false);
   const [approveOrder, setApproveOrder] =
     useState<SupplierPurchaseOrder | null>(null);
   const [issueOrder, setIssueOrder] =
@@ -522,8 +532,17 @@ function SourcingWorkbenchPage() {
     workbench?.solicitations.filter(
       (s) => (s.status ?? "").replaceAll("_", "").toUpperCase() === "DELIVERYFAILED",
     ) ?? [];
+  // Every status goes through one normaliser; a failed or empty read is said as such.
+  const norm = (status: string | null | undefined) => (status ?? "").replaceAll("_", "").toUpperCase();
+  const isApprovedAward = (status: string | null | undefined) => ["APPROVED", "SPLITAPPROVED"].includes(norm(status));
+  // D17: the offers that HAVE been approved. An approved offer's own award is why its line is
+  // covered, so it is presented as awarded — never counted among the offers that "cannot be
+  // awarded until missing commercial evidence is resolved".
+  const approvedOfferIds = new Set(
+    (workbench?.awards ?? []).filter((award) => isApprovedAward(award.status)).map((award) => award.supplierQuotedItemId),
+  );
   const blockedOffers = Object.values(comparisonsQuery.data ?? {}).flatMap(
-    (comparison) => comparison.lines.filter((line) => !line.eligible),
+    (comparison) => comparison.lines.filter((line) => !line.eligible && !approvedOfferIds.has(line.supplierQuotedItemId)),
   );
   const approvedUnconverted =
     workbench?.awards.filter(
@@ -536,6 +555,8 @@ function SourcingWorkbenchPage() {
     hasPermission("Supplier History", "create");
   const canCapture = hasPermission("Supplier History", "create");
   const canAward = hasPermission("Supplier History", "edit");
+  // Same gate as the RFQ page's Prepare Quote Draft and the endpoint behind both.
+  const canPrepareQuote = hasPermission("Quotations", "create");
   const canCreatePo =
     hasPermission("Orders", "create") &&
     hasPermission("Supplier History", "edit");
@@ -545,14 +566,12 @@ function SourcingWorkbenchPage() {
   const referenceQueries = [currenciesQuery, warehousesQuery];
   const referenceDataFailed = referenceQueries.some((query) => query.isError);
   // What sourcing is waiting for, in one sentence, from the workbench the page already holds.
-  // Every status goes through one normaliser; a failed or empty read is said as such.
-  const norm = (status: string | null | undefined) => (status ?? "").replaceAll("_", "").toUpperCase();
   const sols = workbench?.solicitations ?? [];
   const awaitingSuppliers = sols.filter((s) => ["PENDINGDISPATCH", "DISPATCHING", "SENT"].includes(norm(s.status)));
   const uncertainDeliveries = failedSolicitations.filter((s) => s.deliveryOutcome === "UNCERTAIN");
   const notDelivered = failedSolicitations.filter((s) => s.deliveryOutcome !== "UNCERTAIN");
   const linesWithOffers = new Set((workbench?.offers ?? []).map((offer) => offer.rfqItemId));
-  const awardedLineIds = new Set((workbench?.awards ?? []).filter((a) => ["APPROVED", "SPLITAPPROVED"].includes(norm(a.status))).map((a) => a.rfqItemId));
+  const awardedLineIds = new Set((workbench?.awards ?? []).filter((a) => isApprovedAward(a.status)).map((a) => a.rfqItemId));
   const linesAwaitingAward = unresolvedLines.filter((line) => linesWithOffers.has(line.id) && !awardedLineIds.has(line.id));
   const repliesNotCaptured = sols.filter((s) => norm(s.status) === "RESPONDED" && !(s.requestedRfqItemIds ?? []).some((id) => linesWithOffers.has(id)));
   const shortNotAsked = unresolvedLines.filter((line) => line.resolution !== "INCOMING" && !awardedLineIds.has(line.id) && !sols.some((s) => (s.requestedRfqItemIds ?? []).includes(line.id)));
@@ -561,9 +580,55 @@ function SourcingWorkbenchPage() {
   const draftLines = workbench?.customerQuoteDraft?.lines ?? [];
   const unpricedDraftLines = draftLines.filter((line) => Number(line.unitPrice || 0) === 0);
   const unpricedWithAward = unpricedDraftLines.filter((line) => awardedLineIds.has(line.rfqItemId));
+  // D12b. The Coverage step said "4 lines are still short and no supplier has been asked" while
+  // one line was awarded and another was out with a supplier. Say what is true of every line —
+  // awarded, with a supplier (and when the reply is due), still needing one — and keep the button
+  // on the first line nobody has asked about yet.
+  const openSolicitationStatuses = ["PENDINGDISPATCH", "DISPATCHING", "SENT"];
+  const linesWithSupplier = unresolvedLines.filter((line) => !awardedLineIds.has(line.id) && !linesWithOffers.has(line.id)
+    && sols.some((s) => openSolicitationStatuses.includes(norm(s.status)) && (s.requestedRfqItemIds ?? []).includes(line.id)));
+  const awardedLineCount = (workbench?.lines ?? []).filter((line) => awardedLineIds.has(line.id)).length;
+  const nextReplyDue = sols
+    .filter((s) => openSolicitationStatuses.includes(norm(s.status)) && s.dueOn
+      && (s.requestedRfqItemIds ?? []).some((id) => linesWithSupplier.some((line) => line.id === id)))
+    .map((s) => new Date(s.dueOn as string))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime())[0];
+  const coverageSentence = (buyerCanAsk: boolean) => {
+    const count = (n: number) => `${n} line${n === 1 ? "" : "s"}`;
+    const parts: string[] = [];
+    if (awardedLineCount > 0) parts.push(`${count(awardedLineCount)} awarded.`);
+    if (linesWithSupplier.length > 0)
+      parts.push(`${count(linesWithSupplier.length)} ${linesWithSupplier.length === 1 ? "is" : "are"} with a supplier${nextReplyDue ? ` (reply due ${dayMonth(nextReplyDue)})` : ""}.`);
+    parts.push(`${count(shortNotAsked.length)} still need${shortNotAsked.length === 1 ? "s" : ""} a supplier.`);
+    if (!buyerCanAsk) parts.push("Ask a buyer with sourcing rights to send a supplier RFQ.");
+    return parts.join(" ");
+  };
   const openQuoteButton = workbench?.customerQuoteDraft
     ? <Button variant="contained" startIcon={<OpenInNew />} onClick={() => navigate(`/sales/quotes/view/${workbench.customerQuoteDraft!.quoteId}`)}>Open the quote</Button>
     : undefined;
+  // D18. The panel used to send the rep "back to the RFQ" to press Prepare Quote Draft while the
+  // row's "Price customer quote" sat disabled. Same endpoint as that button; then the pricing
+  // dialog opens on the first awarded line, so the award becomes a price in one motion.
+  const prepareQuoteDraft = useMutation({
+    mutationFn: () => rfqService.prepareQuoteDraft(rfqId as number),
+    onSuccess: (quote: { id: number; quoteNo?: string | null; quoteItems?: Array<{ id: number; rfqItemId?: number | null }> | null }) => {
+      toast.success(`Quote ${quote.quoteNo ?? "draft"} prepared. Price each line from its approved offer.`);
+      refresh();
+      setTab(2);
+      const first = approvedUnconverted
+        .map((award) => ({ award, line: (quote.quoteItems ?? []).find((item) => item.rfqItemId === award.rfqItemId) }))
+        .find((candidate) => candidate.line);
+      if (first?.line) {
+        setPricingSelection({
+          awardId: first.award.id, quoteItemId: first.line.id,
+          landedUnitCost: first.award.landedUnitCost, currencyCode: first.award.currencyCode,
+        });
+      }
+    },
+    onError: (error) => toast.error(errorMessage(error, "The customer quote could not be prepared. Open the RFQ to see what it still needs.")),
+  });
+
   const nextStep: { tone: "info" | "warning" | "error" | "success"; sentence: string; action?: React.ReactNode } | null = !workbench
     ? null
     : workbench.lines.length === 0
@@ -575,18 +640,23 @@ function SourcingWorkbenchPage() {
           : repliesNotCaptured.length > 0
             ? { tone: "warning", sentence: `${repliesNotCaptured.length} supplier repl${repliesNotCaptured.length === 1 ? "y is" : "ies are"} in but not captured yet. Capture ${repliesNotCaptured.length === 1 ? "it" : "them"} from the Solicitations tab.`, action: <Button variant="contained" onClick={() => setTab(1)}>Capture the reply</Button> }
             : linesAwaitingAward.length > 0
-              ? { tone: "warning", sentence: `Offers are in for ${linesAwaitingAward.length} line${linesAwaitingAward.length === 1 ? "" : "s"}. Compare them and approve the best one.`, action: <Button variant="contained" onClick={() => setTab(2)}>Compare supplier offers</Button> }
+              ? { tone: "warning", sentence: `Offers are in for ${linesAwaitingAward.length} line${linesAwaitingAward.length === 1 ? "" : "s"}. Compare them and approve the best one.`, action: <Button variant="contained" onClick={() => { setTab(2); setFocusDecisionRequested(true); }}>Compare supplier offers</Button> }
               : shortAskedDeclined.length > 0
                 ? { tone: "warning", sentence: `Every supplier asked for ${shortAskedDeclined.length} line${shortAskedDeclined.length === 1 ? "" : "s"} has declined or let the request expire. Ask a different supplier.`, action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortAskedDeclined[0])}>Ask another supplier</Button> : undefined }
                 : shortNotAsked.length > 0
-                  ? { tone: "warning", sentence: canSolicit
-                        ? `${shortNotAsked.length} line${shortNotAsked.length === 1 ? " is" : "s are"} still short and no supplier has been asked. Send a supplier RFQ${shortNotAsked.length === 1 ? "" : ", one line at a time"}.`
-                        : `${shortNotAsked.length} line${shortNotAsked.length === 1 ? " is" : "s are"} still short. Ask a buyer with sourcing rights to send a supplier RFQ.`,
+                  ? { tone: "warning", sentence: coverageSentence(canSolicit),
                       action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortNotAsked[0])}>Ask suppliers{shortNotAsked.length === 1 ? "" : " for the first line"}</Button> : undefined }
                   : awaitingSuppliers.length > 0 && unresolvedLines.some((line) => !awardedLineIds.has(line.id))
                     ? { tone: "info", sentence: `Waiting for ${awaitingSuppliers.length} supplier${awaitingSuppliers.length === 1 ? "" : "s"} to reply. When a reply arrives, capture it from the Solicitations tab.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
                     : approvedUnconverted.length > 0 && !workbench.customerQuoteDraft
-                      ? { tone: "info", sentence: "Every short line has an approved supplier offer. Go back to the RFQ and prepare the customer quote draft.", action: rfqId ? <Button variant="contained" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined }
+                      // D18: the draft is one call. Make it here and land on the pricing step,
+                      // instead of sending the rep back to the RFQ to find the button.
+                      ? { tone: "info", sentence: canPrepareQuote
+                            ? `Every short line has an approved supplier offer. Prepare the customer quote, then price ${approvedUnconverted.length === 1 ? "its line" : "each line"} from the offer.`
+                            : "Every short line has an approved supplier offer. Ask someone who can create quotations to prepare the customer quote from the RFQ.",
+                          action: rfqId && canPrepareQuote
+                            ? <Button variant="contained" startIcon={<PriceCheck />} loading={prepareQuoteDraft.isPending} onClick={() => prepareQuoteDraft.mutate()}>Prepare the customer quote</Button>
+                            : rfqId ? <Button variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined }
                       : unpricedWithAward.length > 0
                         ? { tone: "info", sentence: `Quote ${workbench.customerQuoteDraft?.quoteNumber} has ${unpricedWithAward.length} unpriced line${unpricedWithAward.length === 1 ? "" : "s"} with an approved offer. Price ${unpricedWithAward.length === 1 ? "it" : "them"} from the offer.`, action: <Button variant="contained" onClick={() => setTab(2)}>Price from the offer</Button> }
                         : unpricedDraftLines.length > 0
@@ -600,6 +670,19 @@ function SourcingWorkbenchPage() {
                             : awaitingSuppliers.length > 0
                               ? { tone: "info", sentence: `Every line is covered, but ${awaitingSuppliers.length} supplier RFQ${awaitingSuppliers.length === 1 ? " is" : "s are"} still open. Nothing else is waiting on you.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
                               : { tone: "success", sentence: "Every line is covered from stock or an approved offer. Nothing is waiting on suppliers.", action: rfqId ? <Button variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}>Back to the RFQ</Button> : undefined };
+
+  useEffect(() => {
+    if (!focusDecisionRequested || tab !== 2 || !comparisonsQuery.data) return;
+    const targetLine = linesAwaitingAward[0];
+    const comparison = targetLine ? comparisonsQuery.data[targetLine.id] : undefined;
+    const targetOfferId = comparison?.recommendedSupplierQuotedItemId
+      ?? orderedOffers.find((offer) => offer.rfqItemId === targetLine?.id)?.id;
+    const control = targetOfferId == null ? undefined : decisionControls.current.get(targetOfferId);
+    if (!control) return;
+    control.scrollIntoView?.({ block: "center", inline: "end" });
+    control.focus();
+    setFocusDecisionRequested(false);
+  }, [focusDecisionRequested, tab, comparisonsQuery.data, linesAwaitingAward, orderedOffers]);
 
   const openSourcingCase = useMutation({
     mutationFn: async (line: (typeof unresolvedLines)[number]) =>
@@ -1018,7 +1101,7 @@ function SourcingWorkbenchPage() {
                 <TableCell>How the score is made up</TableCell>
                 <TableCell>Evidence</TableCell>
                 <TableCell align="right">Still to source</TableCell>
-                <TableCell align="right">Decision</TableCell>
+                <TableCell align="right" data-pinned="right">Decision</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -1036,6 +1119,10 @@ function SourcingWorkbenchPage() {
                 const isCheapest =
                   cheapest?.supplierQuotedItemId === offer.id;
                 const award = workbench.awards.find((item) => item.supplierQuotedItemId === offer.id);
+                // D17: an approved offer is presented as what it is — awarded. Its own award covered
+                // the line, so "already covered" is not a reason it cannot be awarded.
+                const approvedAward = award && isApprovedAward(award.status) ? award : undefined;
+                const sourcingLine = workbench.lines.find((item) => item.id === offer.rfqItemId);
                 const quoteLine = workbench.customerQuoteDraft?.lines.find((item) => item.rfqItemId === offer.rfqItemId);
                 return (
                   <TableRow key={offer.id}>
@@ -1115,7 +1202,10 @@ function SourcingWorkbenchPage() {
                       : `${authoritativeOffer.reliability}%`}
                   </TableCell>
                   <TableCell align="right">
-                    {scoreState.status === "SCORED" ? (
+                    {approvedAward && scoreState.status !== "SCORED" ? (
+                      // D17: an awarded offer is never told it "cannot be awarded as it stands".
+                      <Typography sx={{ fontWeight: 800 }}>Awarded</Typography>
+                    ) : scoreState.status === "SCORED" ? (
                       <Stack spacing={0.25} sx={{ alignItems: "flex-end" }}>
                         <Typography sx={{ fontWeight: 800 }}>
                           {scoreState.headline}
@@ -1148,7 +1238,11 @@ function SourcingWorkbenchPage() {
                       behind a hover: a score a buyer cannot add up is a black box, and the last
                       line of this cell is the sum they can check. */}
                   <TableCell>
-                    {scoreState.status !== "SCORED" || !authoritativeOffer ? (
+                    {approvedAward && scoreState.status !== "SCORED" ? (
+                      <Typography variant="caption" color="text.secondary">
+                        {`Approved at ${money(approvedAward.landedUnitCost, approvedAward.currencyCode)} landed. The award is the decision; nothing on this line waits on a score.`}
+                      </Typography>
+                    ) : scoreState.status !== "SCORED" || !authoritativeOffer ? (
                       <Typography
                         variant="caption"
                         color={
@@ -1188,7 +1282,9 @@ function SourcingWorkbenchPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    {!authoritativeOffer ? (
+                    {approvedAward ? (
+                      <Chip size="small" color="success" label="Awarded" />
+                    ) : !authoritativeOffer ? (
                       <Chip size="small" label="Checking eligibility" />
                     ) : authoritativeOffer.blockers.length > 0 ? (
                       authoritativeOffer.blockers.map((reason) => (
@@ -1224,7 +1320,7 @@ function SourcingWorkbenchPage() {
                   <TableCell align="right">
                     {remainingRequirement(offer.rfqItemId)}
                   </TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" data-pinned="right">
                     <Stack spacing={0.5} sx={{ alignItems: "flex-end" }}>
                       {/* The score chip sits BESIDE the landed-cost fact and never replaces it.
                           When the recommendation is not the cheapest offer, it says what the
@@ -1265,23 +1361,51 @@ function SourcingWorkbenchPage() {
                           label="Lowest landed cost"
                         />
                       )}
-                      <Button
-                        size="small"
-                        variant="contained"
-                        startIcon={<AssignmentTurnedIn />}
-                        disabled={
-                          !authoritativeOffer?.eligible ||
-                          remainingRequirement(offer.rfqItemId) <= 0
-                        }
-                        sx={{ display: canAward ? "inline-flex" : "none" }}
-                        onClick={() => setAwardOffer(offer)}
-                      >
-                        {remainingRequirement(offer.rfqItemId) <= 0
-                          ? "Covered"
-                          : offer.awarded
-                            ? "Award more"
-                            : "Approve"}
-                      </Button>
+                      {approvedAward && (
+                        // D17: the decision that was made, in the buyer's words, on the row it was made on.
+                        <Typography variant="body2" sx={{ fontWeight: 700, textAlign: "right" }}>
+                          {`Awarded · ${approvedAward.quantity} of ${sourcingLine?.requestedQuantity ?? approvedAward.quantity} · ${money(approvedAward.landedUnitCost, approvedAward.currencyCode)} landed`}
+                        </Typography>
+                      )}
+                      {(() => {
+                        // The Approve control. Gone once this offer is awarded and nothing remains;
+                        // otherwise contained when it can be pressed, and outlined WITH its reason
+                        // when it cannot — a blocked offer or a line covered by someone else.
+                        const remaining = remainingRequirement(offer.rfqItemId);
+                        if (approvedAward && remaining <= 0) return null;
+                        const canApprove = !!authoritativeOffer?.eligible && remaining > 0;
+                        const reason = !authoritativeOffer
+                          ? "Checking whether this offer can be awarded."
+                          : remaining <= 0
+                            ? "This line is already covered. Nothing is left to award."
+                            : authoritativeOffer.blockers.length > 0
+                              ? `This offer cannot be awarded as it stands: ${authoritativeOffer.blockers.join("; ")}.`
+                              : "";
+                        const approveButton = (
+                          <Button
+                            size="small"
+                            variant={canApprove ? "contained" : "outlined"}
+                            startIcon={<AssignmentTurnedIn />}
+                            disabled={!canApprove}
+                            ref={(element: HTMLButtonElement | null) => {
+                              if (element) decisionControls.current.set(offer.id, element);
+                              else decisionControls.current.delete(offer.id);
+                            }}
+                            sx={{ display: canAward ? "inline-flex" : "none" }}
+                            onClick={() => setAwardOffer(offer)}
+                          >
+                            {remaining <= 0 ? "Covered" : offer.awarded ? "Award more" : "Approve"}
+                          </Button>
+                        );
+                        return canApprove ? approveButton : (
+                          <Tooltip title={reason}>
+                            {/* A disabled button cannot take focus, so the span carries the reason to
+                                keyboard and screen-reader users. */}
+                            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+                            <span tabIndex={0} aria-label={reason}>{approveButton}</span>
+                          </Tooltip>
+                        );
+                      })()}
                       {award && canAward && hasPermission("Quotations", "edit") && (quoteLine ? (
                         <Button size="small" startIcon={<PriceCheck />} onClick={() => setPricingSelection({
                           awardId: award.id, quoteItemId: quoteLine.quoteItemId,
@@ -1294,16 +1418,18 @@ function SourcingWorkbenchPage() {
                         <Tooltip
                           title={(
                             <>
-                              Draft the customer quote first — open{" "}
+                              Prepare the quote draft first — open{" "}
                               <Link component={RouterLink} to={`/procurement/rfqs/view/${rfqId}`} color="inherit" sx={{ fontWeight: 700 }}>
                                 the RFQ
                               </Link>{" "}
-                              and choose Prepare Quote Draft.
+                              and press Prepare Quote Draft.
                             </>
                           )}
                         >
-                          {/* Focusable while disabled so a keyboard user can reach the reason. */}
-                          <span tabIndex={quoteLine ? undefined : 0}>
+                          {/* Focusable while disabled so a keyboard user can reach the reason,
+                              and labelled so a screen reader hears it without hovering. */}
+                          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+                          <span tabIndex={0} aria-label="Prepare the quote draft first — open the RFQ and press Prepare Quote Draft">
                             <Button size="small" startIcon={<PriceCheck />} disabled>Price customer quote</Button>
                           </span>
                         </Tooltip>
@@ -1752,7 +1878,27 @@ function DataTable({
   const count = body?.props?.children?.length ?? 0;
   return (
     <Paper variant="outlined" sx={{ overflowX: "auto" }}>
-      <Table size="small" sx={{ minWidth: 900, "& thead .MuiTableCell-root": { fontWeight: 700, bgcolor: "action.hover", whiteSpace: "nowrap" }, "& tbody tr:hover": { bgcolor: "action.hover" } }}>
+      <Table
+        size="small"
+        sx={{
+          minWidth: 900,
+          "& thead .MuiTableCell-root": { fontWeight: 700, bgcolor: "action.hover", whiteSpace: "nowrap" },
+          "& tbody tr:hover": { bgcolor: "action.hover" },
+          // D16. A cell marked data-pinned="right" stays at the right edge while the table scrolls,
+          // so the decision is on screen at every width. Opaque, with a left border and shadow, so
+          // it reads as pinned rather than as a column that happens to be last. Declared after the
+          // thead rule on purpose: same specificity, and the later one wins the header background.
+          "& .MuiTableCell-root[data-pinned='right']": {
+            position: "sticky",
+            right: 0,
+            zIndex: 1,
+            bgcolor: "background.paper",
+            borderLeft: "1px solid",
+            borderColor: "divider",
+            boxShadow: "-8px 0 12px -10px rgba(0,0,0,0.35)",
+          },
+        }}
+      >
         {children}
       </Table>
       {count === 0 && (

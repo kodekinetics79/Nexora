@@ -31,6 +31,7 @@ import UploadExportToolbar from '../../components/common/UploadExportToolbar';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
 import CustomFieldValuesEditor from '../../components/common/CustomFieldValuesEditor';
 import useColumnPreferences from '../../hooks/useColumnPreferences';
+import { AccountTeamGap } from './customerWords';
 import { useSnackbar } from 'notistack';
 
 // ─── Empty forms ───────────────────────────────────────────────────────────
@@ -445,11 +446,8 @@ const CustomersPage: React.FC = () => {
     // Each renders a STATED gap rather than an em dash that could be read as "none required".
     {
       field: 'accountTeamName', headerName: 'Account team', width: 160,
-      renderCell: (p) => p.value ?? (
-        <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 700 }}>
-          No account team
-        </Typography>
-      ),
+      // Red for a reason the reader can hover: an unteamed customer's leads route to nobody.
+      renderCell: (p) => p.value ?? <AccountTeamGap />,
     },
     {
       field: 'sector', headerName: 'Sector', width: 140,

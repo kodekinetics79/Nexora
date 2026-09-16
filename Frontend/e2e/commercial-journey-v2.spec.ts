@@ -282,9 +282,10 @@ async function captureAndProjectOffers(page: Parameters<typeof api>[0], token: s
       const checkbox = page.getByRole('checkbox', { name: `Select ${supplierName}` });
       if (!(await checkbox.isChecked())) await checkbox.check();
     }
-    await page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' }).click();
-    await expect(page.getByRole('heading', { name: 'Approve Supplier RFQ Delivery' })).toBeVisible();
-    await page.getByRole('button', { name: 'Approve and Queue' }).click();
+    // The screen drives the rep: "Ask N suppliers" opens the review window, "Send N RFQs" sends.
+    await page.getByRole('button', { name: /^Ask \d+ suppliers?$/ }).click();
+    await expect(page.getByRole('heading', { name: 'Send supplier RFQs' })).toBeVisible();
+    await page.getByRole('button', { name: /^Send \d+ RFQs?$/ }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/sourcing`));
     workbench = await getWorkbench(page, token);
   }
@@ -541,7 +542,7 @@ test('05 out-of-stock RFQ line opens a real Sourcing Case with known Suppliers',
   const token = await loginAs(page, 'manager');
   const sourcingCase = await ensureOutOfStockCase(page, token);
   await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
-  await expect(page.getByRole('heading', { name: 'Known Supplier candidates' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Suppliers for this part' })).toBeVisible();
   await expect(page.getByText('Precision Controls Supply').first()).toBeVisible();
   await expect(page.getByText('Atlas Automation Partners').first()).toBeVisible();
   await expect(page.getByText('Meridian Process Equipment').first()).toBeVisible();
@@ -552,11 +553,12 @@ test('06 Supplier candidate limit supports 10, 20, and 50 without external searc
   const sourcingCase = await ensureOutOfStockCase(page, token);
   await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
   for (const limit of [20, 50, 10]) {
-    const control = page.getByRole('button', { name: `Show ${limit} Supplier candidates` });
+    const control = page.getByRole('button', { name: `Show up to ${limit} suppliers` });
     await control.click();
     await expect(control).toHaveAttribute('aria-pressed', 'true');
   }
-  await expect(page.getByText('Tenant records only.')).toBeVisible();
+  // The list above is the company's own suppliers; the internet section is separate and below it.
+  await expect(page.getByText('From your own supplier list, strongest link first. Tick everyone you want to ask; each gets its own RFQ.')).toBeVisible();
 });
 
 test('07 selected known Suppliers become governed Supplier RFQs', async ({ page }) => {
@@ -567,9 +569,10 @@ test('07 selected known Suppliers become governed Supplier RFQs', async ({ page 
     await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
     await page.getByRole('checkbox', { name: 'Select Atlas Automation Partners' }).check();
     await page.getByRole('checkbox', { name: 'Select Meridian Process Equipment' }).check();
-    await page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' }).click();
-    await expect(page.getByRole('heading', { name: 'Approve Supplier RFQ Delivery' })).toBeVisible();
-    await page.getByRole('button', { name: 'Approve and Queue' }).click();
+    // The screen drives the rep: "Ask N suppliers" opens the review window, "Send N RFQs" sends.
+    await page.getByRole('button', { name: /^Ask \d+ suppliers?$/ }).click();
+    await expect(page.getByRole('heading', { name: 'Send supplier RFQs' })).toBeVisible();
+    await page.getByRole('button', { name: /^Send \d+ RFQs?$/ }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/sourcing`));
     workbench = await getWorkbench(page, token);
   }
@@ -1148,7 +1151,8 @@ test('37 local-first processing evidence and governed learning remain visible ac
   // Processing evidence folds under "Line intelligence and processing evidence" on the RFQ.
   await page.getByRole('button', { name: /Line intelligence and processing evidence/ }).click();
   await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
-  await expect(page.getByText('Local-first', { exact: true })).toBeVisible();
+  // A client sees the finished product only: no provider, model or cost wording (owner rule 2026-09-16).
+  await expect(page.getByText(/Local-first|External provider|Provider use|External cost/)).toHaveCount(0);
 
   const [supplierQuoteId] = await captureAndProjectOffers(page, token);
   await page.goto(`/procurement/supplier-quotes/${supplierQuoteId}`);

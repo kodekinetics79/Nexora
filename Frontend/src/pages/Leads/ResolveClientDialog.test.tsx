@@ -261,10 +261,10 @@ describe('ResolveClientDialog', () => {
       fireEvent.change(screen.getByLabelText(/Search all clients by name/i), {
         target: { value: 'Fulton County Government' },
       });
-      return screen.findByRole('button', { name: /Create .*Fulton County Government.* as a new client/i });
+      return screen.findByRole('button', { name: /Add .*Fulton County Government.* as a new client/i });
     };
 
-    it('offers to create the buyer only once a search has proved no such client exists', async () => {
+    it('offers to add the buyer only once a search has proved no such client exists', async () => {
       const create = await searchForNothing();
       expect(create).toBeInTheDocument();
       // It is offered because the search came back empty, not merely because text was typed.
@@ -294,32 +294,62 @@ describe('ResolveClientDialog', () => {
         expect.objectContaining({ name: 'Fulton County Government' }),
       ));
       expect(screen.queryByRole('button', {
-        name: /Create .*Fulton County Government.* as a new client/i,
+        name: /Add .*Fulton County Government.* as a new client/i,
       })).not.toBeInTheDocument();
+      // Not a silent dead end either: the sentence says who can add it and what to do after.
+      expect(screen.getByText(/Ask an administrator to add it under Customers, then confirm it here/)).toBeInTheDocument();
       expect(createCustomer).not.toHaveBeenCalled();
     });
 
-    it('selects the new client but does not link it — that stays a separate, explicit act', async () => {
-      const create = await searchForNothing();
-      create.click();
+    it('adds the client and confirms it for this lead in one click, from the name the rep typed', async () => {
+      const onClose = vi.fn();
+      render(
+        <ResolveClientDialog open leadId={501} lead={lead()} prefill={{ email: 'bids@aljazirah.example' }} onClose={onClose} />,
+        { wrapper },
+      );
+      await screen.findByText('Saudi Electricity Company');
+      fireEvent.change(screen.getByLabelText(/Search all clients by name/i), { target: { value: 'Al Jazirah' } });
+      fireEvent.click(await screen.findByRole('button', { name: /Add .*Al Jazirah.* as a new client/i }));
 
-      const submit = await screen.findByRole('button', { name: /^Create client$/i });
-      submit.click();
+      // The form is small: the typed name, an optional email, one primary button — and the
+      // footer's Confirm steps aside while it is open.
+      expect(screen.getByLabelText(/^Client name/)).toHaveValue('Al Jazirah');
+      expect(screen.getByLabelText(/Contact email/)).toHaveValue('bids@aljazirah.example');
+      expect(screen.queryByLabelText(/Address|City|Tax registration/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Confirm client' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Add and confirm client' }));
 
       await waitFor(() => expect(createCustomer).toHaveBeenCalledTimes(1));
       const form = createCustomer.mock.calls[0][0] as FormData;
-      expect(form.get('Name')).toBe('Fulton County Government');
-      expect(form.get('ContactEmail')).toBe('bids@fultoncountyga.gov');
+      expect(form.get('Name')).toBe('Al Jazirah');
+      expect(form.get('ContactEmail')).toBe('bids@aljazirah.example');
+      // The client the server created is the one linked — no second click, no trip to Customers.
+      await waitFor(() => expect(linkClient).toHaveBeenCalledWith(501, { customerId: 77, contactId: null }));
+      await waitFor(() => expect(onClose).toHaveBeenCalled());
+    });
 
-      // Creating a client must never link it in the same breath: a mis-typed name has to
-      // be correctable before anything is attached to the enquiry.
+    it('hands a deferred host the new client as the choice instead of linking it', async () => {
+      const onSelect = vi.fn();
+      const onClose = vi.fn();
+      render(
+        <ResolveClientDialog open leadId={501} lead={lead()} onClose={onClose} onSelect={onSelect} />,
+        { wrapper },
+      );
+      await screen.findByText('Saudi Electricity Company');
+      fireEvent.change(screen.getByLabelText(/Search all clients by name/i), { target: { value: 'Al Jazirah' } });
+      fireEvent.click(await screen.findByRole('button', { name: /Add .*Al Jazirah.* as a new client/i }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add and confirm client' }));
+
+      await waitFor(() => expect(onSelect).toHaveBeenCalledWith({ customerId: 77, contactId: null, customerName: 'Al Jazirah' }));
       expect(linkClient).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
     });
 
     it('re-checks Customers:create at the write boundary', async () => {
       const create = await searchForNothing();
       create.click();
-      const submit = await screen.findByRole('button', { name: /^Create client$/i });
+      const submit = await screen.findByRole('button', { name: /^Add and confirm client$/i });
 
       // Simulates revocation between the rendered affordance and the click event.
       testAccess.denied.add('Customers:create');

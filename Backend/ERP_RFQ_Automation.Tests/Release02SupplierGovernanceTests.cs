@@ -66,12 +66,17 @@ public sealed class Release02SupplierGovernanceTests
         Assert.Equal(41, repository.SearchTenant);
     }
 
+    /// <summary>
+    /// Without the discovery service wired in, the web-search endpoint refuses rather than
+    /// inventing suppliers — the behaviour it had for its whole life as a stub. The repository
+    /// never grows a "web" method: the internet is reached through Procurement/Discovery only.
+    /// </summary>
     [Fact]
-    public void External_supplier_discovery_is_explicitly_disabled_and_returns_no_fabricated_results()
+    public async Task Web_search_without_a_discovery_service_is_refused_and_never_fabricates_results()
     {
         var controller = CreateSupplierController(new RecordingSupplierRepository(), "41");
 
-        var result = controller.WebSearch("industrial bearing");
+        var result = await controller.WebSearch("industrial bearing");
 
         var unavailable = Assert.IsType<ObjectResult>(result.Result);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, unavailable.StatusCode);
@@ -79,10 +84,60 @@ public sealed class Release02SupplierGovernanceTests
         // caller can quote one identifier that ties straight back to the server log entry.
         var problem = Assert.IsType<ProblemDetails>(unavailable.Value);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, problem.Status);
-        Assert.Contains("disabled", problem.Detail!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not wired up", problem.Detail!, StringComparison.OrdinalIgnoreCase);
         Assert.True(problem.Extensions.ContainsKey("traceId"));
         Assert.DoesNotContain(typeof(ISupplierRepository).GetMethods(), method =>
             method.Name.Contains("Web", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// With the discovery service present, the supplier page's search box is the same governed
+    /// internet search the sourcing case uses: the tenant comes from the token, never the query,
+    /// and the answer is the discovery result with its status word.
+    /// </summary>
+    [Fact]
+    public async Task Web_search_delegates_to_the_governed_internet_search_for_the_callers_tenant()
+    {
+        var discovery = new RecordingDiscovery();
+        var controller = CreateSupplierController(new RecordingSupplierRepository(), "41", discovery: discovery);
+
+        var result = await controller.WebSearch("Schneider LV431831", offset: 10, limit: 20);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var body = Assert.IsType<ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryResult>(ok.Value);
+        Assert.Equal(ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryStatuses.NoResults, body.Status);
+        Assert.Equal(41, discovery.Tenant);
+        Assert.Equal("Schneider LV431831", discovery.Query);
+        Assert.Equal((10, 20), (discovery.Offset, discovery.Limit));
+
+        var blank = await controller.WebSearch("  ");
+        Assert.IsType<BadRequestObjectResult>(blank.Result);
+    }
+
+    private sealed class RecordingDiscovery : ERP_RFQ_Automation.Procurement.Discovery.ISupplierDiscoveryService
+    {
+        public long Tenant { get; private set; }
+        public string? Query { get; private set; }
+        public int Offset { get; private set; }
+        public int Limit { get; private set; }
+
+        public Task<ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryResult> SearchAsync(
+            long businessUnitId, string query, int offset, int limit, CancellationToken ct = default)
+        {
+            (Tenant, Query, Offset, Limit) = (businessUnitId, query, offset, limit);
+            return Task.FromResult(new ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryResult(
+                ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryStatuses.NoResults, "Nothing found.",
+                new ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoverySearchedFor(null, null, query, []),
+                0, offset, limit, false, null, []));
+        }
+
+        public Task<ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryResult> DiscoverAsync(
+            ERP_RFQ_Automation.Procurement.Discovery.DiscoverSuppliersCommand command, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<ERP_RFQ_Automation.Procurement.Discovery.AdoptDiscoveredSuppliersResult> AdoptAsync(
+            ERP_RFQ_Automation.Procurement.Discovery.AdoptDiscoveredSuppliersCommand command, CancellationToken ct = default)
+            => throw new NotSupportedException();
     }
 
     [Fact]
@@ -280,9 +335,10 @@ public sealed class Release02SupplierGovernanceTests
     private static SupplierController CreateSupplierController(
         ISupplierRepository repository,
         string? tenantClaim,
-        string actor = "test-user")
+        string actor = "test-user",
+        ERP_RFQ_Automation.Procurement.Discovery.ISupplierDiscoveryService? discovery = null)
     {
-        return new SupplierController(repository, new StubMasterDataChangeHistoryReader())
+        return new SupplierController(repository, new StubMasterDataChangeHistoryReader(), discovery)
         {
             ControllerContext = ControllerContext(tenantClaim, actor)
         };

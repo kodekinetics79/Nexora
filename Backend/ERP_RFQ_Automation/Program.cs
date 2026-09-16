@@ -349,6 +349,24 @@ builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepo
 builder.Services.Configure<ERP_RFQ_Automation.Procurement.ProcurementApprovalOptions>(
     builder.Configuration.GetSection(ERP_RFQ_Automation.Procurement.ProcurementApprovalOptions.SectionName));
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
+// Internet supplier discovery from a sourcing case (Procurement/Discovery). The provider posts to
+// ONE fixed origin, https://ollama.com, on the same egress discipline as every AI client: no
+// redirects, and the host must resolve to a public address at connect time. The tenant's consent
+// for that origin is checked by the same allow-list the AI provider uses, before any query leaves.
+builder.Services.AddHttpClient<ERP_RFQ_Automation.Procurement.Discovery.OllamaWebSearchProvider>(client =>
+{
+    client.BaseAddress = new Uri(ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryConfiguration.Endpoint);
+    client.Timeout = TimeSpan.FromSeconds(25);
+})
+    .ConfigurePrimaryHttpMessageHandler(_ => AiEgressGuard.CreateHandler(() => AiProviderClass.External))
+    // Authorization: Bearer <search key> travels on every call; never let a Trace-level log write it.
+    .RedactLoggedHeaders(OutboundHttpRedaction.SensitiveHeaders);
+builder.Services.AddScoped<ERP_RFQ_Automation.Procurement.Discovery.ISupplierWebSearchProvider>(services =>
+    services.GetRequiredService<ERP_RFQ_Automation.Procurement.Discovery.OllamaWebSearchProvider>());
+builder.Services.AddScoped<ERP_RFQ_Automation.Procurement.Discovery.ISupplierContactFinder,
+    ERP_RFQ_Automation.Procurement.Discovery.SupplierContactFinder>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Procurement.Discovery.ISupplierDiscoveryService,
+    ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoveryService>();
 builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService>();
 builder.Services.AddScoped<IProcurementIntegrationService, ProcurementIntegrationService>();
 // Gate 5 / Module 6 (FR-MAS-01..05). Inbound supplier shipments, the Saudi entry-point master and
@@ -907,6 +925,9 @@ builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILea
                            ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILeadDecisionWorkbenchService,
                            ERP_RFQ_Automation.CommercialCases.Participation.LeadDecisionWorkbenchService>();
+// Why a LINE is left out of the quote: the tenant's own list, separate from the quote-outcome list.
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILineSkipReasons,
+                           ERP_RFQ_Automation.CommercialCases.Participation.LineSkipReasons>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.IRfqRevisionImpactResolutionService,
                            ERP_RFQ_Automation.CommercialCases.Participation.RfqRevisionImpactResolutionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Promotion.IRfqPromotionService,

@@ -14,6 +14,12 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public int SourceLeadRevision { get; set; }
         public int SourceRfqRevision { get; set; }
         public string? RevisionImpact { get; set; }
+        /// <summary>
+        /// The open customer revision in full — revision span and per-line changes — on the
+        /// detail projection only. <see cref="RevisionImpact"/> stays as the type string every
+        /// existing reader branches on.
+        /// </summary>
+        public QuoteRevisionImpactDTO? RevisionImpactDetail { get; set; }
         public long? CommercialCaseId { get; set; }
         public string? NexoraSerial { get; set; }
         public long? ContactId { get; set; }

@@ -73,6 +73,12 @@ export interface QuoteDTO {
   sourceLeadRevision: number;
   sourceRfqRevision: number;
   revisionImpact?: string | null;
+  /**
+   * The open customer revision in full: which revision arrived, which one this quote was built
+   * from, and what changed on each line. Detail projection only; `revisionImpact` above is the
+   * type string every existing branch reads.
+   */
+  revisionImpactDetail?: QuoteRevisionImpactDTO | null;
   commercialCaseId?: number;
   commercialCaseReference?: string | null;
   nexoraSerial?: string | null;
@@ -123,6 +129,58 @@ export interface OutcomeReasonDTO {
   id: number;
   code: string;
   label: string;
+}
+
+// ==== Customer revisions on a quote ====
+
+/** One changed fact on one line of the customer's document, in the buyer's own line numbers. */
+export interface QuoteRevisionLineChangeDTO {
+  line: string;
+  /** quantity · unit · part · description · added · removed · changed */
+  field: string;
+  from?: string | null;
+  to?: string | null;
+}
+
+/** Mirrors `DTOs/QuoteDTOs/QuoteRevisionImpactDTOs.cs`. */
+export interface QuoteRevisionImpactDTO {
+  impactId: number;
+  impactType: string;
+  /** The lead revision this quote was prepared from. */
+  fromRevision: number;
+  /** The lead revision that arrived and made the quote stale. */
+  toRevision: number;
+  changes: QuoteRevisionLineChangeDTO[];
+}
+
+/** What "Apply the new quantities" did to the draft. */
+export interface QuoteRevisionApplyResult {
+  quoteId: number;
+  fromRevision: number;
+  toRevision: number;
+  linesUpdated: number;
+  applied: QuoteRevisionLineChangeDTO[];
+  /** Lines the revision added that the draft does not have — nothing was invented for them. */
+  linesNotOnQuote: string[];
+  totalAmount?: number | null;
+}
+
+// ==== The covering e-mail (mirrors DTOs/QuoteDTOs/QuoteEmailDraftDTOs.cs) ====
+
+export interface QuoteEmailDraft {
+  quoteId: number;
+  quoteNo: string;
+  recipientEmail?: string | null;
+  subject: string;
+  /** Plain text; blank lines separate paragraphs. */
+  body: string;
+  attachmentFileName: string;
+}
+
+/** What the rep changed in the send dialog. Either field left undefined keeps the server default. */
+export interface QuoteEmailMessage {
+  subject?: string;
+  body?: string;
 }
 
 // ==== Below-floor holds (WP-B3) + revisions-lite (WP-B4) ====
@@ -211,8 +269,11 @@ export interface QuoteSendReadiness {
    * already hold this quote, and nothing is resent automatically. NOT_DELIVERED when it
    * definitively failed. Null when no delivery has ended terminally.
    */
-  deliveryOutcome?: 'UNCERTAIN' | 'NOT_DELIVERED' | null;
+  deliveryOutcome?: 'UNCERTAIN' | 'NOT_DELIVERED' | 'DELIVERED' | null;
   deliveryInFlight?: boolean;
+  /** Who the pending mail is addressed to and when it was handed over; null when none is pending. */
+  deliveryRecipient?: string | null;
+  deliveryRequestedOn?: string | null;
 }
 
 export interface QuotePriceAttestationStatus {
@@ -358,11 +419,26 @@ const quoteService = {
    *  - R17 `taxDerivationRequired` — a line's output tax has not been calculated.
    * All three are surfaced as outcomes rather than thrown errors.
    */
-  sendEmail: async (id: number, recipientEmail: string): Promise<QuoteSendOutcome> => {
+  /**
+   * The covering e-mail the customer would receive if the quote were sent now — the server's own
+   * default subject and plain-text body, the attachment name and the address on record — so the
+   * rep can review and edit it in the send dialog.
+   */
+  getEmailDraft: async (id: number): Promise<QuoteEmailDraft> => {
+    const { data } = await axiosInstance.get(`/api/Quote/${id}/email-draft`);
+    return data;
+  },
+
+  /**
+   * @param message the rep's edited subject/body from the send dialog. Omitted, the server sends
+   * its default (the same words `getEmailDraft` returned).
+   */
+  sendEmail: async (id: number, recipientEmail: string, message?: QuoteEmailMessage): Promise<QuoteSendOutcome> => {
     try {
       // 202 Accepted carries `{ queuedForDelivery, delivered, replayed }`. Read it: "queued" and
       // "delivered" are different facts and the rep is told different things for each.
-      const { data } = await axiosInstance.post(`/api/Quote/${id}/email`, null, { params: { recipientEmail } });
+      const body = message ? { customSubject: message.subject ?? null, customBody: message.body ?? null } : null;
+      const { data } = await axiosInstance.post(`/api/Quote/${id}/email`, body, { params: { recipientEmail } });
       return {
         held: false,
         delivered: data?.delivered === true,
@@ -442,6 +518,18 @@ const quoteService = {
     await axiosInstance.post(`/api/Quote/${id}/revision-impact/resolve`, null, {
       headers: { 'Idempotency-Key': crypto.randomUUID() },
     });
+  },
+
+  /**
+   * "Apply the new quantities": the draft's lines take the arriving revision's quantities, the
+   * draft is re-totalled and the impact is resolved, in one server transaction. 409 on a quote
+   * already with the customer — that one is revised, not edited.
+   */
+  applyRevisionQuantities: async (id: number): Promise<QuoteRevisionApplyResult> => {
+    const { data } = await axiosInstance.post(`/api/Quote/${id}/revision-impact/apply`, null, {
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    });
+    return data;
   },
 
   // ==== Reasoned validity extensions (R7) ====

@@ -79,6 +79,12 @@ public sealed class SupplierSolicitation
 
     public string? Notes { get; set; }
 
+    /// <summary>
+    /// What the rep wrote to the supplier when preparing this Supplier RFQ, shown in the email
+    /// after the line table. Null when they kept the standard sentence. Plain text, 2,000 max.
+    /// </summary>
+    public string? BuyerMessage { get; set; }
+
     public DateTime CreatedOn { get; set; }
     public DateTime UpdatedOn { get; set; }
 }
