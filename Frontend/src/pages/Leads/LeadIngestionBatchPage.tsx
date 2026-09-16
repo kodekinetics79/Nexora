@@ -34,7 +34,6 @@ import {
   Security as SecurityIcon,
   UploadFile as FilesIcon,
 } from '@mui/icons-material';
-import dayjs from 'dayjs';
 import leadService from '../../api/services/leadService';
 import type { BatchReconciliationItemDTO, LeadMatchCandidateDTO, MatchReviewDecisionAction } from '../../api/services/leadService';
 import { clientStatusLabel } from './ClientCell';
@@ -51,6 +50,7 @@ import {
 } from '../../utils/intakeErrors';
 import { BatchMetricFilterCard } from './BatchMetricFilterCard';
 import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
+import { formatDateTime } from '../../utils/dates';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
@@ -114,11 +114,9 @@ const confidenceLabel = (confidence: number, scored = true): string => scored
   ? `${Math.round(confidence * 100)}% confidence`
   : 'Not yet scored';
 
-const timestampLabel = (value?: string | null): string => {
-  if (!value || !dayjs(value).isValid()) return 'time unavailable';
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
-  return `${dayjs(value).format('DD MMM YYYY, HH:mm')} (${zone})`;
-};
+// The shared style, in the reader's own zone and without a zone name: "(America/New_York)" on a
+// Riyadh rep's screen was the browser's guess at a zone the server never stated.
+const timestampLabel = (value?: string | null): string => formatDateTime(value, 'time unavailable');
 
 const evidenceObject = (value: string): Record<string, unknown> | null => {
   try {

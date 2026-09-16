@@ -15,17 +15,14 @@ import {
   TaskAlt as CaughtUpIcon,
   ErrorOutlined as NeedsCheckDotIcon,
 } from '@mui/icons-material';
-import dayjs from 'dayjs';
-import relativeTime from 'dayjs/plugin/relativeTime';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type { NeedsReviewItem } from '../../api/services/extractionReviewService';
 import operationalReadinessService from '../../api/services/operationalReadinessService';
 import SearchField from '../../components/common/SearchField';
 import ViewTabs from '../../components/layout/ViewTabs';
 import { useAuth } from '../../context/AuthContext';
-import { formatDateSafe } from '../../utils/dates';
+import { formatDateSafe, formatRelativeReceived } from '../../utils/dates';
 
-dayjs.extend(relativeTime);
 
 // This queue used to render an extraction-confidence percentage per row in
 // red/amber/green. That number was never measured — on the structured path it
@@ -76,11 +73,9 @@ const ExtractionReviewPage: React.FC = () => {
   const extractionDeadLetterCount = operationsReadiness.data?.queues
     .find(queue => queue.key === 'extraction')?.deadLetter ?? 0;
 
-  const formatRelative = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = dayjs(dateStr);
-    return d.isValid() ? d.fromNow() : '—';
-  };
+  // Through the shared utility: an offset-less server timestamp is UTC, and a received date is
+  // never "in 4 hours" — clock skew reads as "just now".
+  const formatRelative = (dateStr: string | null) => formatRelativeReceived(dateStr);
 
   const columns: GridColDef<NeedsReviewItem>[] = [
     {
