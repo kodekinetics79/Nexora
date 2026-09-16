@@ -44,11 +44,13 @@ import ColumnPreferences from '../../components/common/ColumnPreferences';
 import { useAuth } from '../../context/AuthContext';
 import { openAuthenticatedFile } from '../../utils/authenticatedFile';
 import FieldEvidencePopover from './FieldEvidencePopover';
+import uomService from '../../api/services/uomService';
 import {
   checkLine,
   summariseChecks,
   checkHeadline,
   documentAssertions,
+  foldUnit,
   type CheckableLine,
   type FieldCheckSignal,
 } from './needsCheck';
@@ -295,6 +297,26 @@ const ExtractionReviewDetailPage: React.FC = () => {
     enabled: !!id && Number.isFinite(leadId),
     retry: false,
   });
+  // The tenant's own units, so a line whose unit is a word the business has never transacted in
+  // ("BANANAS") is flagged instead of passing as verified. Undefined until loaded — and if the
+  // call fails — so an outage never turns into a page full of false flags.
+  const tenantUnits = useQuery({
+    queryKey: ['uom', 'tenant'],
+    queryFn: () => uomService.listForTenant(),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const knownUnits = useMemo<ReadonlySet<string> | undefined>(() => {
+    if (!tenantUnits.data) return undefined;
+    const folded = new Set<string>();
+    for (const unit of tenantUnits.data) {
+      for (const spelling of [unit.uomCode, unit.uomName]) {
+        const key = spelling ? foldUnit(spelling) : '';
+        if (key) folded.add(key);
+      }
+    }
+    return folded;
+  }, [tenantUnits.data]);
 
   const [header, setHeader] = useState<ReviewHeaderState>({
     rfqno: '', buyersName: '', bidClosingDate: '', requiredDeliveryDate: '',
@@ -436,10 +458,10 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   // What this document states at all. A unit of measure no line carries is a
   // unit the buyer never wrote, not a value we failed to read.
-  const assertions = useMemo(() => documentAssertions(items), [items]);
+  const assertions = useMemo(() => documentAssertions(items, knownUnits), [items, knownUnits]);
   const summary = useMemo(
-    () => summariseChecks(items, flaggedByLine),
-    [items, flaggedByLine],
+    () => summariseChecks(items, flaggedByLine, knownUnits),
+    [items, flaggedByLine, knownUnits],
   );
 
   const hasAuthoritativeSource = (lead?.attachments?.length ?? 0) > 0
