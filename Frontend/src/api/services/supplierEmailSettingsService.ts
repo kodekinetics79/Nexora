@@ -37,6 +37,13 @@ export interface SupplierEmailMineSettings extends SupplierEmailMineUpdate {
   company: { defaultMessage: string; signOff: string };
 }
 
+export interface SupplierEmailSendFromOption { mailboxId: number; address: string; label: string; isDefault: boolean }
+export interface SupplierEmailSendFrom { mailboxes: SupplierEmailSendFromOption[]; replyTo: string | null; companyName: string }
+const unwrapSendFrom = (data: unknown): SupplierEmailSendFrom => {
+  const value = (data && typeof data === 'object' && 'data' in (data as Record<string, unknown>) ? (data as { data: SupplierEmailSendFrom }).data : data) as SupplierEmailSendFrom;
+  return { mailboxes: value?.mailboxes ?? [], replyTo: value?.replyTo ?? null, companyName: value?.companyName ?? 'Your company' };
+};
+
 export const SUPPLIER_EMAIL_PLACEHOLDERS = ['[Supplier name]', '[Company name]', '[RFQ number]'] as const;
 
 const unwrap = <T>(response: { data: T }): T => response.data;
@@ -58,6 +65,10 @@ const supplierEmailSettingsService = {
 
   getEffective: async (): Promise<SupplierEmailTexts> =>
     unwrap(await axiosInstance.get<SupplierEmailTexts>(`${BASE}/effective`)),
+
+  /** The company's outgoing mailboxes (one marked default) and where supplier replies go. */
+  getSendFrom: async (): Promise<SupplierEmailSendFrom> =>
+    unwrapSendFrom((await axiosInstance.get('/api/supplier-email-settings/send-from')).data),
 };
 
 /** Replaces the three placeholders with sample or real values. */

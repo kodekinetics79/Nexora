@@ -56,6 +56,14 @@ vi.mock('../../../api/services/procurementService', () => ({
     prepareSupplierRfqs: (...a: unknown[]) => prepareSupplierRfqs(...a),
   },
 }));
+vi.mock('../../../api/services/supplierEmailSettingsService', () => ({
+  default: {
+    getEffective: vi.fn().mockResolvedValue({ subject: 's', greeting: 'g', opening: 'o', defaultMessage: 'Please submit your best pricing and lead times.', signOff: 'Kind regards' }),
+    getSendFrom: vi.fn().mockResolvedValue({ mailboxes: [], replyTo: null, companyName: 'QA Co' }),
+    getMine: vi.fn().mockResolvedValue({ defaultMessage: null, signOff: null, company: { defaultMessage: 'x', signOff: 'y' } }),
+    saveMine: vi.fn(),
+  },
+}));
 vi.mock('../../../api/services/commercialLearningService', () => ({
   default: { getRfqIntelligence: (...a: unknown[]) => getRfqIntelligence(...a) },
 }));
@@ -565,7 +573,7 @@ describe('ViewRFQPage — a line without a product says so, and is not offered a
     fireEvent.click(within(dialog).getByRole('button', { name: 'Send to 1 supplier' }));
 
     await waitFor(() => expect(prepareSupplierRfqs).toHaveBeenCalledWith(
-      44, [61], 4, expect.any(String), null, 'Please submit your best pricing and lead times.', 10));
+      44, [61], 4, expect.any(String), null, 'Please submit your best pricing and lead times.', 10, null));
     expect(adoptDiscoveredSuppliers).toHaveBeenCalledWith(44, ['hit-1']);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });

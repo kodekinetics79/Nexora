@@ -663,12 +663,12 @@ const procurementService = {
   /** The exact email a supplier would receive for this line (subject and plain text), before anything is sent. */
   previewSupplierRfqEmail: async (
     sourcingCaseId: number,
-    request: { quantity?: number | null; message?: string | null; dueOn?: string | null },
-  ): Promise<{ subject: string; body: string }> =>
+    request: { quantity?: number | null; message?: string | null; dueOn?: string | null; sendFromMailboxId?: number | null },
+  ): Promise<{ subject: string; body: string; from?: string | null; replyTo?: string | null }> =>
     unwrap(
-      await axiosInstance.post<{ subject: string; body: string }>(
+      await axiosInstance.post<{ subject: string; body: string; from?: string | null; replyTo?: string | null }>(
         `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs/preview`,
-        { quantity: request.quantity ?? null, message: request.message ?? null, dueOn: request.dueOn ?? null },
+        { quantity: request.quantity ?? null, message: request.message ?? null, dueOn: request.dueOn ?? null, sendFromMailboxId: request.sendFromMailboxId ?? null },
       ),
     ),
 
@@ -690,6 +690,8 @@ const procurementService = {
     message?: string | null,
     /** How many to ask for. Omit and the server asks for the line's shortfall. */
     quantity?: number | null,
+    /** The company mailbox to send from. Omit for the company's default. */
+    sendFromMailboxId?: number | null,
   ): Promise<SupplierRfqPreparationOutcome[]> => {
     const results: SupplierRfqPreparationOutcome[] = [];
     let version = expectedVersion;
@@ -698,7 +700,7 @@ const procurementService = {
         const prepared = unwrap(
           await axiosInstance.post<PreparedSupplierRfqResult>(
           `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`,
-          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null, quantity: quantity ?? null },
+          { supplierId, expectedVersion: version, dueOn: dueOn ?? null, message: message ?? null, quantity: quantity ?? null, ...(sendFromMailboxId ? { sendFromMailboxId } : {}) },
           {
             headers: commandHeaders(
               `prepare-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,

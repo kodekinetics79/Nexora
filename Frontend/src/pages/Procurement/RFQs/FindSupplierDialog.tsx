@@ -11,11 +11,14 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Link,
+  MenuItem,
   Stack,
   TextField,
   Typography,
 } from "@mui/material";
 import { Send } from "@mui/icons-material";
+import supplierEmailSettingsService from "../../../api/services/supplierEmailSettingsService";
 import procurementService, {
   type SourcingCase,
   type SupplierDiscoveryHit,
@@ -82,6 +85,25 @@ export default function FindSupplierDialog({
   const [message, setMessage] = React.useState(DEFAULT_SUPPLIER_MESSAGE);
   const [replyBy, setReplyBy] = React.useState("");
   const [failures, setFailures] = React.useState<string[]>([]);
+  const [sendFrom, setSendFrom] = React.useState<number | "">("");
+  const [savedDefault, setSavedDefault] = React.useState(false);
+  const messageTouched = React.useRef(false);
+
+  // The rep's own default message (or the company's), and the company mailboxes to send from.
+  const effective = useQuery({
+    queryKey: ["supplier-email-effective"],
+    queryFn: supplierEmailSettingsService.getEffective,
+    enabled: open,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const mailboxes = useQuery({
+    queryKey: ["supplier-email-send-from"],
+    queryFn: supplierEmailSettingsService.getSendFrom,
+    enabled: open,
+    staleTime: 60_000,
+    retry: false,
+  });
   const initialised = React.useRef(false);
 
   const caseQuery = useQuery({
@@ -134,6 +156,7 @@ export default function FindSupplierDialog({
   React.useEffect(() => {
     if (!open) {
       initialised.current = false;
+      setSendFrom("");
       return;
     }
     if (initialised.current || !sourcingCase || !line) return;
@@ -144,10 +167,32 @@ export default function FindSupplierDialog({
         && (preset.has(candidate.supplierId) || (PAST_SUPPLY.has(candidate.evidenceType) && !earlierRequests?.has(candidate.supplierId))))
       .map((candidate) => `s-${candidate.supplierId}`)));
     setQuantity(String(line.toSource > 0 ? line.toSource : line.requested));
-    setMessage(presetMessage ?? DEFAULT_SUPPLIER_MESSAGE);
+    messageTouched.current = false;
+    setSavedDefault(false);
+    setMessage(presetMessage ?? effective.data?.defaultMessage ?? DEFAULT_SUPPLIER_MESSAGE);
     setReplyBy("");
     setFailures([]);
   }, [open, sourcingCase, line, presetSupplierIds, presetMessage, earlierRequests]);
+
+  // The saved default can arrive after the window opened; use it unless the rep already typed.
+  React.useEffect(() => {
+    if (open && !presetMessage && !messageTouched.current && effective.data?.defaultMessage) {
+      setMessage(effective.data.defaultMessage);
+    }
+  }, [open, presetMessage, effective.data]);
+  React.useEffect(() => {
+    if (!open || sendFrom !== "" || !mailboxes.data) return;
+    const preferred = mailboxes.data.mailboxes.find((mailbox) => mailbox.isDefault) ?? mailboxes.data.mailboxes[0];
+    if (preferred) setSendFrom(preferred.mailboxId);
+  }, [open, sendFrom, mailboxes.data]);
+
+  const saveMyDefault = useMutation({
+    mutationFn: async () => {
+      const mine = await supplierEmailSettingsService.getMine();
+      return supplierEmailSettingsService.saveMine({ defaultMessage: message.trim() || null, signOff: mine.signOff });
+    },
+    onSuccess: () => setSavedDefault(true),
+  });
 
   const toggle = (key: string) => setTicked((current) => {
     const next = new Set(current);
@@ -160,17 +205,20 @@ export default function FindSupplierDialog({
   const dueOnIso = replyBy ? new Date(`${replyBy}T17:00:00`).toISOString() : null;
 
   // The email below is written by the server exactly as it will be sent, and follows what the rep types.
-  const [previewInput, setPreviewInput] = React.useState({ quantity: 0, message: "", dueOn: null as string | null });
+  const [previewInput, setPreviewInput] = React.useState({ quantity: 0, message: "", dueOn: null as string | null, sendFromMailboxId: null as number | null });
   React.useEffect(() => {
-    const timer = window.setTimeout(() => setPreviewInput({ quantity: quantityOk ? quantityNumber : 0, message, dueOn: dueOnIso }), 400);
+    const timer = window.setTimeout(() => setPreviewInput({
+      quantity: quantityOk ? quantityNumber : 0, message, dueOn: dueOnIso, sendFromMailboxId: sendFrom === "" ? null : sendFrom,
+    }), 400);
     return () => window.clearTimeout(timer);
-  }, [quantityOk, quantityNumber, message, dueOnIso]);
+  }, [quantityOk, quantityNumber, message, dueOnIso, sendFrom]);
   const preview = useQuery({
     queryKey: ["find-supplier-email", sourcingCase?.id, previewInput],
     queryFn: () => procurementService.previewSupplierRfqEmail(sourcingCase!.id, {
       quantity: previewInput.quantity || null,
       message: previewInput.message.trim() || null,
       dueOn: previewInput.dueOn,
+      sendFromMailboxId: previewInput.sendFromMailboxId,
     }),
     enabled: open && Boolean(sourcingCase),
     retry: false,
@@ -195,6 +243,7 @@ export default function FindSupplierDialog({
         dueOnIso,
         message.trim() || null,
         quantityNumber,
+        sendFrom === "" ? null : sendFrom,
       );
       const failed = results.filter((result) => !result.succeeded).map((result) => {
         const error = result.error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | undefined;
@@ -332,6 +381,31 @@ export default function FindSupplierDialog({
                 sx={{ width: 190 }}
               />
             </Stack>
+            {mailboxes.data && (
+              mailboxes.data.mailboxes.length > 0 ? (
+                <TextField
+                  select
+                  label="Send from"
+                  size="small"
+                  fullWidth
+                  value={sendFrom}
+                  onChange={(event) => setSendFrom(Number(event.target.value))}
+                  helperText={mailboxes.data.replyTo ? `Supplier replies go to ${mailboxes.data.replyTo}` : " "}
+                  sx={{ mt: 1 }}
+                >
+                  {mailboxes.data.mailboxes.map((mailbox) => (
+                    <MenuItem key={mailbox.mailboxId} value={mailbox.mailboxId}>
+                      {mailbox.address}{mailbox.label && mailbox.label !== mailbox.address ? ` · ${mailbox.label}` : ""}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              ) : (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+                  Sent under {mailboxes.data.companyName}&apos;s name{mailboxes.data.replyTo ? `; supplier replies go to ${mailboxes.data.replyTo}` : ""}.
+                  Your company has no outgoing mailbox set up yet.
+                </Typography>
+              )
+            )}
             <TextField
               label="Your message"
               size="small"
@@ -339,10 +413,19 @@ export default function FindSupplierDialog({
               minRows={2}
               fullWidth
               value={message}
-              onChange={(event) => setMessage(event.target.value)}
+              onChange={(event) => { messageTouched.current = true; setSavedDefault(false); setMessage(event.target.value); }}
               slotProps={{ htmlInput: { maxLength: 2000 } }}
               sx={{ mt: 1 }}
             />
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", mt: 0.5 }}>
+              <Link component="button" type="button" variant="caption" underline="hover"
+                disabled={saveMyDefault.isPending || !message.trim()}
+                onClick={() => saveMyDefault.mutate()}>
+                {saveMyDefault.isPending ? "Saving…" : "Save as my default message"}
+              </Link>
+              {savedDefault && <Typography variant="caption" color="success.main">Saved. Your next requests start with this message.</Typography>}
+              {saveMyDefault.isError && <Typography variant="caption" color="error.main">Could not save it just now.</Typography>}
+            </Stack>
             <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>What each supplier receives</Typography>
             <Box
               data-testid="supplier-email-preview"
@@ -350,7 +433,13 @@ export default function FindSupplierDialog({
             >
               {preview.data ? (
                 <>
-                  <Typography variant="body2" sx={{ fontWeight: 700, mb: 1 }}>{preview.data.subject}</Typography>
+                  {preview.data.from && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>From: {preview.data.from}</Typography>
+                  )}
+                  {preview.data.replyTo && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>Replies to: {preview.data.replyTo}</Typography>
+                  )}
+                  <Typography variant="body2" sx={{ fontWeight: 700, mb: 1, mt: 0.5 }}>{preview.data.subject}</Typography>
                   <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.5 }}>
                     {preview.data.body}
                   </Typography>
