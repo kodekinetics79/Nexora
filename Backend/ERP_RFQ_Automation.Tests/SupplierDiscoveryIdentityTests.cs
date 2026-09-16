@@ -39,21 +39,46 @@ public sealed class SupplierDiscoveryIdentityTests
     public void Each_maker_is_searched_with_its_own_part_number_two_ways()
     {
         var identity = SupplierDiscoveryIdentity.From("LV431831", "Schneider Electric", "CIRCUIT BREAKER", null);
+        // The product words travel with the number, so a number that also means something else
+        // ("301" is a stainless steel grade) still finds the product.
         Assert.Equal(
-            ["Schneider Electric LV431831 distributor Saudi Arabia", "Schneider Electric LV431831 supplier"],
+            ["Schneider Electric LV431831 CIRCUIT BREAKER supplier", "Schneider Electric CIRCUIT BREAKER distributor Saudi Arabia"],
             identity.Queries());
 
         var multi = SupplierDiscoveryIdentity.From("LV431831", "Schneider Electric", "CIRCUIT BREAKER MCCB",
             "ABB (S203-C16); SIEMENS 5SY6316-7, Eaton");
         Assert.Equal(
         [
-            "Schneider Electric LV431831 distributor Saudi Arabia", "Schneider Electric LV431831 supplier",
-            "ABB S203-C16 distributor Saudi Arabia", "ABB S203-C16 supplier",
-            "SIEMENS 5SY6316-7 distributor Saudi Arabia", "SIEMENS 5SY6316-7 supplier",
+            "Schneider Electric LV431831 CIRCUIT BREAKER MCCB supplier", "Schneider Electric CIRCUIT BREAKER MCCB distributor Saudi Arabia",
+            "ABB S203-C16 CIRCUIT BREAKER MCCB supplier", "ABB CIRCUIT BREAKER MCCB distributor Saudi Arabia",
+            "SIEMENS 5SY6316-7 CIRCUIT BREAKER MCCB supplier", "SIEMENS CIRCUIT BREAKER MCCB distributor Saudi Arabia",
             "Eaton CIRCUIT BREAKER MCCB distributor Saudi Arabia", "Eaton CIRCUIT BREAKER MCCB supplier"
         ], multi.Queries());
         // ABB is never asked about Schneider's number: that pairing would spend a call on nothing.
         Assert.DoesNotContain(multi.Queries(), q => q.StartsWith("ABB LV431831", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_legal_company_name_is_searched_by_its_trading_name_and_the_description_by_its_product_words()
+    {
+        // Live on 2026-09-16: "JAMES NORTH AND SONS COMPANY NS 301 supplier" found a museum archive, a
+        // company register and grade-301 stainless steel dealers. The trading name plus the product
+        // words find glove suppliers.
+        Assert.Equal("JAMES NORTH", SupplierDiscoveryIdentity.SearchName("JAMES NORTH AND SONS COMPANY"));
+        Assert.Equal("ABB", SupplierDiscoveryIdentity.SearchName("ABB Ltd"));
+        Assert.Equal("Schneider Electric", SupplierDiscoveryIdentity.SearchName("Schneider Electric"));
+        Assert.Equal("Company", SupplierDiscoveryIdentity.SearchName("Company"));
+
+        Assert.Equal(["GLOVES", "WORKING", "HEAT", "RESISTANT"],
+            SupplierDiscoveryIdentity.ProductWordsOf("GLOVES:WORKING,HEAT RESISTANT,LARGE,LG 1"));
+
+        var gloves = SupplierDiscoveryIdentity.From("NS 301", "JAMES NORTH AND SONS COMPANY",
+            "GLOVES:WORKING,HEAT RESISTANT,LARGE,LG 1", null);
+        Assert.Equal(
+            ["JAMES NORTH NS 301 GLOVES WORKING HEAT RESISTANT supplier", "JAMES NORTH GLOVES WORKING HEAT RESISTANT distributor Saudi Arabia"],
+            gloves.Queries());
+        // What the rep is shown was searched keeps the customer's full wording.
+        Assert.Equal("JAMES NORTH AND SONS COMPANY", gloves.Maker);
     }
 
     [Fact]
@@ -63,7 +88,7 @@ public sealed class SupplierDiscoveryIdentityTests
             "M2 P2; M3 P3; M4 P4; M5 P5; M6 P6");
         Assert.Equal(SupplierDiscoveryIdentity.MaxQueries, many.Queries().Count);
         Assert.Equal(many.Queries().Count, many.Queries().Distinct(StringComparer.OrdinalIgnoreCase).Count());
-        Assert.Equal("M1 P1 distributor Saudi Arabia", many.Queries()[0]);
+        Assert.Equal("M1 P1 desc supplier", many.Queries()[0]);
     }
 
     [Fact]
@@ -71,7 +96,8 @@ public sealed class SupplierDiscoveryIdentityTests
     {
         var identity = SupplierDiscoveryIdentity.From("LV431831", null,
             "CIRCUIT BREAKER MCCB 3P 250A THERMAL MAGNETIC FIXED", null);
-        Assert.Equal(["LV431831 CIRCUIT BREAKER MCCB 3P 250A supplier Saudi Arabia"], identity.Queries());
+        // "3P" and "250A" are ratings, not product words; the first four product words go.
+        Assert.Equal(["LV431831 CIRCUIT BREAKER MCCB THERMAL supplier Saudi Arabia"], identity.Queries());
         Assert.Equal("LV431831", identity.Subject());
     }
 
@@ -80,7 +106,7 @@ public sealed class SupplierDiscoveryIdentityTests
     {
         var described = SupplierDiscoveryIdentity.From(null, null, "Stainless steel gate valve 6 inch class 150", null);
         Assert.Equal(
-            ["Stainless steel gate valve 6 supplier Saudi Arabia", "Stainless steel gate valve 6 supplier"],
+            ["Stainless steel gate valve supplier Saudi Arabia", "Stainless steel gate valve supplier"],
             described.Queries());
         Assert.False(described.IsEmpty);
 

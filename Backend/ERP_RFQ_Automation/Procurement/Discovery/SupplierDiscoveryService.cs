@@ -292,7 +292,7 @@ public sealed class SupplierDiscoveryService : ISupplierDiscoveryService
             }
             foreach (var result in results)
             {
-                var hit = SupplierDiscoveryClassifier.Classify(result, identity.Makers, identity.PartNumbers, order++);
+                var hit = SupplierDiscoveryClassifier.Classify(result, identity.Makers, identity.PartNumbers, order++, identity.ProductWords);
                 if (hit is null) continue;
                 // First appearance wins: the search engine ranked it higher, and one domain is one company.
                 byDomain.TryAdd(hit.Domain, hit);

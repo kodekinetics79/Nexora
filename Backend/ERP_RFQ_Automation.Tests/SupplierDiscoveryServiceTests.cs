@@ -132,8 +132,8 @@ public sealed class SupplierDiscoveryServiceTests
         var result = await harness.Discover(caseId);
 
         Assert.Equal(SupplierDiscoveryStatuses.Ready, result.Status);
-        Assert.Contains($"{Maker} {Part} distributor Saudi Arabia", harness.Provider.Queries);
-        Assert.Contains($"{Maker} {Part} supplier", harness.Provider.Queries);
+        Assert.Contains($"{Maker} {Part} CIRCUIT BREAKER MCCB supplier", harness.Provider.Queries);
+        Assert.Contains($"{Maker} CIRCUIT BREAKER MCCB distributor Saudi Arabia", harness.Provider.Queries);
         Assert.False(result.FromCache);
         Assert.NotNull(result.SearchedAtUtc);
         Assert.Equal(5, result.Total);
@@ -166,9 +166,9 @@ public sealed class SupplierDiscoveryServiceTests
         Assert.Equal(["ABB (S203-C16)", "SIEMENS 5SY6316-7"], result.SearchedFor.AcceptableMakers);
         Assert.Equal(
         [
-            $"{Maker} {Part} distributor Saudi Arabia", $"{Maker} {Part} supplier",
-            "ABB S203-C16 distributor Saudi Arabia", "ABB S203-C16 supplier",
-            "SIEMENS 5SY6316-7 distributor Saudi Arabia", "SIEMENS 5SY6316-7 supplier"
+            $"{Maker} {Part} CIRCUIT BREAKER MCCB supplier", $"{Maker} CIRCUIT BREAKER MCCB distributor Saudi Arabia",
+            "ABB S203-C16 CIRCUIT BREAKER MCCB supplier", "ABB CIRCUIT BREAKER MCCB distributor Saudi Arabia",
+            "SIEMENS 5SY6316-7 CIRCUIT BREAKER MCCB supplier", "SIEMENS CIRCUIT BREAKER MCCB distributor Saudi Arabia"
         ], harness.Provider.Queries);
     }
 

@@ -20,7 +20,8 @@ public sealed record SupplierDiscoveryIdentity(
     IReadOnlyList<string> Makers,
     IReadOnlyList<string> PartNumbers,
     IReadOnlyList<string> AcceptableMakers,
-    IReadOnlyList<MakerPart> Pairs)
+    IReadOnlyList<MakerPart> Pairs,
+    bool AsTyped = false)
 {
     /// <summary>Bound on how many queries one discovery may post. Each is one paid provider call.</summary>
     public const int MaxQueries = 8;
@@ -31,6 +32,24 @@ public sealed record SupplierDiscoveryIdentity(
     private static readonly Regex PartNumberToken = new(@"^[A-Za-z0-9][A-Za-z0-9\-_./]{2,}$", RegexOptions.Compiled);
     private static readonly Regex Separators = new(@"[;,|\n\r]|\s/\s|\s+or\s+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex Whitespace = new(@"\s+", RegexOptions.Compiled);
+    private static readonly Regex DescriptionSeparators = new(@"[\s:;,/()\[\]|+]+", RegexOptions.Compiled);
+
+    // The legal tail of a company name is noise to a search engine and to a relevance check:
+    // "JAMES NORTH AND SONS COMPANY" is searched, and matched, as "JAMES NORTH".
+    private static readonly HashSet<string> CorporateSuffixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "and", "&", "sons", "son", "company", "co", "co.", "ltd", "ltd.", "limited", "inc", "inc.", "llc", "plc",
+        "gmbh", "ag", "bv", "b.v.", "sa", "s.a.", "sas", "pty", "corporation", "corp", "corp.", "est", "est.",
+        "establishment", "the"
+    };
+
+    // Words that describe the order, not the product: sizes, quantities and packaging carry no
+    // signal about who sells the item and would only narrow the search to nothing.
+    private static readonly HashSet<string> OrderWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "and", "the", "for", "with", "of", "size", "type", "large", "small", "medium", "each", "per", "pcs",
+        "pieces", "nos", "qty", "quantity", "set", "sets", "pair", "pairs", "pack", "box", "unit", "units"
+    };
 
     public static SupplierDiscoveryIdentity From(
         string? partNumber, string? maker, string? description, string? approvedMakersText)
@@ -70,9 +89,36 @@ public sealed record SupplierDiscoveryIdentity(
             pairs.Distinct().ToArray());
     }
 
+    /// <summary>
+    /// The maker as a search engine should see it: "JAMES NORTH AND SONS COMPANY" → "JAMES NORTH",
+    /// "ABB Ltd" → "ABB", "Schneider Electric" unchanged. At least one word always survives.
+    /// </summary>
+    public static string SearchName(string maker)
+    {
+        var words = Whitespace.Split(maker.Trim()).Where(x => x.Length > 0).ToList();
+        while (words.Count > 1 && CorporateSuffixes.Contains(words[^1])) words.RemoveAt(words.Count - 1);
+        return string.Join(' ', words);
+    }
+
+    /// <summary>
+    /// The words of the description that name the product: "GLOVES:WORKING,HEAT RESISTANT,LARGE,LG 1"
+    /// → ["GLOVES", "WORKING", "HEAT", "RESISTANT"]. Sizes, quantities and codes with digits are left
+    /// out. At most four, in the order written, because the first words name the thing.
+    /// </summary>
+    public static IReadOnlyList<string> ProductWordsOf(string? description, int count = 4)
+        => DescriptionSeparators.Split(description ?? string.Empty)
+            .Where(x => x.Length >= 3 && !x.Any(char.IsDigit) && !OrderWords.Contains(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(count)
+            .ToArray();
+
+    public IReadOnlyList<string> ProductWords => AsTyped
+        ? Whitespace.Split(Description).Where(x => x.Length >= 3).Take(8).ToArray()
+        : ProductWordsOf(Description);
+
     /// <summary>The supplier page's free-text box: the words are the description and nothing is inferred from them.</summary>
     public static SupplierDiscoveryIdentity FromQuery(string query)
-        => new(null, null, Clean(query) ?? string.Empty, [], [], [], []);
+        => new(null, null, Clean(query) ?? string.Empty, [], [], [], [], AsTyped: true);
 
     /// <summary>
     /// The search strings, in the order they are posted: the line's own maker and number first,
@@ -82,29 +128,39 @@ public sealed record SupplierDiscoveryIdentity(
     public IReadOnlyList<string> Queries()
     {
         var queries = new List<string>();
-        var descriptionWords = FirstWords(Description, 5);
+        var words = string.Join(' ', ProductWords);
 
         foreach (var pair in Pairs)
         {
-            if (pair.Maker is not null && pair.Part is not null)
+            var maker = pair.Maker is null ? null : SearchName(pair.Maker);
+            if (maker is not null && pair.Part is not null)
             {
-                Add(queries, $"{pair.Maker} {pair.Part} distributor Saudi Arabia");
-                Add(queries, $"{pair.Maker} {pair.Part} supplier");
+                // The product words ride along with the number: "NS 301" alone finds stainless
+                // steel grade 301; "JAMES NORTH NS 301 GLOVES WORKING HEAT RESISTANT" finds gloves.
+                Add(queries, Join($"{maker} {pair.Part}", words, "supplier"));
+                Add(queries, words.Length > 0
+                    ? Join(maker, words, "distributor Saudi Arabia")
+                    : $"{maker} {pair.Part} distributor Saudi Arabia");
             }
-            else if (pair.Maker is not null)
+            else if (maker is not null)
             {
-                Add(queries, Join(pair.Maker, descriptionWords, "distributor Saudi Arabia"));
-                Add(queries, Join(pair.Maker, descriptionWords, "supplier"));
+                Add(queries, Join(maker, words, "distributor Saudi Arabia"));
+                Add(queries, Join(maker, words, "supplier"));
             }
             else if (pair.Part is not null)
             {
-                Add(queries, Join(pair.Part, descriptionWords, "supplier Saudi Arabia"));
+                Add(queries, Join(pair.Part, words, "supplier Saudi Arabia"));
             }
         }
-        if (Pairs.Count == 0 && descriptionWords.Length > 0)
+        if (Pairs.Count == 0)
         {
-            Add(queries, $"{descriptionWords} supplier Saudi Arabia");
-            Add(queries, $"{descriptionWords} supplier");
+            // A rep's typed query is searched as typed; a line description is searched by its product words.
+            var typed = AsTyped ? FirstWords(Description, 8) : words;
+            if (typed.Length > 0)
+            {
+                Add(queries, $"{typed} supplier Saudi Arabia");
+                Add(queries, $"{typed} supplier");
+            }
         }
         return queries.Take(MaxQueries).ToArray();
     }
