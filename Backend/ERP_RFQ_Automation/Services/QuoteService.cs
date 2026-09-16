@@ -666,7 +666,14 @@ namespace ERP_RFQ_Automation.Services
                         }
                         else
                         {
-                            existingItem.RfqitemId = itemDto.RfqItemId;
+                            // D20: the RFQ line link is the only join between a quoted line and
+                            // the supplier award that priced it (QuoteViewPage.sourceFor matches
+                            // awards by it). No screen edits this link, so an absent value means
+                            // "not supplied", never "cut the line loose". Assigning it
+                            // unconditionally nulled it on every Update Quote from the Edit
+                            // screen — one routine price change and every line read "Cost Source
+                            // Pending", with the award→price trace gone for the PO to follow.
+                            existingItem.RfqitemId = itemDto.RfqItemId ?? existingItem.RfqitemId;
                             existingItem.ProductId = itemDto.ProductId;
                             existingItem.ItemDescription = itemDto.ItemDescription;
                             existingItem.Quantity = itemDto.Quantity;
