@@ -170,6 +170,9 @@ namespace ERP_RFQ_Automation.Notifications
                     // mailbox when it has one (issue #54). Parsed, not assumed: a request with no
                     // parseable business unit is system mail and leaves from the platform address.
                     OwningBusinessUnitId = OwningBusinessUnit(request.BusinessUnitId),
+                    OwningMailboxId = request.SendFromMailboxId,
+                    FromDisplayName = string.IsNullOrWhiteSpace(request.FromDisplayName) ? null : request.FromDisplayName,
+                    ReplyTo = string.IsNullOrWhiteSpace(request.ReplyToAddress) ? null : new EmailAddress(request.ReplyToAddress.Trim()),
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
@@ -222,6 +225,9 @@ namespace ERP_RFQ_Automation.Notifications
                     // mailbox when it has one (issue #54). Parsed, not assumed: a request with no
                     // parseable business unit is system mail and leaves from the platform address.
                     OwningBusinessUnitId = OwningBusinessUnit(request.BusinessUnitId),
+                    OwningMailboxId = request.SendFromMailboxId,
+                    FromDisplayName = string.IsNullOrWhiteSpace(request.FromDisplayName) ? null : request.FromDisplayName,
+                    ReplyTo = string.IsNullOrWhiteSpace(request.ReplyToAddress) ? null : new EmailAddress(request.ReplyToAddress.Trim()),
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
@@ -261,7 +267,27 @@ namespace ERP_RFQ_Automation.Notifications
         /// a <c>&lt;br&gt;</c> so a two-paragraph message still reads as two paragraphs.
         /// </summary>
         /// <summary>The template model for a supplier request; shared with the Send window's preview.</summary>
-        internal static Dictionary<string, string?> RfqToSupplierModel(RfqToSupplierNotification request, string? ctaUrl) => new()
+        internal static Dictionary<string, string?> RfqToSupplierModel(RfqToSupplierNotification request, string? ctaUrl)
+        {
+            var d = ERP_RFQ_Automation.Procurement.SupplierEmail.SupplierEmailDefaults.Texts;
+            string Wording(string value, string fallback) => string.IsNullOrWhiteSpace(value)
+                ? ERP_RFQ_Automation.Procurement.SupplierEmail.SupplierEmailDefaults.Fill(fallback, request.SupplierName, request.BuyerCompany, request.RfqNumber)
+                : value;
+            var greeting = Wording(request.Greeting, d.Greeting);
+            var opening = Wording(request.Opening, d.Opening);
+            var signOff = Wording(request.SignOff, d.SignOff);
+            var model = RfqToSupplierBaseModel(request, ctaUrl);
+            model["subjectLine"] = Wording(request.SubjectLine, d.Subject).Replace("\n", " ");
+            model["greeting"] = greeting;
+            model["greetingHtml"] = HtmlParagraph(greeting);
+            model["opening"] = opening;
+            model["openingHtml"] = HtmlParagraph(opening);
+            model["signOff"] = signOff;
+            model["signOffHtml"] = HtmlParagraph(signOff);
+            return model;
+        }
+
+        private static Dictionary<string, string?> RfqToSupplierBaseModel(RfqToSupplierNotification request, string? ctaUrl) => new()
         {
             ["supplierName"] = request.SupplierName,
             ["buyerCompany"] = request.BuyerCompany,

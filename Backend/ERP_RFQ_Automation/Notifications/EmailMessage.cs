@@ -104,6 +104,15 @@ namespace ERP_RFQ_Automation.Notifications
         /// </summary>
         public long? OwningBusinessUnitId { get; set; }
 
+        /// <summary>
+        /// The owning tenant's outgoing mailbox to send from, when the user chose one. Null uses the
+        /// tenant's first active outgoing mailbox, or the platform transport when it has none.
+        /// </summary>
+        public long? OwningMailboxId { get; set; }
+
+        /// <summary>The sender name to show when the message leaves from the platform address (e.g. the company's name).</summary>
+        public string? FromDisplayName { get; set; }
+
         public EmailMessage AddTo(string address, string? displayName = null)
         {
             if (!string.IsNullOrWhiteSpace(address))

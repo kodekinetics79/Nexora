@@ -9,6 +9,10 @@ public interface IProcurementApplicationService
     /// <summary>The exact email a supplier would receive from this line, before anything is sent.</summary>
     Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
         decimal? quantity, string? message, DateTime? dueOn, CancellationToken ct = default)
+        => PreviewSupplierRfqEmailAsync(businessUnitId, sourcingCaseId, quantity, message, dueOn, null, null, ct);
+
+    Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
+        decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default)
         => throw new NotSupportedException("Supplier request previews are not supported by this procurement adapter.");
 
     Task<SourcingCaseView> GetSourcingCaseAsync(long businessUnitId, long sourcingCaseId, CancellationToken ct = default)
@@ -108,7 +112,11 @@ public sealed record PrepareSupplierRfqCommand(
     string Actor,
     string CorrelationId,
     string? Message = null,
-    decimal? Quantity = null);
+    decimal? Quantity = null,
+    /// <summary>Who pressed Send: their own default message and signature apply.</summary>
+    long? UserId = null,
+    /// <summary>The company's outgoing mailbox the rep chose; null uses the default.</summary>
+    long? SendFromMailboxId = null);
 
 public sealed record QueuePreparedSupplierRfqCommand(
     long BusinessUnitId,
@@ -584,4 +592,4 @@ public sealed class ProcurementConflictException : InvalidOperationException
 }
 
 /// <summary>Subject and plain-text body of a supplier request, exactly as it would be sent.</summary>
-public sealed record SupplierRfqEmailPreview(string Subject, string Body);
+public sealed record SupplierRfqEmailPreview(string Subject, string Body, string? From = null, string? ReplyTo = null);

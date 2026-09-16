@@ -265,8 +265,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         });
     }
 
-    public async Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
+    public Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
         decimal? quantity, string? message, DateTime? dueOn, CancellationToken ct = default)
+        => PreviewSupplierRfqEmailAsync(businessUnitId, sourcingCaseId, quantity, message, dueOn, null, null, ct);
+
+    public async Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
+        decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default)
     {
         ValidateTenant(businessUnitId);
         if (quantity is { } asked && (asked <= 0 || asked > 1_000_000_000m))
@@ -280,15 +284,38 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var line = await DescribeLineForSupplierAsync(rfqItem, quantity ?? sourcingCase.UnfulfilledQuantity, ct);
         var company = await _db.BusinessUnits.AsNoTracking().Where(x => x.Id == businessUnitId)
             .Select(x => x.BusinessUnitName).FirstOrDefaultAsync(ct);
+        var sendFrom = await SupplierEmail.SupplierEmailSettingsService.GetSendFromAsync(_db, businessUnitId, ct);
+        var mailbox = sendFromMailboxId is null
+            ? sendFrom.Mailboxes.FirstOrDefault(x => x.IsDefault)
+            : sendFrom.Mailboxes.FirstOrDefault(x => x.MailboxId == sendFromMailboxId)
+              ?? throw new ProcurementValidationException("That mailbox is not one of your company's active outgoing mailboxes.");
+        var wording = await WordingForAsync(businessUnitId, userId, "<supplier name>", company, "SRFQ-number-on-sending", ct);
         var payload = new SolicitationDispatchPayload(0, businessUnitId, sourcingCase.RfqId, string.Empty,
-            "<supplier name>", "SRFQ-number-on-sending", SummariseLinesForSupplier([line]), dueOn, [line], buyerMessage);
-        var notification = SupplierRfqEmail.ComposeRfqToSupplier(payload, company);
+            "<supplier name>", "SRFQ-number-on-sending", SummariseLinesForSupplier([line]), dueOn, [line],
+            buyerMessage, wording.Subject, wording.Greeting, wording.Opening, wording.SignOff, mailbox?.MailboxId, wording.DefaultMessage);
+        var notification = SupplierRfqEmail.ComposeRfqToSupplier(payload, company, sendFrom.ReplyTo);
         var model = ERP_RFQ_Automation.Notifications.NotificationService.RfqToSupplierModel(notification, null);
         var rendered = new ERP_RFQ_Automation.Notifications.Templating.EmailTemplateRenderer(
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<ERP_RFQ_Automation.Notifications.Templating.EmailTemplateRenderer>.Instance)
             .Render(ERP_RFQ_Automation.Notifications.Templating.EmailTemplates.RfqToSupplier, model);
+        var companyName = string.IsNullOrWhiteSpace(company) ? RfqToSupplierNotificationName : company.Trim();
         return new SupplierRfqEmailPreview(rendered.Subject.Replace("SRFQ-number-on-sending", "(number given when sent)"),
-            rendered.TextBody.Replace("SRFQ-number-on-sending", "(number given when sent)").Trim());
+            rendered.TextBody.Replace("SRFQ-number-on-sending", "(number given when sent)").Trim(),
+            mailbox is null ? $"{companyName} (system address)" : $"{companyName} <{mailbox.Address}>",
+            sendFrom.ReplyTo);
+    }
+
+    private const string RfqToSupplierNotificationName = ERP_RFQ_Automation.Notifications.RfqToSupplierNotification.BuyerCompanyFallback;
+
+    /// <summary>The wording for one supplier's email, placeholders filled: the user's own over the company's over Nexora's.</summary>
+    private async Task<SupplierEmail.SupplierEmailTexts> WordingForAsync(long businessUnitId, long? userId, string supplierName,
+        string? companyName, string rfqNumber, CancellationToken ct)
+    {
+        var texts = await SupplierEmail.SupplierEmailSettingsService.ResolveAsync(_db, businessUnitId, userId, ct);
+        var company = string.IsNullOrWhiteSpace(companyName) ? RfqToSupplierNotificationName : companyName.Trim();
+        string Fill(string text) => SupplierEmail.SupplierEmailDefaults.Fill(text, supplierName, company, rfqNumber);
+        return new SupplierEmail.SupplierEmailTexts(Fill(texts.Subject), Fill(texts.Greeting), Fill(texts.Opening),
+            Fill(texts.DefaultMessage), Fill(texts.SignOff));
     }
 
     public async Task<SourcingCaseView> GetSourcingCaseAsync(
@@ -449,6 +476,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         // shortfall is only the default.
         if (command.Quantity is { } askedFor && (askedFor <= 0 || askedFor > 1_000_000_000m))
             throw new ProcurementValidationException("Ask for a quantity greater than zero.");
+        if (command.SendFromMailboxId is { } chosenMailbox
+            && !(await SupplierEmail.SupplierEmailSettingsService.GetSendFromAsync(_db, command.BusinessUnitId, ct))
+                .Mailboxes.Any(x => x.MailboxId == chosenMailbox))
+            throw new ProcurementValidationException("That mailbox is not one of your company's active outgoing mailboxes.");
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
@@ -465,7 +496,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 command.DueOn,
                 command.ExpectedVersion,
                 Message = buyerMessage,
-                command.Quantity
+                command.Quantity,
+                command.SendFromMailboxId
             });
             var replay = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == solicitationKey, ct);
@@ -603,10 +635,17 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             {
                 await DescribeLineForSupplierAsync(rfqItem, command.Quantity ?? sourcingCase.UnfulfilledQuantity, ct)
             };
+            // The wording is fixed onto the request now, so the supplier receives what the rep saw
+            // in the preview even if the company or the rep changes their standard afterwards.
+            var companyName = await _db.BusinessUnits.AsNoTracking().Where(x => x.Id == command.BusinessUnitId)
+                .Select(x => x.BusinessUnitName).FirstOrDefaultAsync(ct);
+            var wording = await WordingForAsync(command.BusinessUnitId, command.UserId, supplier.Name, companyName,
+                solicitation.SupplierRfqNumber, ct);
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
                 solicitation.SupplierRfqNumber, SummariseLinesForSupplier(preparedLines), command.DueOn, preparedLines,
-                buyerMessage));
+                buyerMessage, wording.Subject, wording.Greeting, wording.Opening, wording.SignOff, command.SendFromMailboxId,
+                wording.DefaultMessage));
             candidate.Selected = true;
             candidate.UpdatedOn = now;
             sourcingCase.Status = SourcingCaseStatuses.OutreachReady;
@@ -3633,7 +3672,14 @@ internal sealed record SolicitationDispatchPayload(
     string ItemSummary,
     DateTime? DueOn,
     IReadOnlyList<SolicitationDispatchLine>? Lines = null,
-    string? Message = null);
+    string? Message = null,
+    string? SubjectLine = null,
+    string? Greeting = null,
+    string? Opening = null,
+    string? SignOff = null,
+    long? SendFromMailboxId = null,
+    /// <summary>The company's or rep's saved default message, used when the rep typed none. Message stays exactly what they typed.</summary>
+    string? DefaultMessage = null);
 
 internal sealed record CandidateEvidence(
     long SupplierId,

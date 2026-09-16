@@ -20622,6 +20622,63 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("supplier_discovery_searches", (string)null);
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierEmail.SupplierEmailSettings", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("DefaultMessage")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Greeting")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Opening")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("SignOff")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("Subject")
+                        .HasMaxLength(220)
+                        .HasColumnType("character varying(220)");
+
+                    b.Property<string>("UpdatedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("UpdatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long?>("UserId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_supplier_email_settings_BU_Company")
+                        .HasFilter("\"UserId\" IS NULL");
+
+                    b.HasIndex("BusinessUnitId", "UserId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_supplier_email_settings_BU_User")
+                        .HasFilter("\"UserId\" IS NOT NULL");
+
+                    b.ToTable("supplier_email_settings", (string)null);
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceipt", b =>
                 {
                     b.Property<long>("Id")
@@ -27364,6 +27421,15 @@ namespace ERP_RFQ_Automation.Migrations
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoverySearch", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierEmail.SupplierEmailSettings", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
                         .WithMany()

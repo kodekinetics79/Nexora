@@ -99,7 +99,7 @@ namespace ERP_RFQ_Automation.Notifications.Providers
         private object BuildPayload(EmailMessage message)
         {
             var fromAddress = message.From?.Address ?? _options.FromAddress;
-            var fromName = message.From?.DisplayName ?? _options.FromName;
+            var fromName = message.From?.DisplayName ?? message.FromDisplayName ?? _options.FromName;
 
             var personalization = new Dictionary<string, object>
             {

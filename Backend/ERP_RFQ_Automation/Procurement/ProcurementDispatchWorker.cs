@@ -127,6 +127,9 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                 .Where(x => x.Id == payload.BusinessUnitId)
                 .Select(x => x.BusinessUnitName)
                 .FirstOrDefaultAsync(ct);
+            // Supplier replies come back to the company's RFQ inbox, where Nexora already reads mail.
+            var replyTo = (await ERP_RFQ_Automation.Procurement.SupplierEmail.SupplierEmailSettingsService.GetSendFromAsync(
+                scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>(), payload.BusinessUnitId, ct)).ReplyTo;
             using var providerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             providerCts.CancelAfter(_providerCallTimeout);
             providerInvoked = true;
@@ -134,7 +137,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             try
             {
                 receipt = await notification.SendRfqToSupplierWithReceiptAsync(
-                    SupplierRfqEmail.ComposeRfqToSupplier(payload, buyerCompany), providerCts.Token);
+                    SupplierRfqEmail.ComposeRfqToSupplier(payload, buyerCompany, replyTo), providerCts.Token);
             }
             finally
             {
@@ -814,8 +817,16 @@ internal static class SupplierRfqEmail
     /// The supplier email for a queued request. Shared with the Send window's preview so the rep
     /// sees exactly what the supplier receives.
     /// </summary>
-    internal static RfqToSupplierNotification ComposeRfqToSupplier(SolicitationDispatchPayload payload, string? buyerCompany) => new()
+    internal static RfqToSupplierNotification ComposeRfqToSupplier(SolicitationDispatchPayload payload, string? buyerCompany, string? replyTo = null) => new()
     {
+        // Wording fixed onto the request when the rep pressed Send; empty on requests queued before it existed.
+        SubjectLine = payload.SubjectLine ?? string.Empty,
+        Greeting = payload.Greeting ?? string.Empty,
+        Opening = payload.Opening ?? string.Empty,
+        SignOff = payload.SignOff ?? string.Empty,
+        SendFromMailboxId = payload.SendFromMailboxId,
+        ReplyToAddress = replyTo,
+        FromDisplayName = string.IsNullOrWhiteSpace(buyerCompany) ? RfqToSupplierNotification.BuyerCompanyFallback : buyerCompany.Trim(),
         ToEmail = payload.ToEmail,
         ToName = payload.SupplierName,
         TenantId = payload.BusinessUnitId.ToString(),
@@ -844,9 +855,9 @@ internal static class SupplierRfqEmail
         }).ToList(),
         DueDate = payload.DueOn?.ToString("yyyy-MM-dd") ?? "Please respond promptly",
         // The rep's own words from the Send window; a payload queued without any keeps the standard sentence.
-        Message = string.IsNullOrWhiteSpace(payload.Message)
-            ? RfqToSupplierNotification.DefaultMessage
-            : payload.Message.Trim(),
+        Message = !string.IsNullOrWhiteSpace(payload.Message) ? payload.Message.Trim()
+            : !string.IsNullOrWhiteSpace(payload.DefaultMessage) ? payload.DefaultMessage.Trim()
+            : RfqToSupplierNotification.DefaultMessage,
         CtaPath = $"/procurement/rfqs/{payload.RfqId}/sourcing"
     };
 }

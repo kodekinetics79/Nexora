@@ -45,7 +45,7 @@ public sealed class ProcurementController(
     [RequireModulePermission("Supplier History", PermissionAction.View)]
     public Task<IActionResult> PreviewSupplierRfqEmail(long sourcingCaseId, [FromBody] PreviewSupplierRfqRequest request)
         => ExecuteAsync(async () => Ok(await service.PreviewSupplierRfqEmailAsync(
-            TenantId(), sourcingCaseId, request.Quantity, request.Message, request.DueOn, RequestAborted)));
+            TenantId(), sourcingCaseId, request.Quantity, request.Message, request.DueOn, UserId(), request.SendFromMailboxId, RequestAborted)));
 
     [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-candidates/search")]
     [RequireModulePermission("Supplier History", PermissionAction.Edit)]
@@ -90,7 +90,7 @@ public sealed class ProcurementController(
         {
             var result = await service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
                 TenantId(), sourcingCaseId, request.SupplierId, request.DueOn, request.ExpectedVersion,
-                IdempotencyKey(), Actor(), CorrelationId(), request.Message, request.Quantity), RequestAborted);
+                IdempotencyKey(), Actor(), CorrelationId(), request.Message, request.Quantity, UserId(), request.SendFromMailboxId), RequestAborted);
             return Created($"/api/procurement/solicitations/{result.SupplierSolicitationId}", result);
         });
 
@@ -409,8 +409,8 @@ public sealed record AdoptDiscoveredSuppliersRequest(IReadOnlyCollection<string>
 /// table. Optional; blank means the standard sentence. Plain text, at most 2,000 characters.
 /// </summary>
 /// <summary><paramref name="Quantity"/>: how many the rep asks for; the shortfall when omitted.</summary>
-public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion, string? Message = null, decimal? Quantity = null);
-public sealed record PreviewSupplierRfqRequest(decimal? Quantity = null, string? Message = null, DateTime? DueOn = null);
+public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion, string? Message = null, decimal? Quantity = null, long? SendFromMailboxId = null);
+public sealed record PreviewSupplierRfqRequest(decimal? Quantity = null, string? Message = null, DateTime? DueOn = null, long? SendFromMailboxId = null);
 public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);
 
 /// <summary>The operator states they checked with the supplier and the RFQ never arrived.</summary>

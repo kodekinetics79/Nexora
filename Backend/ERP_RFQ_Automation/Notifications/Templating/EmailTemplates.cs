@@ -157,14 +157,14 @@ Review it here: {{ctaUrl}}
 
                 [RfqToSupplier] = new EmailTemplateDefinition
                 {
-                    Subject = "Request for Quotation {{rfqNumber}} from {{buyerCompany}}",
+                    Subject = "{{subjectLine}}",
                     Html = WrapForSupplier(
                         "Request for Quotation",
                         "{{buyerCompany}} is asking for your quotation.",
                         """
 <h1 style="margin:0 0 16px 0; font-size:20px; color:#0f172a;">Request for Quotation</h1>
-<p style="margin:0 0 16px 0;">Dear {{supplierName}},</p>
-<p style="margin:0 0 16px 0;">{{buyerCompany}} invites you to submit a quotation for the following request. We'd appreciate your best pricing and lead times.</p>
+<p style="margin:0 0 16px 0;">{{greetingHtml}}</p>
+<p style="margin:0 0 16px 0;">{{openingHtml}}</p>
 <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:8px 0; border-collapse:collapse;">
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px; width:40%;">RFQ number</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{rfqNumber}}</td></tr>
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Title</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{rfqTitle}}</td></tr>
@@ -173,14 +173,14 @@ Review it here: {{ctaUrl}}
 </table>
 <p style="margin:0 0 8px 0;">{{messageHtml}}</p>
 <p style="margin:16px 0 8px 0;">Please reply to this email with your price, availability, lead time and how long your price is valid.</p>
-<p style="margin:0 0 8px 0;">Kind regards,<br />{{buyerCompany}}</p>
+<p style="margin:0 0 8px 0;">{{signOffHtml}}</p>
 """),
                     Text = """
 Request for Quotation {{rfqNumber}}
 
-Dear {{supplierName}},
+{{greeting}}
 
-{{buyerCompany}} invites you to submit a quotation for the following request.
+{{opening}}
 
 RFQ number: {{rfqNumber}}
 Title:      {{rfqTitle}}
@@ -191,8 +191,7 @@ Respond by: {{dueDate}}
 
 Please reply to this email with your price, availability, lead time and how long your price is valid.
 
-Kind regards,
-{{buyerCompany}}
+{{signOff}}
 """
                 },
 

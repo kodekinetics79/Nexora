@@ -23,6 +23,15 @@ namespace ERP_RFQ_Automation.Notifications
         /// </summary>
         public string? CtaPath { get; set; }
 
+        /// <summary>The owning tenant's outgoing mailbox to send from; null uses its default.</summary>
+        public long? SendFromMailboxId { get; set; }
+
+        /// <summary>Where replies should go, e.g. the company's RFQ inbox. Null leaves the sender's default.</summary>
+        public string? ReplyToAddress { get; set; }
+
+        /// <summary>Sender name when the platform address is used, e.g. the company's name.</summary>
+        public string? FromDisplayName { get; set; }
+
         /// <summary>Optional attachments (e.g. a generated quote/order PDF).</summary>
         public List<EmailAttachment> Attachments { get; set; } = new();
     }
@@ -47,6 +56,15 @@ namespace ERP_RFQ_Automation.Notifications
         public const string BuyerCompanyFallback = "The buyer";
 
         public string BuyerCompany { get; set; } = BuyerCompanyFallback;
+
+        /// <summary>
+        /// The company's (or sales person's) wording, placeholders already filled. Empty means the
+        /// Nexora default. The part lines are never part of this: they come from <see cref="Lines"/>.
+        /// </summary>
+        public string SubjectLine { get; set; } = string.Empty;
+        public string Greeting { get; set; } = string.Empty;
+        public string Opening { get; set; } = string.Empty;
+        public string SignOff { get; set; } = string.Empty;
         public string RfqNumber { get; set; } = string.Empty;
         public string RfqTitle { get; set; } = string.Empty;
 

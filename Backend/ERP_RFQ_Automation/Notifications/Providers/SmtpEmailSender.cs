@@ -108,7 +108,7 @@ namespace ERP_RFQ_Automation.Notifications.Providers
 
         private MimeMessage BuildMimeMessage(EmailMessage message, string messageId)
         {
-            var from = message.From ?? new EmailAddress(_options.FromAddress, _options.FromName ?? string.Empty);
+            var from = message.From ?? new EmailAddress(_options.FromAddress, message.FromDisplayName ?? _options.FromName ?? string.Empty);
             var defaultReplyTo = string.IsNullOrWhiteSpace(_options.ReplyToAddress)
                 ? null
                 : new EmailAddress(_options.ReplyToAddress!);
