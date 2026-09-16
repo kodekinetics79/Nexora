@@ -163,6 +163,15 @@ function SourcingCasePage() {
     : candidatesFrozen
       ? "Candidates are fixed once a Supplier RFQ has been prepared for this case."
       : null;
+  // The button and the panel sentence are derived from the same tick count, so the sentence names
+  // the button exactly as it reads and changes the moment a supplier is ticked or unticked.
+  const tickedCount = selectedSupplierIds.length;
+  const askLabel = tickedCount > 0 ? `Ask ${tickedCount} supplier${tickedCount === 1 ? "" : "s"}` : "Ask the ticked suppliers";
+  const tickSentence = !canPrepare
+    ? whyNoPrepare
+    : tickedCount === 0
+      ? "Tick the suppliers you want to ask; each gets its own RFQ."
+      : `${tickedCount} supplier${tickedCount === 1 ? "" : "s"} ticked. Press ${askLabel}; each gets its own RFQ.`;
 
   const refreshCandidates = useMutation({
     mutationFn: (limit: CandidateLimit) =>
@@ -353,7 +362,9 @@ function SourcingCasePage() {
             ? (canApproveInline && approvableCandidates.length > 0
               ? "None of these suppliers can be asked yet. Press Approve for RFQs beside a supplier you trust; the list refreshes on its own."
               : "None of these suppliers can be asked yet. A manager approves them for RFQs on the supplier page, then press Refresh candidates.")
-            : sourcingCase.nextAction}
+            : !outreachAlreadySent && eligibleCandidates.length > 0
+              ? tickSentence
+              : sourcingCase.nextAction}
         testId="sourcing-case-next-step"
         action={outreachAlreadySent
           ? <Button variant="contained" onClick={() => navigate(`/procurement/rfqs/${sourcingCase.rfqId}/sourcing`)}>Open sourcing workbench</Button>
@@ -492,9 +503,7 @@ function SourcingCasePage() {
               disabled={!canPrepare || selectedSupplierIds.length === 0}
               onClick={() => setPreviewOpen(true)}
             >
-              {selectedSupplierIds.length > 0
-                ? `Ask ${selectedSupplierIds.length} supplier${selectedSupplierIds.length === 1 ? "" : "s"}`
-                : "Ask the ticked suppliers"}
+              {askLabel}
             </Button>
           </span>
         </Tooltip>
