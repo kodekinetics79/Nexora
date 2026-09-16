@@ -165,6 +165,24 @@ export interface QuoteRevisionApplyResult {
   totalAmount?: number | null;
 }
 
+// ==== The covering e-mail (mirrors DTOs/QuoteDTOs/QuoteEmailDraftDTOs.cs) ====
+
+export interface QuoteEmailDraft {
+  quoteId: number;
+  quoteNo: string;
+  recipientEmail?: string | null;
+  subject: string;
+  /** Plain text; blank lines separate paragraphs. */
+  body: string;
+  attachmentFileName: string;
+}
+
+/** What the rep changed in the send dialog. Either field left undefined keeps the server default. */
+export interface QuoteEmailMessage {
+  subject?: string;
+  body?: string;
+}
+
 // ==== Below-floor holds (WP-B3) + revisions-lite (WP-B4) ====
 
 /** Result of a send attempt: either it went out, or it was parked in Approvals. */
@@ -398,11 +416,26 @@ const quoteService = {
    *  - R17 `taxDerivationRequired` — a line's output tax has not been calculated.
    * All three are surfaced as outcomes rather than thrown errors.
    */
-  sendEmail: async (id: number, recipientEmail: string): Promise<QuoteSendOutcome> => {
+  /**
+   * The covering e-mail the customer would receive if the quote were sent now — the server's own
+   * default subject and plain-text body, the attachment name and the address on record — so the
+   * rep can review and edit it in the send dialog.
+   */
+  getEmailDraft: async (id: number): Promise<QuoteEmailDraft> => {
+    const { data } = await axiosInstance.get(`/api/Quote/${id}/email-draft`);
+    return data;
+  },
+
+  /**
+   * @param message the rep's edited subject/body from the send dialog. Omitted, the server sends
+   * its default (the same words `getEmailDraft` returned).
+   */
+  sendEmail: async (id: number, recipientEmail: string, message?: QuoteEmailMessage): Promise<QuoteSendOutcome> => {
     try {
       // 202 Accepted carries `{ queuedForDelivery, delivered, replayed }`. Read it: "queued" and
       // "delivered" are different facts and the rep is told different things for each.
-      const { data } = await axiosInstance.post(`/api/Quote/${id}/email`, null, { params: { recipientEmail } });
+      const body = message ? { customSubject: message.subject ?? null, customBody: message.body ?? null } : null;
+      const { data } = await axiosInstance.post(`/api/Quote/${id}/email`, body, { params: { recipientEmail } });
       return {
         held: false,
         delivered: data?.delivered === true,

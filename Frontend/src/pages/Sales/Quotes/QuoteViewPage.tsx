@@ -135,10 +135,23 @@ const QuoteViewPage: React.FC = () => {
   const [extendValidityOpen, setExtendValidityOpen] = React.useState(false);
   const [followUpOpen, setFollowUpOpen] = React.useState(false);
   const [priceConfirmOpen, setPriceConfirmOpen] = React.useState(false);
-  const [pendingRecipient, setPendingRecipient] = React.useState('');
+  // The recipient AND the words. The rep reviews and may edit the subject and message in the
+  // send dialog (owner ask 2026-09-15); both travel with the send once the prices are confirmed.
+  const [pendingSend, setPendingSend] = React.useState<{ recipientEmail: string; subject?: string; body?: string }>({ recipientEmail: '' });
   const [holdInfo, setHoldInfo] = React.useState<string | null>(null);
+  // The default covering e-mail the server would send, fetched only while the dialog is open so
+  // the rep sees — and can change — exactly what the customer will read.
+  const emailDraftQuery = useQuery({
+    queryKey: ['quote-email-draft', id],
+    queryFn: () => quoteService.getEmailDraft(Number(id)),
+    enabled: !!id && emailOpen,
+    staleTime: 5 * 60 * 1000,
+  });
   const sendMutation = useMutation({
-    mutationFn: (recipientEmail: string) => quoteService.sendEmail(Number(id), recipientEmail),
+    mutationFn: (send: { recipientEmail: string; subject?: string; body?: string }) =>
+      send.subject !== undefined || send.body !== undefined
+        ? quoteService.sendEmail(Number(id), send.recipientEmail, { subject: send.subject, body: send.body })
+        : quoteService.sendEmail(Number(id), send.recipientEmail),
     onSuccess: (result) => {
       if (result.priceAttestationRequired) {
         // The prices changed between the confirmation and the send — confirm again.
@@ -185,7 +198,7 @@ const QuoteViewPage: React.FC = () => {
       quoteService.confirmPriceAttestation(Number(id), source, reference),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
-      sendMutation.mutate(pendingRecipient);
+      sendMutation.mutate(pendingSend);
     },
     onError: (error: any) => {
       const message = error?.response?.data?.message || 'The price confirmation could not be recorded.';
@@ -939,16 +952,21 @@ const QuoteViewPage: React.FC = () => {
       <EmailPromptDialog
         open={emailOpen}
         title={`Email quote ${quote.quoteNo}`}
-        initialEmail={quote.customerEmail || ''}
+        initialEmail={quote.customerEmail || emailDraftQuery.data?.recipientEmail || ''}
+        initialSubject={emailDraftQuery.data?.subject}
+        initialBody={emailDraftQuery.data?.body}
+        attachmentName={emailDraftQuery.data?.attachmentFileName ?? `Quote_${quote.quoteNo}.pdf`}
+        draftLoading={emailOpen && emailDraftQuery.isPending}
         loading={sendMutation.isPending}
-        composerFields="recipient-only"
+        composerFields="message"
         confirmLabel="Send quote"
         businessUnitId={businessUnitId}
         customerId={quote.customerId ?? null}
         onCancel={() => setEmailOpen(false)}
-        onConfirm={(email) => {
-          // R5: choosing the recipient no longer sends. The prices are confirmed first.
-          setPendingRecipient(email);
+        onConfirm={(email, subject, body) => {
+          // R5: choosing the recipient no longer sends. The prices are confirmed first; the
+          // reviewed words travel with the send.
+          setPendingSend({ recipientEmail: email, subject, body });
           setEmailOpen(false);
           setPriceConfirmOpen(true);
         }}
@@ -958,7 +976,7 @@ const QuoteViewPage: React.FC = () => {
         open={priceConfirmOpen}
         quoteId={Number(id)}
         quoteNo={quote.quoteNo}
-        recipientEmail={pendingRecipient}
+        recipientEmail={pendingSend.recipientEmail}
         submitting={confirmPriceMutation.isPending || sendMutation.isPending}
         onCancel={() => setPriceConfirmOpen(false)}
         onConfirm={(source, reference) => confirmPriceMutation.mutate({ source, reference })}

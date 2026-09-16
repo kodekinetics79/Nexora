@@ -8,6 +8,7 @@ using ERP_RFQ_Automation.Sla;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
@@ -429,9 +430,35 @@ namespace ERP_RFQ_Automation.Controllers
             catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
         }
 
+        /// <summary>
+        /// The e-mail the customer would receive, before it is sent: default subject, plain-text
+        /// body, attachment name and the customer's address on record. The send dialog shows it
+        /// for review and edit; the send below accepts the edited words.
+        /// </summary>
+        [HttpGet("{id}/email-draft")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<QuoteEmailDraftDTO>> GetEmailDraft(long id, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (!await CanAccessQuoteAsync(id, ct)) return NotFound();
+            try
+            {
+                return Ok(await _quoteService.GetEmailDraftAsync(id, businessUnitId, ct));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (Exception ex) { return Unexpected(ex, "quote-email-draft"); }
+        }
+
+        /// <param name="request">
+        /// Optional edits from the send dialog. Bound with <see cref="EmptyBodyBehavior.Allow"/>
+        /// so the callers that POST with no body at all (the e2e journeys, API clients) keep the
+        /// server default; a blank field also means "use the default".
+        /// </param>
         [HttpPost("{id}/email")]
         [RequireModulePermission("Quotations", PermissionAction.Edit)]
-        public async Task<IActionResult> SendEmail(long id, [FromQuery] string recipientEmail)
+        public async Task<IActionResult> SendEmail(long id, [FromQuery] string recipientEmail,
+            [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] QuoteSendEmailRequestDTO? request = null)
         {
             if (string.IsNullOrEmpty(recipientEmail)) return BadRequest("Recipient email is required.");
             try
@@ -441,7 +468,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
                 // WP-B3: the send may be parked as a below-floor approval instead of
                 // being performed; 409 tells the caller it is queued, not failed.
-                var result = await _quoteService.SendQuoteEmailAsync(id, businessUnitId, recipientEmail, options: new QuoteSendOptions
+                var result = await _quoteService.SendQuoteEmailAsync(id, businessUnitId, recipientEmail,
+                    customSubject: request?.CustomSubject, customBody: request?.CustomBody,
+                    options: new QuoteSendOptions
                 {
                     RequestedByUserId = ActorUserId(),
                     RequestedBy = ActorEmail()

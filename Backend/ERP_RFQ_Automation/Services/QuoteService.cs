@@ -58,6 +58,13 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
 
         /// <summary>
+        /// The default covering e-mail for this quote — subject, plain-text body, attachment name
+        /// and the customer's address on record — for the rep to review and edit before sending.
+        /// Composed by the same code the send uses, so it cannot say something the send will not.
+        /// </summary>
+        Task<QuoteEmailDraftDTO> GetEmailDraftAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
+
+        /// <summary>
         /// Everything that will refuse this quote's send, BEFORE the rep opens the send dialog.
         /// See <see cref="QuoteService.EvaluateSendReadinessAsync"/>.
         /// </summary>
@@ -1915,6 +1922,92 @@ namespace ERP_RFQ_Automation.Services
             return readiness;
         }
 
+        /// <summary>
+        /// The default covering e-mail for a quote, as plain text.
+        ///
+        /// <para>"Our Company" and "Sales Team" were the same defect as the PDF's placeholder
+        /// identity, one layer out: a customer receiving mail from "Our Company" learns nothing
+        /// and trusts less. BusinessUnitName is non-null in the schema, so naming it directly is
+        /// not a narrowing.</para>
+        ///
+        /// <para>The body used to say only "please find attached", which told a buyer nothing they
+        /// could act on and nothing they could file. Everything here is a FACT ABOUT THIS QUOTE —
+        /// no marketing, no invented commitment — and each line is omitted entirely when its value
+        /// is absent: a customer-facing e-mail must never read "Valid until:" followed by nothing.
+        /// CustomerRfqReference is the buyer's OWN number for the enquiry; it matters more than
+        /// ours, because it is how they match this quote to the request they raised.</para>
+        /// </summary>
+        internal static (string Subject, string PlainBody) ComposeDefaultQuoteEmail(Quote quote)
+        {
+            var subject = $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
+
+            var greetingName = quote.Customer?.Name;
+            var greeting = string.IsNullOrWhiteSpace(greetingName) ? "Dear Customer" : $"Dear {greetingName}";
+
+            var facts = new List<string> { $"Please find attached our quotation #{quote.QuoteNo}." };
+            if (!string.IsNullOrWhiteSpace(quote.Rfq?.CustomerRfqReference))
+                facts.Add($"Your reference: {quote.Rfq!.CustomerRfqReference}");
+            if (quote.TotalAmount is decimal total && !string.IsNullOrWhiteSpace(quote.Currency?.Code))
+                facts.Add($"Total: {quote.Currency!.Code} {total:N2}");
+            if (quote.ValidUntil is DateTime validUntil)
+                facts.Add($"Valid until: {validUntil:d MMMM yyyy}");
+
+            var body = string.Join("\n\n", new[]
+            {
+                $"{greeting},",
+                string.Join("\n", facts),
+                "If anything here needs revisiting, reply to this message and we will pick it up.",
+                $"Kind regards,\n{quote.BusinessUnit?.BusinessUnitName}"
+            });
+            return (subject, body);
+        }
+
+        /// <summary>
+        /// Plain text → the HTML the mail carries: blank lines become paragraphs, single line
+        /// breaks become <c>&lt;br/&gt;</c>, and every character the rep typed is encoded, so a
+        /// "&lt;" in a part number arrives as a "&lt;" and not as broken markup.
+        /// </summary>
+        internal static string PlainTextToHtml(string text)
+        {
+            var normalized = (text ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+            var paragraphs = System.Text.RegularExpressions.Regex.Split(normalized, "\n{2,}")
+                .Select(paragraph => paragraph.Trim())
+                .Where(paragraph => paragraph.Length > 0)
+                .Select(paragraph => "<p>" + string.Join("<br/>",
+                    paragraph.Split('\n').Select(line => System.Net.WebUtility.HtmlEncode(line.TrimEnd()))) + "</p>");
+            return string.Join("\n", paragraphs);
+        }
+
+        /// <summary>
+        /// What the customer would receive if the rep sent this quote now, in words the rep can
+        /// edit before sending. Same composer as the send, so the preview cannot drift from it.
+        /// </summary>
+        public async Task<QuoteEmailDraftDTO> GetEmailDraftAsync(long quoteId, long businessUnitId, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            var quote = await _context.Quotes.AsNoTracking()
+                .Include(q => q.BusinessUnit)
+                .Include(q => q.Currency)
+                .Include(q => q.Customer)
+                .Include(q => q.Rfq)
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException("Quote not found");
+
+            var composed = ComposeDefaultQuoteEmail(quote);
+            return new QuoteEmailDraftDTO
+            {
+                QuoteId = quote.Id,
+                QuoteNo = quote.QuoteNo,
+                RecipientEmail = string.IsNullOrWhiteSpace(quote.Customer?.ContactEmail) ? null : quote.Customer!.ContactEmail!.Trim(),
+                Subject = composed.Subject,
+                Body = composed.PlainBody,
+                AttachmentFileName = QuoteAttachmentFileName(quote.QuoteNo)
+            };
+        }
+
+        /// <summary>The one spelling of the PDF's file name, for the delivery row and the dialog.</summary>
+        internal static string QuoteAttachmentFileName(string quoteNo) => $"Quote_{quoteNo}.pdf";
+
         public async Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null)
         {
             if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
@@ -1987,47 +2080,13 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
-            // "Our Company" and "Sales Team" below were the same defect as the PDF's placeholder
-            // identity, one layer out: a customer receiving mail from "Our Company" learns
-            // nothing and trusts less. BusinessUnitName is non-null in the schema, so naming it
-            // directly is not a narrowing — it removes a fallback that could only ever have
-            // fired on a broken row, and would have hidden that breakage behind a bland phrase.
-            var subject = !string.IsNullOrEmpty(customSubject)
-                ? customSubject
-                : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
-
-            // The default body used to say only "please find attached", which told a buyer nothing
-            // they could act on and nothing they could file. Everything added below is already
-            // known at this point and is a FACT ABOUT THIS QUOTE -- no marketing, no invented
-            // commitment. Each line is omitted entirely when its value is absent, because a
-            // customer-facing e-mail must never read "valid until" followed by nothing, and the
-            // greeting falls back rather than printing an empty name.
-            //
-            // CustomerRfqReference is the buyer's OWN number for the enquiry. It matters more than
-            // ours: it is how they match this quote to the request they raised, and without it a
-            // procurement desk has to open the attachment to find out what it answers.
-            var greetingName = quote.Customer?.Name;
-            var greeting = string.IsNullOrWhiteSpace(greetingName) ? "Dear Customer" : $"Dear {greetingName}";
-
-            var facts = new List<string>();
-            if (!string.IsNullOrWhiteSpace(quote.Rfq?.CustomerRfqReference))
-                facts.Add($"<p>Your reference: {quote.Rfq!.CustomerRfqReference}</p>");
-            if (quote.TotalAmount is decimal total && !string.IsNullOrWhiteSpace(quote.Currency?.Code))
-                facts.Add($"<p>Total: {quote.Currency!.Code} {total:N2}</p>");
-            if (quote.ValidUntil is DateTime validUntil)
-                facts.Add($"<p>Valid until: {validUntil:d MMMM yyyy}</p>");
-
-            var body = !string.IsNullOrEmpty(customBody)
-                ? customBody.Replace("\n", "<br/>")
-                : $@"
-                <p>{greeting},</p>
-                <p>Please find attached our quotation #{quote.QuoteNo}.</p>
-                {string.Join("\n                ", facts)}
-                <p>If anything here needs revisiting, reply to this message and we will pick it up.</p>
-                <br/>
-                <p>Kind regards,</p>
-                <p>{quote.BusinessUnit?.BusinessUnitName}</p>
-            ";
+            // One composer for the default words (ComposeDefaultQuoteEmail) and one renderer for
+            // whatever goes out (PlainTextToHtml), so the draft the rep reviews in the send dialog
+            // IS the mail the customer receives — edited or not. A blank custom field means "use
+            // the default", which is what the callers that post no body at all rely on.
+            var composed = ComposeDefaultQuoteEmail(quote);
+            var subject = !string.IsNullOrWhiteSpace(customSubject) ? customSubject.Trim() : composed.Subject;
+            var body = PlainTextToHtml(!string.IsNullOrWhiteSpace(customBody) ? customBody : composed.PlainBody);
 
             var issuerEmail = await _context.QuoteConfigurations.AsNoTracking()
                 .Where(x => x.BusinessUnitId == businessUnitId)
@@ -2092,7 +2151,7 @@ namespace ERP_RFQ_Automation.Services
                         // QuoteDeliverySender treats this tenant-owned company address as Reply-To;
                         // the transport's verified From identity remains authoritative.
                         FromEmail = string.IsNullOrWhiteSpace(issuerEmail) ? null : issuerEmail.Trim(),
-                        AttachmentFileName = $"Quote_{quote.QuoteNo}.pdf",
+                        AttachmentFileName = QuoteAttachmentFileName(quote.QuoteNo),
                         AttestedPriceFingerprint = boundFingerprint,
                         RequestedOn = DateTime.UtcNow,
                         AvailableOn = DateTime.UtcNow,
