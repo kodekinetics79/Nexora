@@ -209,6 +209,86 @@ public sealed class Gate2SupplierTierFieldTests
         Assert.Equal(SyntheticVatNumber, listed.TaxRegistrationNumber);
         Assert.Equal(SupplierTiers.Tier1Partner, listed.Tier);
         Assert.Equal(45, listed.CreditDays);
+        Assert.Equal("https://www.tiered.example", listed.Website);
+        Assert.Equal(SupplierRoles.Distributor, listed.Role);
+    }
+
+    // ============================================================================
+    // Website and role (internet supplier discovery)
+    // ============================================================================
+
+    /// <summary>
+    /// The two columns the internet search writes when a rep adopts a hit, and that a master-data
+    /// administrator can also type. The website is stored as an absolute origin however it was
+    /// typed, because the search matches hits against it by domain; the role is stored in its one
+    /// spelling because the CHECK constraint knows no other.
+    /// </summary>
+    [Fact]
+    public async Task Create_and_update_round_trip_website_and_role()
+    {
+        using var database = new TestDb();
+        await SeedTenantAsync(database, Tenant);
+
+        long supplierId;
+        await using (var context = database.ContextFor(Tenant))
+        {
+            var created = await Create(Controller(context, Tenant), new SupplierCreateRequestDTO
+            {
+                Name = "Gulf Switchgear",
+                Website = "gulfswitchgear.com",
+                Role = "DISTRIBUTOR"
+            });
+            var body = Assert.IsType<SupplierResponseDTO>(
+                Assert.IsType<CreatedAtActionResult>(created.Result).Value);
+            Assert.Equal("https://gulfswitchgear.com", body.Website);
+            Assert.Equal(SupplierRoles.Distributor, body.Role);
+            supplierId = body.Id;
+        }
+
+        await using (var context = database.ContextFor(Tenant))
+        {
+            var controller = Controller(context, Tenant);
+            var current = await Detail(controller, supplierId);
+            Assert.Equal("https://gulfswitchgear.com", current.Website);
+            Assert.Equal(SupplierRoles.Distributor, current.Role);
+            var update = await Update(controller, supplierId, new SupplierUpdateRequestDTO
+            {
+                Name = current.Name,
+                Website = "https://www.gulfswitchgear.com/about/",
+                Role = "manufacturer",
+                ConcurrencyToken = current.ConcurrencyToken
+            });
+            Assert.IsType<NoContentResult>(update);
+        }
+
+        await using (var context = database.ContextFor(Tenant))
+        {
+            var fetched = await Detail(Controller(context, Tenant), supplierId);
+            Assert.Equal("https://www.gulfswitchgear.com/about", fetched.Website);
+            Assert.Equal(SupplierRoles.Manufacturer, fetched.Role);
+        }
+    }
+
+    [Theory]
+    [InlineData("Wholesaler")]
+    [InlineData("TIER_1")]
+    public async Task An_unknown_role_is_rejected_and_the_refusal_names_the_permitted_roles(string role)
+    {
+        using var database = new TestDb();
+        await SeedTenantAsync(database, Tenant);
+
+        await using var context = database.ContextFor(Tenant);
+        var controller = Controller(context, Tenant);
+        var created = await Create(controller, new SupplierCreateRequestDTO { Name = "Unroled Parts", Role = role });
+
+        Assert.IsType<BadRequestObjectResult>(created.Result);
+        var message = Assert.Single(controller.ModelState[nameof(SupplierCreateRequestDTO.Role)]!.Errors).ErrorMessage;
+        Assert.Contains(role, message);
+        foreach (var permitted in SupplierRoles.All)
+            Assert.Contains(permitted, message);
+
+        await using var verify = database.ContextFor(Tenant);
+        Assert.False(await verify.Suppliers.AnyAsync());
     }
 
     // ============================================================================
@@ -502,6 +582,8 @@ public sealed class Gate2SupplierTierFieldTests
             request.CityId = 9_003;
             request.CountryId = 9_001;
             request.CurrencyId = Tenant + 1;
+            request.Website = "www.tiered.example/";
+            request.Role = "distributor";
         }
 
         var created = await Create(Controller(context, Tenant), request);

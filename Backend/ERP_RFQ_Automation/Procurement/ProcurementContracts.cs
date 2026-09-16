@@ -10,6 +10,14 @@ public interface IProcurementApplicationService
         => throw new NotSupportedException("Sourcing Cases are not supported by this procurement adapter.");
     Task<SourcingCandidateSearchResult> SearchSourcingCandidatesAsync(SearchSourcingCandidatesCommand command, CancellationToken ct = default)
         => throw new NotSupportedException("Supplier candidate search is not supported by this procurement adapter.");
+    /// <summary>
+    /// Re-runs the case's candidate rule after the supplier list changed under it — today, after
+    /// the rep adopts suppliers from the internet search. Before outreach starts it rebuilds the
+    /// list exactly as the search button does; once a Supplier RFQ has been prepared it only adds
+    /// the suppliers that are new, so nothing already prepared loses its candidate row.
+    /// </summary>
+    Task<SourcingCaseView> RefreshCandidatesAfterSupplierChangeAsync(RefreshSourcingCandidatesCommand command, CancellationToken ct = default)
+        => throw new NotSupportedException("Supplier candidate refresh is not supported by this procurement adapter.");
     Task<PreparedSupplierRfqResult> PrepareSupplierRfqAsync(PrepareSupplierRfqCommand command, CancellationToken ct = default)
         => throw new NotSupportedException("Supplier RFQ preparation is not supported by this procurement adapter.");
     Task<QueuedSupplierRfqResult> QueuePreparedSupplierRfqAsync(QueuePreparedSupplierRfqCommand command, CancellationToken ct = default)
@@ -76,6 +84,12 @@ public sealed record SearchSourcingCandidatesCommand(
     int Limit,
     long ExpectedVersion,
     string IdempotencyKey,
+    string Actor,
+    string CorrelationId);
+
+public sealed record RefreshSourcingCandidatesCommand(
+    long BusinessUnitId,
+    long SourcingCaseId,
     string Actor,
     string CorrelationId);
 

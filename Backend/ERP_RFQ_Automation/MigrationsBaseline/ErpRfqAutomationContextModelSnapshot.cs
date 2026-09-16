@@ -16814,6 +16814,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(32)")
                         .HasDefaultValue("UNKNOWN");
 
+                    b.Property<string>("Role")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<decimal?>("SuccessRate")
                         .HasColumnType("decimal(5, 2)");
 
@@ -16834,6 +16838,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)")
                         .HasDefaultValue("UNKNOWN");
+
+                    b.Property<string>("Website")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.HasKey("Id")
                         .HasName("PK__Supplier__3214EC2782495266");
@@ -16879,6 +16887,8 @@ namespace ERP_RFQ_Automation.Migrations
                             t.HasCheckConstraint("CK_Suppliers_ReadinessStatus", "\"ReadinessStatus\" IN ('REVIEW_REQUIRED','READY','RESTRICTED','BLOCKED')");
 
                             t.HasCheckConstraint("CK_Suppliers_RiskStatus", "\"RiskStatus\" IN ('UNKNOWN','LOW','MEDIUM','HIGH','BLOCKED')");
+
+                            t.HasCheckConstraint("CK_Suppliers_Role", "\"Role\" IS NULL OR \"Role\" IN ('Manufacturer','Distributor','Reseller','Unknown')");
 
                             t.HasCheckConstraint("CK_Suppliers_TaxRegistrationNumber", "\"TaxRegistrationNumber\" IS NULL OR (\"TaxRegistrationNumber\" ~ '^[A-Z0-9./]{5,50}$' AND (\"TaxRegistrationNumber\" !~ '^3[0-9]*$' OR \"TaxRegistrationNumber\" ~ '^3[0-9]{13}3$'))");
 
@@ -20552,6 +20562,60 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("RfqItemId", "RfqId");
 
                     b.ToTable("commercial_demand_lines", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoverySearch", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("HitCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("HitsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("IdentityKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("QueriesJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTime>("SearchedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("SearchedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "IdentityKey")
+                        .IsUnique()
+                        .HasDatabaseName("UX_supplier_discovery_searches_BU_IdentityKey");
+
+                    b.ToTable("supplier_discovery_searches", (string)null);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceipt", b =>
@@ -27292,6 +27356,15 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("RfqItemId", "RfqId")
                         .HasPrincipalKey("Id", "Rfqid")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.Discovery.SupplierDiscoverySearch", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

@@ -5,6 +5,8 @@ using ERP_RFQ_Automation.DTOs.SupplierDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.Procurement.Discovery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -19,12 +21,20 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly ISupplierRepository _repository;
         private readonly IMasterDataChangeHistoryReader _changeHistory;
+        private readonly ISupplierDiscoveryService? _discovery;
 
+        /// <param name="discovery">
+        /// Internet supplier search (Procurement/Discovery). Optional so every existing construction
+        /// site keeps compiling; absent, the web-search endpoint answers 503 exactly as it did before
+        /// the search existed. The composed application always supplies it.
+        /// </param>
         public SupplierController(
-            ISupplierRepository repository, IMasterDataChangeHistoryReader changeHistory)
+            ISupplierRepository repository, IMasterDataChangeHistoryReader changeHistory,
+            ISupplierDiscoveryService? discovery = null)
         {
             _repository = repository;
             _changeHistory = changeHistory;
+            _discovery = discovery;
         }
 
         /// <summary>FR-MDM-05 — the before/after trail for one supplier, newest first. Payment
@@ -160,6 +170,8 @@ namespace ERP_RFQ_Automation.Controllers
                     // The value itself is already validated by the DTO attribute.
                     Tier = SupplierTierInput.Normalize(request.Tier),
                     CreditDays = request.CreditDays,
+                    Website = SupplierRoleInput.NormalizeWebsite(request.Website),
+                    Role = SupplierRoles.Normalize(request.Role),
                     Buid = businessUnitId,
                     IsActive = true,
                     CreatedBy = actor,
@@ -218,6 +230,8 @@ namespace ERP_RFQ_Automation.Controllers
                 // review below, and it enters no eligibility check.
                 existing.Tier = SupplierTierInput.Normalize(request.Tier);
                 existing.CreditDays = request.CreditDays;
+                existing.Website = SupplierRoleInput.NormalizeWebsite(request.Website);
+                existing.Role = SupplierRoles.Normalize(request.Role);
                 // Activation is exclusively controlled by Supplier governance.
                 existing.ModifiedBy = GetAuthenticatedActor();
                 existing.ModifiedOn = DateTime.UtcNow;
@@ -310,6 +324,8 @@ namespace ERP_RFQ_Automation.Controllers
                 TaxRegistrationNumber = supplier.TaxRegistrationNumber,
                 Tier = supplier.Tier,
                 CreditDays = supplier.CreditDays,
+                Website = supplier.Website,
+                Role = supplier.Role,
                 Buid = supplier.Buid,
                 BusinessUnitName = supplier.Bu != null ? supplier.Bu.BusinessUnitName : null,
                 IsActive = supplier.IsActive,
@@ -369,19 +385,34 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// The supplier page's "search the internet" box. Same search, ranking and gates as the
+        /// sourcing case's discover step (Procurement/Discovery), from a free-text query; the answer's
+        /// <c>status</c> word says whether there are hits or why not. Nothing is created here.
+        /// </summary>
         [HttpGet("web-search")]
         [RequireModulePermission("Suppliers", PermissionAction.View)]
-        public ActionResult<List<SupplierSearchResultDTO>> WebSearch([FromQuery] string query)
+        public async Task<ActionResult<SupplierDiscoveryResult>> WebSearch(
+            [FromQuery] string query, [FromQuery] int offset = 0, [FromQuery] int limit = 10)
         {
-            if (!TryGetAuthenticatedTenant(out _))
+            if (!TryGetAuthenticatedTenant(out var businessUnitId))
                 return Forbid();
             if (string.IsNullOrWhiteSpace(query))
                 return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier query",
-                    "Search query is required."));
+                    "Type what you are looking for — a part number, a maker, or both."));
+            if (_discovery is null)
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, Problem(
+                    StatusCodes.Status503ServiceUnavailable, "Internet supplier search unavailable",
+                    "Internet supplier search is not wired up in this deployment."));
 
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, Problem(
-                StatusCodes.Status503ServiceUnavailable, "External supplier discovery disabled",
-                "External supplier discovery is disabled until a governed, tenant-authorized provider is configured."));
+            try
+            {
+                return Ok(await _discovery.SearchAsync(businessUnitId, query, offset, limit, HttpContext.RequestAborted));
+            }
+            catch (ProcurementValidationException ex)
+            {
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier query", ex.Message));
+            }
         }
 
         // Compose Quote Email

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.Procurement.Discovery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,7 +15,8 @@ namespace ERP_RFQ_Automation.Controllers;
 [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Procurement)]
 public sealed class ProcurementController(
     IProcurementApplicationService service,
-    ILogger<ProcurementController> logger) : ControllerBase
+    ILogger<ProcurementController> logger,
+    ISupplierDiscoveryService discovery) : ControllerBase
 {
     [HttpGet("rfqs/{rfqId:long}/workbench")]
     [RequireModulePermission("RFQ Management", PermissionAction.View)]
@@ -47,6 +49,32 @@ public sealed class ProcurementController(
         => ExecuteAsync(async () => Ok(await service.SearchSourcingCandidatesAsync(
             new SearchSourcingCandidatesCommand(TenantId(), sourcingCaseId, request.Limit,
                 request.ExpectedVersion, IdempotencyKey(), Actor(), CorrelationId()), RequestAborted)));
+
+    /// <summary>
+    /// Searches the internet for suppliers of the case's part and maker when the company knows too
+    /// few. Read-only: nothing is created until the rep ticks a hit and calls <c>discover/adopt</c>.
+    /// The answer's <c>status</c> word says what the screen shows — hits to tick, or one sentence on
+    /// why there are none.
+    /// </summary>
+    [HttpPost("sourcing-cases/{sourcingCaseId:long}/discover")]
+    [RequireModulePermission("Supplier History", PermissionAction.Edit)]
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.SupplierSearch)]
+    public Task<IActionResult> DiscoverSuppliers(long sourcingCaseId, [FromBody] DiscoverSuppliersRequest? request)
+        => ExecuteAsync(async () => Ok(await discovery.DiscoverAsync(new DiscoverSuppliersCommand(
+            TenantId(), sourcingCaseId, request?.Offset ?? 0, request?.Limit ?? 10, Actor()), RequestAborted)));
+
+    /// <summary>
+    /// Puts the ticked internet hits on the company's supplier list (Discovered, Tier 3, tagged with
+    /// the part and makers) and re-runs the case's candidate rule so they appear with their blockers
+    /// in words. Adopting the same company twice yields the same supplier.
+    /// </summary>
+    [HttpPost("sourcing-cases/{sourcingCaseId:long}/discover/adopt")]
+    [RequireModulePermission("Supplier History", PermissionAction.Edit)]
+    [RequireModulePermission("Suppliers", PermissionAction.Create)]
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.SupplierSearch)]
+    public Task<IActionResult> AdoptDiscoveredSuppliers(long sourcingCaseId, [FromBody] AdoptDiscoveredSuppliersRequest request)
+        => ExecuteAsync(async () => Ok(await discovery.AdoptAsync(new AdoptDiscoveredSuppliersCommand(
+            TenantId(), sourcingCaseId, request.HitIds ?? [], Actor(), SafeCorrelationId()), RequestAborted)));
 
     [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-rfqs")]
     [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
@@ -363,6 +391,12 @@ public sealed record CreateSourcingCaseRequest(
     bool SourceEntireQuantity = false);
 
 public sealed record SearchSourcingCandidatesRequest(int Limit, long ExpectedVersion);
+
+/// <summary>"Show 10 more" is the same call with <c>Offset</c> moved on by the previous <c>Limit</c>.</summary>
+public sealed record DiscoverSuppliersRequest(int Offset = 0, int Limit = 10);
+
+/// <summary>The ids of the ticked hits, exactly as the discover call returned them.</summary>
+public sealed record AdoptDiscoveredSuppliersRequest(IReadOnlyCollection<string>? HitIds);
 
 public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion);
 public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);

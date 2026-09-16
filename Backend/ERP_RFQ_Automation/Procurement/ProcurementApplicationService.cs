@@ -346,6 +346,73 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         });
     }
 
+    /// <inheritdoc />
+    public async Task<SourcingCaseView> RefreshCandidatesAfterSupplierChangeAsync(
+        RefreshSourcingCandidatesCommand command, CancellationToken ct = default)
+    {
+        ValidateTenant(command.BusinessUnitId);
+        if (string.IsNullOrWhiteSpace(command.Actor))
+            throw new ProcurementValidationException("An authenticated actor is required.");
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var sourcingCase = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
+                ?? throw new ProcurementValidationException("Sourcing Case was not found in the authenticated tenant.");
+            if (sourcingCase.Status is SourcingCaseStatuses.Closed or SourcingCaseStatuses.Cancelled)
+                throw new ProcurementConflictException("A closed or cancelled Sourcing Case cannot take new suppliers.");
+
+            var now = DateTime.UtcNow;
+            var outreachStarted = await _db.Set<SupplierSolicitation>().AnyAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.SourcingCaseId == sourcingCase.Id, ct);
+            var previousCandidates = sourcingCase.Candidates.Select(ToCandidateSnapshot).ToArray();
+            var fresh = await ComputeCandidatesAsync(sourcingCase, sourcingCase.SearchLimit, now, ct);
+            if (!outreachStarted)
+            {
+                // Same rebuild the search button performs.
+                _db.SourcingCaseCandidates.RemoveRange(sourcingCase.Candidates);
+                sourcingCase.Candidates.Clear();
+                foreach (var candidate in fresh) sourcingCase.Candidates.Add(candidate);
+                sourcingCase.Status = sourcingCase.Candidates.Count == 0
+                    ? SourcingCaseStatuses.DiscoveryRequired : SourcingCaseStatuses.InternalSearch;
+                sourcingCase.NextAction = sourcingCase.Candidates.Count == 0
+                    ? "Review discovery options" : "Select suppliers for outreach";
+            }
+            else
+            {
+                // A prepared Supplier RFQ points at a candidate; those rows stay. Only the suppliers
+                // that are new to the case are appended, ranked after the ones already there.
+                var known = sourcingCase.Candidates.Select(x => x.SupplierId).ToHashSet();
+                var rank = sourcingCase.Candidates.Count == 0 ? 0 : sourcingCase.Candidates.Max(x => x.Rank);
+                foreach (var candidate in fresh.Where(x => !known.Contains(x.SupplierId)))
+                {
+                    candidate.Rank = ++rank;
+                    sourcingCase.Candidates.Add(candidate);
+                }
+            }
+            sourcingCase.Version++;
+            sourcingCase.UpdatedOn = now;
+            sourcingCase.UpdatedBy = command.Actor.Trim();
+            AddEvent(command.BusinessUnitId, "SourcingCase", sourcingCase.Id, sourcingCase.Version,
+                "SUPPLIER_CANDIDATES_REFRESHED", command.Actor, command.CorrelationId,
+                $"refresh:{sourcingCase.Id}:{sourcingCase.Version}:{Guid.NewGuid():N}",
+                JsonSerializer.Serialize(new
+                {
+                    Reason = "SUPPLIER_LIST_CHANGED",
+                    OutreachStarted = outreachStarted,
+                    Version = sourcingCase.Version,
+                    PreviousCandidates = previousCandidates,
+                    Candidates = sourcingCase.Candidates.Select(ToCandidateSnapshot).ToArray()
+                }), now);
+            await _db.SaveChangesAsync(ct);
+            var view = await ToSourcingCaseViewAsync(sourcingCase, ct);
+            await tx.CommitAsync(ct);
+            return view;
+        });
+    }
+
     public async Task<PreparedSupplierRfqResult> PrepareSupplierRfqAsync(
         PrepareSupplierRfqCommand command, CancellationToken ct = default)
     {
@@ -2422,6 +2489,17 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
     private async Task RefreshCandidatesAsync(SourcingCase sourcingCase, int limit, DateTime now, CancellationToken ct)
     {
+        foreach (var candidate in await ComputeCandidatesAsync(sourcingCase, limit, now, ct))
+            sourcingCase.Candidates.Add(candidate);
+    }
+
+    /// <summary>
+    /// The candidate rule, as a pure computation over the case and the tenant's supplier list, so a
+    /// caller can decide what to do with the result (replace the list, or append the newcomers).
+    /// </summary>
+    private async Task<IReadOnlyList<SourcingCaseCandidate>> ComputeCandidatesAsync(
+        SourcingCase sourcingCase, int limit, DateTime now, CancellationToken ct)
+    {
         var suppliers = await _db.Suppliers.AsNoTracking()
             .Where(x => x.Buid == sourcingCase.BusinessUnitId && x.IsActive == true)
             .Select(x => new { x.Id, x.Name, x.Tags })
@@ -2493,10 +2571,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
         var ranked = evidence.Values.OrderByDescending(x => x.Score)
             .ThenByDescending(x => x.FreshOn).ThenBy(x => x.SupplierId).Take(limit).ToArray();
+        var candidates = new List<SourcingCaseCandidate>(ranked.Length);
         for (var index = 0; index < ranked.Length; index++)
         {
             var row = ranked[index];
-            sourcingCase.Candidates.Add(new SourcingCaseCandidate
+            candidates.Add(new SourcingCaseCandidate
             {
                 BusinessUnitId = sourcingCase.BusinessUnitId,
                 SupplierId = row.SupplierId,
@@ -2510,6 +2589,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 UpdatedOn = now
             });
         }
+        return candidates;
     }
 
     private static void AddCandidateEvidence(Dictionary<long, CandidateEvidence> evidence, long supplierId,
