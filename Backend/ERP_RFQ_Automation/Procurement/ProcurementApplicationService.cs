@@ -2714,8 +2714,14 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         // purpose — it must still refuse to award more than remains.
         var coverageRequirement = remainingRequirement + approvedAwardQuantity;
         if (coverageRequirement <= 0) blockers.Add("sourcing requirement already covered");
-        if (row.MinimumOrderQuantity is > 0
-            && (coverageRequirement < row.MinimumOrderQuantity || quoteCapacity < row.MinimumOrderQuantity))
+        // MOQ is judged against what is LEFT to award, not against what this offer already has:
+        // an offer partly awarded cannot award the remainder below its minimum (governed, tested
+        // in Comparison_rejects_moq_that_exceeds_requirement_remaining_after_award). Only when
+        // nothing is left AND this offer's own award covered the line is there no further order
+        // for a minimum to apply to.
+        var furtherOrderPossible = remainingRequirement > 0 || approvedAwardQuantity <= 0;
+        if (furtherOrderPossible && row.MinimumOrderQuantity is > 0
+            && (remainingRequirement < row.MinimumOrderQuantity || quoteCapacity < row.MinimumOrderQuantity))
             blockers.Add("minimum order quantity cannot be satisfied");
         if (row.ValidUntil is null || row.ValidUntil <= DateTime.UtcNow) blockers.Add("quote expired or validity missing");
         if (row.LandedUnitCost is null or <= 0) blockers.Add("landed cost unavailable");
