@@ -54,7 +54,10 @@ export interface SupplierSolicitation {
   deliveryOutcome?: "UNCERTAIN" | "NOT_DELIVERED" | null;
   sentOn?: string | null;
   respondedOn?: string | null;
+  /** The reply deadline the buyer gave the supplier, or null when none was set. */
+  dueOn?: string | null;
   updatedOn: string;
+  /** The RFQ lines this supplier was asked about. The server sends them as `rfqItemIds`. */
   requestedRfqItemIds: number[];
 }
 

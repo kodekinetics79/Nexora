@@ -396,6 +396,10 @@ const ResolutionChip = ({ resolution }: { resolution: string }) => {
   );
 };
 
+/** "22 Sep" — the day a reply is due, said the way a buyer says it. */
+const dayMonth = (date: Date) =>
+  `${date.getDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getMonth()]}`;
+
 function SourcingWorkbenchPage() {
   const { rfqId: routeRfqId } = useParams<{ rfqId?: string }>();
   const rfqId = routeRfqId ? Number(routeRfqId) : undefined;
@@ -571,6 +575,30 @@ function SourcingWorkbenchPage() {
   const draftLines = workbench?.customerQuoteDraft?.lines ?? [];
   const unpricedDraftLines = draftLines.filter((line) => Number(line.unitPrice || 0) === 0);
   const unpricedWithAward = unpricedDraftLines.filter((line) => awardedLineIds.has(line.rfqItemId));
+  // D12b. The Coverage step said "4 lines are still short and no supplier has been asked" while
+  // one line was awarded and another was out with a supplier. Say what is true of every line —
+  // awarded, with a supplier (and when the reply is due), still needing one — and keep the button
+  // on the first line nobody has asked about yet.
+  const openSolicitationStatuses = ["PENDINGDISPATCH", "DISPATCHING", "SENT"];
+  const linesWithSupplier = unresolvedLines.filter((line) => !awardedLineIds.has(line.id) && !linesWithOffers.has(line.id)
+    && sols.some((s) => openSolicitationStatuses.includes(norm(s.status)) && (s.requestedRfqItemIds ?? []).includes(line.id)));
+  const awardedLineCount = (workbench?.lines ?? []).filter((line) => awardedLineIds.has(line.id)).length;
+  const nextReplyDue = sols
+    .filter((s) => openSolicitationStatuses.includes(norm(s.status)) && s.dueOn
+      && (s.requestedRfqItemIds ?? []).some((id) => linesWithSupplier.some((line) => line.id === id)))
+    .map((s) => new Date(s.dueOn as string))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime())[0];
+  const coverageSentence = (buyerCanAsk: boolean) => {
+    const count = (n: number) => `${n} line${n === 1 ? "" : "s"}`;
+    const parts: string[] = [];
+    if (awardedLineCount > 0) parts.push(`${count(awardedLineCount)} awarded.`);
+    if (linesWithSupplier.length > 0)
+      parts.push(`${count(linesWithSupplier.length)} ${linesWithSupplier.length === 1 ? "is" : "are"} with a supplier${nextReplyDue ? ` (reply due ${dayMonth(nextReplyDue)})` : ""}.`);
+    parts.push(`${count(shortNotAsked.length)} still need${shortNotAsked.length === 1 ? "s" : ""} a supplier.`);
+    if (!buyerCanAsk) parts.push("Ask a buyer with sourcing rights to send a supplier RFQ.");
+    return parts.join(" ");
+  };
   const openQuoteButton = workbench?.customerQuoteDraft
     ? <Button variant="contained" startIcon={<OpenInNew />} onClick={() => navigate(`/sales/quotes/view/${workbench.customerQuoteDraft!.quoteId}`)}>Open the quote</Button>
     : undefined;
@@ -611,9 +639,7 @@ function SourcingWorkbenchPage() {
               : shortAskedDeclined.length > 0
                 ? { tone: "warning", sentence: `Every supplier asked for ${shortAskedDeclined.length} line${shortAskedDeclined.length === 1 ? "" : "s"} has declined or let the request expire. Ask a different supplier.`, action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortAskedDeclined[0])}>Ask another supplier</Button> : undefined }
                 : shortNotAsked.length > 0
-                  ? { tone: "warning", sentence: canSolicit
-                        ? `${shortNotAsked.length} line${shortNotAsked.length === 1 ? " is" : "s are"} still short and no supplier has been asked. Send a supplier RFQ${shortNotAsked.length === 1 ? "" : ", one line at a time"}.`
-                        : `${shortNotAsked.length} line${shortNotAsked.length === 1 ? " is" : "s are"} still short. Ask a buyer with sourcing rights to send a supplier RFQ.`,
+                  ? { tone: "warning", sentence: coverageSentence(canSolicit),
                       action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortNotAsked[0])}>Ask suppliers{shortNotAsked.length === 1 ? "" : " for the first line"}</Button> : undefined }
                   : awaitingSuppliers.length > 0 && unresolvedLines.some((line) => !awardedLineIds.has(line.id))
                     ? { tone: "info", sentence: `Waiting for ${awaitingSuppliers.length} supplier${awaitingSuppliers.length === 1 ? "" : "s"} to reply. When a reply arrives, capture it from the Solicitations tab.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
