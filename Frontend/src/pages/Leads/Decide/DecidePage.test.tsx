@@ -72,7 +72,8 @@ vi.mock('../../../api/services/commercialLifecycleService', () => ({
 }));
 // The customer picker is its own tested screen; here it only needs to be reachable.
 vi.mock('../ResolveClientDialog', () => ({
-  default: ({ open }: { open: boolean }) => (open ? <div role="dialog" aria-label="Choose customer">customer picker</div> : null),
+  default: ({ open, prefill }: { open: boolean; prefill?: { name?: string | null } }) =>
+    (open ? <div role="dialog" aria-label="Choose customer">customer picker for {prefill?.name ?? 'nobody'}</div> : null),
 }));
 vi.mock('../Workbench/SourceEvidencePanel', () => ({ default: () => <h2>Source evidence</h2> }));
 // The document check is its own tested dialog; here it only needs to open on the right line.
@@ -378,14 +379,14 @@ describe('DecidePage', () => {
     expect(snack).not.toHaveBeenCalledWith('Saved. A manager can create the RFQ from here.', expect.anything());
   });
 
-  it('puts the missing customer first, with the picker one click away', async () => {
-    record = { ...baseWorkbench(), customerId: null, customerName: null };
+  it('puts the missing customer first, with the picker one click away and opened on the name the document printed', async () => {
+    record = { ...baseWorkbench(), customerId: null, customerName: null, extractedClientName: 'Al Jazirah' };
     renderPage();
     expect(await screen.findByRole('heading', { level: 1, name: 'Customer not matched yet' })).toBeInTheDocument();
     expect(status()).toHaveTextContent('Choose the customer this request came from.');
     expect(screen.getByRole('button', { name: 'Create RFQ' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Choose the customer' }));
-    expect(await screen.findByRole('dialog', { name: 'Choose customer' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Choose customer' })).toHaveTextContent('customer picker for Al Jazirah');
   });
 
   it('says an already promoted request is done and offers no second RFQ', async () => {

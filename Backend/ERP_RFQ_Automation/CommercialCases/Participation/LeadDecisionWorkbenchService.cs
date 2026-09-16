@@ -427,7 +427,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 : new PromotionReceiptDto(rfq.Id, rfq.Rfqno, promotedRevision.RevisionNumber, promotedDecision.Sequence,
                     rfq.NoOfLineItems ?? 0, promotion.PromotedAtUtc, promotion.PromotedBy,
                     NameFor(namesByEmail, PersonActor(promotion.PromotedBy)), promotedRevisionLineCount), blockers,
-            sourceOccurrence?.SourceChannel, uploadBatch?.CreatedAtUtc, uploadedBy, NameFor(namesByEmail, uploadedBy));
+            sourceOccurrence?.SourceChannel, uploadBatch?.CreatedAtUtc, uploadedBy, NameFor(namesByEmail, uploadedBy),
+            string.IsNullOrWhiteSpace(lead.CustomerCompanyNameExtracted) ? null : lead.CustomerCompanyNameExtracted.Trim());
     }
 
     /// <summary>
@@ -763,4 +764,7 @@ public sealed record LeadDecisionWorkbenchDto(long LeadId, long LeadRevisionId, 
     IReadOnlyList<DecisionValueOptionDto> CurrencyOptions, FitAssessmentDto? FitAssessment,
     PromotionReceiptDto? Promotion, IReadOnlyList<DecisionBlockerDto> Blockers,
     string? SourceChannel = null, DateTimeOffset? UploadedAtUtc = null, string? UploadedBy = null,
-    string? UploadedByName = null);
+    string? UploadedByName = null,
+    // The buying organisation as the document printed it: what the client dialog opens its search
+    // on, so "no match" is the start of adding the client rather than a name to retype.
+    string? ExtractedClientName = null);

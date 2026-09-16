@@ -133,6 +133,8 @@ export interface LeadDecisionWorkbenchDTO {
   customerRfqReference?: string | null;
   customerId?: number | null;
   customerName?: string | null;
+  /** The buying organisation as the document printed it, when no client is matched yet. */
+  extractedClientName?: string | null;
   buyerName?: string | null;
   senderEmail?: string | null;
   emailSubject?: string | null;
