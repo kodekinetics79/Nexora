@@ -538,7 +538,11 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
         //
         // 228 -> 230 with header_spellings and manufacturer_part_patterns: what a tenant's
         // reviewers taught the document parser, tenant-owned and never shared.
-        Assert.Equal(230L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
+        //
+        // 230 -> 231 with supplier_discovery_searches: the 30-day cache of what a tenant asked
+        // the internet about and which companies came back — one company's sourcing intent,
+        // never another's.
+        Assert.Equal(231L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
         Assert.Equal(300L, await CountAsync("pg_policy",
             "polname IN ('nexora_definer_tenant_read','nexora_definer_tenant_insert','nexora_definer_tenant_update')"));
 

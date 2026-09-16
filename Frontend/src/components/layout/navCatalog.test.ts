@@ -207,14 +207,17 @@ describe('the rail exposes the complete commercial spine', () => {
 
   it('accounts for all 69 old destinations across four surfaces', () => {
     // These are the numbers the before/after rests on, so they are asserted rather than counted by
-    // hand: 1 dashboard row + 7 commercial rows + 15 tabs + 56 directory cards + 25 Setup entries
+    // hand: 1 dashboard row + 7 commercial rows + 15 tabs + 56 directory cards + 20 Setup entries
     // + the directory door. The directory lost one card and the rail gained one row when the
     // Dashboard moved up into the rail: the destination moved, so the accounting still balances.
+    // Setup went from 25 to 20 on 2026-09-16: the five platform studios (AI Trust, Taxonomy &
+    // Document Skills, Model & Rule Lifecycle, Quality Analytics, Test & Release) are Platform
+    // Admin configuration and are no longer tenant destinations at all — see setupCatalog.tsx.
     expect(railFor(false)).toHaveLength(8);
     expect(PRIMARY_VIEWS).toHaveLength(15);
     expect(ADVANCED_ENTRIES).toHaveLength(56);
     expect(ADVANCED_GROUPS).toHaveLength(10);
-    expect(SETUP_ENTRIES).toHaveLength(25);
+    expect(SETUP_ENTRIES).toHaveLength(20);
   });
 
   it('keeps every post-quote destination directly visible and governed by its route permission', () => {
