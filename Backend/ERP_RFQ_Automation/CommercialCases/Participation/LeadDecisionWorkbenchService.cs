@@ -21,12 +21,14 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
     private readonly ErpRfqAutomationContext _db;
     private readonly ILeadOutcomeReasons _leadOutcomeReasons;
     private readonly ILeadConversionIntelligence _conversionIntelligence;
+    private readonly ILineSkipReasons _lineSkipReasons;
     public LeadDecisionWorkbenchService(ErpRfqAutomationContext db, ILeadOutcomeReasons leadOutcomeReasons,
-        ILeadConversionIntelligence conversionIntelligence)
+        ILeadConversionIntelligence conversionIntelligence, ILineSkipReasons? lineSkipReasons = null)
     {
         _db = db;
         _leadOutcomeReasons = leadOutcomeReasons;
         _conversionIntelligence = conversionIntelligence;
+        _lineSkipReasons = lineSkipReasons ?? new LineSkipReasons(db);
     }
 
     public LeadDecisionWorkbenchService(ErpRfqAutomationContext db, ILeadOutcomeReasons leadOutcomeReasons)
@@ -371,10 +373,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             blockers.Add(new("LEAD_NOT_ELIGIBLE", ex.Message, "Open Lead lifecycle", $"/procurement/leads/view/{lead.Id}"));
         }
 
-        var governedNoBidReasons = (await _leadOutcomeReasons.GetAsync(businessUnitId, ct))
-            .Select(x => new DecisionReasonCodeDto(x.Code, x.Label, new[] { "NoBid" },
-                "Governed business-unit outcome reason."));
-        var reasonCodes = governedNoBidReasons.Concat(ClarificationReasonCodes).ToArray();
+        var reasonCodes = ComposeReasonCodes(
+                await _lineSkipReasons.GetAsync(businessUnitId, ct),
+                await _leadOutcomeReasons.GetAsync(businessUnitId, ct))
+            .Concat(ClarificationReasonCodes).ToArray();
         var unitOptions = await _db.SetUoms.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive)
             .OrderBy(x => x.UomCode)
@@ -458,6 +460,45 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .Where(u => u.Name.Length > 0)
             .GroupBy(u => u.Key)
             .ToDictionary(group => group.Key, group => group.First().Name);
+    }
+
+    /// <summary>
+    /// The reason list the screen picks from, with each reason saying what it applies to.
+    ///
+    /// <para><c>NoBid</c> is a LINE left out of the quote: the tenant's line-skip list. <c>Decline</c>
+    /// is the whole request turned down: the tenant's quote-outcome list, which the lifecycle
+    /// records the lead's loss against. They used to be one list, so "Why skip line 4" offered
+    /// "Lost to competitor" and "Expired automatically" for a line nobody had quoted yet. A code
+    /// that appears on both lists (the baselines share "Price too high") is one reason with both
+    /// uses, so a saved choice keeps its label whichever list it came from.</para>
+    /// </summary>
+    internal static IReadOnlyList<DecisionReasonCodeDto> ComposeReasonCodes(
+        IReadOnlyList<LineSkipReason> lineSkipReasons, IReadOnlyList<OutcomeReasonDto> outcomeReasons)
+    {
+        var composed = new List<DecisionReasonCodeDto>();
+        var byCode = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var reason in lineSkipReasons)
+        {
+            if (string.IsNullOrWhiteSpace(reason.Code) || byCode.ContainsKey(reason.Code)) continue;
+            byCode[reason.Code] = composed.Count;
+            composed.Add(new DecisionReasonCodeDto(reason.Code, reason.Label, new[] { "NoBid" },
+                "Why this line is not quoted."));
+        }
+        foreach (var reason in outcomeReasons)
+        {
+            if (string.IsNullOrWhiteSpace(reason.Code)) continue;
+            if (byCode.TryGetValue(reason.Code, out var index))
+            {
+                var existing = composed[index];
+                if (!existing.AppliesTo.Contains("Decline"))
+                    composed[index] = existing with { AppliesTo = existing.AppliesTo.Append("Decline").ToArray() };
+                continue;
+            }
+            byCode[reason.Code] = composed.Count;
+            composed.Add(new DecisionReasonCodeDto(reason.Code, reason.Label, new[] { "Decline" },
+                "Governed business-unit outcome reason."));
+        }
+        return composed;
     }
 
     private static readonly DecisionReasonCodeDto[] ClarificationReasonCodes =

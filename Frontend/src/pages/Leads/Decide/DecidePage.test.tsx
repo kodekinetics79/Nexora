@@ -115,7 +115,7 @@ const baseWorkbench = (): LeadDecisionWorkbenchDTO => ({
     line({ id: 2, description: 'Busbar support insulator, epoxy cast, 15 kV', currency: null }),
     line({ id: 3, description: 'Cable gland kit, brass, 95 mm2' }),
   ],
-  reasonCodes: [{ code: 'NO_STOCK', label: 'Item unavailable', appliesTo: ['NoBid'] }],
+  reasonCodes: [{ code: 'NO_STOCK', label: 'Item unavailable', appliesTo: ['NoBid', 'Decline'] }],
   unitOptions: [{ code: 'EA', label: 'Each' }],
   currencyOptions: [{ code: 'SAR', label: 'Saudi riyal' }, { code: 'USD', label: 'US dollar' }],
   fitAssessment: {

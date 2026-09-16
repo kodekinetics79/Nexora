@@ -907,6 +907,9 @@ builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILea
                            ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILeadDecisionWorkbenchService,
                            ERP_RFQ_Automation.CommercialCases.Participation.LeadDecisionWorkbenchService>();
+// Why a LINE is left out of the quote: the tenant's own list, separate from the quote-outcome list.
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILineSkipReasons,
+                           ERP_RFQ_Automation.CommercialCases.Participation.LineSkipReasons>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.IRfqRevisionImpactResolutionService,
                            ERP_RFQ_Automation.CommercialCases.Participation.RfqRevisionImpactResolutionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Promotion.IRfqPromotionService,

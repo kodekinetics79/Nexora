@@ -90,6 +90,33 @@ describe('a long bid list', () => {
   });
 });
 
+describe('why a line is skipped', () => {
+  it('offers only reasons a line is not quoted, never how a quote ended', () => {
+    render(
+      <LinesTable
+        leadId={407}
+        lines={[line(1)]}
+        decisions={{ 10: { decision: 'NoBid' } }}
+        unitOptions={[{ code: 'EA', label: 'Each' }]}
+        currencyOptions={[{ code: 'SAR', label: 'Saudi riyal' }]}
+        reasonCodes={[
+          { code: 'OUT_OF_SCOPE', label: 'Outside approved product scope', appliesTo: ['NoBid'] },
+          { code: 'PRICE', label: 'Price too high', appliesTo: ['NoBid', 'Decline'] },
+          { code: 'LOST_COMPETITOR', label: 'Lost to competitor', appliesTo: ['Decline'] },
+          { code: 'AUTO_EXPIRED', label: 'Expired automatically', appliesTo: ['Decline'] },
+        ]}
+        readOnly={false}
+        onChange={vi.fn()}
+        onOpenDocument={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Why skip line 00001' }));
+    const options = within(screen.getByRole('listbox')).getAllByRole('option').map((option) => option.textContent);
+    expect(options).toEqual(['Outside approved product scope', 'Price too high']);
+  });
+});
+
 describe('a line a person has not yet checked', () => {
   const table = (lines: LeadDecisionLineDTO[]) => (
     <LinesTable

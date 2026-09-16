@@ -8,7 +8,12 @@ export type OverallFitDecision = 'FIT' | 'CONDITIONAL' | 'NOT_FIT';
 export interface DecisionReasonCodeDTO {
   code: string;
   label: string;
-  appliesTo: Array<'NoBid' | 'Clarify'>;
+  /**
+   * `NoBid`: why one line is left out of the quote. `Decline`: why the whole request is turned
+   * down (the quote-outcome list). `Clarify`: what the customer is being asked. One reason can
+   * carry more than one.
+   */
+  appliesTo: Array<'NoBid' | 'Decline' | 'Clarify'>;
   description?: string | null;
 }
 
