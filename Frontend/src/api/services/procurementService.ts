@@ -426,6 +426,57 @@ export interface SourcingCandidateSearchResult {
   candidates: SourcingCaseCandidate[];
 }
 
+/**
+ * Internet supplier discovery for a sourcing case (POST .../discover). The server ranks hits
+ * manufacturer → distributor → reseller and pages them by offset/limit; `message` is already
+ * one sentence in the rep's words for every non-Ready status and is shown verbatim.
+ */
+export type SupplierDiscoveryStatus = "Ready" | "NotConfigured" | "ConsentRequired" | "NoResults" | "Error";
+export type SupplierDiscoveryRole = "Manufacturer" | "Distributor" | "Reseller";
+
+export interface SupplierDiscoveryHit {
+  id: string;
+  name: string;
+  website: string;
+  domain: string;
+  role: SupplierDiscoveryRole;
+  country: string | null;
+  why: string;
+  contactEmail: string | null;
+  /** Set when this hit is already one of the tenant's suppliers; the row then offers no tick box. */
+  existingSupplierId: number | null;
+}
+
+export interface SupplierDiscoveryResult {
+  status: SupplierDiscoveryStatus;
+  message: string;
+  searchedFor: {
+    maker: string | null;
+    partNumber: string | null;
+    description: string;
+    acceptableMakers: string[];
+  };
+  total: number;
+  offset: number;
+  limit: number;
+  fromCache: boolean;
+  searchedAtUtc: string;
+  hits: SupplierDiscoveryHit[];
+}
+
+export interface AdoptedDiscoveredSupplier {
+  hitId: string;
+  supplierId: number;
+  supplierName: string;
+  contactEmail: string | null;
+  needsContactEmail: boolean;
+  alreadyExisted: boolean;
+}
+
+export interface AdoptDiscoveredSuppliersResult {
+  adopted: AdoptedDiscoveredSupplier[];
+}
+
 export interface PreparedSupplierRfqResult {
   sourcingCaseId: number;
   supplierSolicitationId: number;
@@ -580,6 +631,29 @@ const procurementService = {
             `sourcing-candidates:${sourcingCaseId}:${limit}:${crypto.randomUUID()}`,
           ),
         },
+      ),
+    ),
+
+  discoverSuppliers: async (
+    sourcingCaseId: number,
+    page: { offset: number; limit: number },
+  ): Promise<SupplierDiscoveryResult> =>
+    unwrap(
+      await axiosInstance.post<SupplierDiscoveryResult>(
+        `/api/procurement/sourcing-cases/${sourcingCaseId}/discover`,
+        { offset: page.offset, limit: page.limit },
+      ),
+    ),
+
+  /** Makes the ticked hits tenant suppliers. The server re-runs the candidate search, so refetch the case afterwards. */
+  adoptDiscoveredSuppliers: async (
+    sourcingCaseId: number,
+    hitIds: string[],
+  ): Promise<AdoptDiscoveredSuppliersResult> =>
+    unwrap(
+      await axiosInstance.post<AdoptDiscoveredSuppliersResult>(
+        `/api/procurement/sourcing-cases/${sourcingCaseId}/discover/adopt`,
+        { hitIds },
       ),
     ),
 

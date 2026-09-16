@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Link,
@@ -28,10 +28,14 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { ArrowBack, HowToReg, PersonAdd, PersonSearch, Refresh, Send } from "@mui/icons-material";
+import { ArrowBack, GroupAdd, HowToReg, PersonAdd, PersonSearch, Refresh, Send, TravelExplore } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
 import procurementService, {
+  type AdoptedDiscoveredSupplier,
   type SourcingCaseCandidate,
+  type SupplierDiscoveryHit,
+  type SupplierDiscoveryResult,
+  type SupplierDiscoveryRole,
 } from "../../../api/services/procurementService";
 import supplierService from "../../../api/services/supplierService";
 import {
@@ -91,6 +95,21 @@ function CandidateEvidence({ candidate }: { candidate: SourcingCaseCandidate }) 
   );
 }
 
+/** The internet list arrives ten at a time; the first page loads by itself when fewer than ten known suppliers match. */
+const DISCOVERY_PAGE = 10;
+
+/** One chip per row, three theme colours that are not the brass accent: maker, distributor, reseller. */
+const ROLE_CHIP_COLOR: Record<SupplierDiscoveryRole, "success" | "info" | "secondary"> = {
+  Manufacturer: "success", Distributor: "info", Reseller: "secondary",
+};
+
+/** "Searched for: Schneider Electric LV431831 · also acceptable: ABB, Siemens" — null and empty parts are left out. */
+const searchedForLine = (searchedFor: SupplierDiscoveryResult["searchedFor"]) => {
+  const subject = [searchedFor.maker, searchedFor.partNumber].filter(Boolean).join(" ") || searchedFor.description;
+  const alsoAcceptable = searchedFor.acceptableMakers.filter(Boolean);
+  return `Searched for: ${subject}${alsoAcceptable.length ? ` · also acceptable: ${alsoAcceptable.join(", ")}` : ""}`;
+};
+
 function SourcingCasePage() {
   const { caseId } = useParams<{ caseId: string }>();
   const sourcingCaseId = Number(caseId);
@@ -102,6 +121,11 @@ function SourcingCasePage() {
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<number[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [responseDueOn, setResponseDueOn] = useState("");
+  // Internet discovery: the rep asked for it by hand (when ten known suppliers already match), the
+  // hits ticked to add, and what the server made of the ones already added (so a row can say "Added").
+  const [discoveryRequested, setDiscoveryRequested] = useState(false);
+  const [tickedHitIds, setTickedHitIds] = useState<string[]>([]);
+  const [adoptedByHitId, setAdoptedByHitId] = useState<Record<string, AdoptedDiscoveredSupplier>>({});
 
   const queryKey = ["sourcing-case", sourcingCaseId];
   const query = useQuery({
@@ -172,6 +196,68 @@ function SourcingCasePage() {
     : tickedCount === 0
       ? "Tick the suppliers you want to ask; each gets its own RFQ."
       : `${tickedCount} supplier${tickedCount === 1 ? "" : "s"} ticked. Press ${askLabel}; each gets its own RFQ.`;
+
+  // Suppliers from the internet. Only someone who can add suppliers sees them, since adding is the
+  // one thing the list is for; and once a Supplier RFQ is prepared the candidate list is fixed anyway.
+  // The first page loads by itself when fewer than ten known suppliers match; otherwise on demand.
+  const discoveryOffered = canAddSupplier && !candidatesFrozen && Boolean(query.data);
+  const discoveryEnabled = discoveryOffered && (candidates.length < DISCOVERY_PAGE || discoveryRequested);
+  const discovery = useInfiniteQuery({
+    queryKey: ["sourcing-case-discovery", sourcingCaseId],
+    queryFn: ({ pageParam }) =>
+      procurementService.discoverSuppliers(sourcingCaseId, { offset: pageParam, limit: DISCOVERY_PAGE }),
+    initialPageParam: 0,
+    getNextPageParam: (last) =>
+      last.status === "Ready" && last.offset + last.hits.length < last.total ? last.offset + last.hits.length : undefined,
+    enabled: discoveryEnabled,
+    retry: false,
+    // The server keeps its own copy of the search; a window focus must not run it again.
+    staleTime: Infinity,
+  });
+  const discoveryFirstPage = discovery.data?.pages[0];
+  const discoveryHits = useMemo(
+    () => (discovery.data?.pages ?? []).flatMap((page) => page.hits),
+    [discovery.data],
+  );
+  const discoveryReady = discoveryFirstPage?.status === "Ready";
+  const discoverySearching = discoveryEnabled && discovery.isPending;
+  // The server's sentence for every non-Ready status is shown as written; a transport failure gets
+  // the one sentence the server could not send.
+  const discoveryMessage = discoveryFirstPage && discoveryFirstPage.status !== "Ready"
+    ? discoveryFirstPage.message
+    : discovery.isError
+      ? "The internet could not be searched just now."
+      : null;
+  const discoveryRemaining = discoveryFirstPage ? Math.max(0, discoveryFirstPage.total - discoveryHits.length) : 0;
+  const addableHitIds = discoveryHits
+    .filter((hit) => hit.existingSupplierId === null && !adoptedByHitId[hit.id])
+    .map((hit) => hit.id);
+  const tickedHits = tickedHitIds.filter((id) => addableHitIds.includes(id));
+  const tickedHitCount = tickedHits.length;
+  const addLabel = tickedHitCount > 0 ? `Add ${tickedHitCount} to my suppliers` : "Add the ticked suppliers";
+  const partWords = query.data?.requestedPartNumber || "this part";
+
+  const adoptSuppliers = useMutation({
+    mutationFn: (hitIds: string[]) => procurementService.adoptDiscoveredSuppliers(sourcingCaseId, hitIds),
+    onSuccess: async (result) => {
+      setAdoptedByHitId((current) => ({
+        ...current,
+        ...Object.fromEntries(result.adopted.map((adopted) => [adopted.hitId, adopted])),
+      }));
+      setTickedHitIds([]);
+      const count = result.adopted.length;
+      toast.success(`Added ${count} supplier${count === 1 ? "" : "s"}. They are now in your list above; approve them for RFQs to ask them.`);
+      // The server re-ran the candidate search on adopt, so the known list above is refetched here.
+      await query.refetch();
+    },
+    onError: (error) => toast.error(errorMessage(error, "The suppliers could not be added to your list.")),
+  });
+
+  const toggleHit = (hit: SupplierDiscoveryHit) => {
+    setTickedHitIds((current) =>
+      current.includes(hit.id) ? current.filter((id) => id !== hit.id) : [...current, hit.id],
+    );
+  };
 
   const refreshCandidates = useMutation({
     mutationFn: (limit: CandidateLimit) =>
@@ -355,9 +441,14 @@ function SourcingCasePage() {
         tone={sourcingCase.status === "OUTREACH_SENT" ? "success" : noKnownSupplier || noneReady ? "warning" : "info"}
         title="Next step"
         sentence={noKnownSupplier
-          ? `No supplier on your list is linked to ${sourcingCase.requestedPartNumber || "this part"} yet. ${canAddSupplier
-            ? "Add one with this part number or its maker in Tags, then press Refresh candidates."
-            : "Ask someone who can add suppliers to add one with this part number or its maker in Tags."}`
+          // The sentence follows the internet list: found some → tick them; ticked → name the button.
+          ? discoveryReady && discoveryHits.length > 0
+            ? tickedHitCount > 0
+              ? `${tickedHitCount} ticked. Press ${addLabel}; ${tickedHitCount === 1 ? "it joins" : "they join"} your list above.`
+              : `No supplier on your list is linked to ${partWords} yet. We found ${discoveryFirstPage?.total ?? discoveryHits.length} on the internet — tick the ones to add, or add one yourself.`
+            : `No supplier on your list is linked to ${partWords} yet. ${canAddSupplier
+              ? "Add one with this part number or its maker in Tags, then press Refresh candidates."
+              : "Ask someone who can add suppliers to add one with this part number or its maker in Tags."}`
           : noneReady
             ? (canApproveInline && approvableCandidates.length > 0
               ? "None of these suppliers can be asked yet. Press Approve for RFQs beside a supplier you trust; the list refreshes on its own."
@@ -371,13 +462,18 @@ function SourcingCasePage() {
           : noKnownSupplier && canAddSupplier
             ? (
               <Tooltip describeChild title="Opens the supplier form with this part number already in Tags, and brings you back here when it is saved.">
-                <Button variant="contained" startIcon={<PersonAdd />} onClick={() => navigate(`/suppliers?new=1&tags=${encodeURIComponent(sourcingCase.requestedPartNumber ?? "")}&returnTo=${encodeURIComponent(`/procurement/sourcing-cases/${sourcingCase.id}`)}`)}>
+                {/* Filled until an internet supplier is ticked; then the filled button is the one that adds the ticks. */}
+                <Button variant={tickedHitCount > 0 ? "outlined" : "contained"} startIcon={<PersonAdd />} onClick={() => navigate(`/suppliers?new=1&tags=${encodeURIComponent(sourcingCase.requestedPartNumber ?? "")}&returnTo=${encodeURIComponent(`/procurement/sourcing-cases/${sourcingCase.id}`)}`)}>
                   Add a supplier
                 </Button>
               </Tooltip>
             )
             : undefined}
-      />
+      >
+        {noKnownSupplier && discoveryMessage ? (
+          <Typography variant="body2" sx={{ fontWeight: 500 }}>{discoveryMessage}</Typography>
+        ) : undefined}
+      </NextStepPanel>
 
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between", mb: 2 }}>
         <Box>
@@ -411,7 +507,7 @@ function SourcingCasePage() {
           <PersonSearch aria-hidden sx={{ fontSize: 40, color: "text.disabled", mb: 1 }} />
           <Typography sx={{ fontWeight: 700 }}>No supplier is linked to this part yet</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 620, mx: "auto", textWrap: "pretty" }}>
-            Suppliers show here when their record names this part number or its maker in Tags, or when they quoted or supplied this product before. No internet search is run.
+            Suppliers show here when their record names this part number or its maker in Tags, or when they quoted or supplied this product before.{discoveryOffered ? " Suppliers from the internet are listed below." : ""}
           </Typography>
         </Paper>
       ) : (
@@ -510,6 +606,148 @@ function SourcingCasePage() {
       </Stack>
       {!canPrepare && whyNoPrepare && (
         <Alert severity="info" sx={{ mt: 2 }}>{whyNoPrepare}</Alert>
+      )}
+
+      {discoveryOffered && (
+        <Box component="section" aria-labelledby="internet-suppliers-heading" sx={{ mt: 4 }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between", mb: 2 }}>
+            <Box>
+              <Typography id="internet-suppliers-heading" variant="h6" sx={{ fontWeight: 700 }}>From the internet</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Makers first, then distributors, then resellers. Tick the ones to add; they join your list above and can be asked once approved.
+              </Typography>
+              {discoveryFirstPage && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+                  {searchedForLine(discoveryFirstPage.searchedFor)}
+                </Typography>
+              )}
+            </Box>
+            {!discoveryEnabled && (
+              <Tooltip describeChild title="Looks on the internet for makers, distributors and resellers of this part.">
+                <Button size="small" variant="outlined" startIcon={<TravelExplore />} onClick={() => setDiscoveryRequested(true)}>
+                  Search the internet
+                </Button>
+              </Tooltip>
+            )}
+          </Stack>
+
+          {discoverySearching && (
+            <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", py: 1.5 }} role="status">
+              <CircularProgress size={18} aria-hidden />
+              <Typography variant="body2" color="text.secondary">Searching the internet for {partWords}…</Typography>
+            </Stack>
+          )}
+
+          {!discoverySearching && discoveryMessage && (
+            <Alert
+              severity="info"
+              action={discovery.isError ? <Button color="inherit" onClick={() => discovery.refetch()}>Try again</Button> : undefined}
+            >
+              {discoveryMessage}
+            </Alert>
+          )}
+
+          {discoveryReady && discoveryHits.length > 0 && (
+            <>
+              <Paper variant="outlined" sx={{ overflow: "hidden" }} data-testid="internet-suppliers">
+                <Box sx={{ overflowX: "auto" }}>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell padding="checkbox" sx={{ fontWeight: 700 }}>Add</TableCell>
+                        <TableCell sx={{ fontWeight: 700 }}>Supplier</TableCell>
+                        <TableCell sx={{ fontWeight: 700 }}>Why listed</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {discoveryHits.map((hit) => {
+                        const adopted = adoptedByHitId[hit.id];
+                        const ticked = tickedHits.includes(hit.id);
+                        return (
+                          <TableRow key={hit.id} hover selected={ticked}>
+                            <TableCell padding="checkbox">
+                              {adopted ? (
+                                <Chip size="small" color="success" variant="outlined" label="Added" sx={{ fontWeight: 700 }} />
+                              ) : hit.existingSupplierId !== null ? null : (
+                                <Checkbox
+                                  checked={ticked}
+                                  onChange={() => toggleHit(hit)}
+                                  disabled={adoptSuppliers.isPending}
+                                  slotProps={{ input: { "aria-label": `Add ${hit.name}` } }}
+                                />
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                                <Link href={hit.website} target="_blank" rel="noopener noreferrer" variant="body2" underline="hover" sx={{ fontWeight: 800 }}>
+                                  {hit.name}
+                                </Link>
+                                <Chip
+                                  size="small"
+                                  variant="outlined"
+                                  color={ROLE_CHIP_COLOR[hit.role]}
+                                  label={hit.role}
+                                  data-testid="discovery-role"
+                                  sx={{ fontWeight: 700 }}
+                                />
+                                {hit.country && <Typography variant="caption" color="text.secondary">{hit.country}</Typography>}
+                              </Stack>
+                              <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                                {adopted ? (
+                                  adopted.needsContactEmail ? (
+                                    <>
+                                      No email found — add one on the{" "}
+                                      <Link component="button" type="button" variant="caption" underline="hover" onClick={() => navigate(`/suppliers/${adopted.supplierId}`)}>
+                                        supplier page
+                                      </Link>
+                                      {" "}before asking.
+                                    </>
+                                  ) : adopted.contactEmail
+                                ) : hit.existingSupplierId !== null ? (
+                                  <Link component="button" type="button" variant="caption" underline="hover" onClick={() => navigate(`/suppliers/${hit.existingSupplierId}`)}>
+                                    Already on your list
+                                  </Link>
+                                ) : (
+                                  hit.contactEmail || hit.domain
+                                )}
+                              </Typography>
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="body2" sx={{ maxWidth: 520, textWrap: "pretty" }}>{hit.why}</Typography>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </Box>
+              </Paper>
+
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ mt: 2, justifyContent: "space-between", alignItems: { sm: "center" } }}>
+                <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
+                  <Typography variant="body2" color="text.secondary" className="tabular-nums">{tickedHitCount} ticked</Typography>
+                  {discovery.hasNextPage && (
+                    <Button size="small" onClick={() => discovery.fetchNextPage()} disabled={discovery.isFetchingNextPage}>
+                      {discovery.isFetchingNextPage ? "Loading…" : `Show ${Math.min(DISCOVERY_PAGE, discoveryRemaining)} more`}
+                    </Button>
+                  )}
+                </Stack>
+                <Tooltip describeChild title={tickedHitCount === 0 ? "Tick the suppliers you want on your list." : "Adds each ticked supplier to your list with this part in Tags. A manager approves them for RFQs before they can be asked."}>
+                  <span tabIndex={tickedHitCount === 0 ? 0 : undefined}>
+                    <Button
+                      variant={tickedHitCount > 0 ? "contained" : "outlined"}
+                      startIcon={<GroupAdd />}
+                      disabled={tickedHitCount === 0 || adoptSuppliers.isPending}
+                      onClick={() => adoptSuppliers.mutate(tickedHits)}
+                    >
+                      {adoptSuppliers.isPending ? "Adding…" : addLabel}
+                    </Button>
+                  </span>
+                </Tooltip>
+              </Stack>
+            </>
+          )}
+        </Box>
       )}
 
       <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} maxWidth="sm" fullWidth>
