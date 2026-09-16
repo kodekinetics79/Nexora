@@ -13,7 +13,7 @@ public interface IProcurementApplicationService
 
     Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
         decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default,
-        IReadOnlyList<string>? cc = null, IReadOnlyList<string>? bcc = null)
+        IReadOnlyList<string>? cc = null, IReadOnlyList<string>? bcc = null, SupplierEmailWordingEdit? wording = null)
         => throw new NotSupportedException("Supplier request previews are not supported by this procurement adapter.");
 
     Task<SourcingCaseView> GetSourcingCaseAsync(long businessUnitId, long sourcingCaseId, CancellationToken ct = default)
@@ -120,7 +120,12 @@ public sealed record PrepareSupplierRfqCommand(
     long? SendFromMailboxId = null,
     /// <summary>Copied on every supplier's email of this send.</summary>
     IReadOnlyList<string>? Cc = null,
-    IReadOnlyList<string>? Bcc = null);
+    IReadOnlyList<string>? Bcc = null,
+    /// <summary>The rep's edits to the wording for this send; null parts use the saved wording.</summary>
+    SupplierEmailWordingEdit? Wording = null);
+
+/// <summary>Per-send wording, placeholders allowed. The part lines are not part of it and cannot be edited.</summary>
+public sealed record SupplierEmailWordingEdit(string? Subject = null, string? Greeting = null, string? Opening = null, string? SignOff = null);
 
 public sealed record QueuePreparedSupplierRfqCommand(
     long BusinessUnitId,

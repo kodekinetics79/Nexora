@@ -46,7 +46,7 @@ public sealed class ProcurementController(
     public Task<IActionResult> PreviewSupplierRfqEmail(long sourcingCaseId, [FromBody] PreviewSupplierRfqRequest request)
         => ExecuteAsync(async () => Ok(await service.PreviewSupplierRfqEmailAsync(
             TenantId(), sourcingCaseId, request.Quantity, request.Message, request.DueOn, UserId(), request.SendFromMailboxId, RequestAborted,
-            request.Cc, request.Bcc)));
+            request.Cc, request.Bcc, request.Wording)));
 
     [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-candidates/search")]
     [RequireModulePermission("Supplier History", PermissionAction.Edit)]
@@ -100,7 +100,7 @@ public sealed class ProcurementController(
             var result = await service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
                 TenantId(), sourcingCaseId, request.SupplierId, request.DueOn, request.ExpectedVersion,
                 IdempotencyKey(), Actor(), CorrelationId(), request.Message, request.Quantity, UserId(), request.SendFromMailboxId,
-                request.Cc, request.Bcc), RequestAborted);
+                request.Cc, request.Bcc, request.Wording), RequestAborted);
             return Created($"/api/procurement/solicitations/{result.SupplierSolicitationId}", result);
         });
 
@@ -421,9 +421,9 @@ public sealed record AddSupplierByEmailRequest(string Email, string? Name = null
 /// </summary>
 /// <summary><paramref name="Quantity"/>: how many the rep asks for; the shortfall when omitted.</summary>
 public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion, string? Message = null, decimal? Quantity = null, long? SendFromMailboxId = null,
-    IReadOnlyList<string>? Cc = null, IReadOnlyList<string>? Bcc = null);
+    IReadOnlyList<string>? Cc = null, IReadOnlyList<string>? Bcc = null, SupplierEmailWordingEdit? Wording = null);
 public sealed record PreviewSupplierRfqRequest(decimal? Quantity = null, string? Message = null, DateTime? DueOn = null, long? SendFromMailboxId = null,
-    IReadOnlyList<string>? Cc = null, IReadOnlyList<string>? Bcc = null);
+    IReadOnlyList<string>? Cc = null, IReadOnlyList<string>? Bcc = null, SupplierEmailWordingEdit? Wording = null);
 public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);
 
 /// <summary>The operator states they checked with the supplier and the RFQ never arrived.</summary>

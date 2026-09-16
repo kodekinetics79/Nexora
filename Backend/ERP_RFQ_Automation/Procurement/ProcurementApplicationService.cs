@@ -272,7 +272,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
     public async Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
         decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default,
-        IReadOnlyList<string>? cc = null, IReadOnlyList<string>? bcc = null)
+        IReadOnlyList<string>? cc = null, IReadOnlyList<string>? bcc = null, SupplierEmailWordingEdit? wordingEdit = null)
     {
         var copy = NormaliseCopies(cc, "CC");
         var blindCopy = NormaliseCopies(bcc, "BCC");
@@ -293,7 +293,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             ? sendFrom.Mailboxes.FirstOrDefault(x => x.IsDefault)
             : sendFrom.Mailboxes.FirstOrDefault(x => x.MailboxId == sendFromMailboxId)
               ?? throw new ProcurementValidationException("That mailbox is not one of your company's active outgoing mailboxes.");
-        var wording = await WordingForAsync(businessUnitId, userId, "<supplier name>", company, "SRFQ-number-on-sending", ct);
+        var wording = await WordingForAsync(businessUnitId, userId, "<supplier name>", company, "SRFQ-number-on-sending", ct, wordingEdit);
         var payload = new SolicitationDispatchPayload(0, businessUnitId, sourcingCase.RfqId, string.Empty,
             "<supplier name>", "SRFQ-number-on-sending", SummariseLinesForSupplier([line]), dueOn, [line],
             buyerMessage, wording.Subject, wording.Greeting, wording.Opening, wording.SignOff, mailbox?.MailboxId, wording.DefaultMessage,
@@ -334,9 +334,29 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
     /// <summary>The wording for one supplier's email, placeholders filled: the user's own over the company's over Nexora's.</summary>
     private async Task<SupplierEmail.SupplierEmailTexts> WordingForAsync(long businessUnitId, long? userId, string supplierName,
-        string? companyName, string rfqNumber, CancellationToken ct)
+        string? companyName, string rfqNumber, CancellationToken ct, SupplierEmailWordingEdit? edit = null)
     {
-        var texts = await SupplierEmail.SupplierEmailSettingsService.ResolveAsync(_db, businessUnitId, userId, ct);
+        var saved = await SupplierEmail.SupplierEmailSettingsService.ResolveAsync(_db, businessUnitId, userId, ct);
+        string Pick(string? edited, string savedText, int max, string what)
+        {
+            var text = edited?.Replace("\r\n", "\n").Trim();
+            if (string.IsNullOrEmpty(text)) return savedText;
+            if (text.Length > max)
+                throw new ProcurementValidationException($"{what} can be at most {max:N0} characters; it is {text.Length:N0}.");
+            return text;
+        }
+        var subject = Pick(edit?.Subject, saved.Subject, SupplierEmail.SupplierEmailDefaults.SubjectMax, "The subject line");
+        // Replies are matched by the request number, so the subject always keeps it.
+        if (!subject.Contains(SupplierEmail.SupplierEmailDefaults.RfqNumberToken, StringComparison.OrdinalIgnoreCase)
+            && !subject.Contains(rfqNumber, StringComparison.OrdinalIgnoreCase))
+            subject = $"{subject} ({SupplierEmail.SupplierEmailDefaults.RfqNumberToken})";
+        var texts = saved with
+        {
+            Subject = subject,
+            Greeting = Pick(edit?.Greeting, saved.Greeting, SupplierEmail.SupplierEmailDefaults.GreetingMax, "The greeting"),
+            Opening = Pick(edit?.Opening, saved.Opening, SupplierEmail.SupplierEmailDefaults.OpeningMax, "The opening sentence"),
+            SignOff = Pick(edit?.SignOff, saved.SignOff, SupplierEmail.SupplierEmailDefaults.SignOffMax, "The sign-off and signature"),
+        };
         var company = string.IsNullOrWhiteSpace(companyName) ? RfqToSupplierNotificationName : companyName.Trim();
         string Fill(string text) => SupplierEmail.SupplierEmailDefaults.Fill(text, supplierName, company, rfqNumber);
         return new SupplierEmail.SupplierEmailTexts(Fill(texts.Subject), Fill(texts.Greeting), Fill(texts.Opening),
@@ -526,7 +546,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 command.Quantity,
                 command.SendFromMailboxId,
                 Cc = copies,
-                Bcc = blindCopies
+                Bcc = blindCopies,
+                command.Wording
             });
             var replay = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == solicitationKey, ct);
@@ -669,7 +690,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var companyName = await _db.BusinessUnits.AsNoTracking().Where(x => x.Id == command.BusinessUnitId)
                 .Select(x => x.BusinessUnitName).FirstOrDefaultAsync(ct);
             var wording = await WordingForAsync(command.BusinessUnitId, command.UserId, supplier.Name, companyName,
-                solicitation.SupplierRfqNumber, ct);
+                solicitation.SupplierRfqNumber, ct, command.Wording);
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
                 solicitation.SupplierRfqNumber, SummariseLinesForSupplier(preparedLines), command.DueOn, preparedLines,

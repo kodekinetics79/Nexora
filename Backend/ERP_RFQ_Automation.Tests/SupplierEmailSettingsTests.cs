@@ -179,6 +179,36 @@ public sealed class SupplierEmailSettingsTests
         Assert.Equal("archive@qa.example", Assert.Single(message.Bcc).Address);
     }
 
+    [Fact]
+    public async Task The_rep_can_reword_this_one_email_and_the_subject_still_carries_the_request_number()
+    {
+        using var fixture = new ProcurementScenario();
+        await SupplierRfqEmailContentTests_MakeSourcingReady(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            new CreateSourcingCaseCommand(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, 10, false, "reword", "qa", "corr-reword")));
+        var candidate = Assert.Single(created.Candidates);
+
+        var preview = await fixture.Execute(service => service.PreviewSupplierRfqEmailAsync(fixture.BusinessUnitId, created.Id,
+            null, null, null, 501, null, default, null, null,
+            new SupplierEmailWordingEdit("Urgent: price needed", "Hi [Supplier name] team,", "We need this by Thursday:", "Thanks,\nAhmed")));
+        Assert.Equal("Urgent: price needed ((number given when sent))", preview.Subject);
+        Assert.Contains("Hi <supplier name> team,", preview.Body);
+        Assert.Contains("We need this by Thursday:", preview.Body);
+        // The part lines are still Nexora's: the request line and its quantity are there, untouched.
+        Assert.Contains("Quantity:", preview.Body);
+        Assert.Contains("Thanks,\nAhmed", preview.Body);
+
+        var prepared = await fixture.Execute(service => service.PrepareSupplierRfqAsync(
+            new PrepareSupplierRfqCommand(fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+                "reword-prepare", "qa", "corr-reword-prepare", UserId: 501,
+                Wording: new SupplierEmailWordingEdit("Urgent: price needed", "Hi [Supplier name] team,", null, null))));
+        await using var verify = fixture.Context();
+        var createdEvent = await verify.ProcurementEvents.SingleAsync(x => x.AggregateType == "SupplierSolicitation"
+            && x.AggregateId == prepared.SupplierSolicitationId && x.EventType == "SUPPLIER_RFQ_CREATED");
+        Assert.Contains("\"SubjectLine\":\"Urgent: price needed (SRFQ-", createdEvent.PayloadJson);
+        Assert.Contains("\"Greeting\":\"Hi ", createdEvent.PayloadJson);
+    }
+
     private static async Task SupplierRfqEmailContentTests_MakeSourcingReady(ProcurementScenario fixture)
     {
         await using var context = fixture.Context();
