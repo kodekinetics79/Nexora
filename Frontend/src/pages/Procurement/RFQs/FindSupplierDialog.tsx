@@ -160,8 +160,10 @@ export default function FindSupplierDialog({
     initialPageParam: 0,
     getNextPageParam: (last) => (last.status === "Ready" && last.offset + last.limit < last.total ? last.offset + last.limit : undefined),
     enabled: open && Boolean(sourcingCase),
-    retry: false,
+    // One quiet retry, then the tab says so itself with a Try again button; no red toast on top.
+    retry: 1,
     staleTime: 60_000,
+    meta: { silenceGlobalError: true },
   });
 
   const ownRows: Row[] = (sourcingCase?.candidates ?? []).map((candidate) => ({
@@ -520,7 +522,7 @@ export default function FindSupplierDialog({
                 <Tab value="internet" sx={{ minHeight: 42 }} label={
                   <Badge color="primary" badgeContent={internetTicked} invisible={internetTicked === 0}>
                     <Box sx={{ pr: internetTicked ? 1.5 : 0 }}>
-                      From the internet {internet.isLoading ? "…" : `(${internetRows.length}${moreInternet ? "+" : ""})`}
+                      From the internet {internet.isLoading ? "…" : internet.isError ? "" : `(${internetRows.length}${moreInternet ? "+" : ""})`}
                     </Box>
                   </Badge>} />
               </Tabs>
@@ -540,7 +542,12 @@ export default function FindSupplierDialog({
                   <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>{firstInternetPage.message}</Typography>
                 )}
                 {tab === "internet" && internet.isError && (
-                  <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>The internet could not be searched just now.</Typography>
+                  <Stack spacing={1} sx={{ p: 2, alignItems: "flex-start" }}>
+                    <Typography variant="body2" color="text.secondary">
+                      The internet search did not answer this time. Your own suppliers and typed emails still work.
+                    </Typography>
+                    <Button size="small" variant="outlined" onClick={() => internet.refetch()}>Try again</Button>
+                  </Stack>
                 )}
                 {rows.length > 0 && supplierTable}
                 {tab === "internet" && moreInternet && (
