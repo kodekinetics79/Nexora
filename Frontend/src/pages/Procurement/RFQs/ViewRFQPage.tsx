@@ -50,7 +50,7 @@ import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
-import { OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
+import { LinePriceAction, OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
 import { LineMakersCell, acceptedMakersOf, isApprovedMakersField } from './LineMakers';
 import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
@@ -983,6 +983,7 @@ const ViewRFQPage: React.FC = () => {
                                 {status}
                               </Typography>
                               <OtherMakerStockAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} />
+                              {!unknown && <LinePriceAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} primary={validOffers.length > 0} />}
                               {catalogueNote && validOffers.length + waiting.length > 0 && (
                                 <Typography variant="caption" color="text.secondary">{catalogueNote}</Typography>
                               )}
@@ -993,7 +994,7 @@ const ViewRFQPage: React.FC = () => {
                               )}
                               <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: 'wrap' }}>
                                 {validOffers.length > 0 && (
-                                  <Button size="small" variant="contained" onClick={() => navigate(`/procurement/rfqs/${id}/sourcing`)}>Pick a price</Button>
+                                  <Button size="small" variant="text" onClick={() => navigate(`/procurement/rfqs/${id}/sourcing`)}>Compare prices</Button>
                                 )}
                                 {validOffers.length === 0 && expiredOffers.length > 0 && canFind && (
                                   <Button size="small" variant="contained" startIcon={<SourcingIcon />}

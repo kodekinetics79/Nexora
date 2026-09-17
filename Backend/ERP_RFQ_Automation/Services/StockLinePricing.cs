@@ -42,7 +42,16 @@ public sealed record StockLinePriceView(
     IReadOnlyList<PriceReference> History,
     QuoteLineNow? OnQuote,
     StockCurrency? Currency,
-    AcceptedMakerStock? OtherMaker = null);
+    AcceptedMakerStock? OtherMaker = null,
+    IReadOnlyList<SupplierPriceOption>? SupplierPrices = null,
+    bool CoveredByStock = false);
+
+/// <summary>
+/// A price a supplier gave for this part: for this RFQ line, or for the same product on another
+/// request. Cost is the landed cost when freight/duty were captured, else the unit price.
+/// </summary>
+public sealed record SupplierPriceOption(long Id, string SupplierName, decimal Cost, string? CurrencyCode, int? LeadTimeDays,
+    DateTime? ValidUntil, bool Valid, string? Reference, bool ForThisRequest, DateTime? QuotedOn);
 
 /// <summary>Label: "SIEMENS 3RT2046-1AN20" — the brand and the part number, as the rep and the customer say it.</summary>
 public sealed record AcceptedMakerStock(long ProductId, string PartNumber, string Label, decimal OnHand, decimal Free);
@@ -51,7 +60,7 @@ public sealed record StockOnShelf(decimal OnHand, decimal Free, decimal HeldForO
 
 public sealed record StockPlace(string Warehouse, decimal OnHand, decimal Free);
 
-/// <summary>Source: SELLING_PRICE, COST_PLUS_MARGIN, COST_ONLY (cost known, no margin set) or NONE.</summary>
+/// <summary>Source: SELLING_PRICE, SUPPLIER_PLUS_MARGIN (a valid supplier price is the cost), COST_PLUS_MARGIN, COST_ONLY (cost known, no margin set) or NONE.</summary>
 public sealed record StockPriceSuggestion(string Source, decimal? SellingPrice, decimal? UnitCost, decimal? MarginPercent, decimal? UnitPrice);
 
 /// <summary>Kind: SOLD (an order line), WON (a quote the customer accepted), QUOTED (any other sent quote).</summary>
@@ -73,7 +82,7 @@ public sealed record PartTrackRecord(PriceReference? LastQuoted, PriceReference?
 /// makes a draft revision; the customer sees nothing until it is sent), DECIDED (the customer has
 /// already accepted or rejected, so the price is final).
 /// </summary>
-public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode, string State);
+public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode, string State, int? LeadTimeDays = null);
 
 public sealed record StockCurrency(long Id, string Code);
 
@@ -154,8 +163,15 @@ public sealed class StockLinePricingService : IStockLinePricingService
 
         var stock = await ShelfAsync(businessUnitId, pricedProductId, ct);
         var margin = await GetStandardMarginAsync(businessUnitId, ct);
+        var covered = stock.Free >= (line.Quantity ?? 0m) && (line.Quantity ?? 0m) > 0m;
+        var supplierPrices = await SupplierPricesAsync(businessUnitId, rfqItemId, pricedProductId, ct);
         var price = Suggest(product?.SellingPrice ?? product?.FinalSalesPrice ?? stock.SellingPrice,
             stock.UnitCost ?? product?.UnitCost, margin);
+        // Not on the shelf: what a supplier will charge is the cost that matters, not an old stock cost.
+        var bestSupplier = supplierPrices.Where(x => x.Valid).OrderBy(x => x.Cost).FirstOrDefault();
+        if (!covered && price.Source != "SELLING_PRICE" && bestSupplier is not null)
+            price = new StockPriceSuggestion("SUPPLIER_PLUS_MARGIN", null, bestSupplier.Cost, margin,
+                Math.Round(bestSupplier.Cost * (1m + (margin ?? 0m) / 100m), 2));
 
         var history = pricedProductId is null
             ? new List<PriceReference>()
@@ -172,14 +188,15 @@ public sealed class StockLinePricingService : IStockLinePricingService
             .OrderByDescending(x => x.Quote.RevisionNo).ThenByDescending(x => x.Quote.Id)
             .Select(x => new
             {
-                x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0,
+                x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0, x.DeliveryLeadTime,
                 Currency = x.Quote.Currency != null ? x.Quote.Currency.Code : null,
                 Status = x.Quote.Status != null ? x.Quote.Status.SetupCode : null,
                 StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
             })
             .FirstOrDefaultAsync(ct);
         var onQuote = onQuoteRow is null ? null : new QuoteLineNow(onQuoteRow.QuoteId, onQuoteRow.QuoteNo, onQuoteRow.UnitPrice,
-            onQuoteRow.ExStock, onQuoteRow.Currency, QuoteState(LifecyclePolicy.Canonicalize("Quote", onQuoteRow.Status, onQuoteRow.StatusValue)));
+            onQuoteRow.ExStock, onQuoteRow.Currency, QuoteState(LifecyclePolicy.Canonicalize("Quote", onQuoteRow.Status, onQuoteRow.StatusValue)),
+            onQuoteRow.DeliveryLeadTime);
 
         var currency = await _db.Quotes.AsNoTracking()
             .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId && x.Currency != null)
@@ -204,7 +221,38 @@ public sealed class StockLinePricingService : IStockLinePricingService
             history.Where(x => !ReferenceEquals(x, lastQuoted) && !ReferenceEquals(x, lastWon)).Take(HistoryRows).ToList(),
             onQuote,
             currency,
-            otherMaker);
+            otherMaker,
+            supplierPrices,
+            covered);
+    }
+
+    /// <summary>How many supplier prices the window lists: the valid ones first, cheapest first.</summary>
+    public const int SupplierPriceRows = 6;
+
+    private async Task<List<SupplierPriceOption>> SupplierPricesAsync(long businessUnitId, long rfqItemId, long? productId, CancellationToken ct)
+    {
+        var today = DateTime.UtcNow.Date;
+        var rows = await _db.SupplierQuotedItems.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive && x.UnitPrice > 0m
+                && (x.RfqItemId == rfqItemId || (productId != null && x.ProductId == productId)))
+            .OrderByDescending(x => x.CreatedDate)
+            .Take(40)
+            .Select(x => new
+            {
+                x.Id, x.SupplierId, SupplierName = x.Supplier.Name, x.UnitPrice, x.LandedUnitCost, x.LeadTimeDays,
+                x.ValidUntil, x.QuoteReference, x.RfqItemId, x.QuoteDate, x.CreatedDate,
+                Currency = _db.Currencies.Where(c => c.Id == x.CurrencyId).Select(c => c.Code).FirstOrDefault()
+            })
+            .ToListAsync(ct);
+        return rows
+            // One row per supplier: their latest price.
+            .GroupBy(x => x.SupplierId).Select(g => g.First())
+            .Select(x => new SupplierPriceOption(x.Id, x.SupplierName, Math.Round(x.LandedUnitCost ?? x.UnitPrice!.Value, 4), x.Currency,
+                x.LeadTimeDays, x.ValidUntil, x.ValidUntil is null || x.ValidUntil.Value.Date >= today, x.QuoteReference,
+                x.RfqItemId == rfqItemId, x.QuoteDate ?? x.CreatedDate))
+            .OrderByDescending(x => x.Valid).ThenBy(x => x.Cost)
+            .Take(SupplierPriceRows)
+            .ToList();
     }
 
     private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;

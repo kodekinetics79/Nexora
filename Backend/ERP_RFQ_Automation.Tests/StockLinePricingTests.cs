@@ -64,6 +64,45 @@ public sealed class StockLinePricingTests
         Assert.Null(await service.GetAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None, strangerId));
     }
 
+    [Fact]
+    public async Task A_line_not_in_stock_is_priced_from_the_cheapest_valid_supplier_price()
+    {
+        using var fixture = new ProcurementScenario(); // the line wants 10, the shelf holds 2
+        await using (var setup = fixture.Context())
+        {
+            var second = AgentSeed.Supplier(setup, 96_960, fixture.BusinessUnitId, "Second Supplier", "second@example.test");
+            var expired = AgentSeed.Supplier(setup, 96_961, fixture.BusinessUnitId, "Expired Supplier", "expired@example.test");
+            void Price(long id, long supplierId, decimal unitPrice, DateTime? validUntil, int lead) => setup.SupplierQuotedItems.Add(new Models.SupplierQuotedItem
+            {
+                Id = id, BusinessUnitId = fixture.BusinessUnitId, SupplierId = supplierId, RfqItemId = fixture.RfqItemId,
+                ProductId = ProcurementTestData.Product, Quantity = 10m, UnitPrice = unitPrice, CurrencyId = ProcurementTestData.Currency,
+                LeadTimeDays = lead, ValidUntil = validUntil, IsActive = true, CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+            });
+            Price(96_970, ProcurementTestData.Supplier, 120m, DateTime.UtcNow.AddDays(20), 28);
+            Price(96_971, second.Id, 100m, DateTime.UtcNow.AddDays(5), 14);
+            Price(96_972, expired.Id, 80m, DateTime.UtcNow.AddDays(-3), 7);
+            await setup.SaveChangesAsync();
+        }
+
+        await using var db = fixture.Context();
+        var service = new StockLinePricingService(db);
+        await service.SaveStandardMarginAsync(fixture.BusinessUnitId, 25m, "qa", CancellationToken.None);
+        var view = await service.GetAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None);
+
+        Assert.False(view!.CoveredByStock);
+        Assert.Equal(("SUPPLIER_PLUS_MARGIN", 100m, 125m), (view.Price.Source, view.Price.UnitCost, view.Price.UnitPrice));
+        Assert.Equal(["Second Supplier", "QA Supplier", "Expired Supplier"], view.SupplierPrices!.Select(x => x.SupplierName).ToArray());
+        Assert.False(view.SupplierPrices!.Last().Valid);
+    }
+
+    [Theory]
+    [InlineData(7, "1 week")]
+    [InlineData(28, "4 weeks")]
+    [InlineData(10, "10 days")]
+    [InlineData(1, "1 day")]
+    public void Delivery_prints_in_weeks_when_it_divides(int days, string text) =>
+        Assert.Equal(text, QuoteService.DeliveryText(days));
+
     [Theory]
     [InlineData(null, "DRAFT")]
     [InlineData("DRAFT", "DRAFT")]

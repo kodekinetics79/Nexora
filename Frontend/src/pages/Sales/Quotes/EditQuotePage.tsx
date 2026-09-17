@@ -61,9 +61,13 @@ interface QuoteItem {
   // The user's own statement of how the supply is taxed (R19), and the evidence for it.
   taxCategory: string;
   taxCategoryReason: string;
-  deliveryLeadTime: number;
+  /** Days. 0 = ex stock; null = not stated (nothing printed). */
+  deliveryLeadTime: number | null;
   isDeleted?: boolean;
 }
+
+/** "28 days" → "4 weeks"; "10 days" stays days. */
+export const deliveryText = (days: number) => (days % 7 === 0 ? `${days / 7} week${days === 7 ? '' : 's'}` : `${days} day${days === 1 ? '' : 's'}`);
 
 const EditQuotePage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -169,7 +173,7 @@ const EditQuotePage: React.FC = () => {
         taxRatePercentApplied: i.taxRatePercentApplied ?? null,
         taxCategory: i.taxCategory || TAX_CATEGORY_STANDARD,
         taxCategoryReason: i.taxCategoryReason || '',
-        deliveryLeadTime: i.deliveryLeadTime ?? 7
+        deliveryLeadTime: i.deliveryLeadTime ?? null
       })));
     }
   }, [quote]);
@@ -276,7 +280,7 @@ const EditQuotePage: React.FC = () => {
       discount: 0, discountTypeId: null, discountValue: 0,
       // A brand-new line has no derived tax until the server computes one on save.
       taxAmount: 0, taxRatePercentApplied: null, taxCategory: TAX_CATEGORY_STANDARD, taxCategoryReason: '',
-      deliveryLeadTime: 7
+      deliveryLeadTime: null
     }]);
   };
 
@@ -580,6 +584,11 @@ const EditQuotePage: React.FC = () => {
                     </TableCell>
                     <TableCell>
                       <TextField fullWidth size="small" variant="standard" value={item.itemDescription} onChange={(e) => updateItem(index, { itemDescription: e.target.value })} />
+                      {item.deliveryLeadTime != null && item.deliveryLeadTime > 0 && (
+                        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>
+                          Delivery {deliveryText(item.deliveryLeadTime)}
+                        </Typography>
+                      )}
                       {item.deliveryLeadTime === 0 && (
                         <Typography variant="caption" color="success.main" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>Ex stock</Typography>
                       )}

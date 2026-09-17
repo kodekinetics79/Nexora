@@ -40,7 +40,7 @@ public sealed class RfqLinePricingController(
         return Ok(await pricing.OtherMakersInStockAsync(tenant, rfqId, itemId, ct));
     }
 
-    public sealed record UseStockPriceCommand(decimal UnitPrice, bool ExStock = true, long? CurrencyId = null, bool ReviseIfSent = false, long? ProductId = null);
+    public sealed record UseStockPriceCommand(decimal UnitPrice, bool ExStock = true, long? CurrencyId = null, bool ReviseIfSent = false, long? ProductId = null, int? LeadTimeDays = null);
 
     [HttpPost("{rfqId:long}/items/{itemId:long}/stock-price")]
     [RequireModulePermission("RFQ Management", PermissionAction.View)]
@@ -60,7 +60,7 @@ public sealed class RfqLinePricingController(
         try
         {
             var quote = await quotes.PriceRfqLineAsync(rfqId, itemId, tenant, Actor(), command.UnitPrice, command.ExStock, command.CurrencyId, ct,
-                command.ReviseIfSent, otherMaker?.ProductId, otherMaker?.Label);
+                command.ReviseIfSent, otherMaker?.ProductId, otherMaker?.Label, command.LeadTimeDays);
             return Ok(new { quoteId = quote.Id, quoteNo = quote.QuoteNo });
         }
         catch (KeyNotFoundException) { return NotFound(); }

@@ -81,7 +81,7 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
-        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null);
+        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null, int? leadTimeDays = null);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
         Task<QuoteResponseDTO> GetQuoteAsync(long id);
@@ -635,8 +635,10 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<QuoteResponseDTO> PriceRfqLineAsync(
             long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock,
-            long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null)
+            long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null,
+            int? leadTimeDays = null)
         {
+            if (leadTimeDays is < 0 or > 730) throw new InvalidOperationException("Delivery time must be between 0 and 730 days.");
             if (unitPrice <= 0m) throw new InvalidOperationException("Enter a price above zero.");
             if (unitPrice > 1_000_000_000m) throw new InvalidOperationException("That price is too large.");
 
@@ -688,6 +690,7 @@ namespace ERP_RFQ_Automation.Services
             // 0 days = ex stock: printed as "Ex stock, subject to prior sale". Nothing is reserved;
             // stock is held only when the customer commits with an order.
             if (exStock) line.DeliveryLeadTime = 0;
+            else if (leadTimeDays is > 0) line.DeliveryLeadTime = leadTimeDays;
             else if (line.DeliveryLeadTime == 0) line.DeliveryLeadTime = null;
             line.ModifiedBy = actor;
             line.ModifiedDate = DateTime.UtcNow;
@@ -1043,7 +1046,11 @@ namespace ERP_RFQ_Automation.Services
         /// A quote line collection loaded via Include carries no ordering guarantee at all,
         /// so without this the printed line sequence could differ between two exports.
         /// </summary>
-        internal static IReadOnlyList<QuoteItem> OrderQuoteLines(IEnumerable<QuoteItem> items) => items
+/// <summary>28 → "4 weeks"; 10 → "10 days". What the customer reads under the line.</summary>
+        internal static string DeliveryText(int days) =>
+            days % 7 == 0 ? $"{days / 7} week{(days == 7 ? "" : "s")}" : $"{days} day{(days == 1 ? "" : "s")}";
+
+                internal static IReadOnlyList<QuoteItem> OrderQuoteLines(IEnumerable<QuoteItem> items) => items
             .OrderBy(i => string.IsNullOrWhiteSpace(i.CustomerLineRef) ? 1 : 0)
             .ThenBy(i => long.TryParse(i.CustomerLineRef, out var n) ? n : long.MaxValue)
             .ThenBy(i => i.CustomerLineRef, StringComparer.OrdinalIgnoreCase)
@@ -1790,6 +1797,8 @@ namespace ERP_RFQ_Automation.Services
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
                                     if (item.x.DeliveryLeadTime == 0)
                                         c.Item().Text("Ex stock, subject to prior sale").FontSize(8).FontColor(Colors.Grey.Darken1);
+                                    else if (item.x.DeliveryLeadTime is int days && days > 0)
+                                        c.Item().Text($"Delivery: {DeliveryText(days)}").FontSize(8).FontColor(Colors.Grey.Darken1);
                                     if (item.x.Discount > 0)
                                         c.Item().Text($"Discount: {quote.Currency?.Code} {item.x.Discount:N2}").FontSize(8).Italic().FontColor(Colors.Red.Medium);
                                 });

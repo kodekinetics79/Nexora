@@ -24,7 +24,7 @@ vi.mock('../../../context/AuthContext', () => ({
   }),
 }));
 
-import { OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
+import { LinePriceAction, OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
 
 const sold = { kind: 'SOLD', unitPrice: 142.5, currencyCode: 'SAR', quantity: 8, customer: 'Jubail Petrochem', on: '2026-08-28T00:00:00', reference: 'SO-1' };
 const won = { kind: 'WON', unitPrice: 150, currencyCode: 'SAR', quantity: 10, customer: 'Al Jazirah', on: '2026-09-16T00:00:00', reference: 'QT-1' };
@@ -39,6 +39,8 @@ const view = (overrides = {}) => ({
   history: [sold],
   onQuote: { quoteId: 2, quoteNo: 'QT-0926-0002', unitPrice: 0, exStock: false, currencyCode: null, state: 'DRAFT' },
   currency: { id: 1, code: 'SAR' },
+  coveredByStock: true,
+  supplierPrices: [],
   ...overrides,
 });
 
@@ -165,5 +167,37 @@ describe('Price from stock', () => {
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(2, 10, 17));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ productId: 17 })));
+  });
+
+  it('a line not in stock is priced from a supplier price with its delivery time', async () => {
+    mocks.get.mockResolvedValue(view({
+      coveredByStock: false,
+      stock: { onHand: 0, free: 0, heldForOrders: 0, places: [] },
+      price: { source: 'SUPPLIER_PLUS_MARGIN', sellingPrice: null, unitCost: 100, marginPercent: 20, unitPrice: 120 },
+      supplierPrices: [
+        { id: 1, supplierName: 'Gulf Switchgear', cost: 100, currencyCode: 'SAR', leadTimeDays: 21, validUntil: '2026-10-15T00:00:00', valid: true, forThisRequest: true },
+        { id: 2, supplierName: 'Old Supplier', cost: 90, currencyCode: 'SAR', leadTimeDays: 7, validUntil: '2026-08-01T00:00:00', valid: false, forThisRequest: false },
+      ],
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <LinePriceAction rfqId={2} itemId={10} canPrice primary />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Price it' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Price this line')).toBeInTheDocument();
+    expect(within(dialog).getByText('Not in stock')).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('Offer ex stock')).not.toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByLabelText('Delivery time')).toHaveValue(3));
+    expect(within(dialog).getByText('Expired')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Use Old Supplier price' })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
+    await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ unitPrice: 120, exStock: false, leadTimeDays: 21 })));
   });
 });
