@@ -35,6 +35,35 @@ public sealed class StockLinePricingTests
         Assert.Equal(("QT-THIS-RFQ", "SENT"), (view.OnQuote?.QuoteNo, view.OnQuote?.State));
     }
 
+    [Fact]
+    public async Task Another_accepted_maker_in_stock_is_offered_by_its_part_number_and_nothing_else_is()
+    {
+        using var fixture = new ProcurementScenario();
+        const long siemensId = 96_950, strangerId = 96_951;
+        await using (var setup = fixture.Context())
+        {
+            var line = await setup.Rfqitems.SingleAsync(x => x.Id == fixture.RfqItemId);
+            line.ExtraFields = """{"Approved manufacturers": "ABB ELECTRICAL INDUSTRIES CO. LTD (SA): P/N AF96-30-00-13; SIEMENS AG AUTOMATION AND DRIVE (DE): P/N 3RT2046-1AN20"}""";
+            foreach (var (id, part) in new[] { (siemensId, "3rt2046-1an20"), (strangerId, "NOT-ACCEPTED-1") })
+            {
+                setup.Products.Add(new Product { Id = id, Buid = fixture.BusinessUnitId, PartNo = part, ProductName = part, QtyOnHand = 0, ReorderPoint = 0, IsActive = true, CreatedBy = "qa", CreatedOn = DateTime.UtcNow });
+                setup.Set<Models.Inventory>().Add(new Models.Inventory { Id = id, Buid = fixture.BusinessUnitId, ProductId = id, WarehouseId = ProcurementTestData.Warehouse, PartNo = part, QtyOnHand = 30, ReorderPoint = 0, UnitCost = 410m, CreatedBy = "qa", CreatedOn = DateTime.UtcNow });
+            }
+            await setup.SaveChangesAsync();
+        }
+
+        await using var db = fixture.Context();
+        var service = new StockLinePricingService(db);
+        var other = Assert.Single(await service.OtherMakersInStockAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None));
+        Assert.Equal((siemensId, "SIEMENS 3RT2046-1AN20", 30m), (other.ProductId, other.Label, other.Free));
+
+        var view = await service.GetAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None, siemensId);
+        Assert.Equal(30m, view!.Stock.OnHand);
+        Assert.Equal(410m, view.Price.UnitCost);
+        Assert.Equal("SIEMENS", view.Maker);
+        Assert.Null(await service.GetAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None, strangerId));
+    }
+
     [Theory]
     [InlineData(null, "DRAFT")]
     [InlineData("DRAFT", "DRAFT")]

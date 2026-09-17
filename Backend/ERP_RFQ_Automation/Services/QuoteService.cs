@@ -81,7 +81,7 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
-        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false);
+        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
         Task<QuoteResponseDTO> GetQuoteAsync(long id);
@@ -635,7 +635,7 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<QuoteResponseDTO> PriceRfqLineAsync(
             long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock,
-            long? currencyId, CancellationToken ct = default, bool reviseIfSent = false)
+            long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null)
         {
             if (unitPrice <= 0m) throw new InvalidOperationException("Enter a price above zero.");
             if (unitPrice > 1_000_000_000m) throw new InvalidOperationException("That price is too large.");
@@ -669,6 +669,19 @@ namespace ERP_RFQ_Automation.Services
                 var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId, ct);
                 if (!known) throw new InvalidOperationException("Choose one of your company's currencies.");
                 quote.CurrencyId = currencyId;
+            }
+
+            // Another maker the customer accepts, from our own stock: the quote line names what is
+            // actually offered ("… — SIEMENS 3RT2046-1AN20"), so the customer is never surprised.
+            var rfqLine = await _context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == rfqItemId, ct);
+            var targetProductId = productId ?? rfqLine.ProductId;
+            if (targetProductId != line.ProductId)
+            {
+                var baseDescription = rfqLine.ProductShortDescription ?? rfqLine.ProductShortName ?? rfqLine.ItemText ?? rfqLine.ItemMaterialCode;
+                line.ProductId = targetProductId;
+                line.ItemDescription = productId is not null && !string.IsNullOrWhiteSpace(productLabel)
+                    ? $"{baseDescription} — {productLabel}"
+                    : baseDescription;
             }
 
             line.UnitPrice = Math.Round(unitPrice, 2);

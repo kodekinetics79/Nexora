@@ -9,10 +9,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * button to a small window that puts the price on the quote draft, ex stock, with nothing held.
  */
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), use: vi.fn(), saveMargin: vi.fn(), canEditMargin: true }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), use: vi.fn(), saveMargin: vi.fn(), otherMakers: vi.fn(), canEditMargin: true }));
 
 vi.mock('../../../api/services/stockPriceService', () => ({
-  default: { get: mocks.get, use: mocks.use, saveMargin: mocks.saveMargin },
+  default: { get: mocks.get, use: mocks.use, saveMargin: mocks.saveMargin, otherMakers: mocks.otherMakers },
 }));
 vi.mock('../../../api/services/currencyService', () => ({
   default: { getAll: vi.fn().mockResolvedValue({ items: [{ id: 1, code: 'SAR' }] }) },
@@ -24,7 +24,7 @@ vi.mock('../../../context/AuthContext', () => ({
   }),
 }));
 
-import { StockLineAction } from './StockPriceDialog';
+import { OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
 
 const sold = { kind: 'SOLD', unitPrice: 142.5, currencyCode: 'SAR', quantity: 8, customer: 'Jubail Petrochem', on: '2026-08-28T00:00:00', reference: 'SO-1' };
 const won = { kind: 'WON', unitPrice: 150, currencyCode: 'SAR', quantity: 10, customer: 'Al Jazirah', on: '2026-09-16T00:00:00', reference: 'QT-1' };
@@ -143,5 +143,27 @@ describe('Price from stock', () => {
     expect(await screen.findByText(/Priced SAR\s?125\.00 on QT-0926-0002 · ex stock/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change price' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open quote' })).toBeInTheDocument();
+  });
+
+  it('a line needing sourcing offers another accepted maker from stock and quotes that product', async () => {
+    mocks.otherMakers.mockResolvedValue([{ productId: 17, partNumber: '3RT2046-1AN20', label: 'SIEMENS 3RT2046-1AN20', onHand: 30, free: 30 }]);
+    mocks.get.mockResolvedValue(view({ otherMaker: { productId: 17, partNumber: '3RT2046-1AN20', label: 'SIEMENS 3RT2046-1AN20', onHand: 30, free: 30 } }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <OtherMakerStockAction rfqId={2} itemId={10} canPrice />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('SIEMENS 3RT2046-1AN20 in stock · 30')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Price SIEMENS 3RT2046-1AN20 from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/one of the makers the customer accepts/)).toBeInTheDocument();
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(2, 10, 17));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
+    await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ productId: 17 })));
   });
 });

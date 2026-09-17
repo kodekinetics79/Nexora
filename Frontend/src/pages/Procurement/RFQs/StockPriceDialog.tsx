@@ -40,7 +40,8 @@ const qty = (value: number) => value.toLocaleString(undefined, { maximumFraction
 const describeError = (error: unknown, fallback: string) =>
   (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback;
 
-export const stockPriceQueryKey = (rfqId: number, itemId: number) => ["stock-price", rfqId, itemId];
+export const stockPriceQueryKey = (rfqId: number, itemId: number, productId?: number | null) =>
+  productId ? ["stock-price", rfqId, itemId, productId] : ["stock-price", rfqId, itemId];
 
 const KIND_LABEL: Record<PriceReference["kind"], string> = { SOLD: "Sold", WON: "Won", QUOTED: "Quoted" };
 
@@ -85,6 +86,8 @@ export interface StockPriceDialogProps {
   open: boolean;
   rfqId: number;
   itemId: number;
+  /** Price another accepted maker's product from stock instead of the line's own. */
+  productId?: number | null;
   onClose: () => void;
 }
 
@@ -93,7 +96,7 @@ export interface StockPriceDialogProps {
  * (selling price, else cost + company margin), and what the part last sold and won at. Nothing
  * is held: the quote says "ex stock, subject to prior sale".
  */
-export default function StockPriceDialog({ open, rfqId, itemId, onClose }: StockPriceDialogProps) {
+export default function StockPriceDialog({ open, rfqId, itemId, productId, onClose }: StockPriceDialogProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
@@ -101,8 +104,8 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
   const canSaveMargin = hasPermission("Quote Configuration", "edit");
 
   const viewQuery = useQuery({
-    queryKey: stockPriceQueryKey(rfqId, itemId),
-    queryFn: () => stockPriceService.get(rfqId, itemId),
+    queryKey: stockPriceQueryKey(rfqId, itemId, productId),
+    queryFn: () => stockPriceService.get(rfqId, itemId, productId),
     enabled: open,
   });
   const view = viewQuery.data;
@@ -177,6 +180,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
         exStock,
         currencyId: quoteHasCurrency ? null : currencyId === "" ? null : currencyId,
         ...(sent ? { reviseIfSent: true } : {}),
+        ...(productId ? { productId } : {}),
       });
     },
     onSuccess: (result) => {
@@ -184,6 +188,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
       queryClient.invalidateQueries({ queryKey: ["rfq-detail", rfqId] });
       queryClient.invalidateQueries({ queryKey: ["rfq-commercial-intelligence", rfqId] });
       queryClient.invalidateQueries({ queryKey: ["stock-price"] });
+      queryClient.invalidateQueries({ queryKey: ["other-makers-in-stock"] });
       enqueueSnackbar(sent ? `New revision ${result.quoteNo} made with this price. Send it when ready.` : `Price added to ${result.quoteNo}.`, {
         variant: "success",
         action: <Button color="inherit" size="small" onClick={() => navigate(`/sales/quotes/edit/${result.quoteId}`)}>Open quote</Button>,
@@ -252,6 +257,11 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
 
         {view && stock && (
           <>
+            {view.otherMaker && (
+              <Alert severity="info" icon={<LocalOffer fontSize="small" />} sx={{ borderRadius: 0 }}>
+                Offering <b>{view.otherMaker.label}</b>, one of the makers the customer accepts. The quote line will name it.
+              </Alert>
+            )}
             {/* ---- The shelf, in one strip ---- */}
             <Stack direction={{ xs: "column", sm: "row" }} spacing={0} sx={(theme) => ({
               px: 2.5, py: 1.5, gap: { xs: 1, sm: 4 }, alignItems: { sm: "center" },
@@ -491,6 +501,53 @@ export function StockLineAction({ rfqId, itemId, canPrice }: { rfqId: number; it
         )}
       </Stack>
       {open && <StockPriceDialog open={open} rfqId={rfqId} itemId={itemId} onClose={() => setOpen(false)} />}
+    </Stack>
+  );
+}
+
+/**
+ * For a line that needs sourcing: stock of another maker the customer accepts, with one button to
+ * price it from stock. Shows nothing when there is none.
+ */
+export function OtherMakerStockAction({ rfqId, itemId, canPrice }: { rfqId: number; itemId: number; canPrice: boolean }) {
+  const [openFor, setOpenFor] = React.useState<number | null>(null);
+  const query = useQuery({
+    queryKey: ["other-makers-in-stock", rfqId, itemId],
+    queryFn: () => stockPriceService.otherMakers(rfqId, itemId),
+    staleTime: 60_000,
+  });
+  const options = query.data ?? [];
+  const lineQuery = useQuery({
+    queryKey: stockPriceQueryKey(rfqId, itemId),
+    queryFn: () => stockPriceService.get(rfqId, itemId),
+    enabled: options.length > 0,
+  });
+  if (options.length === 0) return null;
+  const priced = lineQuery.data?.onQuote && lineQuery.data.onQuote.unitPrice > 0 ? lineQuery.data.onQuote : null;
+
+  return (
+    <Stack spacing={0.5} sx={{ alignItems: "flex-start" }}>
+      {priced && (
+        <Typography variant="caption" sx={{ fontWeight: 700, color: "success.main" }}>
+          {priced.state === "DRAFT" ? "Priced" : "Quoted"} {formatMoney(priced.unitPrice, priced.currencyCode)} on {priced.quoteNo}{priced.exStock ? " · ex stock" : ""}
+        </Typography>
+      )}
+      {options.slice(0, 2).map((option) => (
+        <Stack key={option.productId} spacing={0.25} sx={{ alignItems: "flex-start" }}>
+          <Typography variant="caption" sx={{ fontWeight: 700, color: "success.main" }}>
+            {option.label} in stock · {qty(option.free)}
+          </Typography>
+          {canPrice && (
+            <Button size="small" variant={priced ? "outlined" : "contained"} startIcon={<LocalOffer />} onClick={() => setOpenFor(option.productId)}
+              aria-label={`Price ${option.label} from stock`}>
+              {priced ? "Change price" : "Price from stock"}
+            </Button>
+          )}
+        </Stack>
+      ))}
+      {openFor != null && (
+        <StockPriceDialog open rfqId={rfqId} itemId={itemId} productId={openFor} onClose={() => setOpenFor(null)} />
+      )}
     </Stack>
   );
 }

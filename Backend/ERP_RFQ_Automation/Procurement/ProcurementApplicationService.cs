@@ -3668,12 +3668,15 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     /// The customer's accepted-maker list for a line: the RFQ line's own copy (which the rep can
     /// edit), else the lead line it came from.
     /// </summary>
-    internal async Task<string?> ApprovedMakersForLineAsync(Rfqitem line, CancellationToken ct)
+    internal Task<string?> ApprovedMakersForLineAsync(Rfqitem line, CancellationToken ct) =>
+        ApprovedMakersForLineAsync(_db, line, ct);
+
+    internal static async Task<string?> ApprovedMakersForLineAsync(ErpRfqAutomationContext db, Rfqitem line, CancellationToken ct)
     {
         var approved = ApprovedMakers(line.ExtraFields);
         if (approved is null && line.SourceLeadItemRevisionId.HasValue)
         {
-            var leadExtraFields = await _db.Set<LeadIdentity.LeadItemRevision>().AsNoTracking()
+            var leadExtraFields = await db.Set<LeadIdentity.LeadItemRevision>().AsNoTracking()
                 .Where(x => x.Id == line.SourceLeadItemRevisionId.Value && x.LeadItem != null)
                 .Select(x => x.LeadItem!.ExtraFields)
                 .FirstOrDefaultAsync(ct);

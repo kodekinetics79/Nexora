@@ -50,7 +50,7 @@ import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
-import { StockLineAction } from './StockPriceDialog';
+import { OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
 import { LineMakersCell, acceptedMakersOf, isApprovedMakersField } from './LineMakers';
 import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
@@ -982,6 +982,7 @@ const ViewRFQPage: React.FC = () => {
                               <Typography variant="caption" sx={{ fontWeight: 700, color: validOffers.length > 0 ? 'success.main' : waiting.length > 0 ? 'info.main' : 'warning.main' }}>
                                 {status}
                               </Typography>
+                              <OtherMakerStockAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} />
                               {catalogueNote && validOffers.length + waiting.length > 0 && (
                                 <Typography variant="caption" color="text.secondary">{catalogueNote}</Typography>
                               )}

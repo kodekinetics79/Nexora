@@ -16,7 +16,14 @@ namespace ERP_RFQ_Automation.Services;
 /// </summary>
 public interface IStockLinePricingService
 {
-    Task<StockLinePriceView?> GetAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct);
+    /// <param name="productId">Another accepted maker's catalogue product to price from instead of the line's own.</param>
+    Task<StockLinePriceView?> GetAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, long? productId = null);
+
+    /// <summary>
+    /// Catalogue products of the OTHER makers the customer accepts for this line (matched by the
+    /// part number written next to each maker), with what is on the shelf. inStockOnly drops the empty ones.
+    /// </summary>
+    Task<IReadOnlyList<AcceptedMakerStock>> OtherMakersInStockAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, bool inStockOnly = true);
     Task<decimal?> GetStandardMarginAsync(long businessUnitId, CancellationToken ct);
     Task SaveStandardMarginAsync(long businessUnitId, decimal? marginPercent, string actor, CancellationToken ct);
 }
@@ -34,7 +41,11 @@ public sealed record StockLinePriceView(
     PartTrackRecord TrackRecord,
     IReadOnlyList<PriceReference> History,
     QuoteLineNow? OnQuote,
-    StockCurrency? Currency);
+    StockCurrency? Currency,
+    AcceptedMakerStock? OtherMaker = null);
+
+/// <summary>Label: "SIEMENS 3RT2046-1AN20" — the brand and the part number, as the rep and the customer say it.</summary>
+public sealed record AcceptedMakerStock(long ProductId, string PartNumber, string Label, decimal OnHand, decimal Free);
 
 public sealed record StockOnShelf(decimal OnHand, decimal Free, decimal HeldForOrders, IReadOnlyList<StockPlace> Places);
 
@@ -78,8 +89,52 @@ public sealed class StockLinePricingService : IStockLinePricingService
 
     public StockLinePricingService(ErpRfqAutomationContext db) => _db = db;
 
-    public async Task<StockLinePriceView?> GetAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct)
+    public async Task<IReadOnlyList<AcceptedMakerStock>> OtherMakersInStockAsync(
+        long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, bool inStockOnly = true)
     {
+        var line = await _db.Rfqitems.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == rfqItemId && x.Rfqid == rfqId && x.Rfq.BusinessUnitId == businessUnitId, ct);
+        if (line is null) return [];
+        var approved = await Procurement.ProcurementApplicationService.ApprovedMakersForLineAsync(_db, line, ct);
+        if (approved is null) return [];
+
+        var identity = Procurement.Discovery.SupplierDiscoveryIdentity.From(
+            line.ManufacturerPartNumber, line.ManufacturerName, line.ProductShortDescription, approved);
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in identity.Pairs.Where(x => x.Part is not null))
+        {
+            var brand = Procurement.Discovery.SupplierDiscoveryIdentity.BrandOf(pair.Maker);
+            labels.TryAdd(pair.Part!, brand is null ? pair.Part! : $"{brand} {pair.Part}");
+        }
+        if (labels.Count == 0) return [];
+
+        var wanted = labels.Keys.Select(x => x.ToUpperInvariant()).ToArray();
+        var products = await _db.Products.AsNoTracking()
+            .Where(x => x.Buid == businessUnitId && x.IsActive == true && x.Id != line.ProductId
+                && wanted.Contains(x.PartNo.ToUpper()))
+            .Select(x => new { x.Id, x.PartNo })
+            .ToListAsync(ct);
+
+        var result = new List<AcceptedMakerStock>();
+        foreach (var product in products)
+        {
+            var shelf = await ShelfAsync(businessUnitId, product.Id, ct);
+            if (inStockOnly && shelf.Free <= 0m) continue;
+            result.Add(new AcceptedMakerStock(product.Id, product.PartNo,
+                labels.TryGetValue(product.PartNo, out var label) ? label : product.PartNo, shelf.OnHand, shelf.Free));
+        }
+        return result.OrderByDescending(x => x.Free).ToList();
+    }
+
+    public async Task<StockLinePriceView?> GetAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, long? productId = null)
+    {
+        AcceptedMakerStock? otherMaker = null;
+        if (productId is not null)
+        {
+            otherMaker = (await OtherMakersInStockAsync(businessUnitId, rfqId, rfqItemId, ct, inStockOnly: false))
+                .FirstOrDefault(x => x.ProductId == productId);
+        }
+
         var line = await _db.Rfqitems.AsNoTracking()
             .Where(x => x.Id == rfqItemId && x.Rfqid == rfqId && x.Rfq.BusinessUnitId == businessUnitId)
             .Select(x => new
@@ -89,20 +144,22 @@ public sealed class StockLinePricingService : IStockLinePricingService
             })
             .SingleOrDefaultAsync(ct);
         if (line is null) return null;
+        if (productId is not null && productId != line.ProductId && otherMaker is null) return null;
+        var pricedProductId = otherMaker?.ProductId ?? line.ProductId;
 
-        var product = line.ProductId is null ? null : await _db.Products.AsNoTracking()
-            .Where(x => x.Id == line.ProductId)
+        var product = pricedProductId is null ? null : await _db.Products.AsNoTracking()
+            .Where(x => x.Id == pricedProductId)
             .Select(x => new { x.SellingPrice, x.UnitCost, x.FinalSalesPrice })
             .SingleOrDefaultAsync(ct);
 
-        var stock = await ShelfAsync(businessUnitId, line.ProductId, ct);
+        var stock = await ShelfAsync(businessUnitId, pricedProductId, ct);
         var margin = await GetStandardMarginAsync(businessUnitId, ct);
         var price = Suggest(product?.SellingPrice ?? product?.FinalSalesPrice ?? stock.SellingPrice,
             stock.UnitCost ?? product?.UnitCost, margin);
 
-        var history = line.ProductId is null
+        var history = pricedProductId is null
             ? new List<PriceReference>()
-            : await HistoryAsync(businessUnitId, line.ProductId.Value, rfqId, ct);
+            : await HistoryAsync(businessUnitId, pricedProductId.Value, rfqId, ct);
         var quotes = history.Where(x => x.Kind is "QUOTED" or "WON").ToList();
         var wonQuoteIds = history.Where(x => x.Kind == "WON").Select(x => x.QuoteId).ToHashSet();
         var wins = history.Where(x => x.Kind == "WON" || x.Kind == "SOLD" && (x.QuoteId is null || !wonQuoteIds.Contains(x.QuoteId))).ToList();
@@ -136,9 +193,9 @@ public sealed class StockLinePricingService : IStockLinePricingService
 
         return new StockLinePriceView(
             line.Id, line.ProductId,
-            line.ManufacturerPartNumber ?? line.ItemMaterialCode,
+            otherMaker?.PartNumber ?? line.ManufacturerPartNumber ?? line.ItemMaterialCode,
             line.ProductShortDescription ?? line.ProductShortName,
-            line.ManufacturerName,
+            otherMaker is null ? line.ManufacturerName : NullIfEmpty(otherMaker.Label.Replace(otherMaker.PartNumber, "", StringComparison.OrdinalIgnoreCase).Trim()),
             line.Quantity ?? 0m,
             line.UnitOfMeasure,
             new StockOnShelf(stock.OnHand, stock.Free, stock.Held, stock.Places),
@@ -146,8 +203,11 @@ public sealed class StockLinePricingService : IStockLinePricingService
             track,
             history.Where(x => !ReferenceEquals(x, lastQuoted) && !ReferenceEquals(x, lastWon)).Take(HistoryRows).ToList(),
             onQuote,
-            currency);
+            currency,
+            otherMaker);
     }
+
+    private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;
 
     public static string QuoteState(string? canonicalStatus) => canonicalStatus?.ToUpperInvariant() switch
     {
