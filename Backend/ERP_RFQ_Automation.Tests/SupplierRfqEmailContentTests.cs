@@ -104,6 +104,23 @@ public sealed class SupplierRfqEmailContentTests
     }
 
     [Fact]
+    public async Task A_line_that_names_a_maker_still_lists_every_maker_the_customer_accepts()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture, line =>
+            line.ExtraFields = """{"Approved manufacturers": "QA Maker QA-PART-0; GE THQL32010; Eaton"}""");
+
+        var solicitation = await fixture.Execute(service => service.CreateSolicitationAsync(fixture.Solicitation("named-maker")));
+
+        await using var verify = fixture.Context();
+        var outbox = await verify.ProcurementOutboxMessages.SingleAsync(x => x.SupplierSolicitationId == solicitation.Id);
+        using var payload = JsonDocument.Parse(outbox.PayloadJson);
+        var line = Assert.Single(payload.RootElement.GetProperty("Lines").EnumerateArray());
+        Assert.Equal("QA Maker", line.GetProperty("Maker").GetString());
+        Assert.Equal("QA Maker QA-PART-0; GE THQL32010; Eaton", line.GetProperty("AcceptableMakers").GetString());
+    }
+
+    [Fact]
     public async Task A_line_with_no_single_maker_carries_the_customers_acceptable_makers()
     {
         using var fixture = new ProcurementScenario();
@@ -164,7 +181,10 @@ public sealed class SupplierRfqEmailContentTests
             Assert.Contains("Quantity: 12 EA", body);
             Assert.Contains("Needed by: 2026-10-01", body);
             Assert.Contains("Line 4", body);
-            Assert.Contains("Acceptable makers: Flexitallic; Klinger", body);
+            Assert.Contains("Acceptable makers (any one of):", body);
+            Assert.Contains("  - Flexitallic", body);
+            Assert.Contains("  - Klinger", body);
+            Assert.Contains("Please state the maker and part number you are quoting.", body);
             Assert.Contains("Quantity: 40 PC", body);
             Assert.Contains("Request for quotation for 2 lines", body);
             // The old bare "id: quantity" never reaches the supplier once lines exist.

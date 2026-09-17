@@ -201,6 +201,32 @@ public sealed record SupplierDiscoveryIdentity(
 
     public bool IsEmpty => Makers.Count == 0 && PartNumbers.Count == 0 && Description.Length == 0;
 
+    private static readonly Regex NameEnds = new(@"\s*(\(|:|\bvia\b|\s/\s|\bP/N\b)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // First words that are not a brand on their own: "GENERAL ELECTRIC" is not "GENERAL".
+    private static readonly HashSet<string> NotABrand = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "general", "international", "national", "united", "saudi", "arabian", "arabia", "gulf", "al", "the",
+        "electric", "electrical", "industries", "industrial", "trading", "power", "global", "american",
+        "european", "middle", "east", "new", "first", "royal", "advanced", "modern", "technical", "engineering"
+    };
+
+    /// <summary>
+    /// The name a supplier's tags would carry: "ABB ELECTRICAL INDUSTRIES CO. LTD (SA): P/N AF96" → "ABB";
+    /// "SCHNEIDER ELECTRIC USA / SQUARE-D (US)" → "SCHNEIDER"; "GENERAL ELECTRIC" → "GENERAL ELECTRIC".
+    /// </summary>
+    public static string? BrandOf(string? segment)
+    {
+        if (string.IsNullOrWhiteSpace(segment)) return null;
+        var name = NameEnds.Split(segment.Trim())[0];
+        var words = Whitespace.Split(name).Where(x => x.Length > 0 && !CorporateSuffixes.Contains(x)
+            && !(PartNumberToken.IsMatch(x) && x.Any(char.IsDigit))).ToList();
+        if (words.Count == 0) return null;
+        return words[0].Length >= 3 && !NotABrand.Contains(words[0])
+            ? words[0]
+            : string.Join(' ', words.Take(2));
+    }
+
     internal static IReadOnlyList<string> SplitApproved(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return [];

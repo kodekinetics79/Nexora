@@ -51,6 +51,7 @@ import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
 import { StockLineAction } from './StockPriceDialog';
+import { LineMakersCell, acceptedMakersOf, isApprovedMakersField } from './LineMakers';
 import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
@@ -798,7 +799,9 @@ const ViewRFQPage: React.FC = () => {
                 </TableHead>
                 <TableBody>
                   {visibleItems.map((item, idx) => {
-                    const extraFields = presentRfqExtraFields(item.extraFields);
+                    const presentedFields = presentRfqExtraFields(item.extraFields);
+                    // The accepted makers have their own place in the maker column.
+                    const extraFields = { ...presentedFields, fields: presentedFields.fields.filter((field) => !isApprovedMakersField(field.label)) };
                     return (
                     <TableRow key={item.id} hover sx={{ '&:last-child td': { border: 0 } }}>
                       {/* The buyer's line number is the identifier they will quote back at you, so
@@ -838,12 +841,7 @@ const ViewRFQPage: React.FC = () => {
                         ) : null}
                       </TableCell>
                       <TableCell>
-                        <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>
-                          {item.manufacturerName || 'N/A'}
-                        </Typography>
-                        <Typography variant="caption" sx={{ color: 'text.disabled' }}>
-                          {item.manufacturerPartNumber || 'N/A'}
-                        </Typography>
+                        <LineMakersCell rfqId={Number(id)} item={item} canEdit={hasPermission('RFQ Management', 'edit')} />
                       </TableCell>
                       <TableCell align="right" sx={{ fontSize: '0.85rem', fontWeight: 900, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
                         {item.quantity?.toLocaleString()} {item.unitOfMeasure || 'EA'}
@@ -1285,6 +1283,7 @@ const ViewRFQPage: React.FC = () => {
           rfqItemId: found.id,
           partNumber: found.manufacturerPartNumber,
           maker: found.manufacturerName,
+          acceptedMakers: acceptedMakersOf(found),
           description: found.productShortDescription || found.productShortName || found.itemText,
           unitOfMeasure: found.unitOfMeasure,
           requested,

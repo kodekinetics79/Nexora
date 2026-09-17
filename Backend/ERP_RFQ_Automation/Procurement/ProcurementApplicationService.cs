@@ -2693,15 +2693,29 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     new { productId = sourcingCase.ProductId.Value, purchaseOrder.Count, purchaseOrder.LastPurchaseOrderId });
         }
 
-        var searchTerms = new[] { sourcingCase.RequestedPartNumber, sourcingCase.Manufacturer }
-            .Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        if (searchTerms.Length > 0)
+        // Every maker the customer accepts counts: a supplier tagged "Eaton" is a candidate for an
+        // ABB line whose customer also accepts Eaton.
+        var lineForMakers = await _db.Rfqitems.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == sourcingCase.RfqItemId, ct);
+        var approvedMakers = lineForMakers is null ? null : await ApprovedMakersForLineAsync(lineForMakers, ct);
+        var identity = Discovery.SupplierDiscoveryIdentity.From(
+            sourcingCase.RequestedPartNumber, sourcingCase.Manufacturer, sourcingCase.Description, approvedMakers);
+        var makerTerms = identity.Makers.Concat(identity.AcceptableMakers)
+            .Select(Discovery.SupplierDiscoveryIdentity.BrandOf)
+            .Where(x => x is { Length: >= 2 }).Select(x => x!)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var partTerms = identity.PartNumbers.Where(x => x.Length >= 3).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (makerTerms.Length + partTerms.Length > 0)
         {
-            foreach (var supplier in suppliers.Where(supplier => searchTerms.Any(term =>
-                         ContainsInvariant(supplier.Tags, term) || ContainsInvariant(supplier.Name, term))))
+            foreach (var supplier in suppliers)
+            {
+                var part = partTerms.FirstOrDefault(term => ContainsInvariant(supplier.Tags, term) || ContainsInvariant(supplier.Name, term));
+                var maker = makerTerms.FirstOrDefault(term => ContainsWord(supplier.Tags, term) || ContainsWord(supplier.Name, term));
+                if (part is null && maker is null) continue;
                 AddCandidateEvidence(evidence, supplier.Id, SourcingCandidateEvidenceTypes.SupplierMetadata,
-                    "Persisted supplier metadata matches the requested part or manufacturer", 50m,
-                    null, new { matchedTerms = searchTerms });
+                    part is not null ? $"Listed for part {part}" : $"Carries {maker}", 50m,
+                    null, new { matchedPart = part, matchedMaker = maker });
+            }
         }
 
         var ranked = evidence.Values.OrderByDescending(x => x.Score)
@@ -3635,23 +3649,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         Rfqitem line, decimal quantity, CancellationToken ct)
     {
         var maker = Clean(line.ManufacturerName);
-        string? acceptableMakers = null;
-        if (maker is null)
-        {
-            // A line with no single maker may still carry the customer's approved-maker list,
-            // captured verbatim from their document. The RFQ line holds a copy taken at
-            // promotion; older RFQ lines predate that copy and are read through the lead line
-            // that produced them.
-            acceptableMakers = ApprovedMakers(line.ExtraFields);
-            if (acceptableMakers is null && line.SourceLeadItemRevisionId.HasValue)
-            {
-                var leadExtraFields = await _db.Set<LeadIdentity.LeadItemRevision>().AsNoTracking()
-                    .Where(x => x.Id == line.SourceLeadItemRevisionId.Value && x.LeadItem != null)
-                    .Select(x => x.LeadItem!.ExtraFields)
-                    .FirstOrDefaultAsync(ct);
-                acceptableMakers = ApprovedMakers(leadExtraFields);
-            }
-        }
+        // Every maker the customer accepts is listed, including when the line also names one:
+        // a supplier who carries only GE must know GE is welcome for an "ABB" line.
+        var acceptableMakers = await ApprovedMakersForLineAsync(line, ct);
         return new SolicitationDispatchLine(
             Clean(line.LineItemNo) ?? line.Id.ToString(),
             Clean(line.ProductShortDescription) ?? Clean(line.ProductShortName) ?? Clean(line.ItemText),
@@ -3664,7 +3664,31 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             acceptableMakers);
     }
 
-    private static string? ApprovedMakers(string? extraFieldsJson)
+    /// <summary>
+    /// The customer's accepted-maker list for a line: the RFQ line's own copy (which the rep can
+    /// edit), else the lead line it came from.
+    /// </summary>
+    internal async Task<string?> ApprovedMakersForLineAsync(Rfqitem line, CancellationToken ct)
+    {
+        var approved = ApprovedMakers(line.ExtraFields);
+        if (approved is null && line.SourceLeadItemRevisionId.HasValue)
+        {
+            var leadExtraFields = await _db.Set<LeadIdentity.LeadItemRevision>().AsNoTracking()
+                .Where(x => x.Id == line.SourceLeadItemRevisionId.Value && x.LeadItem != null)
+                .Select(x => x.LeadItem!.ExtraFields)
+                .FirstOrDefaultAsync(ct);
+            approved = ApprovedMakers(leadExtraFields);
+        }
+        return approved;
+    }
+
+    /// <summary>"GE" matches the tag "GE; Eaton" but not "Gears": makers match on whole words.</summary>
+    internal static bool ContainsWord(string? text, string term) =>
+        !string.IsNullOrWhiteSpace(text) && System.Text.RegularExpressions.Regex.IsMatch(text,
+            $@"(?<![\p{{L}}\p{{N}}]){System.Text.RegularExpressions.Regex.Escape(term)}(?![\p{{L}}\p{{N}}])",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    internal static string? ApprovedMakers(string? extraFieldsJson)
     {
         var extra = ExtraFieldsJson.Deserialize(extraFieldsJson);
         if (extra is null) return null;

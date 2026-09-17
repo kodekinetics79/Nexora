@@ -31,6 +31,7 @@ import {
 } from "@mui/material";
 import { Edit, Lock, Send, Visibility } from "@mui/icons-material";
 import supplierEmailSettingsService from "../../../api/services/supplierEmailSettingsService";
+import { makerLabel } from "./LineMakers";
 import type { SupplierEmailWordingEdit } from "../../../api/services/procurementService";
 import procurementService, {
   type SourcingCase,
@@ -51,6 +52,8 @@ export interface FindSupplierLine {
   rfqItemId: number;
   partNumber?: string | null;
   maker?: string | null;
+  /** Every maker the customer accepts, the named one first ("ABB S203", "GE THQL32010", "Eaton"). */
+  acceptedMakers?: string[];
   description?: string | null;
   unitOfMeasure?: string | null;
   requested: number;
@@ -443,7 +446,10 @@ export default function FindSupplierDialog({
             {line && (
               <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }} noWrap>
                 <b>{line.description}</b>
-                {line.partNumber ? ` · Part ${line.partNumber}` : ""}{line.maker ? ` · ${line.maker}` : ""}
+                {line.partNumber ? ` · Part ${line.partNumber}` : ""}
+                {(line.acceptedMakers?.length ?? 0) > 1
+                  ? ` · Makers accepted: ${line.acceptedMakers!.map(makerLabel).join(", ")}`
+                  : line.maker ? ` · ${line.maker}` : ""}
               </Typography>
             )}
           </Box>

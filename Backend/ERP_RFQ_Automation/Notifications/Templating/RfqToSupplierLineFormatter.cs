@@ -63,7 +63,19 @@ namespace ERP_RFQ_Automation.Notifications.Templating
                 yield return $"Part no. {line.MakerPartNumber}";
 
             if (!string.IsNullOrWhiteSpace(line.AcceptableMakers))
-                yield return $"Acceptable makers: {line.AcceptableMakers}";
+            {
+                var makers = line.AcceptableMakers.Split(';', System.StringSplitOptions.RemoveEmptyEntries | System.StringSplitOptions.TrimEntries);
+                if (makers.Length <= 1)
+                    yield return $"Acceptable makers: {line.AcceptableMakers.Trim()}";
+                else
+                {
+                    // One maker per row: a supplier scanning for the brand they carry finds it at once.
+                    yield return "Acceptable makers (any one of):";
+                    foreach (var maker in makers)
+                        yield return $"  - {maker}";
+                }
+                yield return "Please state the maker and part number you are quoting.";
+            }
 
             if (!string.IsNullOrWhiteSpace(line.MaterialCode))
                 yield return $"Material code: {line.MaterialCode}";

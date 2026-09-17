@@ -195,6 +195,12 @@ export interface RfqCreatePayload {
 }
 
 const rfqService = {
+    /** The makers the customer accepts for one line, separated by ";" ("ABB 1SDA; GE THQL32010; Eaton"). Empty clears the list. */
+    saveAcceptedMakers: async (rfqId: number, itemId: number, acceptedMakers: string): Promise<{ acceptedMakers: string[] }> => {
+        const response = await axiosInstance.put<{ acceptedMakers: string[] }>(`/api/rfq/${rfqId}/items/${itemId}/makers`, { acceptedMakers });
+        return response.data;
+    },
+
     getAll: async (params: RfqFilterParams): Promise<PaginatedRfqResponseDTO> => {
         const response = await axiosInstance.get<PaginatedRfqResponseDTO>("/api/Rfq", { params });
         return response.data;
