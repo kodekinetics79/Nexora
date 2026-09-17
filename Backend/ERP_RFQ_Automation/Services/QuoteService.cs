@@ -80,6 +80,8 @@ namespace ERP_RFQ_Automation.Services
         Task<DeliveredQuoteReconciliation> ReconcileDeliveredQuotesAsync(long businessUnitId, CancellationToken ct = default);
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
+        /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
+        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
         Task<QuoteResponseDTO> GetQuoteAsync(long id);
@@ -584,18 +586,13 @@ namespace ERP_RFQ_Automation.Services
             return $"{prefix}{nextSequence:D4}";
         }
 
-        public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
+        /// <summary>
+        /// The one rule for whether a quote's figures may still change: DRAFT, and no delivery that
+        /// reached, is reaching, or may have reached the customer. Shared by the Edit screen's save
+        /// and the RFQ line's "Use this price".
+        /// </summary>
+        private async Task EnsureQuoteEditableAsync(Quote quote)
         {
-            var quote = await _context.Quotes
-                .Include(q => q.QuoteItems)
-                .FirstOrDefaultAsync(q => q.Id == id);
-
-            if (quote == null) throw new KeyNotFoundException($"Quote with ID {id} not found.");
-
-            // FIN-05: a quote's financial content may only be modified while it is still in DRAFT.
-            // Once it has been SENT / ACCEPTED / ORDERED, the customer already holds a PDF with
-            // fixed totals; silently recalculating here would diverge the stored figures from that
-            // issued document. Reject the edit and require a new revision instead.
             if (!await IsQuoteInDraftAsync(quote))
             {
                 throw new InvalidOperationException(
@@ -634,6 +631,58 @@ namespace ERP_RFQ_Automation.Services
                     $"Quote '{quote.QuoteNo}' may already have reached the customer: its delivery was interrupted " +
                     "and never confirmed either way. It cannot be edited. Check with the customer; if the quote " +
                     "did not arrive, create a new revision and send that.");
+        }
+
+        public async Task<QuoteResponseDTO> PriceRfqLineAsync(
+            long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock,
+            long? currencyId, CancellationToken ct = default)
+        {
+            if (unitPrice <= 0m) throw new InvalidOperationException("Enter a price above zero.");
+            if (unitPrice > 1_000_000_000m) throw new InvalidOperationException("That price is too large.");
+
+            var draft = await PrepareDraftFromRfqAsync(rfqId, businessUnitId, actor, ct);
+            var quote = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .SingleAsync(q => q.Id == draft.Id && q.BusinessUnitId == businessUnitId, ct);
+            await EnsureQuoteEditableAsync(quote);
+
+            var line = quote.QuoteItems.FirstOrDefault(i => i.RfqitemId == rfqItemId)
+                ?? throw new InvalidOperationException("This line is not on the quote. Mark it to quote first.");
+            if (quote.CurrencyId is null && currencyId is not null)
+            {
+                var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId, ct);
+                if (!known) throw new InvalidOperationException("Choose one of your company's currencies.");
+                quote.CurrencyId = currencyId;
+            }
+
+            line.UnitPrice = Math.Round(unitPrice, 2);
+            // 0 days = ex stock: printed as "Ex stock, subject to prior sale". Nothing is reserved;
+            // stock is held only when the customer commits with an order.
+            if (exStock) line.DeliveryLeadTime = 0;
+            else if (line.DeliveryLeadTime == 0) line.DeliveryLeadTime = null;
+            line.ModifiedBy = actor;
+            line.ModifiedDate = DateTime.UtcNow;
+            quote.ModifiedBy = actor;
+            quote.ModifiedDate = DateTime.UtcNow;
+
+            await CalculateQuoteTotals(quote);
+            await _context.SaveChangesAsync(ct);
+            return await GetQuoteByIdAsync(quote.Id);
+        }
+
+        public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
+        {
+            var quote = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .FirstOrDefaultAsync(q => q.Id == id);
+
+            if (quote == null) throw new KeyNotFoundException($"Quote with ID {id} not found.");
+
+            // FIN-05: a quote's financial content may only be modified while it is still in DRAFT.
+            // Once it has been SENT / ACCEPTED / ORDERED, the customer already holds a PDF with
+            // fixed totals; silently recalculating here would diverge the stored figures from that
+            // issued document. Reject the edit and require a new revision instead.
+            await EnsureQuoteEditableAsync(quote);
 
             quote.QuoteNo = request.QuoteNo;
             quote.CustomerId = request.CustomerId;
@@ -1710,6 +1759,8 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
+                                    if (item.x.DeliveryLeadTime == 0)
+                                        c.Item().Text("Ex stock, subject to prior sale").FontSize(8).FontColor(Colors.Grey.Darken1);
                                     if (item.x.Discount > 0)
                                         c.Item().Text($"Discount: {quote.Currency?.Code} {item.x.Discount:N2}").FontSize(8).Italic().FontColor(Colors.Red.Medium);
                                 });
@@ -1733,6 +1784,8 @@ namespace ERP_RFQ_Automation.Services
                             {
                                 c.Item().PaddingTop(10).Text("Terms & Conditions").Bold().FontSize(10).FontColor(primaryColor);
                                 c.Item().PaddingTop(5).Text(termsContent).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
+                                if (orderedItems.Any(x => x.DeliveryLeadTime == 0))
+                                    c.Item().PaddingTop(5).Text("Items marked ex stock are offered subject to prior sale. Stock is held for you once we receive your purchase order.").FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
 
                                 c.Item().PaddingTop(30).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
                             });

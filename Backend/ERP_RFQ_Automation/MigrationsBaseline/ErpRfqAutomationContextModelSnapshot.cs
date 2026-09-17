@@ -15399,6 +15399,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<decimal?>("StockMarginPercent")
+                        .HasPrecision(7, 2)
+                        .HasColumnType("numeric(7,2)");
+
                     b.Property<string>("TermsAndConditions")
                         .HasColumnType("text");
 

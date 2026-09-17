@@ -398,6 +398,7 @@ builder.Services.AddSingleton<ICommercialDocumentClassifier, DeterministicCommer
 builder.Services.AddScoped<CommercialDocumentClassificationService>();
 builder.Services.AddScoped<SupplierGovernanceService>();
 builder.Services.AddScoped<IQuoteService, QuoteService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Services.IStockLinePricingService, ERP_RFQ_Automation.Services.StockLinePricingService>();
 builder.Services.AddScoped<IQuoteDeliveryStore, QuoteDeliveryStore>();
 builder.Services.AddScoped<IQuoteDeliverySender, QuoteDeliverySender>();
 builder.Services.AddSingleton<QuoteDeliveryDispatcher>();

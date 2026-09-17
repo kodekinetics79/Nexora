@@ -1036,6 +1036,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ModifiedBy).HasMaxLength(100);
             entity.Property(e => e.ModifiedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.PrimaryColor).HasMaxLength(20);
+            entity.Property(e => e.StockMarginPercent).HasPrecision(7, 2);
 
             entity.HasOne(d => d.BusinessUnit).WithOne(p => p.QuoteConfiguration)
                 .HasForeignKey<QuoteConfiguration>(d => d.BusinessUnitId)

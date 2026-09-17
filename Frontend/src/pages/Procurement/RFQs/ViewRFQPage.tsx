@@ -50,6 +50,7 @@ import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
+import { StockLineAction } from './StockPriceDialog';
 import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
@@ -945,7 +946,7 @@ const ViewRFQPage: React.FC = () => {
                                 </Stack>
                               );
                             }
-                            return <Chip size="small" icon={<InventoryIcon />} color="success" variant="outlined" label="Use company inventory" />;
+                            return <StockLineAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} />;
                           }
                           // One button per line: Find supplier. The line says where it stands in one sentence;
                           // every choice (who, how many, what to say) is made in the small window.

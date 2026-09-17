@@ -169,7 +169,7 @@ const EditQuotePage: React.FC = () => {
         taxRatePercentApplied: i.taxRatePercentApplied ?? null,
         taxCategory: i.taxCategory || TAX_CATEGORY_STANDARD,
         taxCategoryReason: i.taxCategoryReason || '',
-        deliveryLeadTime: i.deliveryLeadTime || 7
+        deliveryLeadTime: i.deliveryLeadTime ?? 7
       })));
     }
   }, [quote]);
@@ -580,6 +580,9 @@ const EditQuotePage: React.FC = () => {
                     </TableCell>
                     <TableCell>
                       <TextField fullWidth size="small" variant="standard" value={item.itemDescription} onChange={(e) => updateItem(index, { itemDescription: e.target.value })} />
+                      {item.deliveryLeadTime === 0 && (
+                        <Typography variant="caption" color="success.main" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>Ex stock</Typography>
+                      )}
                     </TableCell>
                     <TableCell align="center">
                       <TextField type="number" size="small" variant="standard" sx={{ width: 60 }} value={item.quantity} onChange={(e) => updateItem(index, { quantity: Number(e.target.value) })} />

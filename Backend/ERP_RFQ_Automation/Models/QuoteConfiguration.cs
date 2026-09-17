@@ -23,6 +23,9 @@ public partial class QuoteConfiguration
 
     public string? FooterText { get; set; }
 
+    /// <summary>Company standard margin (%) added to stock cost when a stock item has no selling price.</summary>
+    public decimal? StockMarginPercent { get; set; }
+
     public string? ModifiedBy { get; set; }
 
     public DateTime? ModifiedOn { get; set; }
