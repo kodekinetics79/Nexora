@@ -2,6 +2,7 @@ import React from "react";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import {
   Alert,
+  Badge,
   Box,
   Button,
   Checkbox,
@@ -11,14 +12,24 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
   FormControlLabel,
+  InputAdornment,
   Link,
   MenuItem,
   Stack,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Tabs,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
-import { Send } from "@mui/icons-material";
+import { Edit, Lock, Send, Visibility } from "@mui/icons-material";
 import supplierEmailSettingsService from "../../../api/services/supplierEmailSettingsService";
 import type { SupplierEmailWordingEdit } from "../../../api/services/procurementService";
 import procurementService, {
@@ -97,9 +108,8 @@ export default function FindSupplierDialog({
   const [cc, setCc] = React.useState("");
   const [bcc, setBcc] = React.useState("");
   const copiesTouched = React.useRef(false);
-  const [newEmail, setNewEmail] = React.useState("");
-  const [newName, setNewName] = React.useState("");
-  const [addError, setAddError] = React.useState<string | null>(null);
+  const [extraTo, setExtraTo] = React.useState("");
+  const [tab, setTab] = React.useState<"own" | "internet">("own");
   const [editing, setEditing] = React.useState(false);
   const [addToCatalogue, setAddToCatalogue] = React.useState(true);
   const [wording, setWording] = React.useState({ subject: "", greeting: "", opening: "", signOff: "" });
@@ -176,9 +186,8 @@ export default function FindSupplierDialog({
       copiesTouched.current = false;
       setAddToCatalogue(true);
       setEditing(false);
-      setNewEmail("");
-      setNewName("");
-      setAddError(null);
+      setExtraTo("");
+      setTab("own");
       return;
     }
     if (initialised.current || !sourcingCase || !line) return;
@@ -204,8 +213,8 @@ export default function FindSupplierDialog({
   }, [open, presetMessage, effective.data]);
   React.useEffect(() => {
     if (!open || copiesTouched.current || !effective.data) return;
-    setCc((effective.data.defaultCc ?? []).join(", "));
-    setBcc((effective.data.defaultBcc ?? []).join(", "));
+    setCc((effective.data.defaultCc ?? []).join("; "));
+    setBcc((effective.data.defaultBcc ?? []).join("; "));
   }, [open, effective.data]);
 
   React.useEffect(() => {
@@ -218,7 +227,10 @@ export default function FindSupplierDialog({
     [...new Set(text.split(/[,;\s]+/).map((part) => part.trim().toLowerCase()).filter(Boolean))];
   const ccList = splitAddresses(cc);
   const bccList = splitAddresses(bcc);
-  const badCopy = [...ccList, ...bccList].find((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(address));
+  const isEmail = (address: string) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(address);
+  const extraToList = splitAddresses(extraTo);
+  const badTo = extraToList.find((address) => !isEmail(address));
+  const badCopy = [...ccList, ...bccList].find((address) => !isEmail(address));
   const wordingEdit: SupplierEmailWordingEdit | null = editing ? {
     subject: wording.subject.trim() || null,
     greeting: wording.greeting.trim() || null,
@@ -235,21 +247,6 @@ export default function FindSupplierDialog({
     }
     setEditing((value) => !value);
   };
-
-  const addByEmail = useMutation({
-    mutationFn: () => procurementService.addSupplierByEmail(sourcingCase!.id, newEmail.trim(), newName),
-    onSuccess: async (added) => {
-      setAddError(null);
-      setNewEmail("");
-      setNewName("");
-      await caseQuery.refetch();
-      setTicked((current) => new Set([...current, `s-${added.supplierId}`]));
-    },
-    onError: (error: unknown) => {
-      const e = error as { response?: { data?: { detail?: string; title?: string } }; message?: string };
-      setAddError(e?.response?.data?.detail || e?.message || "That supplier could not be added.");
-    },
-  });
 
   const saveMyDefault = useMutation({
     mutationFn: async () => {
@@ -305,6 +302,12 @@ export default function FindSupplierDialog({
       if (!sourcingCase) throw new Error("The line is still opening.");
       const hitIds = tickedRows.map((row) => row.hitId).filter((id): id is string => Boolean(id));
       const supplierIds = new Set(tickedRows.map((row) => row.supplierId).filter((id): id is number => typeof id === "number"));
+      // Addresses typed into To join the supplier list for this part (an address a supplier already
+      // uses brings that supplier), then are asked like any ticked supplier.
+      for (const address of extraToList) {
+        const added = await procurementService.addSupplierByEmail(sourcingCase.id, address, null);
+        supplierIds.add(added.supplierId);
+      }
       if (hitIds.length > 0) {
         const adopted = await procurementService.adoptDiscoveredSuppliers(sourcingCase.id, hitIds);
         adopted.adopted.forEach((entry) => supplierIds.add(entry.supplierId));
@@ -334,6 +337,7 @@ export default function FindSupplierDialog({
     onSuccess: ({ sent, failed, missing }) => {
       if (missing > 0) failed.push(`${missing} ticked supplier${missing === 1 ? "" : "s"} could not be added to this line`);
       if (failed.length === 0) {
+        setExtraTo("");
         onSent(sent, true);
         return;
       }
@@ -350,123 +354,101 @@ export default function FindSupplierDialog({
     },
   });
 
+  const recipientCount = tickedRows.length + extraToList.length;
   const sendLabel = send.isPending
     ? "Sending…"
-    : tickedRows.length === 0 ? "Tick who to ask" : `Send to ${tickedRows.length} supplier${tickedRows.length === 1 ? "" : "s"}`;
+    : recipientCount === 0 ? "Tick who to ask" : `Send to ${recipientCount} supplier${recipientCount === 1 ? "" : "s"}`;
 
-  const renderRow = (row: Row) => (
-    <Stack key={row.key} direction="row" spacing={1} sx={{ alignItems: "flex-start", py: 0.75, borderBottom: 1, borderColor: "divider" }}>
-      <Checkbox
-        size="small"
-        checked={ticked.has(row.key) && !row.blocked}
-        disabled={Boolean(row.blocked)}
-        onChange={() => toggle(row.key)}
-        slotProps={{ input: { "aria-label": `Ask ${row.name}` } }}
-        sx={{ mt: -0.5 }}
-      />
-      <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Stack direction="row" spacing={0.75} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
-          <Typography variant="body2" sx={{ fontWeight: 700 }}>{row.name}</Typography>
-          {row.role && <Chip size="small" variant="outlined" label={row.role} />}
-          {row.country && <Typography variant="caption" color="text.secondary">{row.country}</Typography>}
-        </Stack>
-        <Typography variant="caption" color={row.blocked ? "warning.main" : "text.secondary"} sx={{ display: "block" }}>
-          {row.blocked ? row.blocked : row.email}
-          {row.detail ? ` · ${row.detail}` : ""}
-        </Typography>
-      </Box>
-    </Stack>
+  // The server's email, split so the part lines can be shown as the locked block they are.
+  const body = preview.data?.body ?? "";
+  const partStart = body.indexOf("RFQ number:");
+  const respondAt = body.indexOf("Respond by:");
+  const partEnd = respondAt >= 0 ? (body.indexOf("\n", respondAt) >= 0 ? body.indexOf("\n", respondAt) : body.length) : -1;
+  const hasPartBlock = partStart >= 0 && partEnd > partStart;
+  const bodyBefore = hasPartBlock ? body.slice(0, partStart).replace(/^Request for Quotation[^\n]*\n+/, "").trim() : body;
+  const partBlock = hasPartBlock ? body.slice(partStart, partEnd).trim() : "";
+  const bodyAfter = hasPartBlock ? body.slice(partEnd).trim() : "";
+
+  // Nothing of your own for this part: open on the internet list rather than an empty tab.
+  const tabTouched = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) { tabTouched.current = false; return; }
+    if (!tabTouched.current && sourcingCase && ownRows.length === 0 && tab === "own") setTab("internet");
+  }, [open, sourcingCase, ownRows.length, tab]);
+
+  const ownTicked = ownRows.filter((row) => ticked.has(row.key) && !row.blocked).length;
+  const internetTicked = internetRows.filter((row) => ticked.has(row.key) && !row.blocked).length;
+  const rows = tab === "own" ? ownRows : internetRows;
+
+  const supplierTable = (
+    <Table size="small" stickyHeader aria-label={tab === "own" ? "Your suppliers" : "Suppliers found on the internet"}>
+      <TableHead>
+        <TableRow>
+          <TableCell padding="checkbox" />
+          <TableCell sx={{ fontWeight: 700 }}>Supplier</TableCell>
+          <TableCell sx={{ fontWeight: 700 }}>Email</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {rows.map((row) => {
+          const isTicked = ticked.has(row.key) && !row.blocked;
+          return (
+            <TableRow key={row.key} hover selected={isTicked} sx={{ opacity: row.blocked ? 0.6 : 1 }}>
+              <TableCell padding="checkbox">
+                <Checkbox
+                  size="small"
+                  checked={isTicked}
+                  disabled={Boolean(row.blocked)}
+                  onChange={() => toggle(row.key)}
+                  slotProps={{ input: { "aria-label": `Ask ${row.name}` } }}
+                />
+              </TableCell>
+              <TableCell sx={{ maxWidth: 220 }}>
+                <Stack direction="row" spacing={0.5} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                  <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.3 }} noWrap title={row.name}>{row.name}</Typography>
+                  {row.role && <Chip size="small" variant="outlined" label={row.role} sx={{ height: 18, fontSize: 11 }} />}
+                  {row.country && <Typography variant="caption" color="text.secondary">{row.country}</Typography>}
+                </Stack>
+                {row.detail && (
+                  <Tooltip title={row.detail} placement="bottom-start">
+                    <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block" }}>{row.detail}</Typography>
+                  </Tooltip>
+                )}
+              </TableCell>
+              <TableCell sx={{ maxWidth: 210 }}>
+                {row.blocked
+                  ? <Typography variant="caption" color="warning.main">{row.blocked}</Typography>
+                  : <Typography variant="body2" noWrap title={row.email ?? ""} sx={{ fontSize: 13 }}>{row.email}</Typography>}
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  );
+
+  const markers = (
+    <Typography variant="caption" color="text.secondary">
+      Markers filled in for each supplier: <b>[Supplier name]</b> · <b>[Company name]</b> · <b>[RFQ number]</b>
+    </Typography>
   );
 
   return (
-    <Dialog open={open} onClose={send.isPending ? undefined : onClose} maxWidth="sm" fullWidth>
+    <Dialog open={open} onClose={send.isPending ? undefined : onClose} maxWidth="lg" fullWidth
+      slotProps={{ paper: { sx: { height: { md: "88vh" } } } }}>
       <DialogTitle sx={{ pb: 1 }}>
-        <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Find supplier</Typography>
-        {line && (
-          <>
-            {line.description && (
-              <Typography component="span" variant="body2" sx={{ display: "block", fontWeight: 600 }}>{line.description}</Typography>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ justifyContent: "space-between", alignItems: { sm: "center" } }}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Find supplier</Typography>
+            {line && (
+              <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }} noWrap>
+                <b>{line.description}</b>
+                {line.partNumber ? ` · Part ${line.partNumber}` : ""}{line.maker ? ` · ${line.maker}` : ""}
+              </Typography>
             )}
-            <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }}>
-              {[line.partNumber && `Part ${line.partNumber}`, line.maker].filter(Boolean).join(" · ")}
-              {line.partNumber || line.maker ? " · " : ""}
-              {line.inStock > 0 && line.toSource > 0
-                ? `${line.inStock} in stock, ${line.toSource} to source`
-                : `${line.requested} ${line.unitOfMeasure ?? ""}`.trim()}
-            </Typography>
-          </>
-        )}
-      </DialogTitle>
-      <DialogContent dividers sx={{ pt: 1 }}>
-        {caseQuery.isLoading && (
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", py: 3 }} role="status">
-            <CircularProgress size={18} />
-            <Typography variant="body2">Opening this line…</Typography>
-          </Stack>
-        )}
-        {caseQuery.isError && (
-          <Alert severity="error" action={<Button color="inherit" onClick={() => caseQuery.refetch()}>Try again</Button>}>
-            {(caseQuery.error as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail
-              || (caseQuery.error as Error)?.message || "This line could not be opened."}
-          </Alert>
-        )}
-
-        {sourcingCase && (
-          <>
-            <Typography variant="overline" color="text.secondary">Your suppliers</Typography>
-            {ownRows.length === 0
-              ? <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>None of your suppliers is linked to this part yet.</Typography>
-              : ownRows.map(renderRow)}
-
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.5, alignItems: { sm: "flex-start" } }}>
-              <TextField
-                size="small"
-                label="Add a supplier by email"
-                placeholder="sales@supplier.com"
-                value={newEmail}
-                onChange={(event) => { setNewEmail(event.target.value); setAddError(null); }}
-                onKeyDown={(event) => { if (event.key === "Enter" && newEmail.trim()) { event.preventDefault(); addByEmail.mutate(); } }}
-                error={Boolean(addError)}
-                helperText={addError ?? "A supplier you know that is not listed."}
-                sx={{ flex: 2 }}
-              />
-              <TextField
-                size="small"
-                label="Company name (optional)"
-                value={newName}
-                onChange={(event) => setNewName(event.target.value)}
-                helperText=" "
-                sx={{ flex: 1.4 }}
-              />
-              <Button
-                variant="outlined"
-                disabled={!newEmail.trim() || addByEmail.isPending}
-                onClick={() => addByEmail.mutate()}
-                sx={{ mt: { sm: 0.25 }, whiteSpace: "nowrap" }}
-              >
-                {addByEmail.isPending ? "Adding…" : "Add and tick"}
-              </Button>
-            </Stack>
-
-            <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 1 }}>From the internet</Typography>
-            {internet.isLoading && (
-              <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", py: 1 }} role="status">
-                <CircularProgress size={16} />
-                <Typography variant="body2" color="text.secondary">Searching makers, distributors and resellers…</Typography>
-              </Stack>
-            )}
-            {firstInternetPage && firstInternetPage.status !== "Ready" && (
-              <Typography variant="body2" color="text.secondary">{firstInternetPage.message}</Typography>
-            )}
-            {internet.isError && <Typography variant="body2" color="text.secondary">The internet could not be searched just now.</Typography>}
-            {internetRows.map(renderRow)}
-            {moreInternet && (
-              <Button size="small" sx={{ mt: 1 }} disabled={internet.isFetchingNextPage} onClick={() => internet.fetchNextPage()}>
-                {internet.isFetchingNextPage ? "Loading…" : "Show 10 more"}
-              </Button>
-            )}
-
-            <Stack direction="row" spacing={1.5} sx={{ mt: 2.5 }}>
+          </Box>
+          {sourcingCase && line && (
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
               <TextField
                 label="Quantity to ask for"
                 size="small"
@@ -474,177 +456,239 @@ export default function FindSupplierDialog({
                 value={quantity}
                 onChange={(event) => setQuantity(event.target.value)}
                 error={!quantityOk}
-                helperText={line && line.inStock > 0 ? `${line.requested} requested, ${line.inStock} in stock` : " "}
-                slotProps={{ htmlInput: { min: 0, step: "any" } }}
-                sx={{ width: 190 }}
+                slotProps={{
+                  htmlInput: { min: 0, step: "any" },
+                  input: { endAdornment: <InputAdornment position="end">{line.unitOfMeasure ?? ""}</InputAdornment> },
+                }}
+                helperText={line.inStock > 0 ? `${line.inStock} in stock` : undefined}
+                sx={{ width: 150 }}
               />
               <TextField
-                label="Reply by (optional)"
+                label="Reply by"
                 size="small"
                 type="date"
                 value={replyBy}
                 onChange={(event) => setReplyBy(event.target.value)}
                 slotProps={{ inputLabel: { shrink: true } }}
-                helperText=" "
-                sx={{ width: 190 }}
+                sx={{ width: 160 }}
               />
             </Stack>
-            {mailboxes.data && (
-              mailboxes.data.mailboxes.length > 0 ? (
-                <TextField
-                  select
-                  label="Send from"
-                  size="small"
-                  fullWidth
-                  value={sendFrom}
-                  onChange={(event) => setSendFrom(Number(event.target.value))}
-                  helperText={mailboxes.data.replyTo ? `Supplier replies go to ${mailboxes.data.replyTo}` : " "}
-                  sx={{ mt: 1 }}
-                >
-                  {mailboxes.data.mailboxes.map((mailbox) => (
-                    <MenuItem key={mailbox.mailboxId} value={mailbox.mailboxId}>
-                      {mailbox.address}{mailbox.label && mailbox.label !== mailbox.address ? ` · ${mailbox.label}` : ""}
-                    </MenuItem>
-                  ))}
-                </TextField>
-              ) : (
-                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
-                  Sent under {mailboxes.data.companyName}&apos;s name{mailboxes.data.replyTo ? `; supplier replies go to ${mailboxes.data.replyTo}` : ""}.
-                  Your company has no outgoing mailbox set up yet.
-                </Typography>
-              )
-            )}
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 1 }}>
-              <TextField
-                size="small"
-                fullWidth
-                label="CC"
-                placeholder="colleague@yourcompany.com"
-                value={cc}
-                onChange={(event) => { copiesTouched.current = true; setCc(event.target.value); }}
-                error={Boolean(badCopy && ccList.includes(badCopy))}
-                helperText={badCopy && ccList.includes(badCopy) ? `"${badCopy}" is not an email address` : "Separate addresses with commas"}
-              />
-              <TextField
-                size="small"
-                fullWidth
-                label="BCC"
-                value={bcc}
-                onChange={(event) => { copiesTouched.current = true; setBcc(event.target.value); }}
-                error={Boolean(badCopy && bccList.includes(badCopy))}
-                helperText={badCopy && bccList.includes(badCopy) ? `"${badCopy}" is not an email address` : "Suppliers do not see these"}
-              />
-            </Stack>
-            <TextField
-              label="Your message"
-              size="small"
-              multiline
-              minRows={2}
-              fullWidth
-              value={message}
-              onChange={(event) => { messageTouched.current = true; setSavedDefault(false); setMessage(event.target.value); }}
-              slotProps={{ htmlInput: { maxLength: 2000 } }}
-              sx={{ mt: 1 }}
-            />
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center", mt: 0.5 }}>
-              <Link component="button" type="button" variant="caption" underline="hover"
-                disabled={saveMyDefault.isPending || !message.trim()}
-                onClick={() => saveMyDefault.mutate()}>
-                {saveMyDefault.isPending ? "Saving…" : "Save as my default message"}
-              </Link>
-              {savedDefault && <Typography variant="caption" color="success.main">Saved. Your next requests start with this message.</Typography>}
-              {saveMyDefault.isError && <Typography variant="caption" color="error.main">Could not save it just now.</Typography>}
-            </Stack>
-            {catalogueChoice && (
-              <FormControlLabel
-                sx={{ mt: 1, display: "flex" }}
-                control={<Checkbox size="small" checked={addToCatalogue} onChange={(event) => setAddToCatalogue(event.target.checked)} />}
-                label={
-                  <Typography variant="body2">
-                    Add this part to my catalogue
-                    <Typography component="span" variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                      {addToCatalogue ? "It is added when you press Send." : "Suppliers are still asked; the part stays out of your catalogue."}
-                    </Typography>
-                  </Typography>
-                }
-              />
-            )}
-            <Link component="button" type="button" variant="body2" underline="hover" sx={{ mt: 1.5, display: "block" }} onClick={startEditing}>
-              {editing ? "Use the saved wording" : "Edit the email for this send"}
-            </Link>
-            {editing && (
-              <Stack spacing={1.25} sx={{ mt: 1.5, p: 1.5, border: 1, borderColor: "divider", borderRadius: 1 }}>
-                <Typography variant="caption" color="text.secondary">
-                  Changes apply to this send only. [Supplier name], [Company name] and [RFQ number] are filled in for each supplier.
-                </Typography>
-                <TextField size="small" fullWidth label="Subject line" value={wording.subject}
-                  onChange={(event) => setWording((current) => ({ ...current, subject: event.target.value }))}
-                  slotProps={{ htmlInput: { maxLength: 200 } }} />
-                <TextField size="small" fullWidth label="Greeting" value={wording.greeting}
-                  onChange={(event) => setWording((current) => ({ ...current, greeting: event.target.value }))}
-                  slotProps={{ htmlInput: { maxLength: 200 } }} />
-                <TextField size="small" fullWidth multiline minRows={2} label="Opening sentence" value={wording.opening}
-                  onChange={(event) => setWording((current) => ({ ...current, opening: event.target.value }))}
-                  slotProps={{ htmlInput: { maxLength: 1000 } }} />
-                <Box sx={{ p: 1, borderRadius: 1, bgcolor: "action.hover" }}>
-                  <Typography variant="caption" color="text.secondary">
-                    The part details (description, part number, makers, quantity, needed-by date) are added here and cannot be edited.
-                  </Typography>
-                </Box>
-                <TextField size="small" fullWidth multiline minRows={3} label="Sign-off and signature" value={wording.signOff}
-                  onChange={(event) => setWording((current) => ({ ...current, signOff: event.target.value }))}
-                  slotProps={{ htmlInput: { maxLength: 1000 } }} />
-              </Stack>
-            )}
+          )}
+        </Stack>
+      </DialogTitle>
+      <DialogContent dividers sx={{ p: 0, display: "flex", flexDirection: "column" }}>
+        {caseQuery.isLoading && (
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", p: 3 }} role="status">
+            <CircularProgress size={18} />
+            <Typography variant="body2">Opening this line…</Typography>
+          </Stack>
+        )}
+        {caseQuery.isError && (
+          <Alert severity="error" sx={{ m: 2 }} action={<Button color="inherit" onClick={() => caseQuery.refetch()}>Try again</Button>}>
+            {(caseQuery.error as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail
+              || (caseQuery.error as Error)?.message || "This line could not be opened."}
+          </Alert>
+        )}
 
-            <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>What each supplier receives</Typography>
-            <Box
-              data-testid="supplier-email-preview"
-              sx={{ p: 1.5, border: 1, borderColor: "divider", borderRadius: 1, maxHeight: 240, overflowY: "auto", bgcolor: "background.default" }}
-            >
-              {preview.data ? (
-                <>
-                  {preview.data.from && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>From: {preview.data.from}</Typography>
-                  )}
-                  {(preview.data.cc?.length ?? 0) > 0 && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>CC: {preview.data.cc!.join(", ")}</Typography>
-                  )}
-                  {(preview.data.bcc?.length ?? 0) > 0 && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>BCC: {preview.data.bcc!.join(", ")}</Typography>
-                  )}
-                  {preview.data.replyTo && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>Replies to: {preview.data.replyTo}</Typography>
-                  )}
-                  <Typography variant="body2" sx={{ fontWeight: 700, mb: 1, mt: 0.5 }}>{preview.data.subject}</Typography>
-                  <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.5 }}>
-                    {preview.data.body}
+        {sourcingCase && (
+          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "5fr 7fr" }, flex: 1, minHeight: 0 }}>
+            {/* ---- Who to ask ---- */}
+            <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0, borderRight: { md: 1 }, borderColor: "divider" }}>
+              <Tabs value={tab} onChange={(_, value) => { tabTouched.current = true; setTab(value); }} variant="fullWidth" sx={{ borderBottom: 1, borderColor: "divider", minHeight: 42 }}>
+                <Tab value="own" sx={{ minHeight: 42 }} label={
+                  <Badge color="primary" badgeContent={ownTicked} invisible={ownTicked === 0}>
+                    <Box sx={{ pr: ownTicked ? 1.5 : 0 }}>Your suppliers ({ownRows.length})</Box>
+                  </Badge>} />
+                <Tab value="internet" sx={{ minHeight: 42 }} label={
+                  <Badge color="primary" badgeContent={internetTicked} invisible={internetTicked === 0}>
+                    <Box sx={{ pr: internetTicked ? 1.5 : 0 }}>
+                      From the internet {internet.isLoading ? "…" : `(${internetRows.length}${moreInternet ? "+" : ""})`}
+                    </Box>
+                  </Badge>} />
+              </Tabs>
+              <Box sx={{ flex: 1, overflowY: "auto", minHeight: { xs: 240, md: 0 } }}>
+                {tab === "own" && ownRows.length === 0 && (
+                  <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
+                    None of your suppliers is linked to this part yet. Look at the internet tab, or type an address in To.
                   </Typography>
-                </>
-              ) : preview.isError ? (
-                <Typography variant="body2" color="text.secondary">The email preview could not be loaded; the email is still sent with the details above.</Typography>
-              ) : (
-                <Typography variant="body2" color="text.secondary">Writing the email…</Typography>
+                )}
+                {tab === "internet" && internet.isLoading && (
+                  <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", p: 2 }} role="status">
+                    <CircularProgress size={16} />
+                    <Typography variant="body2" color="text.secondary">Searching makers, distributors and resellers…</Typography>
+                  </Stack>
+                )}
+                {tab === "internet" && firstInternetPage && firstInternetPage.status !== "Ready" && (
+                  <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>{firstInternetPage.message}</Typography>
+                )}
+                {tab === "internet" && internet.isError && (
+                  <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>The internet could not be searched just now.</Typography>
+                )}
+                {rows.length > 0 && supplierTable}
+                {tab === "internet" && moreInternet && (
+                  <Button size="small" sx={{ m: 1 }} disabled={internet.isFetchingNextPage} onClick={() => internet.fetchNextPage()}>
+                    {internet.isFetchingNextPage ? "Loading…" : "Show 10 more"}
+                  </Button>
+                )}
+              </Box>
+              {catalogueChoice && (
+                <FormControlLabel
+                  sx={{ px: 2, py: 0.5, borderTop: 1, borderColor: "divider", m: 0 }}
+                  control={<Checkbox size="small" checked={addToCatalogue} onChange={(event) => setAddToCatalogue(event.target.checked)} />}
+                  label={<Typography variant="body2">Add this part to my catalogue {addToCatalogue ? "" : <Typography component="span" variant="caption" color="text.secondary">(suppliers are still asked)</Typography>}</Typography>}
+                />
               )}
             </Box>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-              &lt;supplier name&gt; is replaced with each supplier&apos;s name. Your customer is not named, and their target prices and your margins are never included.
-            </Typography>
 
-            {failures.length > 0 && (
-              <Alert severity="warning" sx={{ mt: 2 }}>
-                {failures.map((failure) => <Box key={failure}>{failure}</Box>)}
-              </Alert>
-            )}
-          </>
+            {/* ---- The email ---- */}
+            <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto", p: 2, bgcolor: "background.default" }}>
+              <Stack spacing={1}>
+                {mailboxes.data && mailboxes.data.mailboxes.length > 0 ? (
+                  <TextField select label="From" size="small" fullWidth value={sendFrom}
+                    onChange={(event) => setSendFrom(Number(event.target.value))}>
+                    {mailboxes.data.mailboxes.map((mailbox) => (
+                      <MenuItem key={mailbox.mailboxId} value={mailbox.mailboxId}>
+                        {mailbox.address}{mailbox.label && mailbox.label !== mailbox.address ? ` · ${mailbox.label}` : ""}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                ) : (
+                  <Typography variant="caption" color="text.secondary">
+                    From: {preview.data?.from ?? `${mailboxes.data?.companyName ?? "Your company"}`}
+                  </Typography>
+                )}
+
+                <Box sx={{ border: 1, borderColor: badTo ? "error.main" : "divider", borderRadius: 1, px: 1.25, py: 0.75, bgcolor: "background.paper" }}>
+                  <Stack direction="row" spacing={0.75} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, minWidth: 22 }}>To</Typography>
+                    {tickedRows.map((row) => (
+                      <Tooltip key={row.key} title={row.email ?? ""}>
+                        <Chip size="small" label={row.name} onDelete={() => toggle(row.key)} />
+                      </Tooltip>
+                    ))}
+                    <TextField
+                      variant="standard"
+                      size="small"
+                      value={extraTo}
+                      onChange={(event) => setExtraTo(event.target.value)}
+                      placeholder={tickedRows.length === 0 ? "Tick suppliers on the left, or type emails; separate with ;" : "Add more emails; separate with ;"}
+                      slotProps={{ input: { disableUnderline: true }, htmlInput: { "aria-label": "Add supplier emails to To" } }}
+                      sx={{ flex: 1, minWidth: 200 }}
+                    />
+                  </Stack>
+                </Box>
+                <Typography variant="caption" color={badTo ? "error.main" : "text.secondary"} sx={{ mt: -0.5 }}>
+                  {badTo ? `"${badTo}" is not an email address.` : "Each supplier gets their own email. Typed addresses are added to your suppliers for this part."}
+                </Typography>
+
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                  <TextField size="small" fullWidth label="CC" placeholder="name@company.com; name2@company.com" value={cc}
+                    onChange={(event) => { copiesTouched.current = true; setCc(event.target.value); }}
+                    error={Boolean(badCopy && ccList.includes(badCopy))}
+                    helperText={badCopy && ccList.includes(badCopy) ? `"${badCopy}" is not an email address` : undefined} />
+                  <TextField size="small" fullWidth label="BCC" placeholder="Separate with ;" value={bcc}
+                    onChange={(event) => { copiesTouched.current = true; setBcc(event.target.value); }}
+                    error={Boolean(badCopy && bccList.includes(badCopy))}
+                    helperText={badCopy && bccList.includes(badCopy) ? `"${badCopy}" is not an email address` : undefined} />
+                </Stack>
+              </Stack>
+
+              <Divider sx={{ my: 1.5 }} />
+
+              <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+                <Typography variant="overline" color="text.secondary">What each supplier receives</Typography>
+                <Button size="small" startIcon={editing ? <Visibility /> : <Edit />} onClick={startEditing}>
+                  {editing ? "Done editing" : "Edit email"}
+                </Button>
+              </Stack>
+
+              <Box data-testid="supplier-email-preview"
+                sx={{ p: 2, border: 1, borderColor: editing ? "primary.main" : "divider", borderRadius: 1, bgcolor: "background.paper" }}>
+                {editing ? (
+                  <Stack spacing={1.25}>
+                    {markers}
+                    <TextField size="small" fullWidth label="Subject" value={wording.subject}
+                      onChange={(event) => setWording((current) => ({ ...current, subject: event.target.value }))}
+                      slotProps={{ htmlInput: { maxLength: 200 } }} />
+                    <TextField size="small" fullWidth label="Greeting" value={wording.greeting}
+                      onChange={(event) => setWording((current) => ({ ...current, greeting: event.target.value }))}
+                      slotProps={{ htmlInput: { maxLength: 200 } }} />
+                    <TextField size="small" fullWidth multiline minRows={2} label="Opening" value={wording.opening}
+                      onChange={(event) => setWording((current) => ({ ...current, opening: event.target.value }))}
+                      slotProps={{ htmlInput: { maxLength: 1000 } }} />
+                    <Box sx={{ p: 1.25, borderRadius: 1, bgcolor: "action.hover", position: "relative" }}>
+                      <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", mb: 0.5 }}>
+                        <Lock sx={{ fontSize: 14 }} color="action" />
+                        <Typography variant="caption" color="text.secondary">Part details, added by Nexora</Typography>
+                      </Stack>
+                      <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13 }}>{partBlock || "…"}</Typography>
+                    </Box>
+                    <TextField size="small" fullWidth multiline minRows={2} label="Your message" value={message}
+                      onChange={(event) => { messageTouched.current = true; setSavedDefault(false); setMessage(event.target.value); }}
+                      slotProps={{ htmlInput: { maxLength: 2000 } }} />
+                    <Stack direction="row" spacing={1} sx={{ alignItems: "center", mt: -0.75 }}>
+                      <Link component="button" type="button" variant="caption" underline="hover"
+                        disabled={saveMyDefault.isPending || !message.trim()} onClick={() => saveMyDefault.mutate()}>
+                        {saveMyDefault.isPending ? "Saving…" : "Save as my default message"}
+                      </Link>
+                      {savedDefault && <Typography variant="caption" color="success.main">Saved.</Typography>}
+                      {saveMyDefault.isError && <Typography variant="caption" color="error.main">Could not save it just now.</Typography>}
+                    </Stack>
+                    <Typography variant="body2" color="text.secondary" sx={{ fontSize: 13 }}>
+                      Please reply to this email with your price, availability, lead time and how long your price is valid.
+                    </Typography>
+                    <TextField size="small" fullWidth multiline minRows={3} label="Sign-off and signature" value={wording.signOff}
+                      onChange={(event) => setWording((current) => ({ ...current, signOff: event.target.value }))}
+                      slotProps={{ htmlInput: { maxLength: 1000 } }} />
+                  </Stack>
+                ) : preview.data ? (
+                  <>
+                    <Typography variant="body2" sx={{ fontWeight: 700, mb: 1.5 }}>{preview.data.subject}</Typography>
+                    {hasPartBlock ? (
+                      <>
+                        <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13.5 }}>{bodyBefore}</Typography>
+                        <Box sx={{ my: 1.5, p: 1.25, borderRadius: 1, bgcolor: "action.hover" }}>
+                          <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", mb: 0.5 }}>
+                            <Lock sx={{ fontSize: 14 }} color="action" />
+                            <Typography variant="caption" color="text.secondary">Part details</Typography>
+                          </Stack>
+                          <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13 }}>{partBlock}</Typography>
+                        </Box>
+                        <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13.5 }}>{bodyAfter}</Typography>
+                      </>
+                    ) : (
+                      <Typography variant="body2" component="div" sx={{ whiteSpace: "pre-wrap", fontSize: 13.5 }}>{body}</Typography>
+                    )}
+                  </>
+                ) : preview.isError ? (
+                  <Typography variant="body2" color="text.secondary">The email preview could not be loaded; the email is still sent with the part details.</Typography>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">Writing the email…</Typography>
+                )}
+              </Box>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.75 }}>
+                {preview.data?.replyTo ? `Supplier replies go to ${preview.data.replyTo}. ` : ""}
+                Your customer is not named, and their target prices and your margins are never included.
+              </Typography>
+
+              {failures.length > 0 && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  {failures.map((failure) => <Box key={failure}>{failure}</Box>)}
+                </Alert>
+              )}
+            </Box>
+          </Box>
         )}
       </DialogContent>
-      <DialogActions>
+      <DialogActions sx={{ px: 2 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ mr: "auto" }}>
+          {recipientCount > 0 ? `${recipientCount} supplier${recipientCount === 1 ? "" : "s"} will get their own email` : "Tick suppliers on the left or type emails in To"}
+        </Typography>
         <Button onClick={onClose} disabled={send.isPending}>Cancel</Button>
         <Button
           variant="contained"
           startIcon={send.isPending ? <CircularProgress size={16} color="inherit" /> : <Send />}
-          disabled={!sourcingCase || send.isPending || tickedRows.length === 0 || !quantityOk || Boolean(badCopy)}
+          disabled={!sourcingCase || send.isPending || recipientCount === 0 || !quantityOk || Boolean(badCopy) || Boolean(badTo)}
           onClick={() => send.mutate()}
         >
           {sendLabel}
