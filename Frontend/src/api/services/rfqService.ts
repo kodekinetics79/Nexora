@@ -201,6 +201,12 @@ const rfqService = {
         return response.status === 204 || !response.data ? null : response.data;
     },
 
+    /** One draft quote line: ESTIMATE with a price, TO_FOLLOW, NOT_QUOTED with a reason, or null for a plain price. */
+    saveLinePricing: async (quoteId: number, lineId: number, body: { status: 'ESTIMATE' | 'TO_FOLLOW' | 'NOT_QUOTED' | null; note?: string | null; unitPrice?: number | null }) => {
+        const response = await axiosInstance.put(`/api/rfq/quotes/${quoteId}/lines/${lineId}/pricing`, body);
+        return response.data as { quoteId: number };
+    },
+
     /** Currency (only while the quote has none) and validity date of a draft quote. */
     saveQuoteTerms: async (quoteId: number, terms: { currencyId?: number | null; validUntil?: string | null }) => {
         const response = await axiosInstance.put(`/api/rfq/quotes/${quoteId}/terms`, terms);

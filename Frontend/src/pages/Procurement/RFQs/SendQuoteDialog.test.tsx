@@ -10,13 +10,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const mocks = vi.hoisted(() => ({
-  getLatestQuote: vi.fn(), prepareQuoteDraft: vi.fn(), saveQuoteTerms: vi.fn(),
+  getLatestQuote: vi.fn(), prepareQuoteDraft: vi.fn(), saveQuoteTerms: vi.fn(), saveLinePricing: vi.fn(), stockGet: vi.fn(),
   getById: vi.fn(), getSendReadiness: vi.fn(), getPriceAttestation: vi.fn(), getEmailDraft: vi.fn(),
   confirmPriceAttestation: vi.fn(), sendEmail: vi.fn(),
 }));
 
 vi.mock('../../../api/services/rfqService', () => ({
-  default: { getLatestQuote: mocks.getLatestQuote, prepareQuoteDraft: mocks.prepareQuoteDraft, saveQuoteTerms: mocks.saveQuoteTerms },
+  default: { getLatestQuote: mocks.getLatestQuote, prepareQuoteDraft: mocks.prepareQuoteDraft, saveQuoteTerms: mocks.saveQuoteTerms, saveLinePricing: mocks.saveLinePricing },
 }));
 vi.mock('../../../api/services/quoteService', () => ({
   default: {
@@ -24,6 +24,7 @@ vi.mock('../../../api/services/quoteService', () => ({
     getEmailDraft: mocks.getEmailDraft, confirmPriceAttestation: mocks.confirmPriceAttestation, sendEmail: mocks.sendEmail,
   },
 }));
+vi.mock('../../../api/services/stockPriceService', () => ({ default: { get: mocks.stockGet } }));
 vi.mock('../../../api/services/currencyService', () => ({
   default: { getAll: vi.fn().mockResolvedValue({ items: [{ id: 1, code: 'SAR', isBaseCurrency: true }, { id: 2, code: 'USD' }] }) },
 }));
@@ -95,7 +96,7 @@ describe('Send quote', () => {
     ] });
     renderDialog();
     const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText(/1 line has no price yet. Close this window and use Price it/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/1 line has no price yet. Price it on the RFQ, or send it as Price to follow, an Estimate, or Not quoting/)).toBeInTheDocument();
     expect(within(dialog).getByText('Add your company address to quotes.')).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Open Quote Format' })).toBeInTheDocument();
     // Tax cannot be worked out on an unpriced line, so that message is not repeated.
@@ -109,5 +110,48 @@ describe('Send quote', () => {
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText(/QT-0926-0004 was already sent/)).toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: 'Send quote' })).not.toBeInTheDocument();
+  });
+
+  it('a line with no price can go as Price to follow, an estimate from the record, or not quoted with a reason', async () => {
+    mocks.saveLinePricing.mockResolvedValue({ quoteId: 7 });
+    mocks.stockGet.mockResolvedValue({ trackRecord: { lastQuoted: { unitPrice: 51 }, lastWon: null, timesQuoted: 1, timesWon: 0 }, supplierPrices: [], price: { unitPrice: null } });
+    mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', quoteItems: [
+      line(),
+      line({ id: 2, rfqItemId: 22, itemDescription: 'RELAY', unitPrice: 0, taxableBase: 0, taxAmount: null }),
+      line({ id: 3, rfqItemId: 23, itemDescription: 'TYRE', unitPrice: 0, taxableBase: 0, taxAmount: null }),
+      line({ id: 4, rfqItemId: 24, itemDescription: 'CABLE', unitPrice: 0, taxableBase: 0, taxAmount: null }),
+    ] }));
+    renderDialog();
+    const dialog = await screen.findByRole('dialog');
+    expect((await within(dialog).findAllByText(/3 lines have no price yet/)).length).toBeGreaterThan(0);
+    const rowOf = (name: string) => within(dialog).getByText(name).closest('tr')! as HTMLElement;
+
+    fireEvent.click(within(rowOf('RELAY')).getByText('Price to follow'));
+    await waitFor(() => expect(mocks.saveLinePricing).toHaveBeenCalledWith(7, 2, { status: 'TO_FOLLOW' }));
+    // The email preview follows the new total when the rep has not edited it.
+    await waitFor(() => expect(mocks.getEmailDraft.mock.calls.length).toBeGreaterThan(1));
+
+    fireEvent.click(within(rowOf('TYRE')).getByText('Estimate'));
+    await waitFor(() => expect(within(rowOf('TYRE')).getByLabelText('Estimated price')).toHaveValue(51));
+    fireEvent.click(within(rowOf('TYRE')).getByRole('button', { name: 'Use estimate' }));
+    await waitFor(() => expect(mocks.saveLinePricing).toHaveBeenCalledWith(7, 3, { status: 'ESTIMATE', unitPrice: 51 }));
+
+    fireEvent.click(within(rowOf('CABLE')).getByText('Not quoting'));
+    fireEvent.click(within(rowOf('CABLE')).getByText('Discontinued by manufacturer'));
+    fireEvent.click(within(rowOf('CABLE')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(mocks.saveLinePricing).toHaveBeenCalledWith(7, 4, { status: 'NOT_QUOTED', note: 'Discontinued by manufacturer' }));
+  });
+
+  it('lines already set to follow or not quoted do not block the send', async () => {
+    mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', validUntil: '2099-01-01T00:00:00', quoteItems: [
+      line(),
+      line({ id: 2, itemDescription: 'RELAY', unitPrice: 0, taxableBase: 0, pricingStatus: 'TO_FOLLOW' }),
+      line({ id: 3, itemDescription: 'CABLE', unitPrice: 0, taxableBase: 0, pricingStatus: 'NOT_QUOTED', pricingNote: 'Discontinued by manufacturer' }),
+    ] }));
+    renderDialog();
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('To follow')).toBeInTheDocument();
+    expect(within(dialog).getByText('Not quoted: Discontinued by manufacturer')).toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send quote' })).toBeEnabled());
   });
 });

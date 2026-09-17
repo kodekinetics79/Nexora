@@ -81,6 +81,8 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
+        /// <summary>Estimate / price to follow / not quoted on one draft line, or back to a plain price (status null).</summary>
+        Task<QuoteResponseDTO> SetLinePricingStatusAsync(long quoteId, long quoteItemId, long businessUnitId, string actor, string? status, string? note, decimal? unitPrice, CancellationToken ct = default);
         /// <summary>The quote currency (only while none is set) and validity date of a draft, without resubmitting its lines.</summary>
         Task<QuoteResponseDTO> SetDraftTermsAsync(long quoteId, long businessUnitId, string actor, long? currencyId, DateTime? validUntil, CancellationToken ct = default);
         Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null, int? leadTimeDays = null, decimal? exStockQuantity = null);
@@ -635,6 +637,50 @@ namespace ERP_RFQ_Automation.Services
                     "did not arrive, create a new revision and send that.");
         }
 
+        public async Task<QuoteResponseDTO> SetLinePricingStatusAsync(long quoteId, long quoteItemId, long businessUnitId, string actor,
+            string? status, string? note, decimal? unitPrice, CancellationToken ct = default)
+        {
+            status = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant();
+            if (!QuoteLinePricing.IsKnown(status)) throw new InvalidOperationException("Unknown line choice.");
+            note = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
+            if (note is { Length: > QuoteLinePricing.MaxNote }) throw new InvalidOperationException("Keep the note under 300 characters.");
+
+            var quote = await _context.Quotes.Include(q => q.QuoteItems)
+                .SingleOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException("The quote was not found.");
+            await EnsureQuoteEditableAsync(quote);
+            var line = quote.QuoteItems.FirstOrDefault(i => i.Id == quoteItemId)
+                ?? throw new KeyNotFoundException("The quote line was not found.");
+
+            switch (status)
+            {
+                case QuoteLinePricing.Estimate:
+                    if (unitPrice is not > 0m) throw new InvalidOperationException("Enter the estimated price.");
+                    line.UnitPrice = Math.Round(unitPrice.Value, 2);
+                    break;
+                case QuoteLinePricing.NotQuoted:
+                    if (note is null) throw new InvalidOperationException("Say why this line is not quoted.");
+                    line.UnitPrice = 0m;
+                    break;
+                case QuoteLinePricing.ToFollow:
+                    line.UnitPrice = 0m;
+                    break;
+                default:
+                    if (line.UnitPrice <= 0m) throw new InvalidOperationException("Price the line first.");
+                    note = null;
+                    break;
+            }
+            line.PricingStatus = status;
+            line.PricingNote = note;
+            line.ModifiedBy = actor;
+            line.ModifiedDate = DateTime.UtcNow;
+            quote.ModifiedBy = actor;
+            quote.ModifiedDate = DateTime.UtcNow;
+            await CalculateQuoteTotals(quote);
+            await _context.SaveChangesAsync(ct);
+            return await GetQuoteByIdAsync(quote.Id);
+        }
+
         public async Task<QuoteResponseDTO> SetDraftTermsAsync(long quoteId, long businessUnitId, string actor, long? currencyId,
             DateTime? validUntil, CancellationToken ct = default)
         {
@@ -719,6 +765,9 @@ namespace ERP_RFQ_Automation.Services
             }
 
             line.UnitPrice = Math.Round(unitPrice, 2);
+            // A real price replaces "to follow", "not quoted" or an estimate.
+            line.PricingStatus = null;
+            line.PricingNote = null;
             // 0 days = ex stock: printed as "Ex stock, subject to prior sale". Nothing is reserved;
             // stock is held only when the customer commits with an order.
             if (exStock) line.DeliveryLeadTime = 0;
@@ -1181,8 +1230,10 @@ namespace ERP_RFQ_Automation.Services
                 return prefix + "this quote has no lines. Add the lines you are quoting for.";
             if (!validUntil.HasValue)
                 return prefix + "this quote has no validity date. Set how long the prices hold before sending it.";
-            if (items.Any(item => item.UnitPrice <= 0))
-                return prefix + "one or more lines have no price. Price every line before sending the quote.";
+            if (items.Any(item => item.UnitPrice <= 0 && !QuoteLinePricing.IsUnpricedByChoice(item.PricingStatus)))
+                return prefix + "one or more lines have no price. Price every line, or mark it \"Price to follow\" or \"Not quoted\", before sending the quote.";
+            if (items.All(item => QuoteLinePricing.IsUnpricedByChoice(item.PricingStatus)))
+                return prefix + "no line on this quote has a price. Price at least one line before sending it.";
             return null;
         }
 
@@ -1267,6 +1318,8 @@ namespace ERP_RFQ_Automation.Services
             for (var index = 0; index < ordered.Count; index++)
             {
                 var item = ordered[index];
+                // A line sent without a price by choice carries no tax to derive.
+                if (QuoteLinePricing.IsUnpricedByChoice(item.PricingStatus)) continue;
                 var label = string.IsNullOrWhiteSpace(item.CustomerLineRef)
                     ? (index + 1).ToString()
                     : item.CustomerLineRef!;
@@ -1448,6 +1501,8 @@ namespace ERP_RFQ_Automation.Services
                     TaxableBase = i.TaxableBase,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     ExStockQuantity = i.ExStockQuantity,
+                    PricingStatus = i.PricingStatus,
+                    PricingNote = i.PricingNote,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
                     RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
@@ -1831,7 +1886,13 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
-                                    if (item.x.DeliveryLeadTime == 0)
+                                    if (item.x.PricingStatus == QuoteLinePricing.NotQuoted)
+                                        c.Item().Text($"Not quoted{(string.IsNullOrWhiteSpace(item.x.PricingNote) ? "" : ": " + item.x.PricingNote)}").FontSize(8).FontColor(Colors.Red.Darken1);
+                                    else if (item.x.PricingStatus == QuoteLinePricing.ToFollow)
+                                        c.Item().Text($"Price to follow{(string.IsNullOrWhiteSpace(item.x.PricingNote) ? "" : ": " + item.x.PricingNote)}").FontSize(8).FontColor(Colors.Orange.Darken2);
+                                    else if (item.x.PricingStatus == QuoteLinePricing.Estimate)
+                                        c.Item().Text($"Estimate, subject to confirmation{(string.IsNullOrWhiteSpace(item.x.PricingNote) ? "" : ": " + item.x.PricingNote)}").FontSize(8).FontColor(Colors.Orange.Darken2);
+                                    if (item.x.DeliveryLeadTime == 0 && !QuoteLinePricing.IsUnpricedByChoice(item.x.PricingStatus))
                                         c.Item().Text("Ex stock, subject to prior sale").FontSize(8).FontColor(Colors.Grey.Darken1);
                                     else if (item.x.ExStockQuantity is decimal fromStock && fromStock > 0)
                                         c.Item().Text(item.x.DeliveryLeadTime is int balanceDays && balanceDays > 0
@@ -1844,13 +1905,17 @@ namespace ERP_RFQ_Automation.Services
                                 });
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
                                 table.Cell().Element(RowStyle).Text(item.x.UnitOfMeasure ?? string.Empty);
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.UnitPrice.ToString("N2"));
+                                var unpricedByChoice = QuoteLinePricing.IsUnpricedByChoice(item.x.PricingStatus);
+                                table.Cell().Element(RowStyle).AlignRight().Text(
+                                    item.x.PricingStatus == QuoteLinePricing.ToFollow ? "To follow"
+                                    : item.x.PricingStatus == QuoteLinePricing.NotQuoted ? "Not quoted"
+                                    : item.x.UnitPrice.ToString("N2"));
                                 // The line's own consideration, tax EXCLUDED. The stored TotalAmount
                                 // carries the line's tax inside it (calculation version 2), so
                                 // printing it here put VAT in the line column and then added the
                                 // same VAT again in the summary below — the printed lines could not
                                 // be added up to the printed subtotal.
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.TaxableBase.ToString("N2")).Bold();
+                                table.Cell().Element(RowStyle).AlignRight().Text(unpricedByChoice ? "—" : item.x.TaxableBase.ToString("N2")).Bold();
                             }
                         });
 
@@ -2626,6 +2691,8 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategoryReason = i.TaxCategoryReason,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     ExStockQuantity = i.ExStockQuantity,
+                    PricingStatus = i.PricingStatus,
+                    PricingNote = i.PricingNote,
                     CreatedBy = actor,
                     CreatedDate = now
                 }).ToList()

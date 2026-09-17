@@ -141,6 +141,9 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public int? DeliveryLeadTime { get; set; }
         /// <summary>Quantity offered ex stock when the rest follows in DeliveryLeadTime days.</summary>
         public decimal? ExStockQuantity { get; set; }
+        /// <summary>ESTIMATE, TO_FOLLOW, NOT_QUOTED, or null for a plain price.</summary>
+        public string? PricingStatus { get; set; }
+        public string? PricingNote { get; set; }
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }
         public decimal? DiscountValue { get; set; }

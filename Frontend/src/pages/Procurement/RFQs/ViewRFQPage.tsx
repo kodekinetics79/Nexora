@@ -525,6 +525,11 @@ const ViewRFQPage: React.FC = () => {
   // customer deadline — the leak utils/dates.ts exists to close.
   const deadline = parseDateSafe(rfq.bidClosingDate);
   const overdue = deadline !== null && deadline < new Date();
+  // Closing today or tomorrow with the quote not yet out: say so, and offer to send what is ready.
+  // Calendar days, not hours: a bid closing tomorrow afternoon is "tomorrow" all day today.
+  const daysToClose = deadline === null ? null
+    : Math.round((new Date(deadline).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86_400_000);
+  const closingSoon = daysToClose !== null && daysToClose >= 0 && daysToClose <= 1 && latestQuote?.state !== 'SENT' && latestQuote?.state !== 'DECIDED';
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
   // What this RFQ is waiting for, in one sentence, from facts the page already holds.
   // Order is the order a rep works: match the catalogue, cover the shortages, then quote.
@@ -763,6 +768,12 @@ const ViewRFQPage: React.FC = () => {
             </Grid>
           </Grid>
         </Paper>
+        {closingSoon && hasPermission('Quotations', 'edit') && (
+          <Alert severity="warning" sx={{ mt: 2, borderRadius: 3 }}
+            action={<Button color="inherit" variant="outlined" size="small" onClick={() => setSendQuoteOpen(true)}>Send what's ready</Button>}>
+            <b>Bid closes {daysToClose === 0 ? 'today' : 'tomorrow'}.</b> Lines still waiting for suppliers can go out as Price to follow, an Estimate, or Not quoted, so the customer gets the full quote on time.
+          </Alert>
+        )}
         {nextStep && (
           <Box sx={{ mt: 2 }}>
             <NextStepPanel tone={nextStep.tone} title={nextStep.title} sentence={nextStep.sentence} action={nextStep.action} testId="rfq-next-step" />

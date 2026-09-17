@@ -29,6 +29,7 @@ import { useSnackbar } from "notistack";
 import quoteService, { type PriceAttestationSource, type QuoteDTO, type QuoteLineDTO } from "../../../api/services/quoteService";
 import rfqService from "../../../api/services/rfqService";
 import currencyService from "../../../api/services/currencyService";
+import stockPriceService from "../../../api/services/stockPriceService";
 import { useAuth } from "../../../context/AuthContext";
 import { formatMoney } from "../../../utils/currency";
 
@@ -51,6 +52,95 @@ const deliveryOf = (line: QuoteLineDTO) => {
   if (days === 0) return "Ex stock";
   return when ? `Delivery ${when}` : "";
 };
+
+type LineChoice = "ESTIMATE" | "TO_FOLLOW" | "NOT_QUOTED";
+const NOT_QUOTED_REASONS = ["No supplier response in time", "Discontinued by manufacturer", "Not available", "Outside our scope"];
+
+/**
+ * A line with no price when the bid is closing: send it as "Price to follow", an estimate
+ * "subject to confirmation", or "Not quoted" with a reason, so the full quote can still go out.
+ */
+function LineChoiceControl({ quoteId, rfqId, line, currencyCode, onSaved }: {
+  quoteId: number; rfqId: number; line: QuoteLineDTO; currencyCode: string | null; onSaved: () => void;
+}) {
+  const { enqueueSnackbar } = useSnackbar();
+  const [mode, setMode] = React.useState<LineChoice | null>(null);
+  const [estimate, setEstimate] = React.useState("");
+  const [reason, setReason] = React.useState("");
+  const current = line.pricingStatus ?? null;
+
+  // The estimate starts from what this part was last quoted or won at, or a supplier's last price.
+  const record = useQuery({
+    queryKey: ["stock-price", rfqId, line.rfqItemId],
+    queryFn: () => stockPriceService.get(rfqId, line.rfqItemId!),
+    enabled: mode === "ESTIMATE" && !!line.rfqItemId,
+  });
+  React.useEffect(() => {
+    if (mode !== "ESTIMATE" || estimate !== "" || !record.data) return;
+    const v = record.data;
+    const hint = v.trackRecord.lastQuoted?.unitPrice ?? v.trackRecord.lastWon?.unitPrice ?? v.supplierPrices?.[0]?.cost ?? v.price.unitPrice;
+    if (hint) setEstimate(String(hint));
+  }, [mode, record.data, estimate]);
+
+  const save = useMutation({
+    mutationFn: (body: { status: LineChoice | null; note?: string | null; unitPrice?: number | null }) =>
+      rfqService.saveLinePricing(quoteId, line.id, body),
+    onSuccess: () => { setMode(null); onSaved(); },
+    onError: (error) => enqueueSnackbar(describeError(error, "The line could not be updated."), { variant: "error" }),
+  });
+
+  const estimateNumber = Number(estimate);
+  const chip = (choice: LineChoice, label: string) => (
+    <Chip key={choice} size="small" label={label} clickable disabled={save.isPending}
+      color={current === choice || mode === choice ? "primary" : "default"}
+      variant={current === choice ? "filled" : "outlined"}
+      onClick={() => (choice === "TO_FOLLOW" ? save.mutate({ status: "TO_FOLLOW" }) : setMode(choice))} />
+  );
+
+  return (
+    <Box sx={{ mt: 0.75 }}>
+      {current ? (
+        <Typography variant="caption" sx={{ display: "block", fontWeight: 700, color: current === "NOT_QUOTED" ? "error.main" : "warning.dark" }}>
+          {current === "TO_FOLLOW" ? "Price to follow" : current === "NOT_QUOTED" ? "Not quoted" : "Estimate, subject to confirmation"}
+          {line.pricingNote ? `: ${line.pricingNote}` : ""}
+        </Typography>
+      ) : (
+        <Typography variant="caption" color="warning.dark" sx={{ display: "block", fontWeight: 700 }}>No price yet. Send it as:</Typography>
+      )}
+      <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap", mt: 0.5 }}>
+        {chip("TO_FOLLOW", "Price to follow")}
+        {chip("ESTIMATE", "Estimate")}
+        {chip("NOT_QUOTED", "Not quoting")}
+      </Stack>
+      {mode === "ESTIMATE" && (
+        <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
+          <TextField size="small" type="number" label={`Estimated price${currencyCode ? ` (${currencyCode})` : ""}`} value={estimate}
+            onChange={(event) => setEstimate(event.target.value)} sx={{ width: 170 }}
+            slotProps={{ htmlInput: { min: 0, step: "any", "aria-label": "Estimated price" } }} />
+          <Button size="small" variant="contained" disabled={!(estimateNumber > 0) || save.isPending}
+            onClick={() => save.mutate({ status: "ESTIMATE", unitPrice: estimateNumber })}>Use estimate</Button>
+          <Button size="small" onClick={() => setMode(null)}>Cancel</Button>
+        </Stack>
+      )}
+      {mode === "NOT_QUOTED" && (
+        <Box sx={{ mt: 1 }}>
+          <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap" }}>
+            {NOT_QUOTED_REASONS.map((text) => (
+              <Chip key={text} size="small" label={text} variant={reason === text ? "filled" : "outlined"} onClick={() => setReason(text)} />
+            ))}
+          </Stack>
+          <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
+            <TextField size="small" label="Reason the customer sees" value={reason} onChange={(event) => setReason(event.target.value)}
+              sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 300, "aria-label": "Reason not quoted" } }} />
+            <Button size="small" variant="contained" disabled={!reason.trim() || save.isPending}
+              onClick={() => save.mutate({ status: "NOT_QUOTED", note: reason.trim() })}>Save</Button>
+            <Button size="small" onClick={() => setMode(null)}>Cancel</Button>
+          </Stack>
+        </Box>
+      )}
+    </Box>
+  );
+}
 
 export interface SendQuoteDialogProps {
   open: boolean;
@@ -120,6 +210,19 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQu
     setBody(draftQuery.data.body);
     setReference(userData?.userName ?? "");
   }, [open, quote, draftQuery.data, userData?.userName]);
+  // The email shows the quote total: when a line choice changes it, follow the new wording unless
+  // the rep has already edited the email themselves.
+  const shownDraft = React.useRef<{ subject: string; body: string } | null>(null);
+  React.useEffect(() => {
+    const draft = draftQuery.data;
+    if (!draft) return;
+    const previous = shownDraft.current;
+    if (previous && subject === previous.subject && body === previous.body) {
+      setSubject(draft.subject);
+      setBody(draft.body);
+    }
+    shownDraft.current = { subject: draft.subject, body: draft.body };
+  }, [draftQuery.data]);
   React.useEffect(() => {
     if (quote && !quote.currencyId && currencyId === "" && currencies.length > 0) {
       setCurrencyId((currencies.find((c) => c.isBaseCurrency) ?? currencies[0]).id);
@@ -127,7 +230,11 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQu
   }, [quote, currencies, currencyId]);
 
   const lines = quote?.quoteItems ?? [];
-  const unpriced = lines.filter((line) => !(line.unitPrice > 0));
+  // Lines still to decide: no price and not sent "to follow" or "not quoted".
+  const unpriced = lines.filter((line) => !(line.unitPrice > 0) && line.pricingStatus !== "TO_FOLLOW" && line.pricingStatus !== "NOT_QUOTED");
+  const refreshQuote = () => {
+    for (const key of ["send-quote", "send-quote-readiness", "send-quote-attestation", "send-quote-email", "stock-price"]) queryClient.invalidateQueries({ queryKey: [key] });
+  };
   const currencyCode = quote?.currencyCode ?? currencies.find((c) => c.id === currencyId)?.code ?? null;
   const subtotal = lines.reduce((sum, line) => sum + (line.taxableBase ?? 0), 0);
   const tax = lines.reduce((sum, line) => sum + (line.taxAmount ?? 0), 0);
@@ -246,20 +353,30 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQu
                 <TableBody>
                   {lines.map((line, index) => {
                     const priced = line.unitPrice > 0;
+                    const status = line.pricingStatus ?? null;
+                    const needsChoice = !priced || status !== null;
                     return (
-                      <TableRow key={line.id} sx={priced ? undefined : { bgcolor: "warning.lighter" }}>
-                        <TableCell sx={{ color: "text.secondary" }}>{line.customerLineRef || index + 1}</TableCell>
-                        <TableCell sx={{ maxWidth: 280 }}>
+                      <TableRow key={line.id} sx={!priced && !status ? { bgcolor: "warning.lighter" } : undefined}>
+                        <TableCell sx={{ color: "text.secondary", verticalAlign: "top" }}>{line.customerLineRef || index + 1}</TableCell>
+                        <TableCell sx={{ maxWidth: 320 }}>
                           <Typography variant="body2" noWrap title={line.itemDescription ?? ""}>{line.itemDescription}</Typography>
-                          {deliveryOf(line) && <Typography variant="caption" color="text.secondary">{deliveryOf(line)}</Typography>}
+                          {priced && deliveryOf(line) && <Typography variant="caption" color="text.secondary">{deliveryOf(line)}</Typography>}
+                          {needsChoice && quoteId && (
+                            <LineChoiceControl quoteId={quoteId} rfqId={rfqId} line={line} currencyCode={currencyCode} onSaved={refreshQuote} />
+                          )}
                         </TableCell>
-                        <TableCell align="right">{qty(line.quantity)} {line.unitOfMeasure}</TableCell>
-                        <TableCell align="right">
-                          {priced ? formatMoney(line.unitPrice, currencyCode) : (
+                        <TableCell align="right" sx={{ verticalAlign: "top" }}>{qty(line.quantity)} {line.unitOfMeasure}</TableCell>
+                        <TableCell align="right" sx={{ verticalAlign: "top" }}>
+                          {status === "TO_FOLLOW" ? "To follow" : status === "NOT_QUOTED" ? "Not quoted" : priced ? (
+                            <>
+                              {formatMoney(line.unitPrice, currencyCode)}
+                              {status === "ESTIMATE" && <Typography variant="caption" color="warning.dark" sx={{ display: "block" }}>estimate</Typography>}
+                            </>
+                          ) : (
                             <Chip size="small" color="warning" icon={<WarningAmber />} label="No price" />
                           )}
                         </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700 }}>{priced ? formatMoney(line.taxableBase, currencyCode) : "—"}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, verticalAlign: "top" }}>{priced ? formatMoney(line.taxableBase, currencyCode) : "—"}</TableCell>
                       </TableRow>
                     );
                   })}
@@ -267,7 +384,7 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQu
               </Table>
               {unpriced.length > 0 && (
                 <Typography variant="body2" color="warning.main" sx={{ mt: 1, fontWeight: 700 }}>
-                  {unpriced.length} {unpriced.length === 1 ? "line has" : "lines have"} no price yet. Close this window and use Price it on {unpriced.length === 1 ? "that line" : "those lines"}.
+                  {unpriced.length} {unpriced.length === 1 ? "line has" : "lines have"} no price yet. Price {unpriced.length === 1 ? "it" : "them"} on the RFQ, or send {unpriced.length === 1 ? "it" : "them"} as Price to follow, an Estimate, or Not quoting.
                 </Typography>
               )}
 

@@ -89,6 +89,27 @@ public sealed class RfqLinePricingController(
         return Ok(new { quoteId = latest.Id, quoteNo = latest.QuoteNo, state });
     }
 
+    public sealed record LinePricingCommand(string? Status, string? Note, decimal? UnitPrice);
+
+    /// <summary>One quote line: ESTIMATE (with price), TO_FOLLOW, NOT_QUOTED (with reason), or null for a plain price.</summary>
+    [HttpPut("quotes/{quoteId:long}/lines/{lineId:long}/pricing")]
+    [RequireModulePermission("Quotations", PermissionAction.Edit)]
+    public async Task<IActionResult> SaveLinePricing(long quoteId, long lineId, [FromBody] LinePricingCommand command, CancellationToken ct)
+    {
+        if (!TryTenant(out var tenant)) return Unauthorized();
+        if (access is null || !await access.CanAccessQuoteAsync(quoteId, ct)) return NotFound();
+        try
+        {
+            var quote = await quotes.SetLinePricingStatusAsync(quoteId, lineId, tenant, Actor(), command.Status, command.Note, command.UnitPrice, ct);
+            return Ok(new { quoteId = quote.Id });
+        }
+        catch (KeyNotFoundException) { return NotFound(); }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new ProblemDetails { Status = 409, Title = "Line not updated", Detail = ex.Message });
+        }
+    }
+
     public sealed record QuoteTermsCommand(long? CurrencyId, DateTime? ValidUntil);
 
     [HttpPut("quotes/{quoteId:long}/terms")]

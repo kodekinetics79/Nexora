@@ -15444,6 +15444,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrecision(18, 4)
                         .HasColumnType("numeric(18,4)");
 
+                    b.Property<string>("PricingNote")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("PricingStatus")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
                     b.Property<decimal?>("Discount")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("decimal(18, 6)")

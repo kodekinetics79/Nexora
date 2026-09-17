@@ -339,7 +339,7 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             .ToListAsync(cancellationToken);
 
         var consumed = await ConfirmedQuoteQuantitiesAsync(businessUnitId, quoteId, null, cancellationToken);
-        var lines = quote.QuoteItems.OrderBy(x => x.Id).Select(item =>
+        var lines = quote.QuoteItems.Where(x => !QuoteLinePricing.IsUnpricedByChoice(x.PricingStatus)).OrderBy(x => x.Id).Select(item =>
         {
             var confirmed = consumed.GetValueOrDefault(item.Id);
             return new QuoteAwardBalanceLineView(
@@ -629,7 +629,7 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             throw new ArgumentException("The quotation belongs to a different customer than the purchase order.");
 
         var consumed = await ConfirmedQuoteQuantitiesAsync(businessUnitId, quoteId, null, cancellationToken);
-        var quoteLines = quote.QuoteItems.OrderBy(x => x.Id).Select(item => new QuoteLineKeys(
+        var quoteLines = quote.QuoteItems.Where(x => !QuoteLinePricing.IsUnpricedByChoice(x.PricingStatus)).OrderBy(x => x.Id).Select(item => new QuoteLineKeys(
             item.Id,
             item.ItemDescription ?? item.Product?.Description ?? item.Product?.ProductName ?? $"Quote line {item.Id}",
             item.Rfqitem?.ItemMaterialCode,

@@ -236,6 +236,8 @@ namespace ERP_RFQ_Automation.Repositories
                     TaxableBase = i.TaxableBase,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     ExStockQuantity = i.ExStockQuantity,
+                    PricingStatus = i.PricingStatus,
+                    PricingNote = i.PricingNote,
                     DiscountTypeId = i.DiscountTypeId,
                     DiscountTypeName = i.DiscountType?.Description,
                     DiscountValue = i.DiscountValue,

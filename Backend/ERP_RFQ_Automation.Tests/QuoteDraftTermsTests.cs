@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -48,6 +49,45 @@ public sealed class QuoteDraftTermsTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             service.SetDraftTermsAsync(quoteId, Tenant, "rep@qa", null, DateTime.UtcNow.Date.AddDays(10)));
+    }
+
+    [Fact]
+    public async Task A_closing_bid_goes_out_complete_with_lines_to_follow_estimated_or_not_quoted()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        var quoteId = await SeedAsync(context, DraftStatusId, currencyId: Sar);
+        await using (var setup = db.ContextFor(Tenant))
+        {
+            (await setup.Quotes.SingleAsync(q => q.Id == quoteId)).ValidUntil = DateTime.UtcNow.Date.AddDays(30);
+            setup.QuoteItems.Add(new QuoteItem { Id = 99_022, QuoteId = quoteId, ItemDescription = "Late supplier", Quantity = 2m, UnitPrice = 0m, CreatedBy = "seed", CreatedDate = DateTime.UtcNow });
+            setup.QuoteItems.Add(new QuoteItem { Id = 99_023, QuoteId = quoteId, ItemDescription = "Discontinued", Quantity = 1m, UnitPrice = 0m, CreatedBy = "seed", CreatedDate = DateTime.UtcNow });
+            await setup.SaveChangesAsync();
+        }
+        context.ChangeTracker.Clear();
+        var quote = await context.Quotes.AsNoTracking().Include(q => q.QuoteItems).SingleAsync(q => q.Id == quoteId);
+        var service = new QuoteService(context, null!, null!);
+
+        Assert.Contains("no price", QuoteService.DraftCompletenessBlocker(true, Sar, quote.ValidUntil, quote.QuoteItems));
+
+        await service.SetLinePricingStatusAsync(quoteId, 99_022, Tenant, "rep@qa", "TO_FOLLOW", null, null);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SetLinePricingStatusAsync(quoteId, 99_023, Tenant, "rep@qa", "NOT_QUOTED", " ", null));
+        await service.SetLinePricingStatusAsync(quoteId, 99_023, Tenant, "rep@qa", "NOT_QUOTED", "Discontinued by manufacturer", null);
+        var saved = await service.SetLinePricingStatusAsync(quoteId, 99_021, Tenant, "rep@qa", "ESTIMATE", null, 760m);
+
+        await using var verify = db.ContextFor(Tenant);
+        var items = await verify.QuoteItems.Where(x => x.QuoteId == quoteId).ToListAsync();
+        Assert.Null(QuoteService.DraftCompletenessBlocker(true, Sar, quote.ValidUntil, items));
+        Assert.Equal(("ESTIMATE", 760m), (items.Single(x => x.Id == 99_021).PricingStatus, items.Single(x => x.Id == 99_021).UnitPrice));
+        Assert.Equal("Discontinued by manufacturer", items.Single(x => x.Id == 99_023).PricingNote);
+        // Lines sent without a price carry no tax to derive, so they never block the send.
+        Assert.DoesNotContain("Late supplier", QuoteService.TaxDerivationBlocker(items.Where(x => x.Id != 99_021), 15m) ?? "");
+        Assert.Null(QuoteService.TaxDerivationBlocker(items.Where(x => x.Id != 99_021), 15m));
+        Assert.Equal(760m, saved.QuoteItems.Sum(x => x.UnitPrice * x.Quantity));
+
+        // Nothing priced at all is not a quote.
+        foreach (var item in items) { item.UnitPrice = 0m; item.PricingStatus = "TO_FOLLOW"; }
+        Assert.Contains("no line on this quote has a price", QuoteService.DraftCompletenessBlocker(true, Sar, quote.ValidUntil, items));
     }
 
     private static async Task<long> SeedAsync(ErpRfqAutomationContext context, long statusId, long? currencyId)

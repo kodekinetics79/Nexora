@@ -242,7 +242,8 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                 q.Rfqid,
                 q.CurrencyId,
                 Items = q.QuoteItems
-                    .Where(i => i.RfqitemId != null)
+                    // A line sent as "price to follow" or "not quoted" has no price to compare with a floor.
+                    .Where(i => i.RfqitemId != null && i.UnitPrice > 0m)
                     .Select(i => new { RfqItemId = i.RfqitemId!.Value, i.UnitPrice })
                     .ToList()
             })

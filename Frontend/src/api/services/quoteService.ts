@@ -56,6 +56,9 @@ export interface QuoteLineDTO {
   deliveryLeadTime?: number | null;
   /** Quantity offered ex stock when the balance follows in deliveryLeadTime days. */
   exStockQuantity?: number | null;
+  /** ESTIMATE (priced, subject to confirmation), TO_FOLLOW (price follows), NOT_QUOTED (with a reason), or null for a plain price. */
+  pricingStatus?: 'ESTIMATE' | 'TO_FOLLOW' | 'NOT_QUOTED' | null;
+  pricingNote?: string | null;
   // What the customer asked for, read through the linked RFQ line. Null when the quote has no RFQ.
   requestedManufacturerName?: string | null;
   requestedManufacturerPartNumber?: string | null;
