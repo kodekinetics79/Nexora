@@ -280,6 +280,7 @@ namespace ERP_RFQ_Automation.Repositories
                     LineItemNo = i.LineItemNo,
                     ProductId = i.ProductId,
                     ProductName = i.Product?.ProductName,
+                    ProductIsCatalogItem = i.Product == null ? null : i.Product.IsCatalogItem ?? true,
                     ProductResolvedBy = i.ProductResolvedBy,
                     ProductResolvedOn = i.ProductResolvedOn,
                     ProductResolutionReason = i.ProductResolutionReason,

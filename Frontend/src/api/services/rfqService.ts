@@ -64,6 +64,8 @@ export interface RfqitemResponseDTO {
     lineItemNo?: string;
     productId?: number;
     productName?: string;
+    /** False when the linked part was kept out of the catalogue. */
+    productIsCatalogItem?: boolean | null;
     productResolvedBy?: string | null;
     productResolvedOn?: string | null;
     productResolutionReason?: string | null;

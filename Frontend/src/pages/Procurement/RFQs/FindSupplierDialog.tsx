@@ -11,6 +11,7 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   Link,
   MenuItem,
   Stack,
@@ -57,6 +58,11 @@ interface Props {
   /** What already happened with each supplier on this line, e.g. "Asked 16 Sep · waiting for reply". Shown on the row; asking again stays the rep's choice. */
   earlierRequests?: Map<number, string>;
   onClose: () => void;
+  /**
+   * For a part not in the catalogue: the window asks whether to add it. The part is kept out while
+   * the window is open; on Send with the tick on, this puts it in.
+   */
+  catalogueChoice?: { addToCatalogue: (productId: number) => Promise<unknown> };
   /** allDone is false when some suppliers could not be sent to; the window then stays open and says why. */
   onSent: (sentTo: string[], allDone: boolean) => void;
 }
@@ -79,7 +85,7 @@ type Row = {
  * default is a suggestion: ticks, quantity and message can all be changed.
  */
 export default function FindSupplierDialog({
-  open, line, openCase, presetSupplierIds, presetMessage, earlierRequests, onClose, onSent,
+  open, line, openCase, presetSupplierIds, presetMessage, earlierRequests, catalogueChoice, onClose, onSent,
 }: Props) {
   const [ticked, setTicked] = React.useState<Set<string>>(new Set());
   const [quantity, setQuantity] = React.useState("");
@@ -95,6 +101,7 @@ export default function FindSupplierDialog({
   const [newName, setNewName] = React.useState("");
   const [addError, setAddError] = React.useState<string | null>(null);
   const [editing, setEditing] = React.useState(false);
+  const [addToCatalogue, setAddToCatalogue] = React.useState(true);
   const [wording, setWording] = React.useState({ subject: "", greeting: "", opening: "", signOff: "" });
   const messageTouched = React.useRef(false);
 
@@ -167,6 +174,7 @@ export default function FindSupplierDialog({
       initialised.current = false;
       setSendFrom("");
       copiesTouched.current = false;
+      setAddToCatalogue(true);
       setEditing(false);
       setNewEmail("");
       setNewName("");
@@ -318,6 +326,9 @@ export default function FindSupplierDialog({
         return `${names.get(result.supplierId) ?? "A supplier"}: ${reason}`;
       });
       const sent = results.filter((result) => result.succeeded).map((result) => names.get(result.supplierId) ?? "supplier");
+      if (catalogueChoice && addToCatalogue && sent.length > 0 && fresh.productId) {
+        await catalogueChoice.addToCatalogue(fresh.productId);
+      }
       return { sent, failed, missing: supplierIds.size - askable.length };
     },
     onSuccess: ({ sent, failed, missing }) => {
@@ -544,6 +555,20 @@ export default function FindSupplierDialog({
               {savedDefault && <Typography variant="caption" color="success.main">Saved. Your next requests start with this message.</Typography>}
               {saveMyDefault.isError && <Typography variant="caption" color="error.main">Could not save it just now.</Typography>}
             </Stack>
+            {catalogueChoice && (
+              <FormControlLabel
+                sx={{ mt: 1, display: "flex" }}
+                control={<Checkbox size="small" checked={addToCatalogue} onChange={(event) => setAddToCatalogue(event.target.checked)} />}
+                label={
+                  <Typography variant="body2">
+                    Add this part to my catalogue
+                    <Typography component="span" variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                      {addToCatalogue ? "It is added when you press Send." : "Suppliers are still asked; the part stays out of your catalogue."}
+                    </Typography>
+                  </Typography>
+                }
+              />
+            )}
             <Link component="button" type="button" variant="body2" underline="hover" sx={{ mt: 1.5, display: "block" }} onClick={startEditing}>
               {editing ? "Use the saved wording" : "Edit the email for this send"}
             </Link>

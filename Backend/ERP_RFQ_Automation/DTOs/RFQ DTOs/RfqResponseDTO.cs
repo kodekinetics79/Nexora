@@ -71,6 +71,8 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? LineItemNo { get; set; }
         public long? ProductId { get; set; }
         public string? ProductName { get; set; }  // for UI
+        /// <summary>False when the linked part was kept out of the catalogue (e.g. suppliers asked without adding it).</summary>
+        public bool? ProductIsCatalogItem { get; set; }
         public string? ProductResolvedBy { get; set; }
         public DateTime? ProductResolvedOn { get; set; }
         public string? ProductResolutionReason { get; set; }

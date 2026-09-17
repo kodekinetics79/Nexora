@@ -339,6 +339,8 @@ const ViewRFQPage: React.FC = () => {
     const existing = sourcingLines.get(item.id)?.sourcingCaseId;
     if (item.productId && existing) return procurementService.getSourcingCase(existing);
     if (item.productId) return procurementService.createOrOpenSourcingCase(Number(id), item.id, 10);
+    // Not in the catalogue: the part is created kept out of it, and the window's tick decides
+    // on Send whether it goes in (owner decision 2026-09-16).
       const entry = catalogueEntryFor(item);
       if (!entry) throw new Error('This line has neither a part number nor a description, so there is nothing to ask suppliers for.');
       const compact = (value?: string | null) => (value ?? '').replace(/[^a-z0-9]/gi, '').toUpperCase();
@@ -350,7 +352,10 @@ const ViewRFQPage: React.FC = () => {
         product = found.items.find((candidate) => compact(candidate.partNo) === compact(entry.partNo));
       }
       const added = !product;
-      if (!product) product = await productService.create(entry.form);
+      if (!product) {
+        entry.form.set('isCatalogItem', 'false');
+        product = await productService.create(entry.form);
+      }
       const reason = added
         ? `No catalogue product matched customer part ${entry.partNo || entry.description}. Added ${product.partNo} from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} to ask suppliers for a price.`
         : `Customer part ${entry.partNo} is catalogue product ${product.partNo} (same part number). Linked from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} to ask suppliers for a price.`;
@@ -365,6 +370,14 @@ const ViewRFQPage: React.FC = () => {
         throw new Error(`The line is now linked to ${product.partNo}, but the sourcing case could not be opened: ${describeError(error, 'unknown error')}. Press "Create / Open Sourcing Case" on the line.`, { cause: error });
       }
   };
+  const keepInCatalogueMutation = useMutation({
+    mutationFn: (productId: number) => productService.setCatalogue(productId, true),
+    onSuccess: async () => {
+      enqueueSnackbar('Added to your catalogue.', { variant: 'success' });
+      await invalidateLineViews();
+    },
+    onError: () => enqueueSnackbar('The part could not be added to your catalogue.', { variant: 'error' }),
+  });
   const [findSupplierFor, setFindSupplierFor] = React.useState<{ item: RfqitemResponseDTO; presetSupplierIds?: number[]; presetMessage?: string } | null>(null);
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
@@ -937,6 +950,8 @@ const ViewRFQPage: React.FC = () => {
                           // One button per line: Find supplier. The line says where it stands in one sentence;
                           // every choice (who, how many, what to say) is made in the small window.
                           const unknown = sourcingLine.resolution === 'UNKNOWN';
+                          // A part suppliers were asked about while kept out of the catalogue.
+                          const keptOut = !unknown && Boolean(item.productId) && item.productIsCatalogItem === false;
                           const leftOut = unknown && notNowLineIds.includes(item.id);
                           const sentFor = (sourcingQuery.data?.solicitations ?? []).filter((request) => request.requestedRfqItemIds?.includes(item.id));
                           // The server spells these both ways ("PENDINGDISPATCH" and "PENDING_DISPATCH"); compare without underscores.
@@ -959,13 +974,18 @@ const ViewRFQPage: React.FC = () => {
                                 ? `Sent to ${plural(waiting.length, 'supplier')} · waiting for prices`
                                 : unknown
                                   ? leftOut ? 'Not in your catalogue · left for now' : 'Not in your catalogue · no supplier yet'
+                                  : keptOut ? `Not in your catalogue · ${sourcingLine.shortfallQuantity} to source`
                                   : inStock > 0 ? `${inStock} in stock · ${sourcingLine.shortfallQuantity} to source` : `${sourcingLine.shortfallQuantity} to source`;
+                          const catalogueNote = keptOut ? 'Not in your catalogue' : null;
                           const primaryIsFind = validOffers.length === 0 && expiredOffers.length === 0 && waiting.length === 0;
                           return (
                             <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
                               <Typography variant="caption" sx={{ fontWeight: 700, color: validOffers.length > 0 ? 'success.main' : waiting.length > 0 ? 'info.main' : 'warning.main' }}>
                                 {status}
                               </Typography>
+                              {catalogueNote && validOffers.length + waiting.length > 0 && (
+                                <Typography variant="caption" color="text.secondary">{catalogueNote}</Typography>
+                              )}
                               {failedSends.length > 0 && (
                                 <Typography variant="caption" color="error.main">
                                   Email to {failedSends.map((request) => request.supplierName).join(', ')} did not go through
@@ -984,6 +1004,13 @@ const ViewRFQPage: React.FC = () => {
                                 {canFind && (
                                   <Button size="small" variant={primaryIsFind ? 'contained' : 'text'} startIcon={primaryIsFind ? <SourcingIcon /> : undefined} onClick={() => openFind()}>
                                     {primaryIsFind ? 'Find supplier' : 'Find more suppliers'}
+                                  </Button>
+                                )}
+                                {keptOut && canAddToCatalogue && (
+                                  <Button size="small" variant="outlined" startIcon={<AddIcon />}
+                                    disabled={keepInCatalogueMutation.isPending}
+                                    onClick={() => keepInCatalogueMutation.mutate(item.productId!)}>
+                                    Add to catalogue
                                   </Button>
                                 )}
                                 {unknown && commercialAccess.canResolveRfqProduct && (
@@ -1270,6 +1297,9 @@ const ViewRFQPage: React.FC = () => {
             openCase={() => openCaseForLine(found)}
             presetSupplierIds={findSupplierFor.presetSupplierIds}
             presetMessage={findSupplierFor.presetMessage}
+            catalogueChoice={unknownLine || found.productIsCatalogItem === false
+              ? { addToCatalogue: (productId: number) => productService.setCatalogue(productId, true) }
+              : undefined}
             earlierRequests={new Map((sourcingQuery.data?.solicitations ?? [])
               .filter((request) => request.requestedRfqItemIds?.includes(found.id))
               .sort((a, b) => a.id - b.id)

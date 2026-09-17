@@ -561,6 +561,8 @@ describe('ViewRFQPage — a line without a product says so, and is not offered a
     const form = createProduct.mock.calls[0][0] as FormData;
     expect(form.get('partNo')).toBe('MPN-1');
     expect(form.get('description')).toBe('Manufacturer: TELEDYNE. VALVE,SOLN,1/4 IN PS');
+    // Kept out of the catalogue until the rep sends with "Add this part to my catalogue" ticked.
+    expect(form.get('isCatalogItem')).toBe('false');
     expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 777, expect.stringContaining('Added MPN-1'));
 
     // The window: the email the supplier will receive, then tick, then send.

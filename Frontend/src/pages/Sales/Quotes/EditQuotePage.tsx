@@ -18,6 +18,7 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import customerService from '../../../api/services/customerService';
+import currencyService from '../../../api/services/currencyService';
 import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
 import productService from '../../../api/services/productService';
@@ -92,6 +93,13 @@ const EditQuotePage: React.FC = () => {
    * defect, not the absence of one.
    */
   const [currencyCode, setCurrencyCode] = useState<string | null>(null);
+  const [chosenCurrencyId, setChosenCurrencyId] = useState<number | null>(null);
+  const currenciesQuery = useQuery({
+    queryKey: ['currencies-for-quote', userData?.businessUnitId],
+    queryFn: async () => (await currencyService.getAll({ businessUnitId: userData?.businessUnitId, pageNumber: 1, pageSize: 100, isActive: true })).items ?? [],
+    enabled: !currencyCode && Boolean(userData?.businessUnitId),
+    staleTime: 10 * 60 * 1000,
+  });
 
   const [items, setItems] = useState<QuoteItem[]>([]);
 
@@ -348,7 +356,9 @@ const EditQuotePage: React.FC = () => {
       // CurrencyId as "not supplied" rather than "clear it", so this is belt AND braces: the
       // payload states the truth, and the server no longer destroys it if some future caller
       // forgets to. This screen deliberately offers no way to CHANGE the currency.
-      currencyId: quote?.currencyId ?? null,
+      // A hand-priced quote has no currency until the rep picks one here; one set by supplier
+      // pricing is kept and cannot be changed from this screen.
+      currencyId: quote?.currencyId ?? chosenCurrencyId ?? null,
       headerRemarks,
       discountTypeId, discountValue, statusId,
       modifiedBy: userData?.userName || 'System',
@@ -446,9 +456,21 @@ const EditQuotePage: React.FC = () => {
             testId="edit-quote-next-step"
           >
             {!currencyCode && (
-              <Typography variant="body2">
-                This quote has no currency yet. It is set when a line is priced from an approved supplier offer on the Sourcing workbench; it cannot be typed here.
-              </Typography>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { sm: 'center' } }}>
+                <Typography variant="body2">This quote has no currency yet. Pick the currency your prices are in:</Typography>
+                <TextField
+                  select
+                  size="small"
+                  label="Quote currency"
+                  value={chosenCurrencyId ?? ''}
+                  onChange={(event) => setChosenCurrencyId(Number(event.target.value))}
+                  sx={{ minWidth: 180 }}
+                >
+                  {(currenciesQuery.data ?? []).map((currency) => (
+                    <MenuItem key={currency.id} value={currency.id}>{currency.code} · {currency.currencyName}</MenuItem>
+                  ))}
+                </TextField>
+              </Stack>
             )}
           </NextStepPanel>
         );
