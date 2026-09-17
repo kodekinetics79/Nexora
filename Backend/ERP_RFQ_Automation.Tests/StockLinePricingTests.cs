@@ -21,6 +21,8 @@ public sealed class StockLinePricingTests
             var customer = Seed.Customer(setup, 96_900, fixture.BusinessUnitId, "Khobar Power");
             var sent = Status(setup, 96_911, "QuoteStatus", "SENT", fixture.BusinessUnitId);
             AddQuote(setup, fixture, 96_921, "QT-SENT", sent.SetupId, customer.Id, 130m, new DateTime(2026, 9, 10));
+            // This RFQ's own sent quote is not "your record": the line already shows it.
+            AddQuote(setup, fixture, 96_923, "QT-THIS-RFQ", sent.SetupId, customer.Id, 99m, new DateTime(2026, 9, 15), fixture.RfqId);
             await setup.SaveChangesAsync();
         }
         await using var db = fixture.Context();
@@ -30,7 +32,17 @@ public sealed class StockLinePricingTests
         Assert.Null(view.TrackRecord.LastWon);
         Assert.Equal((1, 0), (view.TrackRecord.TimesQuoted, view.TrackRecord.TimesWon));
         Assert.Empty(view.History);
+        Assert.Equal(("QT-THIS-RFQ", "SENT"), (view.OnQuote?.QuoteNo, view.OnQuote?.State));
     }
+
+    [Theory]
+    [InlineData(null, "DRAFT")]
+    [InlineData("DRAFT", "DRAFT")]
+    [InlineData("SENT", "SENT")]
+    [InlineData("ACCEPTED", "DECIDED")]
+    [InlineData("REJECTED", "DECIDED")]
+    public void A_sent_quote_is_revised_and_a_decided_one_is_final(string? status, string state) =>
+        Assert.Equal(state, StockLinePricingService.QuoteState(status));
 
     [Fact]
     public void Selling_price_wins_then_cost_plus_company_margin_then_cost_alone()
@@ -112,15 +124,16 @@ public sealed class StockLinePricingTests
     }
 
     private static void AddQuote(ErpRfqAutomationContext db, ProcurementScenario fixture, long id, string number,
-        long statusId, long customerId, decimal price, DateTime on)
+        long statusId, long customerId, decimal price, DateTime on, long? rfqId = null)
     {
         var quote = new Quote
         {
             Id = id, QuoteNo = number, BusinessUnitId = fixture.BusinessUnitId, CustomerId = customerId, StatusId = statusId,
-            CurrencyId = ProcurementTestData.Currency, QuoteDate = on, CreatedBy = "qa", CreatedDate = on
+            CurrencyId = ProcurementTestData.Currency, QuoteDate = on, CreatedBy = "qa", CreatedDate = on, Rfqid = rfqId
         };
         quote.QuoteItems.Add(new QuoteItem
         {
+            RfqitemId = rfqId is null ? null : fixture.RfqItemId,
             ProductId = ProcurementTestData.Product, Quantity = 10m, UnitPrice = price, TotalAmount = price * 10m, CreatedBy = "qa"
         });
         db.Quotes.Add(quote);

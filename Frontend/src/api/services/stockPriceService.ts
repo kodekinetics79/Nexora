@@ -36,7 +36,8 @@ export interface StockLinePrice {
   trackRecord: { lastQuoted?: PriceReference | null; lastWon?: PriceReference | null; timesQuoted: number; timesWon: number };
   /** Other recent prices, not repeating the two above. */
   history: PriceReference[];
-  onQuote?: { quoteId: number; quoteNo: string; unitPrice: number; exStock: boolean; currencyCode?: string | null } | null;
+  /** DRAFT: price changes here. SENT: a new price makes a draft revision. DECIDED: the customer already decided; final. */
+  onQuote?: { quoteId: number; quoteNo: string; unitPrice: number; exStock: boolean; currencyCode?: string | null; state: 'DRAFT' | 'SENT' | 'DECIDED' } | null;
   currency?: { id: number; code: string } | null;
 }
 
@@ -44,7 +45,7 @@ const stockPriceService = {
   get: async (rfqId: number, itemId: number): Promise<StockLinePrice> =>
     (await axiosInstance.get<StockLinePrice>(`/api/rfq/${rfqId}/items/${itemId}/stock-price`)).data,
 
-  use: async (rfqId: number, itemId: number, body: { unitPrice: number; exStock: boolean; currencyId?: number | null }) =>
+  use: async (rfqId: number, itemId: number, body: { unitPrice: number; exStock: boolean; currencyId?: number | null; reviseIfSent?: boolean }) =>
     (await axiosInstance.post<{ quoteId: number; quoteNo: string }>(`/api/rfq/${rfqId}/items/${itemId}/stock-price`, body)).data,
 
   getMargin: async () =>

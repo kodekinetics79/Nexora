@@ -61,7 +61,10 @@ function PriceCard({ title, icon, reference, empty, onUse }: {
       {reference ? (
         <>
           <Stack direction="row" sx={{ alignItems: "baseline", justifyContent: "space-between", mt: 0.5 }}>
-            <Typography variant="h6" sx={{ fontWeight: 800 }}>{formatMoney(reference.unitPrice, reference.currencyCode)}</Typography>
+            <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
+              <Typography variant="h6" sx={{ fontWeight: 800 }}>{formatMoney(reference.unitPrice, reference.currencyCode)}</Typography>
+              {title === "Last quoted" && reference.kind === "WON" && <Chip size="small" color="success" label="Won" />}
+            </Stack>
             <Button size="small" onClick={() => onUse(reference.unitPrice)} aria-label={`Use ${title.toLowerCase()} price`}>Use</Button>
           </Stack>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block" }} noWrap>
@@ -132,6 +135,8 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
   }, [open, view]);
 
   const quoteHasCurrency = Boolean(view?.onQuote?.currencyCode);
+  const sent = view?.onQuote?.state === "SENT";
+  const decided = view?.onQuote?.state === "DECIDED";
   const currenciesQuery = useQuery({
     queryKey: ["currencies-for-quote", userData?.businessUnitId],
     queryFn: async () => (await currencyService.getAll({ businessUnitId: userData?.businessUnitId, pageNumber: 1, pageSize: 100, isActive: true })).items ?? [],
@@ -171,13 +176,15 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
         unitPrice: priceNumber,
         exStock,
         currencyId: quoteHasCurrency ? null : currencyId === "" ? null : currencyId,
+        ...(sent ? { reviseIfSent: true } : {}),
       });
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: stockPriceQueryKey(rfqId, itemId) });
       queryClient.invalidateQueries({ queryKey: ["rfq-detail", rfqId] });
       queryClient.invalidateQueries({ queryKey: ["rfq-commercial-intelligence", rfqId] });
-      enqueueSnackbar(`Price added to ${result.quoteNo}.`, {
+      queryClient.invalidateQueries({ queryKey: ["stock-price"] });
+      enqueueSnackbar(sent ? `New revision ${result.quoteNo} made with this price. Send it when ready.` : `Price added to ${result.quoteNo}.`, {
         variant: "success",
         action: <Button color="inherit" size="small" onClick={() => navigate(`/sales/quotes/edit/${result.quoteId}`)}>Open quote</Button>,
       });
@@ -405,18 +412,25 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
         )}
       </DialogContent>
 
+      {view?.onQuote && (sent || decided) && (
+        <Alert severity={decided ? "warning" : "info"} sx={{ borderRadius: 0 }}>
+          {decided
+            ? `The customer has already decided on ${view.onQuote.quoteNo} (${formatMoney(view.onQuote.unitPrice, view.onQuote.currencyCode)}). This price can no longer change.`
+            : `${view.onQuote.quoteNo} was already sent to the customer at ${formatMoney(view.onQuote.unitPrice, view.onQuote.currencyCode)}. A new price makes a new revision. The customer sees nothing until you send it.`}
+        </Alert>
+      )}
       <DialogActions sx={{ px: 2.5 }}>
         <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
-          {view?.onQuote ? `Updates this line on ${view.onQuote.quoteNo}.` : "Starts the quote draft with this line priced."} You can still change it on the quote.
+          {decided ? "" : sent ? "The sent quote stays as it is." : view?.onQuote ? `Updates this line on ${view.onQuote.quoteNo}. You can still change it on the quote.` : "Starts the quote draft with this line priced. You can still change it on the quote."}
         </Typography>
         <Button onClick={onClose} disabled={use.isPending}>Cancel</Button>
         <Button
           variant="contained"
           onClick={() => use.mutate()}
-          disabled={!view || !priceOk || use.isPending || (!quoteHasCurrency && currencyId === "")}
+          disabled={!view || decided || !priceOk || use.isPending || (!quoteHasCurrency && currencyId === "")}
           startIcon={use.isPending ? <CircularProgress size={16} color="inherit" /> : <CheckCircle />}
         >
-          Use this price
+          {sent ? "Make a revision with this price" : "Use this price"}
         </Button>
       </DialogActions>
     </Dialog>
@@ -453,7 +467,8 @@ export function StockLineAction({ rfqId, itemId, canPrice }: { rfqId: number; it
       {priced ? (
         <>
           <Typography variant="caption" sx={{ fontWeight: 700, color: "success.main" }}>
-            Priced {formatMoney(priced.unitPrice, priced.currencyCode)} on {priced.quoteNo}{priced.exStock ? " · ex stock" : ""}
+            {priced.state === "DRAFT" ? "Priced" : "Quoted"} {formatMoney(priced.unitPrice, priced.currencyCode)} on {priced.quoteNo}
+            {priced.state === "SENT" ? " · sent" : priced.state === "DECIDED" ? " · customer decided" : ""}{priced.exStock ? " · ex stock" : ""}
           </Typography>
           <Typography variant="caption" color="text.secondary">{qty(view.stock.onHand)}{unit} on the shelf</Typography>
         </>
@@ -466,13 +481,13 @@ export function StockLineAction({ rfqId, itemId, canPrice }: { rfqId: number; it
         </>
       )}
       <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap" }}>
-        {canPrice && (
+        {canPrice && priced?.state !== "DECIDED" && (
           <Button size="small" variant={priced ? "outlined" : "contained"} startIcon={<LocalOffer />} onClick={() => setOpen(true)}>
             {priced ? "Change price" : "Price from stock"}
           </Button>
         )}
         {priced && (
-          <Button size="small" variant="text" onClick={() => navigate(`/sales/quotes/edit/${priced.quoteId}`)}>Open quote</Button>
+          <Button size="small" variant="text" onClick={() => navigate(priced.state === "DRAFT" ? `/sales/quotes/edit/${priced.quoteId}` : `/sales/quotes/view/${priced.quoteId}`)}>Open quote</Button>
         )}
       </Stack>
       {open && <StockPriceDialog open={open} rfqId={rfqId} itemId={itemId} onClose={() => setOpen(false)} />}

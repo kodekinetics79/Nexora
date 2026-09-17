@@ -81,7 +81,7 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
-        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default);
+        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
         Task<QuoteResponseDTO> GetQuoteAsync(long id);
@@ -635,10 +635,26 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<QuoteResponseDTO> PriceRfqLineAsync(
             long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock,
-            long? currencyId, CancellationToken ct = default)
+            long? currencyId, CancellationToken ct = default, bool reviseIfSent = false)
         {
             if (unitPrice <= 0m) throw new InvalidOperationException("Enter a price above zero.");
             if (unitPrice > 1_000_000_000m) throw new InvalidOperationException("That price is too large.");
+
+            // A quote the customer already holds is never edited. With the rep's say-so, the new
+            // price goes on a draft revision; the customer sees nothing until that is sent.
+            var latest = await _context.Quotes.AsNoTracking()
+                .Include(q => q.Status)
+                .Where(q => q.Rfqid == rfqId && q.BusinessUnitId == businessUnitId)
+                .OrderByDescending(q => q.RevisionNo).ThenByDescending(q => q.Id)
+                .FirstOrDefaultAsync(ct);
+            if (latest is not null && LifecyclePolicy.Canonicalize("Quote", latest.Status?.SetupCode, latest.Status?.SetupValue) != "DRAFT")
+            {
+                if (!reviseIfSent)
+                    throw new InvalidOperationException(
+                        $"Quote '{latest.QuoteNo}' was already sent to the customer. Make a revision to change the price.");
+                await ReviseQuoteAsync(latest.Id, businessUnitId, actor);
+                _context.ChangeTracker.Clear();
+            }
 
             var draft = await PrepareDraftFromRfqAsync(rfqId, businessUnitId, actor, ct);
             var quote = await _context.Quotes

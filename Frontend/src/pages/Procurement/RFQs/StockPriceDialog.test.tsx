@@ -37,7 +37,7 @@ const view = (overrides = {}) => ({
   price: { source: 'COST_ONLY', sellingPrice: null, unitCost: 100, marginPercent: null, unitPrice: 100 },
   trackRecord: { lastQuoted: quoted, lastWon: won, timesQuoted: 2, timesWon: 2 },
   history: [sold],
-  onQuote: { quoteId: 2, quoteNo: 'QT-0926-0002', unitPrice: 0, exStock: false, currencyCode: null },
+  onQuote: { quoteId: 2, quoteNo: 'QT-0926-0002', unitPrice: 0, exStock: false, currencyCode: null, state: 'DRAFT' },
   currency: { id: 1, code: 'SAR' },
   ...overrides,
 });
@@ -117,8 +117,28 @@ describe('Price from stock', () => {
     expect(within(dialog).getByText('Quoted 1 time · won 0')).toBeInTheDocument();
   });
 
+  it('a line already sent to the customer says so and a new price makes a revision', async () => {
+    mocks.get.mockResolvedValue(view({ onQuote: { quoteId: 3, quoteNo: 'QT-0926-0003', unitPrice: 130, exStock: true, currencyCode: 'SAR', state: 'SENT' } }));
+    renderLine();
+    expect(await screen.findByText(/Quoted SAR\s?130\.00 on QT-0926-0003/)).toBeInTheDocument();
+    expect(screen.getByText(/· sent/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Change price' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/already sent to the customer/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText('Unit price'), { target: { value: '128' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Make a revision with this price' }));
+    await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 128, exStock: true, currencyId: null, reviseIfSent: true }));
+  });
+
+  it('a line the customer already decided on cannot be repriced', async () => {
+    mocks.get.mockResolvedValue(view({ onQuote: { quoteId: 1, quoteNo: 'QT-0926-0001', unitPrice: 150, exStock: false, currencyCode: 'SAR', state: 'DECIDED' } }));
+    renderLine();
+    expect(await screen.findByText(/customer decided/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Change price' })).not.toBeInTheDocument();
+  });
+
   it('once priced, the line says where the price went and offers Change price', async () => {
-    mocks.get.mockResolvedValue(view({ onQuote: { quoteId: 2, quoteNo: 'QT-0926-0002', unitPrice: 125, exStock: true, currencyCode: 'SAR' } }));
+    mocks.get.mockResolvedValue(view({ onQuote: { quoteId: 2, quoteNo: 'QT-0926-0002', unitPrice: 125, exStock: true, currencyCode: 'SAR', state: 'DRAFT' } }));
     renderLine();
     expect(await screen.findByText(/Priced SAR\s?125\.00 on QT-0926-0002 · ex stock/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change price' })).toBeInTheDocument();

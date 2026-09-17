@@ -57,7 +57,12 @@ public sealed record PriceReference(string Kind, decimal UnitPrice, string? Curr
 /// </summary>
 public sealed record PartTrackRecord(PriceReference? LastQuoted, PriceReference? LastWon, int TimesQuoted, int TimesWon);
 
-public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode);
+/// <summary>
+/// The line on this RFQ's latest quote. State: DRAFT (price can change here), SENT (a new price
+/// makes a draft revision; the customer sees nothing until it is sent), DECIDED (the customer has
+/// already accepted or rejected, so the price is final).
+/// </summary>
+public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode, string State);
 
 public sealed record StockCurrency(long Id, string Code);
 
@@ -97,7 +102,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
 
         var history = line.ProductId is null
             ? new List<PriceReference>()
-            : await HistoryAsync(businessUnitId, line.ProductId.Value, ct);
+            : await HistoryAsync(businessUnitId, line.ProductId.Value, rfqId, ct);
         var quotes = history.Where(x => x.Kind is "QUOTED" or "WON").ToList();
         var wonQuoteIds = history.Where(x => x.Kind == "WON").Select(x => x.QuoteId).ToHashSet();
         var wins = history.Where(x => x.Kind == "WON" || x.Kind == "SOLD" && (x.QuoteId is null || !wonQuoteIds.Contains(x.QuoteId))).ToList();
@@ -105,12 +110,19 @@ public sealed class StockLinePricingService : IStockLinePricingService
         var lastWon = wins.FirstOrDefault();
         var track = new PartTrackRecord(lastQuoted, lastWon, quotes.Count, wins.Count);
 
-        var onQuote = await _db.QuoteItems.AsNoTracking()
+        var onQuoteRow = await _db.QuoteItems.AsNoTracking()
             .Where(x => x.RfqitemId == rfqItemId && x.Quote.BusinessUnitId == businessUnitId)
-            .OrderByDescending(x => x.Quote.Id)
-            .Select(x => new QuoteLineNow(x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, x.DeliveryLeadTime == 0,
-                x.Quote.Currency != null ? x.Quote.Currency.Code : null))
+            .OrderByDescending(x => x.Quote.RevisionNo).ThenByDescending(x => x.Quote.Id)
+            .Select(x => new
+            {
+                x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0,
+                Currency = x.Quote.Currency != null ? x.Quote.Currency.Code : null,
+                Status = x.Quote.Status != null ? x.Quote.Status.SetupCode : null,
+                StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
+            })
             .FirstOrDefaultAsync(ct);
+        var onQuote = onQuoteRow is null ? null : new QuoteLineNow(onQuoteRow.QuoteId, onQuoteRow.QuoteNo, onQuoteRow.UnitPrice,
+            onQuoteRow.ExStock, onQuoteRow.Currency, QuoteState(LifecyclePolicy.Canonicalize("Quote", onQuoteRow.Status, onQuoteRow.StatusValue)));
 
         var currency = await _db.Quotes.AsNoTracking()
             .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId && x.Currency != null)
@@ -136,6 +148,13 @@ public sealed class StockLinePricingService : IStockLinePricingService
             onQuote,
             currency);
     }
+
+    public static string QuoteState(string? canonicalStatus) => canonicalStatus?.ToUpperInvariant() switch
+    {
+        null or "" or "DRAFT" => "DRAFT",
+        "ACCEPTED" or "ORDERED" or "REJECTED" or "LOST" or "CANCELLED" or "EXPIRED" => "DECIDED",
+        _ => "SENT",
+    };
 
     /// <summary>
     /// Selling price wins. Without one, cost plus the company margin. A cost with no margin set is
@@ -195,10 +214,12 @@ public sealed class StockLinePricingService : IStockLinePricingService
             rows.FirstOrDefault(x => x.SellingPrice is > 0m)?.SellingPrice);
     }
 
-    private async Task<List<PriceReference>> HistoryAsync(long businessUnitId, long productId, CancellationToken ct)
+    // This RFQ's own quotes are left out: the line already says what it was quoted at here.
+    private async Task<List<PriceReference>> HistoryAsync(long businessUnitId, long productId, long rfqId, CancellationToken ct)
     {
         var sold = await _db.OrderItems.AsNoTracking()
-            .Where(x => x.ProductId == productId && x.Order.BusinessUnitId == businessUnitId && x.Order.IsActive && x.UnitPrice > 0m)
+            .Where(x => x.ProductId == productId && x.Order.BusinessUnitId == businessUnitId && x.Order.IsActive && x.UnitPrice > 0m
+                && (x.Order.Rfqid == null || x.Order.Rfqid != rfqId))
             .OrderByDescending(x => x.Order.OrderDate).ThenByDescending(x => x.Id)
             .Take(50)
             .Select(x => new
@@ -211,7 +232,8 @@ public sealed class StockLinePricingService : IStockLinePricingService
             .ToListAsync(ct);
 
         var quoted = await _db.QuoteItems.AsNoTracking()
-            .Where(x => x.ProductId == productId && x.Quote.BusinessUnitId == businessUnitId && x.UnitPrice > 0m)
+            .Where(x => x.ProductId == productId && x.Quote.BusinessUnitId == businessUnitId && x.UnitPrice > 0m
+                && (x.Quote.Rfqid == null || x.Quote.Rfqid != rfqId))
             .OrderByDescending(x => x.Quote.QuoteDate).ThenByDescending(x => x.Id)
             .Take(100)
             .Select(x => new
