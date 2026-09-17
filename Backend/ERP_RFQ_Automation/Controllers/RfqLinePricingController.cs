@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Controllers;
 
@@ -67,6 +68,44 @@ public sealed class RfqLinePricingController(
         catch (InvalidOperationException ex)
         {
             return Conflict(new ProblemDetails { Status = StatusCodes.Status409Conflict, Title = "Price not added", Detail = ex.Message });
+        }
+    }
+
+    /// <summary>The RFQ's latest quote (a revision wins over its original), or 204 when none exists yet.</summary>
+    [HttpGet("{rfqId:long}/latest-quote")]
+    [RequireModulePermission("RFQ Management", PermissionAction.View)]
+    public async Task<IActionResult> LatestQuote(long rfqId, [FromServices] Models.ErpRfqAutomationContext db, CancellationToken ct)
+    {
+        if (!TryTenant(out var tenant)) return Unauthorized();
+        if (access is null || !await access.CanAccessRfqAsync(rfqId, ct)) return NotFound();
+        var latest = await db.Quotes.AsNoTracking()
+            .Where(q => q.Rfqid == rfqId && q.BusinessUnitId == tenant)
+            .OrderByDescending(q => q.RevisionNo).ThenByDescending(q => q.Id)
+            .Select(q => new { q.Id, q.QuoteNo, Status = q.Status != null ? q.Status.SetupCode : null, StatusValue = q.Status != null ? q.Status.SetupValue : null })
+            .FirstOrDefaultAsync(ct);
+        if (latest is null) return NoContent();
+        var state = StockLinePricingService.QuoteState(
+            ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecyclePolicy.Canonicalize("Quote", latest.Status, latest.StatusValue));
+        return Ok(new { quoteId = latest.Id, quoteNo = latest.QuoteNo, state });
+    }
+
+    public sealed record QuoteTermsCommand(long? CurrencyId, DateTime? ValidUntil);
+
+    [HttpPut("quotes/{quoteId:long}/terms")]
+    [RequireModulePermission("Quotations", PermissionAction.Edit)]
+    public async Task<IActionResult> SaveTerms(long quoteId, [FromBody] QuoteTermsCommand command, CancellationToken ct)
+    {
+        if (!TryTenant(out var tenant)) return Unauthorized();
+        if (access is null || !await access.CanAccessQuoteAsync(quoteId, ct)) return NotFound();
+        try
+        {
+            var quote = await quotes.SetDraftTermsAsync(quoteId, tenant, Actor(), command.CurrencyId, command.ValidUntil, ct);
+            return Ok(new { quoteId = quote.Id, currencyId = quote.CurrencyId, validUntil = quote.ValidUntil });
+        }
+        catch (KeyNotFoundException) { return NotFound(); }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new ProblemDetails { Status = 409, Title = "Quote not updated", Detail = ex.Message });
         }
     }
 

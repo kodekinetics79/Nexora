@@ -81,6 +81,8 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
+        /// <summary>The quote currency (only while none is set) and validity date of a draft, without resubmitting its lines.</summary>
+        Task<QuoteResponseDTO> SetDraftTermsAsync(long quoteId, long businessUnitId, string actor, long? currencyId, DateTime? validUntil, CancellationToken ct = default);
         Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null, int? leadTimeDays = null, decimal? exStockQuantity = null);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
@@ -631,6 +633,36 @@ namespace ERP_RFQ_Automation.Services
                     $"Quote '{quote.QuoteNo}' may already have reached the customer: its delivery was interrupted " +
                     "and never confirmed either way. It cannot be edited. Check with the customer; if the quote " +
                     "did not arrive, create a new revision and send that.");
+        }
+
+        public async Task<QuoteResponseDTO> SetDraftTermsAsync(long quoteId, long businessUnitId, string actor, long? currencyId,
+            DateTime? validUntil, CancellationToken ct = default)
+        {
+            var quote = await _context.Quotes.Include(q => q.QuoteItems)
+                .SingleOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException("The quote was not found.");
+            await EnsureQuoteEditableAsync(quote);
+
+            if (currencyId is not null && currencyId != quote.CurrencyId)
+            {
+                // A currency is chosen once. Changing it later would silently restate every price.
+                if (quote.CurrencyId is not null)
+                    throw new InvalidOperationException("This quote already has a currency.");
+                var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId && c.IsActive == true, ct);
+                if (!known) throw new InvalidOperationException("Choose one of your company's currencies.");
+                quote.CurrencyId = currencyId;
+            }
+            if (validUntil is not null)
+            {
+                var day = DateTime.SpecifyKind(validUntil.Value.Date, DateTimeKind.Unspecified);
+                if (day < DateTime.UtcNow.Date) throw new InvalidOperationException("The quote cannot be valid until a date that has passed.");
+                if (day > DateTime.UtcNow.Date.AddYears(2)) throw new InvalidOperationException("Choose a validity date within two years.");
+                quote.ValidUntil = day;
+            }
+            quote.ModifiedBy = actor;
+            quote.ModifiedDate = DateTime.UtcNow;
+            await _context.SaveChangesAsync(ct);
+            return await GetQuoteByIdAsync(quote.Id);
         }
 
         public async Task<QuoteResponseDTO> PriceRfqLineAsync(

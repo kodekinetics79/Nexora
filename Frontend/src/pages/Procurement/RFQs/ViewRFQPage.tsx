@@ -18,6 +18,7 @@ import {
   Edit as EditIcon,
   CheckCircle as ApproveIcon,
   RequestQuote as QuoteDraftIcon,
+  Send as SendQuoteIcon,
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
   OpenInNew as WorkspaceIcon,
@@ -51,6 +52,7 @@ import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
 import { LinePriceAction, OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
+import SendQuoteDialog from './SendQuoteDialog';
 import { LineMakersCell, acceptedMakersOf, isApprovedMakersField } from './LineMakers';
 import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
@@ -315,6 +317,18 @@ const ViewRFQPage: React.FC = () => {
     },
     onError: (error: any) => enqueueSnackbar(describeError(error, 'The part could not be added to the catalogue.'), { variant: 'error' }),
   });
+
+  const [sendQuoteOpen, setSendQuoteOpen] = React.useState(false);
+  // Set when a send was handed over: delivery finishes a few seconds later, so the header keeps
+  // checking until the quote reads as sent (at most a minute).
+  const [sentAt, setSentAt] = React.useState<number | null>(null);
+  const latestQuoteQuery = useQuery({
+    queryKey: ['send-quote-id', Number(id)],
+    queryFn: () => rfqService.getLatestQuote(Number(id)),
+    enabled: !!id && hasPermission('Quotations'),
+    refetchInterval: (query) => sentAt && Date.now() - sentAt < 60_000 && query.state.data?.state === 'DRAFT' ? 3000 : false,
+  });
+  const latestQuote = latestQuoteQuery.data ?? null;
 
   const quoteDraftMutation = useMutation({
     mutationFn: () => rfqService.prepareQuoteDraft(Number(id)),
@@ -706,11 +720,29 @@ const ViewRFQPage: React.FC = () => {
                     '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 },
                   }}
                 >
-                  <Button variant="contained" color="success" startIcon={<QuoteDraftIcon />}
-                    onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
-                    sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
-                    Prepare Quote Draft
-                  </Button>
+                  {latestQuote ? (
+                    <Button variant="outlined" startIcon={<QuoteDraftIcon />} onClick={() => navigate(`/sales/quotes/view/${latestQuote.quoteId}`)}
+                      sx={{ fontWeight: 800, borderRadius: 2, px: 2 }}>
+                      {latestQuote.state === 'DRAFT' ? `Open ${latestQuote.quoteNo}` : `${latestQuote.quoteNo} sent`}
+                    </Button>
+                  ) : (
+                    <Button variant="outlined" startIcon={<QuoteDraftIcon />}
+                      onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
+                      sx={{ fontWeight: 800, borderRadius: 2, px: 2 }}>
+                      Prepare Quote Draft
+                    </Button>
+                  )}
+                  {sentAt && latestQuote?.state === 'DRAFT' && Date.now() - sentAt < 60_000 ? (
+                    <Button variant="contained" color="success" disabled sx={{ fontWeight: 800, borderRadius: 2, px: 3, ml: 1 }}
+                      startIcon={<CircularProgress size={16} color="inherit" />}>
+                      Sending…
+                    </Button>
+                  ) : (!latestQuote || latestQuote.state === 'DRAFT') && hasPermission('Quotations', 'edit') && (
+                    <Button variant="contained" color="success" startIcon={<SendQuoteIcon />} sx={{ fontWeight: 800, borderRadius: 2, px: 3, ml: 1 }}
+                      disabled={!latestQuote && !canPrepareQuote} onClick={() => setSendQuoteOpen(true)}>
+                      Send quote
+                    </Button>
+                  )}
                 </Box>
               </Tooltip>
             )}
@@ -1279,6 +1311,10 @@ const ViewRFQPage: React.FC = () => {
         </Grid>
       </Grid>
 
+      <SendQuoteDialog open={sendQuoteOpen} rfqId={Number(id)} onSent={() => setSentAt(Date.now())} onClose={() => {
+        setSendQuoteOpen(false);
+        queryClient.invalidateQueries({ queryKey: ['send-quote-id', Number(id)] });
+      }} />
       {findSupplierFor && (() => {
         const found = findSupplierFor.item;
         const line = sourcingLines.get(found.id);
