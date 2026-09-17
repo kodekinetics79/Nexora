@@ -175,8 +175,8 @@ describe('Price from stock', () => {
       stock: { onHand: 0, free: 0, heldForOrders: 0, places: [] },
       price: { source: 'SUPPLIER_PLUS_MARGIN', sellingPrice: null, unitCost: 100, marginPercent: 20, unitPrice: 120 },
       supplierPrices: [
-        { id: 1, supplierName: 'Gulf Switchgear', cost: 100, currencyCode: 'SAR', leadTimeDays: 21, validUntil: '2026-10-15T00:00:00', valid: true, forThisRequest: true },
-        { id: 2, supplierName: 'Old Supplier', cost: 90, currencyCode: 'SAR', leadTimeDays: 7, validUntil: '2026-08-01T00:00:00', valid: false, forThisRequest: false },
+        { id: 1, supplierId: 11, supplierName: 'Gulf Switchgear', cost: 100, currencyCode: 'SAR', leadTimeDays: 21, validUntil: '2026-10-15T00:00:00', valid: true, forThisRequest: true },
+        { id: 2, supplierId: 12, supplierName: 'Old Supplier', cost: 90, currencyCode: 'SAR', leadTimeDays: 7, validUntil: '2026-08-01T00:00:00', valid: false, forThisRequest: false },
       ],
     }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -199,5 +199,32 @@ describe('Price from stock', () => {
     expect(within(dialog).queryByRole('button', { name: 'Use Old Supplier price' })).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ unitPrice: 120, exStock: false, leadTimeDays: 21 })));
+  });
+
+  it('an expired supplier price from an earlier request is called out, and Ask again opens Find supplier for that supplier', async () => {
+    const askAgain = vi.fn();
+    mocks.get.mockResolvedValue(view({
+      coveredByStock: false,
+      stock: { onHand: 0, free: 0, heldForOrders: 0, places: [] },
+      price: { source: 'NONE', sellingPrice: null, unitCost: null, marginPercent: 20, unitPrice: null },
+      onQuote: null,
+      supplierPrices: [{ id: 2, supplierId: 12, supplierName: 'Old Supplier', cost: 90, currencyCode: 'SAR', leadTimeDays: 7, validUntil: '2026-08-01T00:00:00', valid: false, forThisRequest: false }],
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <LinePriceAction rfqId={2} itemId={10} canPrice primary={false} onAskAgain={askAgain} />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/Old Supplier price expired/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Price it' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('The supplier price has expired. Ask them again, or type a price.')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ask Old Supplier again' }));
+    expect(askAgain).toHaveBeenCalledWith([12]);
   });
 });

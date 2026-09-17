@@ -49,6 +49,7 @@ export interface StockLinePrice {
 
 export interface SupplierPriceOption {
   id: number;
+  supplierId: number;
   supplierName: string;
   cost: number;
   currencyCode?: string | null;

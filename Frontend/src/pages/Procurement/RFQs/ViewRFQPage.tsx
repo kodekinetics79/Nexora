@@ -983,7 +983,10 @@ const ViewRFQPage: React.FC = () => {
                                 {status}
                               </Typography>
                               <OtherMakerStockAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} />
-                              {!unknown && <LinePriceAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} primary={validOffers.length > 0} />}
+                              {!unknown && (
+                                <LinePriceAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} primary={validOffers.length > 0}
+                                  onAskAgain={canFind ? (supplierIds) => openFind({ presetSupplierIds: supplierIds, presetMessage: RECONFIRM_PRICE_MESSAGE }) : undefined} />
+                              )}
                               {catalogueNote && validOffers.length + waiting.length > 0 && (
                                 <Typography variant="caption" color="text.secondary">{catalogueNote}</Typography>
                               )}

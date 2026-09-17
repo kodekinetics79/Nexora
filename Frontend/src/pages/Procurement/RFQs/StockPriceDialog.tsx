@@ -88,6 +88,8 @@ export interface StockPriceDialogProps {
   itemId: number;
   /** Price another accepted maker's product from stock instead of the line's own. */
   productId?: number | null;
+  /** Ask a supplier whose price has expired to confirm it again (opens Find supplier). */
+  onAskAgain?: (supplierIds: number[]) => void;
   onClose: () => void;
 }
 
@@ -96,7 +98,7 @@ export interface StockPriceDialogProps {
  * (selling price, else cost + company margin), and what the part last sold and won at. Nothing
  * is held: the quote says "ex stock, subject to prior sale".
  */
-export default function StockPriceDialog({ open, rfqId, itemId, productId, onClose }: StockPriceDialogProps) {
+export default function StockPriceDialog({ open, rfqId, itemId, productId, onAskAgain, onClose }: StockPriceDialogProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
@@ -242,6 +244,9 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onClo
       return `Cost ${formatMoney(cost, currencyCode)} + ${marginNumber}% margin`;
     }
     if (cost && cost > 0) return `Cost ${formatMoney(cost, currencyCode)}. Type a margin or a price.`;
+    if (supplierPrices.length > 0 && !supplierPrices.some((x) => x.valid)) {
+      return "The supplier price has expired. Ask them again, or type a price.";
+    }
     return "No selling price or cost on file. Type a price, or use one from your record.";
   })();
 
@@ -471,6 +476,11 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onClo
                                 aria-label={`Use ${option.supplierName} price`}>
                                 {chosen ? "Using" : "Use"}
                               </Button>
+                            ) : onAskAgain ? (
+                              <Button size="small" variant="outlined" onClick={() => { onClose(); onAskAgain([option.supplierId]); }}
+                                aria-label={`Ask ${option.supplierName} again`}>
+                                Ask again
+                              </Button>
                             ) : (
                               <Chip size="small" label="Expired" />
                             )}
@@ -660,15 +670,26 @@ const deliveryShort = (days?: number | null) =>
  * For a known line that stock does not cover: where its price stands on the quote, the company's
  * record on the part, and "Price it" (from a supplier's price or by hand, with a delivery time).
  */
-export function LinePriceAction({ rfqId, itemId, canPrice, primary }: { rfqId: number; itemId: number; canPrice: boolean; primary: boolean }) {
+export function LinePriceAction({ rfqId, itemId, canPrice, primary, onAskAgain }: {
+  rfqId: number; itemId: number; canPrice: boolean; primary: boolean; onAskAgain?: (supplierIds: number[]) => void;
+}) {
   const [open, setOpen] = React.useState(false);
   const query = useQuery({ queryKey: stockPriceQueryKey(rfqId, itemId), queryFn: () => stockPriceService.get(rfqId, itemId) });
   const view = query.data;
   if (!view || view.coveredByStock) return null;
   const priced = view.onQuote && view.onQuote.unitPrice > 0 ? view.onQuote : null;
+  // A price from an earlier request that has run out (this request's own expired prices are
+  // already called out on the line): say so, and offer to ask that supplier again.
+  const prices = view.supplierPrices ?? [];
+  const staleElsewhere = !priced && !prices.some((x) => x.valid) ? prices.find((x) => !x.valid && !x.forThisRequest) : undefined;
 
   return (
     <Stack spacing={0.5} sx={{ alignItems: "flex-start" }}>
+      {staleElsewhere && (
+        <Typography variant="caption" color="warning.main" sx={{ fontWeight: 700 }}>
+          {staleElsewhere.supplierName} price expired {day(staleElsewhere.validUntil)}
+        </Typography>
+      )}
       {priced ? (
         <Typography variant="caption" sx={{ fontWeight: 700, color: "success.main" }}>
           {priced.state === "DRAFT" ? "Priced" : "Quoted"} {formatMoney(priced.unitPrice, priced.currencyCode)} on {priced.quoteNo}
@@ -677,12 +698,17 @@ export function LinePriceAction({ rfqId, itemId, canPrice, primary }: { rfqId: n
       ) : (
         <Typography variant="caption" color="text.secondary">{recordHint(view)}</Typography>
       )}
-      {canPrice && priced?.state !== "DECIDED" && (
-        <Button size="small" variant={primary && !priced ? "contained" : "outlined"} startIcon={<LocalOffer />} onClick={() => setOpen(true)}>
-          {priced ? "Change price" : "Price it"}
-        </Button>
-      )}
-      {open && <StockPriceDialog open rfqId={rfqId} itemId={itemId} onClose={() => setOpen(false)} />}
+      <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap" }}>
+        {staleElsewhere && onAskAgain && (
+          <Button size="small" variant="outlined" onClick={() => onAskAgain([staleElsewhere.supplierId])}>Ask again</Button>
+        )}
+        {canPrice && priced?.state !== "DECIDED" && (
+          <Button size="small" variant={primary && !priced ? "contained" : "outlined"} startIcon={<LocalOffer />} onClick={() => setOpen(true)}>
+            {priced ? "Change price" : "Price it"}
+          </Button>
+        )}
+      </Stack>
+      {open && <StockPriceDialog open rfqId={rfqId} itemId={itemId} onAskAgain={onAskAgain} onClose={() => setOpen(false)} />}
     </Stack>
   );
 }

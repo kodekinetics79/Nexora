@@ -50,7 +50,7 @@ public sealed record StockLinePriceView(
 /// A price a supplier gave for this part: for this RFQ line, or for the same product on another
 /// request. Cost is the landed cost when freight/duty were captured, else the unit price.
 /// </summary>
-public sealed record SupplierPriceOption(long Id, string SupplierName, decimal Cost, string? CurrencyCode, int? LeadTimeDays,
+public sealed record SupplierPriceOption(long Id, long SupplierId, string SupplierName, decimal Cost, string? CurrencyCode, int? LeadTimeDays,
     DateTime? ValidUntil, bool Valid, string? Reference, bool ForThisRequest, DateTime? QuotedOn);
 
 /// <summary>Label: "SIEMENS 3RT2046-1AN20" — the brand and the part number, as the rep and the customer say it.</summary>
@@ -247,7 +247,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
         return rows
             // One row per supplier: their latest price.
             .GroupBy(x => x.SupplierId).Select(g => g.First())
-            .Select(x => new SupplierPriceOption(x.Id, x.SupplierName, Math.Round(x.LandedUnitCost ?? x.UnitPrice!.Value, 4), x.Currency,
+            .Select(x => new SupplierPriceOption(x.Id, x.SupplierId, x.SupplierName, Math.Round(x.LandedUnitCost ?? x.UnitPrice!.Value, 4), x.Currency,
                 x.LeadTimeDays, x.ValidUntil, x.ValidUntil is null || x.ValidUntil.Value.Date >= today, x.QuoteReference,
                 x.RfqItemId == rfqItemId, x.QuoteDate ?? x.CreatedDate))
             .OrderByDescending(x => x.Valid).ThenBy(x => x.Cost)
