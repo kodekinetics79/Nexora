@@ -215,6 +215,8 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
       queryClient.invalidateQueries({ queryKey: ["rfq-commercial-intelligence", rfqId] });
       queryClient.invalidateQueries({ queryKey: ["stock-price"] });
       queryClient.invalidateQueries({ queryKey: ["other-makers-in-stock"] });
+      // The RFQ header shows the latest quote; a price can create the draft or a new revision.
+      queryClient.invalidateQueries({ queryKey: ["send-quote-id"] });
       enqueueSnackbar(sent ? `New revision ${result.quoteNo} made with this price. Send it when ready.` : `Price added to ${result.quoteNo}.`, {
         variant: "success",
         action: <Button color="inherit" size="small" onClick={() => navigate(`/sales/quotes/edit/${result.quoteId}`)}>Open quote</Button>,
