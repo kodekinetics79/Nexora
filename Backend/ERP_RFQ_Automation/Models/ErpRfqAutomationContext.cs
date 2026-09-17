@@ -1049,6 +1049,8 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasKey(e => e.Id).HasName("PK__QuoteIte__3214EC27B021232E");
             entity.Property(e => e.ExStockQuantity).HasPrecision(18, 4);
             entity.Property(e => e.PricingStatus).HasMaxLength(20);
+            entity.Property(e => e.OfferedNote).HasMaxLength(OfferedPartKinds.MaxNote);
+            entity.Property(e => e.OfferedSpecs).HasMaxLength(OfferedPartKinds.MaxSpecs);
             entity.Property(e => e.PricingNote).HasMaxLength(QuoteLinePricing.MaxNote);
 
             // Wrong-quantity backstop: RfqController.ApproveAsync creates the Quote and
@@ -1227,6 +1229,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasIndex(e => new { e.Rfqid, e.ParticipationDecision }, "IX_RFQItems_Rfqid_Participation");
 
             entity.Property(e => e.Id).HasColumnName("ID");
+            entity.Property(e => e.OfferedPartNumber).HasMaxLength(100);
+            entity.Property(e => e.OfferedMakerName).HasMaxLength(150);
+            entity.Property(e => e.OfferedKind).HasMaxLength(20);
+            entity.Property(e => e.OfferedNote).HasMaxLength(OfferedPartKinds.MaxNote);
+            entity.Property(e => e.OfferedSpecs).HasMaxLength(OfferedPartKinds.MaxSpecs);
             entity.Property(e => e.Aiconfidence)
                 .HasColumnType("decimal(5, 4)")
                 .HasColumnName("AIConfidence");

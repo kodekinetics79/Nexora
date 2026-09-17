@@ -54,6 +54,7 @@ import productService, { type ProductDTO } from '../../../api/services/productSe
 import { LinePriceAction, OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
 import SendQuoteDialog from './SendQuoteDialog';
 import { LineMakersCell, acceptedMakersOf, isApprovedMakersField } from './LineMakers';
+import { OfferedPartCell } from './OfferedPartDialog';
 import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
@@ -885,6 +886,7 @@ const ViewRFQPage: React.FC = () => {
                       </TableCell>
                       <TableCell>
                         <LineMakersCell rfqId={Number(id)} item={item} canEdit={hasPermission('RFQ Management', 'edit')} />
+                        <OfferedPartCell rfqId={Number(id)} line={item} canEdit={hasPermission('RFQ Management', 'edit')} />
                       </TableCell>
                       <TableCell align="right" sx={{ fontSize: '0.85rem', fontWeight: 900, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
                         {item.quantity?.toLocaleString()} {item.unitOfMeasure || 'EA'}

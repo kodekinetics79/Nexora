@@ -853,7 +853,8 @@ internal static class SupplierRfqEmail
             Quantity = line.Quantity.ToString("0.####"),
             UnitOfMeasure = line.UnitOfMeasure,
             RequiredBy = line.RequiredOn?.ToString("yyyy-MM-dd"),
-            AcceptableMakers = line.AcceptableMakers
+            AcceptableMakers = line.AcceptableMakers,
+            OfferedNote = line.OfferedNote
         }).ToList(),
         DueDate = payload.DueOn?.ToString("yyyy-MM-dd") ?? "Please respond promptly",
         // The rep's own words from the Send window; a payload queued without any keeps the standard sentence.

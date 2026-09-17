@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Controllers;
+using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -12,6 +13,17 @@ namespace ERP_RFQ_Automation.Tests;
 /// </summary>
 public sealed class LineMakersTests
 {
+    [Theory]
+    [InlineData("REPLACEMENT", "GE", "THQL32010", "AF96-30-00-13", null, "Offered: GE THQL32010, replaces AF96-30-00-13")]
+    [InlineData("REPLACEMENT", null, "THQL32010", null, "Maker's successor", "Offered: THQL32010. Maker's successor")]
+    [InlineData("EQUIVALENT", "SIEMENS", "3RT2046", "AF96", "Original discontinued", "Offered as an equivalent: SIEMENS 3RT2046, in place of AF96. Original discontinued")]
+    public void The_customer_reads_one_sentence_about_what_is_offered(string kind, string? maker, string part, string? asked, string? note, string expected) =>
+        Assert.Equal(expected, OfferedPartKinds.Sentence(kind, maker, part, asked, note));
+
+    [Fact]
+    public void A_line_offered_as_asked_says_nothing() =>
+        Assert.Null(OfferedPartKinds.Sentence(null, null, null, "AF96", null));
+
     [Fact]
     public void The_rep_types_makers_like_email_addresses()
     {

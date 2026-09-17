@@ -73,6 +73,13 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? ProductName { get; set; }  // for UI
         /// <summary>False when the linked part was kept out of the catalogue (e.g. suppliers asked without adding it).</summary>
         public bool? ProductIsCatalogItem { get; set; }
+
+        /// <summary>What is really being offered when the part asked for is obsolete or discontinued.</summary>
+        public string? OfferedPartNumber { get; set; }
+        public string? OfferedMakerName { get; set; }
+        public string? OfferedKind { get; set; }
+        public string? OfferedNote { get; set; }
+        public string? OfferedSpecs { get; set; }
         public string? ProductResolvedBy { get; set; }
         public DateTime? ProductResolvedOn { get; set; }
         public string? ProductResolutionReason { get; set; }

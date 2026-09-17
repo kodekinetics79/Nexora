@@ -144,6 +144,9 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         /// <summary>ESTIMATE, TO_FOLLOW, NOT_QUOTED, or null for a plain price.</summary>
         public string? PricingStatus { get; set; }
         public string? PricingNote { get; set; }
+        /// <summary>"Offered: GE THQL32010, replaces ABB AF96" when the part asked for is obsolete or discontinued.</summary>
+        public string? OfferedNote { get; set; }
+        public string? OfferedSpecs { get; set; }
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }
         public decimal? DiscountValue { get; set; }

@@ -238,6 +238,8 @@ namespace ERP_RFQ_Automation.Repositories
                     ExStockQuantity = i.ExStockQuantity,
                     PricingStatus = i.PricingStatus,
                     PricingNote = i.PricingNote,
+                    OfferedNote = i.OfferedNote,
+                    OfferedSpecs = i.OfferedSpecs,
                     DiscountTypeId = i.DiscountTypeId,
                     DiscountTypeName = i.DiscountType?.Description,
                     DiscountValue = i.DiscountValue,

@@ -104,6 +104,29 @@ public sealed class SupplierRfqEmailContentTests
     }
 
     [Fact]
+    public async Task An_obsolete_part_is_asked_for_by_the_part_that_replaces_it()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture, line =>
+        {
+            line.OfferedKind = "REPLACEMENT";
+            line.OfferedMakerName = "GE";
+            line.OfferedPartNumber = "THQL32010";
+            line.OfferedNote = "Maker replaced QA-PART-0 in 2026";
+        });
+
+        var solicitation = await fixture.Execute(service => service.CreateSolicitationAsync(fixture.Solicitation("obsolete")));
+
+        await using var verify = fixture.Context();
+        var outbox = await verify.ProcurementOutboxMessages.SingleAsync(x => x.SupplierSolicitationId == solicitation.Id);
+        using var payload = JsonDocument.Parse(outbox.PayloadJson);
+        var line = Assert.Single(payload.RootElement.GetProperty("Lines").EnumerateArray());
+        Assert.Equal("GE", line.GetProperty("Maker").GetString());
+        Assert.Equal("THQL32010", line.GetProperty("MakerPartNumber").GetString());
+        Assert.Equal("Offered: GE THQL32010, replaces QA-PART-0. Maker replaced QA-PART-0 in 2026", line.GetProperty("OfferedNote").GetString());
+    }
+
+    [Fact]
     public async Task A_line_that_names_a_maker_still_lists_every_maker_the_customer_accepts()
     {
         using var fixture = new ProcurementScenario();

@@ -81,6 +81,12 @@ export interface RfqitemResponseDTO {
     unitPrice?: number;
     quantity: number;
     extraFields?: string | null;
+    /** Set when the part asked for is obsolete or discontinued and something else is being offered. */
+    offeredPartNumber?: string | null;
+    offeredMakerName?: string | null;
+    offeredKind?: string | null;
+    offeredNote?: string | null;
+    offeredSpecs?: string | null;
     storageLocation?: string;
     warehouseId?: number;
     warehouseName?: string;
@@ -199,6 +205,14 @@ const rfqService = {
     getLatestQuote: async (rfqId: number): Promise<{ quoteId: number; quoteNo: string; state: 'DRAFT' | 'SENT' | 'DECIDED' } | null> => {
         const response = await axiosInstance.get(`/api/rfq/${rfqId}/latest-quote`);
         return response.status === 204 || !response.data ? null : response.data;
+    },
+
+    /** The part actually offered for an RFQ line when the one asked for is obsolete or discontinued. Empty body clears it. */
+    saveOfferedPart: async (rfqId: number, itemId: number, body: {
+        partNumber?: string; makerName?: string | null; kind?: 'REPLACEMENT' | 'EQUIVALENT'; note?: string | null; specs?: string | null; productId?: number | null;
+    }) => {
+        const response = await axiosInstance.put(`/api/rfq/${rfqId}/items/${itemId}/offered-part`, body);
+        return response.data as { offeredPartNumber?: string | null; productId?: number | null };
     },
 
     /** One draft quote line: ESTIMATE with a price, TO_FOLLOW, NOT_QUOTED with a reason, or null for a plain price. */

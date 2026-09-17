@@ -3648,7 +3648,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     private async Task<SolicitationDispatchLine> DescribeLineForSupplierAsync(
         Rfqitem line, decimal quantity, CancellationToken ct)
     {
-        var maker = Clean(line.ManufacturerName);
+        // An obsolete or discontinued part is not what we ask suppliers for: the offered part is.
+        var offeredSentence = OfferedPartKinds.Sentence(line.OfferedKind, line.OfferedMakerName, line.OfferedPartNumber,
+            Clean(line.ManufacturerPartNumber), Clean(line.OfferedNote));
+        var maker = Clean(line.OfferedMakerName) ?? Clean(line.ManufacturerName);
         // Every maker the customer accepts is listed, including when the line also names one:
         // a supplier who carries only GE must know GE is welcome for an "ABB" line.
         var acceptableMakers = await ApprovedMakersForLineAsync(line, ct);
@@ -3656,12 +3659,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             Clean(line.LineItemNo) ?? line.Id.ToString(),
             Clean(line.ProductShortDescription) ?? Clean(line.ProductShortName) ?? Clean(line.ItemText),
             maker,
-            Clean(line.ManufacturerPartNumber),
+            Clean(line.OfferedPartNumber) ?? Clean(line.ManufacturerPartNumber),
             Clean(line.ItemMaterialCode),
             quantity,
             Clean(line.UnitOfMeasure),
             line.RequiredDesiredDate,
-            acceptableMakers);
+            acceptableMakers,
+            offeredSentence);
     }
 
     /// <summary>
@@ -3731,7 +3735,8 @@ internal sealed record SolicitationDispatchLine(
     decimal Quantity,
     string? UnitOfMeasure,
     DateTime? RequiredOn,
-    string? AcceptableMakers);
+    string? AcceptableMakers,
+    string? OfferedNote = null);
 
 /// <summary>
 /// The governed envelope a queued supplier RFQ travels in. <see cref="Lines"/> is newer than

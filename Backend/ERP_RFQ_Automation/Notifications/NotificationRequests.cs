@@ -114,6 +114,8 @@ namespace ERP_RFQ_Automation.Notifications
         public string? RequiredBy { get; set; }
         /// <summary>The buyer's approved-maker list when the line names no single maker.</summary>
         public string? AcceptableMakers { get; set; }
+        /// <summary>Set when the part asked for is obsolete or discontinued: what is being offered instead.</summary>
+        public string? OfferedNote { get; set; }
     }
 
     /// <summary>Delivery of a prepared quotation to a buyer.</summary>

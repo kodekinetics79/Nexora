@@ -526,6 +526,9 @@ namespace ERP_RFQ_Automation.Services
                         // line number so the printed quote can echo their reference back.
                         UnitOfMeasure = item.UnitOfMeasure,
                         CustomerLineRef = item.LineItemNo,
+                        OfferedNote = OfferedPartKinds.Sentence(item.OfferedKind, item.OfferedMakerName, item.OfferedPartNumber,
+                            item.ManufacturerPartNumber, item.OfferedNote),
+                        OfferedSpecs = item.OfferedSpecs,
                         UnitPrice = 0m,
                         TotalAmount = 0m,
                         // R17/R19: an unpriced draft line has nothing to derive tax FROM, so both
@@ -754,6 +757,10 @@ namespace ERP_RFQ_Automation.Services
             // Another maker the customer accepts, from our own stock: the quote line names what is
             // actually offered ("… — SIEMENS 3RT2046-1AN20"), so the customer is never surprised.
             var rfqLine = await _context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == rfqItemId, ct);
+            // What the customer is actually being offered when the part they asked for is obsolete.
+            line.OfferedNote = OfferedPartKinds.Sentence(rfqLine.OfferedKind, rfqLine.OfferedMakerName, rfqLine.OfferedPartNumber,
+                rfqLine.ManufacturerPartNumber, rfqLine.OfferedNote);
+            line.OfferedSpecs = rfqLine.OfferedSpecs;
             var targetProductId = productId ?? rfqLine.ProductId;
             if (targetProductId != line.ProductId)
             {
@@ -1503,6 +1510,8 @@ namespace ERP_RFQ_Automation.Services
                     ExStockQuantity = i.ExStockQuantity,
                     PricingStatus = i.PricingStatus,
                     PricingNote = i.PricingNote,
+                    OfferedNote = i.OfferedNote,
+                    OfferedSpecs = i.OfferedSpecs,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
                     RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
@@ -1886,6 +1895,10 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
+                                    if (!string.IsNullOrWhiteSpace(item.x.OfferedNote))
+                                        c.Item().Text(item.x.OfferedNote).FontSize(8).SemiBold().FontColor(Colors.Blue.Darken2);
+                                    if (!string.IsNullOrWhiteSpace(item.x.OfferedSpecs))
+                                        c.Item().Text($"Specification: {item.x.OfferedSpecs}").FontSize(8).FontColor(Colors.Grey.Darken1);
                                     if (item.x.PricingStatus == QuoteLinePricing.NotQuoted)
                                         c.Item().Text($"Not quoted{(string.IsNullOrWhiteSpace(item.x.PricingNote) ? "" : ": " + item.x.PricingNote)}").FontSize(8).FontColor(Colors.Red.Darken1);
                                     else if (item.x.PricingStatus == QuoteLinePricing.ToFollow)
@@ -2255,11 +2268,23 @@ namespace ERP_RFQ_Automation.Services
                 ?? throw new KeyNotFoundException("Quote not found");
 
             var composed = ComposeDefaultQuoteEmail(quote);
+            // No address on the customer's record: offer the one their last quote actually went to,
+            // so the rep does not retype it for every quote and every revision.
+            var recipient = string.IsNullOrWhiteSpace(quote.Customer?.ContactEmail) ? null : quote.Customer!.ContactEmail!.Trim();
+            if (recipient is null && quote.CustomerId is long customerId)
+            {
+                recipient = await (from request in _context.QuoteDeliveryRequests.AsNoTracking()
+                                   join sent in _context.Quotes.AsNoTracking() on request.QuoteId equals sent.Id
+                                   where request.BusinessUnitId == businessUnitId && sent.CustomerId == customerId
+                                       && request.RecipientEmail != null && request.CompletedOn != null
+                                   orderby request.RequestedOn descending
+                                   select request.RecipientEmail).FirstOrDefaultAsync(ct);
+            }
             return new QuoteEmailDraftDTO
             {
                 QuoteId = quote.Id,
                 QuoteNo = quote.QuoteNo,
-                RecipientEmail = string.IsNullOrWhiteSpace(quote.Customer?.ContactEmail) ? null : quote.Customer!.ContactEmail!.Trim(),
+                RecipientEmail = recipient,
                 Subject = composed.Subject,
                 Body = composed.PlainBody,
                 AttachmentFileName = QuoteAttachmentFileName(quote.QuoteNo)
@@ -2625,7 +2650,7 @@ namespace ERP_RFQ_Automation.Services
                     $"SELECT 1 FROM \"Quotes\" WHERE \"BusinessUnitID\" = {businessUnitId} AND \"ID\" = {quoteId} FOR UPDATE");
             }
             var source = await _context.Quotes
-                .Include(q => q.QuoteItems)
+                .Include(q => q.QuoteItems).ThenInclude(i => i.Rfqitem)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
             if (source == null) throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
 
@@ -2693,6 +2718,13 @@ namespace ERP_RFQ_Automation.Services
                     ExStockQuantity = i.ExStockQuantity,
                     PricingStatus = i.PricingStatus,
                     PricingNote = i.PricingNote,
+                    // A revision is a new document: it states what is offered TODAY, which is why
+                    // this reads the RFQ line rather than copying the sent quote's sentence.
+                    OfferedNote = i.Rfqitem is null
+                        ? i.OfferedNote
+                        : OfferedPartKinds.Sentence(i.Rfqitem.OfferedKind, i.Rfqitem.OfferedMakerName, i.Rfqitem.OfferedPartNumber,
+                            i.Rfqitem.ManufacturerPartNumber, i.Rfqitem.OfferedNote),
+                    OfferedSpecs = i.Rfqitem is null ? i.OfferedSpecs : i.Rfqitem.OfferedSpecs,
                     CreatedBy = actor,
                     CreatedDate = now
                 }).ToList()

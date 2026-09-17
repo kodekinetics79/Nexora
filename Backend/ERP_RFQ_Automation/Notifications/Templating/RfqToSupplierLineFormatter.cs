@@ -62,6 +62,9 @@ namespace ERP_RFQ_Automation.Notifications.Templating
             else if (!string.IsNullOrWhiteSpace(line.MakerPartNumber))
                 yield return $"Part no. {line.MakerPartNumber}";
 
+            if (!string.IsNullOrWhiteSpace(line.OfferedNote))
+                yield return line.OfferedNote!;
+
             if (!string.IsNullOrWhiteSpace(line.AcceptableMakers))
             {
                 var makers = line.AcceptableMakers.Split(';', System.StringSplitOptions.RemoveEmptyEntries | System.StringSplitOptions.TrimEntries);
