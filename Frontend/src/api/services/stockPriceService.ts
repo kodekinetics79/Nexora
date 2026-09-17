@@ -32,9 +32,10 @@ export interface StockLinePrice {
     marginPercent?: number | null;
     unitPrice?: number | null;
   };
+  /** The company's own record on this part: last quoted (to anyone), last won, or never. */
+  trackRecord: { lastQuoted?: PriceReference | null; lastWon?: PriceReference | null; timesQuoted: number; timesWon: number };
+  /** Other recent prices, not repeating the two above. */
   history: PriceReference[];
-  lastSold?: PriceReference | null;
-  lastWon?: PriceReference | null;
   onQuote?: { quoteId: number; quoteNo: string; unitPrice: number; exStock: boolean; currencyCode?: string | null } | null;
   currency?: { id: number; code: string } | null;
 }

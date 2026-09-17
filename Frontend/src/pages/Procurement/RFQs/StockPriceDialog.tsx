@@ -44,11 +44,12 @@ export const stockPriceQueryKey = (rfqId: number, itemId: number) => ["stock-pri
 
 const KIND_LABEL: Record<PriceReference["kind"], string> = { SOLD: "Sold", WON: "Won", QUOTED: "Quoted" };
 
-/** A headline figure the rep can take with one click: last sold, last won. */
-function PriceCard({ title, icon, reference, onUse }: {
+/** A headline figure the rep can take with one click: last quoted, last won. */
+function PriceCard({ title, icon, reference, empty, onUse }: {
   title: string;
   icon: React.ReactNode;
   reference?: PriceReference | null;
+  empty: string;
   onUse: (price: number) => void;
 }) {
   return (
@@ -71,7 +72,7 @@ function PriceCard({ title, icon, reference, onUse }: {
           </Typography>
         </>
       ) : (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>Nothing yet</Typography>
+        <Typography variant="h6" color="text.secondary" sx={{ mt: 0.5, fontWeight: 700 }}>{empty}</Typography>
       )}
     </Box>
   );
@@ -190,15 +191,19 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
   const covered = stock ? stock.free >= need : false;
   const unit = view?.unit ?? "";
   const lineTotal = priceOk ? priceNumber * need : null;
-  const same = (a?: PriceReference | null, b?: PriceReference | null) => Boolean(a && b && a.kind === b.kind && a.reference === b.reference);
-  const earlier = (view?.history ?? []).filter((row) => !same(row, view?.lastSold) && !same(row, view?.lastWon));
+  const earlier = view?.history ?? [];
+  const track = view?.trackRecord;
 
   const suggestion = (() => {
     if (!view) return "";
     const p = view.price;
     if (p.source === "SELLING_PRICE") return `Suggested from your selling price ${formatMoney(p.sellingPrice, currencyCode)}`;
     if (p.source === "COST_PLUS_MARGIN") return `Suggested: cost ${formatMoney(p.unitCost, currencyCode)} + ${p.marginPercent}% company margin`;
-    if (p.source === "COST_ONLY") return `Cost ${formatMoney(p.unitCost, currencyCode)}. Set a margin to build the price.`;
+    if (p.source === "COST_ONLY") {
+      return marginNumber != null && Number.isFinite(marginNumber)
+        ? `Cost ${formatMoney(p.unitCost, currencyCode)} + ${marginNumber}% margin`
+        : `Cost ${formatMoney(p.unitCost, currencyCode)}. Set a margin to build the price.`;
+    }
     return "No selling price or cost on file. Type a price, or use one from history.";
   })();
 
@@ -354,12 +359,19 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
                 </Tooltip>
               </Stack>
 
-              {/* ---- What it sold for ---- */}
+              {/* ---- Your record on this part ---- */}
               <Stack spacing={1.5} sx={{ p: 2.5, bgcolor: (theme) => alpha(theme.palette.text.primary, 0.02) }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>What it sold for</Typography>
+                <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Your record on this part</Typography>
+                  {track && track.timesQuoted > 0 && (
+                    <Typography variant="caption" color="text.secondary">
+                      Quoted {track.timesQuoted} {track.timesQuoted === 1 ? "time" : "times"} · won {track.timesWon}
+                    </Typography>
+                  )}
+                </Stack>
                 <Stack direction="row" spacing={1.25}>
-                  <PriceCard title="Last sold" icon={<ReceiptLong sx={{ fontSize: 16 }} />} reference={view.lastSold} onUse={usePrice} />
-                  <PriceCard title="Last won" icon={<EmojiEvents sx={{ fontSize: 16 }} />} reference={view.lastWon} onUse={usePrice} />
+                  <PriceCard title="Last quoted" icon={<ReceiptLong sx={{ fontSize: 16 }} />} reference={track?.lastQuoted} empty="Never quoted" onUse={usePrice} />
+                  <PriceCard title="Last won" icon={<EmojiEvents sx={{ fontSize: 16 }} />} reference={track?.lastWon} empty="Never won" onUse={usePrice} />
                 </Stack>
                 {earlier.length > 0 && (
                   <Box>
@@ -379,7 +391,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
                     </Stack>
                   </Box>
                 )}
-                {!view.lastSold && !view.lastWon && earlier.length === 0 && (
+                {!track?.lastQuoted && !track?.lastWon && earlier.length === 0 && (
                   <Typography variant="body2" color="text.secondary">This part has not been quoted or sold before.</Typography>
                 )}
               </Stack>
@@ -423,10 +435,13 @@ export function StockLineAction({ rfqId, itemId, canPrice }: { rfqId: number; it
 
   const unit = view.unit ? ` ${view.unit}` : "";
   const priced = view.onQuote && view.onQuote.unitPrice > 0 ? view.onQuote : null;
-  const hints = [
-    view.lastSold ? `Last sold ${formatMoney(view.lastSold.unitPrice, view.lastSold.currencyCode)}` : null,
-    view.lastWon ? `Last won ${formatMoney(view.lastWon.unitPrice, view.lastWon.currencyCode)}` : null,
-  ].filter(Boolean).join(" · ");
+  const track = view.trackRecord;
+  const hints = track.lastQuoted || track.lastWon
+    ? [
+        track.lastQuoted ? `Last quoted ${formatMoney(track.lastQuoted.unitPrice, track.lastQuoted.currencyCode)}` : null,
+        track.lastWon ? `Last won ${formatMoney(track.lastWon.unitPrice, track.lastWon.currencyCode)}` : "Never won",
+      ].filter(Boolean).join(" · ")
+    : "Never quoted before";
 
   return (
     <Stack spacing={0.5} sx={{ alignItems: "flex-start" }}>

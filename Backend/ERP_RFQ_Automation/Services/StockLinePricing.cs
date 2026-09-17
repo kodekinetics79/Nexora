@@ -31,9 +31,8 @@ public sealed record StockLinePriceView(
     string? Unit,
     StockOnShelf Stock,
     StockPriceSuggestion Price,
+    PartTrackRecord TrackRecord,
     IReadOnlyList<PriceReference> History,
-    PriceReference? LastSold,
-    PriceReference? LastWon,
     QuoteLineNow? OnQuote,
     StockCurrency? Currency);
 
@@ -45,7 +44,18 @@ public sealed record StockPlace(string Warehouse, decimal OnHand, decimal Free);
 public sealed record StockPriceSuggestion(string Source, decimal? SellingPrice, decimal? UnitCost, decimal? MarginPercent, decimal? UnitPrice);
 
 /// <summary>Kind: SOLD (an order line), WON (a quote the customer accepted), QUOTED (any other sent quote).</summary>
-public sealed record PriceReference(string Kind, decimal UnitPrice, string? CurrencyCode, decimal Quantity, string? Customer, DateTime? On, string Reference);
+public sealed record PriceReference(string Kind, decimal UnitPrice, string? CurrencyCode, decimal Quantity, string? Customer, DateTime? On, string Reference)
+{
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long? QuoteId { get; init; }
+}
+
+/// <summary>
+/// Owner, 2026-09-17: the company's own record on this part — what it last quoted (to anyone) and
+/// when it last won the order, or that it never has. Won = an accepted quote, or an order that did
+/// not come from a quote already counted.
+/// </summary>
+public sealed record PartTrackRecord(PriceReference? LastQuoted, PriceReference? LastWon, int TimesQuoted, int TimesWon);
 
 public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode);
 
@@ -53,7 +63,7 @@ public sealed record StockCurrency(long Id, string Code);
 
 public sealed class StockLinePricingService : IStockLinePricingService
 {
-    /// <summary>How many earlier prices the window lists under the two headline figures.</summary>
+    /// <summary>How many prices to other customers the window lists under the two headline figures.</summary>
     public const int HistoryRows = 5;
 
     private static readonly HashSet<string> WonCodes = new(StringComparer.OrdinalIgnoreCase) { "ACCEPTED", "ORDERED" };
@@ -88,6 +98,12 @@ public sealed class StockLinePricingService : IStockLinePricingService
         var history = line.ProductId is null
             ? new List<PriceReference>()
             : await HistoryAsync(businessUnitId, line.ProductId.Value, ct);
+        var quotes = history.Where(x => x.Kind is "QUOTED" or "WON").ToList();
+        var wonQuoteIds = history.Where(x => x.Kind == "WON").Select(x => x.QuoteId).ToHashSet();
+        var wins = history.Where(x => x.Kind == "WON" || x.Kind == "SOLD" && (x.QuoteId is null || !wonQuoteIds.Contains(x.QuoteId))).ToList();
+        var lastQuoted = quotes.FirstOrDefault();
+        var lastWon = wins.FirstOrDefault();
+        var track = new PartTrackRecord(lastQuoted, lastWon, quotes.Count, wins.Count);
 
         var onQuote = await _db.QuoteItems.AsNoTracking()
             .Where(x => x.RfqitemId == rfqItemId && x.Quote.BusinessUnitId == businessUnitId)
@@ -115,9 +131,8 @@ public sealed class StockLinePricingService : IStockLinePricingService
             line.UnitOfMeasure,
             new StockOnShelf(stock.OnHand, stock.Free, stock.Held, stock.Places),
             price,
-            history.Take(HistoryRows).ToList(),
-            history.FirstOrDefault(x => x.Kind == "SOLD"),
-            history.FirstOrDefault(x => x.Kind == "WON"),
+            track,
+            history.Where(x => !ReferenceEquals(x, lastQuoted) && !ReferenceEquals(x, lastWon)).Take(HistoryRows).ToList(),
             onQuote,
             currency);
     }
@@ -185,7 +200,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
         var sold = await _db.OrderItems.AsNoTracking()
             .Where(x => x.ProductId == productId && x.Order.BusinessUnitId == businessUnitId && x.Order.IsActive && x.UnitPrice > 0m)
             .OrderByDescending(x => x.Order.OrderDate).ThenByDescending(x => x.Id)
-            .Take(HistoryRows)
+            .Take(50)
             .Select(x => new
             {
                 x.UnitPrice, x.Quantity, x.Order.OrderDate, x.Order.OrderNo, x.Order.QuoteId,
@@ -198,7 +213,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
         var quoted = await _db.QuoteItems.AsNoTracking()
             .Where(x => x.ProductId == productId && x.Quote.BusinessUnitId == businessUnitId && x.UnitPrice > 0m)
             .OrderByDescending(x => x.Quote.QuoteDate).ThenByDescending(x => x.Id)
-            .Take(30)
+            .Take(100)
             .Select(x => new
             {
                 x.UnitPrice, x.Quantity, x.Quote.QuoteDate, x.Quote.QuoteNo, x.QuoteId,
@@ -212,12 +227,12 @@ public sealed class StockLinePricingService : IStockLinePricingService
         var all = new List<PriceReference>();
         all.AddRange(sold
             .Where(x => !string.Equals(LifecyclePolicy.Canonicalize("Order", x.Status, x.StatusValue), "CANCELLED", StringComparison.OrdinalIgnoreCase))
-            .Select(x => new PriceReference("SOLD", x.UnitPrice, x.Currency, x.Quantity, x.Customer, x.OrderDate, x.OrderNo)));
+            .Select(x => new PriceReference("SOLD", x.UnitPrice, x.Currency, x.Quantity, x.Customer, x.OrderDate, x.OrderNo) { QuoteId = x.QuoteId }));
         foreach (var q in quoted)
         {
             var code = LifecyclePolicy.Canonicalize("Quote", q.Status, q.StatusValue) ?? string.Empty;
             if (NotSentCodes.Contains(code)) continue;
-            all.Add(new PriceReference(WonCodes.Contains(code) ? "WON" : "QUOTED", q.UnitPrice, q.Currency, q.Quantity, q.Customer, q.QuoteDate, q.QuoteNo));
+            all.Add(new PriceReference(WonCodes.Contains(code) ? "WON" : "QUOTED", q.UnitPrice, q.Currency, q.Quantity, q.Customer, q.QuoteDate, q.QuoteNo) { QuoteId = q.QuoteId });
         }
         return all.OrderByDescending(x => x.On ?? DateTime.MinValue).ToList();
     }

@@ -35,7 +35,8 @@ const view = (overrides = {}) => ({
   requestedQuantity: 5, unit: 'EA',
   stock: { onHand: 40, free: 40, heldForOrders: 0, places: [{ warehouse: 'Main Store', onHand: 40, free: 40 }] },
   price: { source: 'COST_ONLY', sellingPrice: null, unitCost: 100, marginPercent: null, unitPrice: 100 },
-  history: [quoted, won, sold], lastSold: { ...sold }, lastWon: { ...won },
+  trackRecord: { lastQuoted: quoted, lastWon: won, timesQuoted: 2, timesWon: 2 },
+  history: [sold],
   onQuote: { quoteId: 2, quoteNo: 'QT-0926-0002', unitPrice: 0, exStock: false, currencyCode: null },
   currency: { id: 1, code: 'SAR' },
   ...overrides,
@@ -62,11 +63,11 @@ beforeEach(() => {
 });
 
 describe('Price from stock', () => {
-  it('says the line is covered, shows the real shelf and the last sold and won prices', async () => {
+  it('says the line is covered, shows the real shelf and the last quoted and won prices', async () => {
     mocks.get.mockResolvedValue(view());
     renderLine();
     expect(await screen.findByText(/All 5 in stock · 40 EA on the shelf/)).toBeInTheDocument();
-    expect(screen.getByText(/Last sold SAR\s?142\.50 · Last won SAR\s?150\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/Last quoted SAR\s?130\.00 · Last won SAR\s?150\.00/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Price from stock' })).toBeInTheDocument();
   });
 
@@ -77,8 +78,8 @@ describe('Price from stock', () => {
     const dialog = await screen.findByRole('dialog');
 
     expect(within(dialog).getByText(/Main Store 40/)).toBeInTheDocument();
-    // Last sold and last won are headline cards, not repeated in the list below them.
-    expect(within(dialog).getAllByText(/Jubail Petrochem/)).toHaveLength(1);
+    expect(within(dialog).getByText('Quoted 2 times · won 2')).toBeInTheDocument();
+    expect(within(dialog).getAllByText(/Al Jazirah/)).toHaveLength(1);
     expect(within(dialog).getByLabelText('Offer ex stock')).toBeChecked();
     expect(within(dialog).queryByText(/company margin for stock/)).not.toBeInTheDocument();
 
@@ -104,6 +105,16 @@ describe('Price from stock', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 150, exStock: true, currencyId: 1 }));
     expect(mocks.saveMargin).not.toHaveBeenCalled();
+  });
+
+  it('a part quoted but never won says Never won on the line and in the window', async () => {
+    mocks.get.mockResolvedValue(view({ trackRecord: { lastQuoted: quoted, lastWon: null, timesQuoted: 1, timesWon: 0 }, history: [] }));
+    renderLine();
+    expect(await screen.findByText(/Last quoted SAR\s?130\.00 · Never won/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Price from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Never won')).toBeInTheDocument();
+    expect(within(dialog).getByText('Quoted 1 time · won 0')).toBeInTheDocument();
   });
 
   it('once priced, the line says where the price went and offers Change price', async () => {
