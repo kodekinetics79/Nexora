@@ -2650,7 +2650,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 .SingleOrDefaultAsync(ct);
             if (product?.PreferredSupplierId is long preferredId && supplierIds.Contains(preferredId))
                 AddCandidateEvidence(evidence, preferredId, SourcingCandidateEvidenceTypes.PreferredSupplier,
-                    "Preferred supplier recorded on the matched Product", 100m, null,
+                    "Your preferred supplier for this part", 100m, null,
                     new { productId = product.Id, preferredSupplierId = preferredId });
 
             var quotes = await _db.SupplierQuotedItems.AsNoTracking()
@@ -2667,7 +2667,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 }).ToListAsync(ct);
             foreach (var quote in quotes)
                 AddCandidateEvidence(evidence, quote.SupplierId, SourcingCandidateEvidenceTypes.PriorSupplierQuote,
-                    "Prior persisted Supplier Quote for this Product", 90m, quote.FreshOn,
+                    "Quoted you this part before", 90m, quote.FreshOn,
                     new { productId = sourcingCase.ProductId.Value, quote.Count, quote.LastQuoteId });
 
             var purchaseOrders = await (
@@ -2689,7 +2689,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 }).ToListAsync(ct);
             foreach (var purchaseOrder in purchaseOrders)
                 AddCandidateEvidence(evidence, purchaseOrder.SupplierId, SourcingCandidateEvidenceTypes.PurchaseOrderHistory,
-                    "Prior persisted Supplier Purchase Order for this Product", 70m, purchaseOrder.FreshOn,
+                    "You bought this part from them", 70m, purchaseOrder.FreshOn,
                     new { productId = sourcingCase.ProductId.Value, purchaseOrder.Count, purchaseOrder.LastPurchaseOrderId });
         }
 

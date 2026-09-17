@@ -20,4 +20,12 @@ describe('accepted makers', () => {
       extraFields: JSON.stringify({ 'Approved manufacturers': 'ABB S203; GE THQL32010; Eaton' }),
     })).toEqual(['ABB S203', 'GE THQL32010', 'Eaton']);
   });
+
+  it('never shows a bare part number or material code as a maker when the customer listed makers', () => {
+    expect(acceptedMakersOf({
+      id: 2, manufacturerName: null, manufacturerPartNumber: '300012346',
+      extraFields: JSON.stringify({ 'Approved manufacturers': 'ABB (SA): P/N AF96-30-00-13; SIEMENS AG (DE): P/N 3RT2046-1AN20' }),
+    })).toEqual(['ABB (SA): P/N AF96-30-00-13', 'SIEMENS AG (DE): P/N 3RT2046-1AN20']);
+    expect(acceptedMakersOf({ id: 3, manufacturerName: null, manufacturerPartNumber: 'SEL-751', extraFields: null })).toEqual(['SEL-751']);
+  });
 });

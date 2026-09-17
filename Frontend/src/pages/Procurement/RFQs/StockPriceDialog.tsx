@@ -138,7 +138,9 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     if (!open) { seeded.current = null; return; }
     if (!view || seeded.current === view) return;
     seeded.current = view;
-    const priced = view.onQuote && view.onQuote.unitPrice > 0 ? view.onQuote : null;
+    // A draft line keeps the price already on it. A sent quote is being revised, so it starts from
+    // today's suggested price (the note below still says what was sent).
+    const priced = view.onQuote && view.onQuote.unitPrice > 0 && view.onQuote.state === "DRAFT" ? view.onQuote : null;
     const start = priced?.unitPrice || view.price.unitPrice || null;
     setPrice(start != null ? String(start) : "");
     // A cost with no company margin starts with an empty margin box, not a "0%" nobody chose.
@@ -149,7 +151,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     setSaveMargin(false);
     setCurrencyId(view.currency?.id ?? "");
     const best = (view.supplierPrices ?? []).filter((x) => x.valid).sort((a, b) => a.cost - b.cost)[0];
-    setChosenSupplier((view.price.source === "SUPPLIER_PLUS_MARGIN" || view.price.source === "BLENDED_PLUS_MARGIN") && best ? { name: best.supplierName, cost: best.cost } : null);
+    setChosenSupplier(!priced && (view.price.source === "SUPPLIER_PLUS_MARGIN" || view.price.source === "BLENDED_PLUS_MARGIN") && best ? { name: best.supplierName, cost: best.cost } : null);
     setSendStockNow(priced ? priced.exStockQuantity != null && priced.exStockQuantity > 0 : true);
     setLead(priced?.leadTimeDays && priced.leadTimeDays > 0 ? priced.leadTimeDays : best?.leadTimeDays ?? null);
   }, [open, view]);
@@ -704,6 +706,14 @@ export function LinePriceAction({ rfqId, itemId, canPrice, primary, onAskAgain }
 }) {
   const [open, setOpen] = React.useState(false);
   const query = useQuery({ queryKey: stockPriceQueryKey(rfqId, itemId), queryFn: () => stockPriceService.get(rfqId, itemId) });
+  // Same cached read as OtherMakerStockAction: when another accepted maker is on the shelf, that is
+  // the line's main action and pricing the named part becomes the quieter alternative.
+  const otherMakers = useQuery({
+    queryKey: ["other-makers-in-stock", rfqId, itemId],
+    queryFn: () => stockPriceService.otherMakers(rfqId, itemId),
+    staleTime: 60_000,
+  });
+  const otherInStock = (otherMakers.data ?? []).length > 0;
   const view = query.data;
   if (!view || view.coveredByStock) return null;
   const priced = view.onQuote && view.onQuote.unitPrice > 0 ? view.onQuote : null;
@@ -724,7 +734,7 @@ export function LinePriceAction({ rfqId, itemId, canPrice, primary, onAskAgain }
           {priced.state === "DRAFT" ? "Priced" : "Quoted"} {formatMoney(priced.unitPrice, priced.currencyCode)} on {priced.quoteNo}
           {priced.state === "SENT" ? " · sent" : priced.state === "DECIDED" ? " · customer decided" : ""}{deliveryShort(priced.leadTimeDays, priced.exStockQuantity)}
         </Typography>
-      ) : (
+      ) : otherInStock ? null : (
         <Typography variant="caption" color="text.secondary">{recordHint(view)}</Typography>
       )}
       <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap" }}>
@@ -732,9 +742,13 @@ export function LinePriceAction({ rfqId, itemId, canPrice, primary, onAskAgain }
           <Button size="small" variant="outlined" onClick={() => onAskAgain([staleElsewhere.supplierId])}>Ask again</Button>
         )}
         {canPrice && priced?.state !== "DECIDED" && (
-          <Button size="small" variant={primary && !priced ? "contained" : "outlined"} startIcon={<LocalOffer />} onClick={() => setOpen(true)}>
-            {priced ? "Change price" : "Price it"}
-          </Button>
+          otherInStock && !priced ? (
+            <Button size="small" variant="text" onClick={() => setOpen(true)}>Price the named part instead</Button>
+          ) : (
+            <Button size="small" variant={primary && !priced ? "contained" : "outlined"} startIcon={<LocalOffer />} onClick={() => setOpen(true)}>
+              {priced ? "Change price" : "Price it"}
+            </Button>
+          )
         )}
       </Stack>
       {open && <StockPriceDialog open rfqId={rfqId} itemId={itemId} onAskAgain={onAskAgain} onClose={() => setOpen(false)} />}

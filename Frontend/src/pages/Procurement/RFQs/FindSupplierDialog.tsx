@@ -43,6 +43,15 @@ export const RECONFIRM_PRICE_MESSAGE = "Please confirm your current price, avail
 
 const PAGE = 10;
 
+// Suppliers found before these reasons were reworded keep the old stored text; show it in plain words.
+const LEGACY_REASONS: Record<string, string> = {
+  "Preferred supplier recorded on the matched Product": "Your preferred supplier for this part",
+  "Prior persisted Supplier Quote for this Product": "Quoted you this part before",
+  "Prior persisted Supplier Purchase Order for this Product": "You bought this part from them",
+  "Persisted supplier metadata matches the requested part or manufacturer": "Listed for this part or maker",
+};
+const plainReason = (reason: string) => LEGACY_REASONS[reason] ?? reason;
+
 /** Evidence that the supplier sold or quoted this part before: those are ticked for the rep, who can untick them. */
 const PAST_SUPPLY = new Set(["PRIOR_SUPPLIER_QUOTE", "PURCHASE_HISTORY", "PURCHASE_ORDER_HISTORY", "PREFERRED_SUPPLIER"]);
 
@@ -159,7 +168,7 @@ export default function FindSupplierDialog({
     key: `s-${candidate.supplierId}`,
     name: candidate.supplierName,
     email: candidate.contactEmail ?? null,
-    detail: earlierRequests?.get(candidate.supplierId) ?? candidate.recommendationReason,
+    detail: earlierRequests?.get(candidate.supplierId) ?? plainReason(candidate.recommendationReason),
     supplierId: candidate.supplierId,
     blocked: candidate.eligibleForSupplierRfq ? undefined : candidate.blockingReasons?.[0] ?? "Cannot be asked",
   }));
@@ -196,9 +205,12 @@ export default function FindSupplierDialog({
     if (initialised.current || !sourcingCase || !line) return;
     initialised.current = true;
     const preset = new Set(presetSupplierIds ?? []);
+    // "Ask again" names exactly who to ask; only a plain Find supplier pre-ticks past suppliers.
     setTicked(new Set((sourcingCase.candidates ?? [])
       .filter((candidate) => candidate.eligibleForSupplierRfq
-        && (preset.has(candidate.supplierId) || (PAST_SUPPLY.has(candidate.evidenceType) && !earlierRequests?.has(candidate.supplierId))))
+        && (preset.size > 0
+          ? preset.has(candidate.supplierId)
+          : PAST_SUPPLY.has(candidate.evidenceType) && !earlierRequests?.has(candidate.supplierId)))
       .map((candidate) => `s-${candidate.supplierId}`)));
     setQuantity(String(line.toSource > 0 ? line.toSource : line.requested));
     messageTouched.current = false;

@@ -76,8 +76,12 @@ interface LineForMakers {
 
 /** Everything the customer accepts, the line's own maker first: ["ABB S203", "GE THQL32010", "Eaton"]. */
 export const acceptedMakersOf = (item: LineForMakers): string[] => {
-  const primary = [item.manufacturerName, item.manufacturerPartNumber].filter(Boolean).join(" ").trim();
   const approved = approvedMakersOf(item.extraFields);
+  // A part number with no maker name is not a maker: "300012346" (a material code) or "SEL-751"
+  // beside "SCHWEITZER SEL-751" only added a confusing chip.
+  const primary = item.manufacturerName?.trim()
+    ? [item.manufacturerName, item.manufacturerPartNumber].filter(Boolean).join(" ").trim()
+    : approved.length > 0 ? "" : (item.manufacturerPartNumber ?? "").trim();
   const maker = item.manufacturerName?.trim().toLowerCase();
   const others = maker ? approved.filter((x) => !x.toLowerCase().startsWith(maker)) : approved;
   return primary ? [primary, ...others] : others;

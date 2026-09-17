@@ -62,6 +62,7 @@ beforeEach(() => {
   mocks.canEditMargin = true;
   mocks.use.mockResolvedValue({ quoteId: 2, quoteNo: 'QT-0926-0002' });
   mocks.saveMargin.mockResolvedValue({ marginPercent: 25 });
+  mocks.otherMakers.mockResolvedValue([]);
 });
 
 describe('Price from stock', () => {
@@ -127,6 +128,8 @@ describe('Price from stock', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Change price' }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText(/already sent to the customer/)).toBeInTheDocument();
+    // Revising a sent quote starts from today's price, not the SAR 130 that was sent.
+    expect(within(dialog).getByLabelText('Unit price')).toHaveValue(100);
     fireEvent.change(within(dialog).getByLabelText('Unit price'), { target: { value: '128' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Make a revision with this price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 128, exStock: true, currencyId: null, reviseIfSent: true }));
@@ -255,5 +258,23 @@ describe('Price from stock', () => {
     expect(within(dialog).getByText('Quote prints "Delivery: 150 ex stock, balance in 2 weeks"')).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ unitPrice: 6.45, exStock: false, leadTimeDays: 14, exStockQuantity: 150 })));
+  });
+
+  it('when another accepted maker is on the shelf, pricing the named part is the quieter choice', async () => {
+    mocks.otherMakers.mockResolvedValue([{ productId: 17, partNumber: '3RT2046-1AN20', label: 'SIEMENS 3RT2046-1AN20', onHand: 30, free: 30 }]);
+    mocks.get.mockResolvedValue(view({ coveredByStock: false, onQuote: null, stock: { onHand: 0, free: 0, heldForOrders: 0, places: [] } }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <LinePriceAction rfqId={2} itemId={10} canPrice primary={false} />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByRole('button', { name: 'Price the named part instead' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Price it' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Never quoted before|Last quoted/)).not.toBeInTheDocument();
   });
 });
