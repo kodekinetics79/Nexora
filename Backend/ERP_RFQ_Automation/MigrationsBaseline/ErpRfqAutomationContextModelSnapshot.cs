@@ -15440,6 +15440,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<int?>("DeliveryLeadTime")
                         .HasColumnType("integer");
 
+                    b.Property<decimal?>("ExStockQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
                     b.Property<decimal?>("Discount")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("decimal(18, 6)")

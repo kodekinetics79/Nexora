@@ -139,6 +139,8 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public decimal TaxableBase { get; set; }
 
         public int? DeliveryLeadTime { get; set; }
+        /// <summary>Quantity offered ex stock when the rest follows in DeliveryLeadTime days.</summary>
+        public decimal? ExStockQuantity { get; set; }
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }
         public decimal? DiscountValue { get; set; }

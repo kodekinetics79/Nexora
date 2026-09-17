@@ -63,6 +63,7 @@ interface QuoteItem {
   taxCategoryReason: string;
   /** Days. 0 = ex stock; null = not stated (nothing printed). */
   deliveryLeadTime: number | null;
+  exStockQuantity?: number | null;
   isDeleted?: boolean;
 }
 
@@ -173,7 +174,8 @@ const EditQuotePage: React.FC = () => {
         taxRatePercentApplied: i.taxRatePercentApplied ?? null,
         taxCategory: i.taxCategory || TAX_CATEGORY_STANDARD,
         taxCategoryReason: i.taxCategoryReason || '',
-        deliveryLeadTime: i.deliveryLeadTime ?? null
+        deliveryLeadTime: i.deliveryLeadTime ?? null,
+        exStockQuantity: i.exStockQuantity ?? null
       })));
     }
   }, [quote]);
@@ -584,7 +586,11 @@ const EditQuotePage: React.FC = () => {
                     </TableCell>
                     <TableCell>
                       <TextField fullWidth size="small" variant="standard" value={item.itemDescription} onChange={(e) => updateItem(index, { itemDescription: e.target.value })} />
-                      {item.deliveryLeadTime != null && item.deliveryLeadTime > 0 && (
+                      {item.exStockQuantity != null && item.exStockQuantity > 0 ? (
+                        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>
+                          {item.exStockQuantity} ex stock, balance {item.deliveryLeadTime ? `in ${deliveryText(item.deliveryLeadTime)}` : 'to follow'}
+                        </Typography>
+                      ) : item.deliveryLeadTime != null && item.deliveryLeadTime > 0 && (
                         <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>
                           Delivery {deliveryText(item.deliveryLeadTime)}
                         </Typography>

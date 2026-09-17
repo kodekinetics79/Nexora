@@ -44,7 +44,14 @@ public sealed record StockLinePriceView(
     StockCurrency? Currency,
     AcceptedMakerStock? OtherMaker = null,
     IReadOnlyList<SupplierPriceOption>? SupplierPrices = null,
-    bool CoveredByStock = false);
+    bool CoveredByStock = false,
+    PartialStock? Partial = null);
+
+/// <summary>
+/// Stock covers part of the quantity: FromStock at the stock cost, ToOrder at a supplier's price.
+/// The suggested price is the blended cost of the two plus the margin, on one quote line.
+/// </summary>
+public sealed record PartialStock(decimal FromStock, decimal ToOrder, decimal? StockUnitCost);
 
 /// <summary>
 /// A price a supplier gave for this part: for this RFQ line, or for the same product on another
@@ -82,7 +89,8 @@ public sealed record PartTrackRecord(PriceReference? LastQuoted, PriceReference?
 /// makes a draft revision; the customer sees nothing until it is sent), DECIDED (the customer has
 /// already accepted or rejected, so the price is final).
 /// </summary>
-public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode, string State, int? LeadTimeDays = null);
+public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode, string State, int? LeadTimeDays = null,
+    decimal? ExStockQuantity = null);
 
 public sealed record StockCurrency(long Id, string Code);
 
@@ -169,9 +177,19 @@ public sealed class StockLinePricingService : IStockLinePricingService
             stock.UnitCost ?? product?.UnitCost, margin);
         // Not on the shelf: what a supplier will charge is the cost that matters, not an old stock cost.
         var bestSupplier = supplierPrices.Where(x => x.Valid).OrderBy(x => x.Cost).FirstOrDefault();
+        var need = line.Quantity ?? 0m;
+        var partial = !covered && stock.Free > 0m && need > 0m
+            ? new PartialStock(Math.Min(stock.Free, need), need - Math.Min(stock.Free, need), stock.UnitCost ?? product?.UnitCost)
+            : null;
         if (!covered && price.Source != "SELLING_PRICE" && bestSupplier is not null)
-            price = new StockPriceSuggestion("SUPPLIER_PLUS_MARGIN", null, bestSupplier.Cost, margin,
-                Math.Round(bestSupplier.Cost * (1m + (margin ?? 0m) / 100m), 2));
+        {
+            // Part from the shelf at stock cost, the rest at the supplier's price: one blended cost.
+            var cost = partial?.StockUnitCost is decimal stockCost
+                ? Math.Round((partial.FromStock * stockCost + partial.ToOrder * bestSupplier.Cost) / need, 4)
+                : bestSupplier.Cost;
+            price = new StockPriceSuggestion(partial?.StockUnitCost is not null ? "BLENDED_PLUS_MARGIN" : "SUPPLIER_PLUS_MARGIN",
+                null, cost, margin, Math.Round(cost * (1m + (margin ?? 0m) / 100m), 2));
+        }
 
         var history = pricedProductId is null
             ? new List<PriceReference>()
@@ -188,7 +206,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
             .OrderByDescending(x => x.Quote.RevisionNo).ThenByDescending(x => x.Quote.Id)
             .Select(x => new
             {
-                x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0, x.DeliveryLeadTime,
+                x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0, x.DeliveryLeadTime, x.ExStockQuantity,
                 Currency = x.Quote.Currency != null ? x.Quote.Currency.Code : null,
                 Status = x.Quote.Status != null ? x.Quote.Status.SetupCode : null,
                 StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
@@ -196,7 +214,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
             .FirstOrDefaultAsync(ct);
         var onQuote = onQuoteRow is null ? null : new QuoteLineNow(onQuoteRow.QuoteId, onQuoteRow.QuoteNo, onQuoteRow.UnitPrice,
             onQuoteRow.ExStock, onQuoteRow.Currency, QuoteState(LifecyclePolicy.Canonicalize("Quote", onQuoteRow.Status, onQuoteRow.StatusValue)),
-            onQuoteRow.DeliveryLeadTime);
+            onQuoteRow.DeliveryLeadTime, onQuoteRow.ExStockQuantity);
 
         var currency = await _db.Quotes.AsNoTracking()
             .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId && x.Currency != null)
@@ -223,7 +241,8 @@ public sealed class StockLinePricingService : IStockLinePricingService
             currency,
             otherMaker,
             supplierPrices,
-            covered);
+            covered,
+            partial);
     }
 
     /// <summary>How many supplier prices the window lists: the valid ones first, cheapest first.</summary>

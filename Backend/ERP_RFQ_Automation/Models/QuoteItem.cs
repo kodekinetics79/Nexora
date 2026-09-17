@@ -66,6 +66,13 @@ public partial class QuoteItem
 
     public int? DeliveryLeadTime { get; set; }
 
+    /// <summary>
+    /// Part of the quantity offered from stock when stock does not cover all of it: the quote
+    /// prints "Delivery: 40 ex stock, balance in 3 weeks". Null when the whole line is ex stock
+    /// (DeliveryLeadTime 0) or none of it is.
+    /// </summary>
+    public decimal? ExStockQuantity { get; set; }
+
     public string CreatedBy { get; set; } = null!;
 
     public DateTime? CreatedDate { get; set; }

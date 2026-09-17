@@ -81,7 +81,7 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
-        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null, int? leadTimeDays = null);
+        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null, int? leadTimeDays = null, decimal? exStockQuantity = null);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
         Task<QuoteResponseDTO> GetQuoteAsync(long id);
@@ -636,7 +636,7 @@ namespace ERP_RFQ_Automation.Services
         public async Task<QuoteResponseDTO> PriceRfqLineAsync(
             long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock,
             long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null,
-            int? leadTimeDays = null)
+            int? leadTimeDays = null, decimal? exStockQuantity = null)
         {
             if (leadTimeDays is < 0 or > 730) throw new InvalidOperationException("Delivery time must be between 0 and 730 days.");
             if (unitPrice <= 0m) throw new InvalidOperationException("Enter a price above zero.");
@@ -692,6 +692,9 @@ namespace ERP_RFQ_Automation.Services
             if (exStock) line.DeliveryLeadTime = 0;
             else if (leadTimeDays is > 0) line.DeliveryLeadTime = leadTimeDays;
             else if (line.DeliveryLeadTime == 0) line.DeliveryLeadTime = null;
+            // Part from stock, the balance later. Only a real split is kept: all of it is "ex stock".
+            line.ExStockQuantity = !exStock && exStockQuantity is > 0 && exStockQuantity < line.Quantity
+                ? Math.Round(exStockQuantity.Value, 4) : null;
             line.ModifiedBy = actor;
             line.ModifiedDate = DateTime.UtcNow;
             quote.ModifiedBy = actor;
@@ -1412,6 +1415,7 @@ namespace ERP_RFQ_Automation.Services
                     HeaderDiscountAllocated = i.HeaderDiscountAllocated,
                     TaxableBase = i.TaxableBase,
                     DeliveryLeadTime = i.DeliveryLeadTime,
+                    ExStockQuantity = i.ExStockQuantity,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
                     RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
@@ -1797,6 +1801,10 @@ namespace ERP_RFQ_Automation.Services
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
                                     if (item.x.DeliveryLeadTime == 0)
                                         c.Item().Text("Ex stock, subject to prior sale").FontSize(8).FontColor(Colors.Grey.Darken1);
+                                    else if (item.x.ExStockQuantity is decimal fromStock && fromStock > 0)
+                                        c.Item().Text(item.x.DeliveryLeadTime is int balanceDays && balanceDays > 0
+                                            ? $"Delivery: {fromStock:0.##} ex stock, balance in {DeliveryText(balanceDays)}"
+                                            : $"Delivery: {fromStock:0.##} ex stock, balance to follow").FontSize(8).FontColor(Colors.Grey.Darken1);
                                     else if (item.x.DeliveryLeadTime is int days && days > 0)
                                         c.Item().Text($"Delivery: {DeliveryText(days)}").FontSize(8).FontColor(Colors.Grey.Darken1);
                                     if (item.x.Discount > 0)
@@ -1822,7 +1830,7 @@ namespace ERP_RFQ_Automation.Services
                             {
                                 c.Item().PaddingTop(10).Text("Terms & Conditions").Bold().FontSize(10).FontColor(primaryColor);
                                 c.Item().PaddingTop(5).Text(termsContent).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
-                                if (orderedItems.Any(x => x.DeliveryLeadTime == 0))
+                                if (orderedItems.Any(x => x.DeliveryLeadTime == 0 || x.ExStockQuantity > 0))
                                     c.Item().PaddingTop(5).Text("Items marked ex stock are offered subject to prior sale. Stock is held for you once we receive your purchase order.").FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
 
                                 c.Item().PaddingTop(30).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
@@ -2585,6 +2593,7 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = i.TaxCategory,
                     TaxCategoryReason = i.TaxCategoryReason,
                     DeliveryLeadTime = i.DeliveryLeadTime,
+                    ExStockQuantity = i.ExStockQuantity,
                     CreatedBy = actor,
                     CreatedDate = now
                 }).ToList()

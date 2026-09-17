@@ -54,6 +54,8 @@ export interface QuoteLineDTO {
   /** What output tax was charged on: `totalAmount - taxAmount`. The printed line column's figure. */
   taxableBase: number;
   deliveryLeadTime?: number | null;
+  /** Quantity offered ex stock when the balance follows in deliveryLeadTime days. */
+  exStockQuantity?: number | null;
   // What the customer asked for, read through the linked RFQ line. Null when the quote has no RFQ.
   requestedManufacturerName?: string | null;
   requestedManufacturerPartNumber?: string | null;

@@ -1047,6 +1047,7 @@ public partial class ErpRfqAutomationContext : DbContext
         modelBuilder.Entity<QuoteItem>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PK__QuoteIte__3214EC27B021232E");
+            entity.Property(e => e.ExStockQuantity).HasPrecision(18, 4);
 
             // Wrong-quantity backstop: RfqController.ApproveAsync creates the Quote and
             // emails it in the same request, so no screen between approval and the

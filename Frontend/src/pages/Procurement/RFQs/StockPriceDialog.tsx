@@ -122,9 +122,16 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
   const [chosenSupplier, setChosenSupplier] = React.useState<{ name: string; cost: number } | null>(null);
   const [leadValue, setLeadValue] = React.useState("");
   const [leadUnit, setLeadUnit] = React.useState<"days" | "weeks">("weeks");
+  const [sendStockNow, setSendStockNow] = React.useState(true);
   const seeded = React.useRef<StockLinePrice | null>(null);
 
-  const cost = chosenSupplier?.cost ?? view?.price.unitCost ?? null;
+  const partial = !view?.coveredByStock ? view?.partial ?? null : null;
+  const need0 = view?.requestedQuantity ?? 0;
+  // Partly in stock: the shelf part at stock cost and the rest at the chosen supplier's price, blended.
+  const blend = (supplierCost: number) => partial?.stockUnitCost != null && need0 > 0
+    ? (partial.fromStock * partial.stockUnitCost + partial.toOrder * supplierCost) / need0
+    : supplierCost;
+  const cost = chosenSupplier ? blend(chosenSupplier.cost) : view?.price.unitCost ?? null;
   const marginFromPrice = (value: number) => (cost && cost > 0 ? round2((value / cost - 1) * 100) : null);
 
   React.useEffect(() => {
@@ -142,7 +149,8 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     setSaveMargin(false);
     setCurrencyId(view.currency?.id ?? "");
     const best = (view.supplierPrices ?? []).filter((x) => x.valid).sort((a, b) => a.cost - b.cost)[0];
-    setChosenSupplier(view.price.source === "SUPPLIER_PLUS_MARGIN" && best ? { name: best.supplierName, cost: best.cost } : null);
+    setChosenSupplier((view.price.source === "SUPPLIER_PLUS_MARGIN" || view.price.source === "BLENDED_PLUS_MARGIN") && best ? { name: best.supplierName, cost: best.cost } : null);
+    setSendStockNow(priced ? priced.exStockQuantity != null && priced.exStockQuantity > 0 : true);
     setLead(priced?.leadTimeDays && priced.leadTimeDays > 0 ? priced.leadTimeDays : best?.leadTimeDays ?? null);
   }, [open, view]);
 
@@ -193,6 +201,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
         unitPrice: priceNumber,
         exStock: covered && exStock,
         ...(!covered && leadDays ? { leadTimeDays: leadDays } : {}),
+        ...(partial && sendStockNow ? { exStockQuantity: partial.fromStock } : {}),
         currencyId: quoteHasCurrency ? null : currencyId === "" ? null : currencyId,
         ...(sent ? { reviseIfSent: true } : {}),
         ...(productId ? { productId } : {}),
@@ -222,9 +231,11 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
   const supplierPrices = view?.supplierPrices ?? [];
   const useSupplierPrice = (option: { supplierName: string; cost: number; leadTimeDays?: number | null }) => {
     setChosenSupplier({ name: option.supplierName, cost: option.cost });
-    const m = marginNumber != null && Number.isFinite(marginNumber) ? marginNumber : companyMargin ?? 0;
+    // The rep's own margin if they typed one here; otherwise the usual margin, never a figure
+    // back-calculated from an old hand-typed price.
+    const m = marginTouched && marginNumber != null && Number.isFinite(marginNumber) ? marginNumber : companyMargin ?? marginNumber ?? 0;
     setMargin(String(m));
-    setPrice(String(round2(option.cost * (1 + m / 100))));
+    setPrice(String(round2(blend(option.cost) * (1 + m / 100))));
     if (option.leadTimeDays) setLead(option.leadTimeDays);
   };
   const unit = view?.unit ?? "";
@@ -238,6 +249,9 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     const p = view.price;
     if (p.sellingPrice && priceOk && priceNumber === p.sellingPrice) return `Your selling price`;
     if (chosenSupplier && priceOk && marginNumber != null && Number.isFinite(marginNumber)) {
+      if (partial?.stockUnitCost != null && cost != null) {
+        return `${qty(partial.fromStock)} from stock at ${formatMoney(partial.stockUnitCost, currencyCode)} + ${qty(partial.toOrder)} from ${chosenSupplier.name} at ${formatMoney(chosenSupplier.cost, currencyCode)} = ${formatMoney(round2(cost), currencyCode)} each, + ${marginNumber}% margin`;
+      }
       return `${chosenSupplier.name} price ${formatMoney(chosenSupplier.cost, currencyCode)} + ${marginNumber}% margin`;
     }
     if (cost && cost > 0 && priceOk && marginNumber != null && Number.isFinite(marginNumber)) {
@@ -406,9 +420,17 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
 
                 {!covered ? (
                   <Box>
+                    {partial && (
+                      <FormControlLabel
+                        sx={{ mb: 0.75 }}
+                        control={<Checkbox size="small" checked={sendStockNow} onChange={(event) => setSendStockNow(event.target.checked)}
+                          slotProps={{ input: { "aria-label": "Send the stock part straight away" } }} />}
+                        label={<Typography variant="body2">Send the {qty(partial.fromStock)} in stock straight away</Typography>}
+                      />
+                    )}
                     <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
                       <TextField
-                        label="Delivery time"
+                        label={partial && sendStockNow ? "Balance in" : "Delivery time"}
                         size="small"
                         type="number"
                         value={leadValue}
@@ -425,7 +447,11 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                       </TextField>
                     </Stack>
                     <Typography variant="caption" color="text.secondary">
-                      {leadDays ? `Quote prints "Delivery: ${leadUnit === "weeks" ? `${leadNumber} week${leadNumber === 1 ? "" : "s"}` : `${leadNumber} day${leadNumber === 1 ? "" : "s"}`}"` : "Leave empty to print no delivery time"}
+                      {(() => {
+                        const when = leadDays ? (leadUnit === "weeks" ? `${leadNumber} week${leadNumber === 1 ? "" : "s"}` : `${leadNumber} day${leadNumber === 1 ? "" : "s"}`) : null;
+                        if (partial && sendStockNow) return `Quote prints "Delivery: ${qty(partial.fromStock)} ex stock, balance ${when ? `in ${when}` : "to follow"}"`;
+                        return when ? `Quote prints "Delivery: ${when}"` : "Leave empty to print no delivery time";
+                      })()}
                     </Typography>
                   </Box>
                 ) : (
@@ -663,8 +689,11 @@ const recordHint = (view: StockLinePrice) => {
   ].filter(Boolean).join(" · ");
 };
 
-const deliveryShort = (days?: number | null) =>
-  !days ? "" : days % 7 === 0 ? ` · ${days / 7} week${days === 7 ? "" : "s"}` : ` · ${days} day${days === 1 ? "" : "s"}`;
+const deliveryShort = (days?: number | null, fromStock?: number | null) => {
+  const when = !days ? "" : days % 7 === 0 ? `${days / 7} week${days === 7 ? "" : "s"}` : `${days} day${days === 1 ? "" : "s"}`;
+  if (fromStock && fromStock > 0) return ` · ${qty(fromStock)} ex stock, balance ${when || "to follow"}`;
+  return when ? ` · ${when}` : "";
+};
 
 /**
  * For a known line that stock does not cover: where its price stands on the quote, the company's
@@ -693,7 +722,7 @@ export function LinePriceAction({ rfqId, itemId, canPrice, primary, onAskAgain }
       {priced ? (
         <Typography variant="caption" sx={{ fontWeight: 700, color: "success.main" }}>
           {priced.state === "DRAFT" ? "Priced" : "Quoted"} {formatMoney(priced.unitPrice, priced.currencyCode)} on {priced.quoteNo}
-          {priced.state === "SENT" ? " · sent" : priced.state === "DECIDED" ? " · customer decided" : ""}{deliveryShort(priced.leadTimeDays)}
+          {priced.state === "SENT" ? " · sent" : priced.state === "DECIDED" ? " · customer decided" : ""}{deliveryShort(priced.leadTimeDays, priced.exStockQuantity)}
         </Typography>
       ) : (
         <Typography variant="caption" color="text.secondary">{recordHint(view)}</Typography>

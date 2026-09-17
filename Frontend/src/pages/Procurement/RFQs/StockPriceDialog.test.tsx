@@ -227,4 +227,33 @@ describe('Price from stock', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Ask Old Supplier again' }));
     expect(askAgain).toHaveBeenCalledWith([12]);
   });
+
+  it('partly in stock: blended cost explained, the stock part sent straight away, the balance with a delivery time', async () => {
+    mocks.get.mockResolvedValue(view({
+      requestedQuantity: 200,
+      coveredByStock: false,
+      stock: { onHand: 150, free: 150, heldForOrders: 0, places: [{ warehouse: 'Main Store', onHand: 150, free: 150 }] },
+      partial: { fromStock: 150, toOrder: 50, stockUnitCost: 5 },
+      price: { source: 'BLENDED_PLUS_MARGIN', sellingPrice: null, unitCost: 5.375, marginPercent: 20, unitPrice: 6.45 },
+      onQuote: null,
+      supplierPrices: [{ id: 1, supplierId: 11, supplierName: 'Gulf Switchgear', cost: 6.5, currencyCode: 'SAR', leadTimeDays: 14, validUntil: '2026-10-30T00:00:00', valid: true, forThisRequest: false }],
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <LinePriceAction rfqId={2} itemId={10} canPrice primary />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Price it' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/150 from stock at SAR\s?5\.00 \+ 50 from Gulf Switchgear at SAR\s?6\.50 = SAR\s?5\.38 each/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Send the stock part straight away')).toBeChecked();
+    expect(within(dialog).getByText('Quote prints "Delivery: 150 ex stock, balance in 2 weeks"')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
+    await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ unitPrice: 6.45, exStock: false, leadTimeDays: 14, exStockQuantity: 150 })));
+  });
 });

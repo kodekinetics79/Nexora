@@ -95,6 +95,32 @@ public sealed class StockLinePricingTests
         Assert.False(view.SupplierPrices!.Last().Valid);
     }
 
+    [Fact]
+    public async Task Partly_in_stock_blends_the_stock_cost_with_the_supplier_price()
+    {
+        using var fixture = new ProcurementScenario(); // wants 10, shelf holds 2
+        await using (var setup = fixture.Context())
+        {
+            (await setup.Set<Models.Inventory>().SingleAsync()).UnitCost = 5m;
+            setup.SupplierQuotedItems.Add(new Models.SupplierQuotedItem
+            {
+                Id = 96_980, BusinessUnitId = fixture.BusinessUnitId, SupplierId = ProcurementTestData.Supplier, RfqItemId = fixture.RfqItemId,
+                ProductId = ProcurementTestData.Product, Quantity = 8m, UnitPrice = 6.5m, CurrencyId = ProcurementTestData.Currency,
+                LeadTimeDays = 14, ValidUntil = DateTime.UtcNow.AddDays(30), IsActive = true, CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+            });
+            await setup.SaveChangesAsync();
+        }
+        await using var db = fixture.Context();
+        var service = new StockLinePricingService(db);
+        await service.SaveStandardMarginAsync(fixture.BusinessUnitId, 25m, "qa", CancellationToken.None);
+
+        var view = await service.GetAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None);
+
+        Assert.Equal((2m, 8m, 5m), (view!.Partial!.FromStock, view.Partial.ToOrder, view.Partial.StockUnitCost));
+        // (2 × 5 + 8 × 6.50) / 10 = 6.20 each, + 25% = 7.75
+        Assert.Equal(("BLENDED_PLUS_MARGIN", 6.2m, 7.75m), (view.Price.Source, view.Price.UnitCost, view.Price.UnitPrice));
+    }
+
     [Theory]
     [InlineData(7, "1 week")]
     [InlineData(28, "4 weeks")]
