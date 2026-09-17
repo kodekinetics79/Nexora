@@ -194,17 +194,16 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
   const earlier = view?.history ?? [];
   const track = view?.trackRecord;
 
+  // Says what the price in the box is made of right now, never a figure the rep has since changed.
   const suggestion = (() => {
     if (!view) return "";
     const p = view.price;
-    if (p.source === "SELLING_PRICE") return `Suggested from your selling price ${formatMoney(p.sellingPrice, currencyCode)}`;
-    if (p.source === "COST_PLUS_MARGIN") return `Suggested: cost ${formatMoney(p.unitCost, currencyCode)} + ${p.marginPercent}% company margin`;
-    if (p.source === "COST_ONLY") {
-      return marginNumber != null && Number.isFinite(marginNumber)
-        ? `Cost ${formatMoney(p.unitCost, currencyCode)} + ${marginNumber}% margin`
-        : `Cost ${formatMoney(p.unitCost, currencyCode)}. Set a margin to build the price.`;
+    if (p.sellingPrice && priceOk && priceNumber === p.sellingPrice) return `Your selling price`;
+    if (cost && cost > 0 && priceOk && marginNumber != null && Number.isFinite(marginNumber)) {
+      return `Cost ${formatMoney(cost, currencyCode)} + ${marginNumber}% margin`;
     }
-    return "No selling price or cost on file. Type a price, or use one from history.";
+    if (cost && cost > 0) return `Cost ${formatMoney(cost, currencyCode)}. Type a margin or a price.`;
+    return "No selling price or cost on file. Type a price, or use one from your record.";
   })();
 
   return (
@@ -324,18 +323,24 @@ export default function StockPriceDialog({ open, rfqId, itemId, onClose }: Stock
                       }}
                       sx={{ width: 120 }}
                     />
-                    <Typography variant="caption" color="text.secondary">
-                      on cost {formatMoney(cost, currencyCode)}
-                      {companyMargin != null ? ` · company ${companyMargin}%` : ""}
-                    </Typography>
+                    {companyMargin != null && (
+                      <Typography variant="caption" color="text.secondary">Usual margin {companyMargin}%</Typography>
+                    )}
                   </Stack>
                 )}
                 {canSaveMargin && marginTouched && cost != null && cost > 0 && marginNumber != null && Number.isFinite(marginNumber)
                   && marginNumber >= 0 && marginNumber !== companyMargin && (
                   <FormControlLabel
-                    sx={{ mt: "-8px !important" }}
+                    sx={{ alignItems: "flex-start", "& .MuiCheckbox-root": { pt: 0.25 } }}
                     control={<Checkbox size="small" checked={saveMargin} onChange={(event) => setSaveMargin(event.target.checked)} />}
-                    label={<Typography variant="body2">Make {marginNumber}% the company margin for stock</Typography>}
+                    label={
+                      <Box>
+                        <Typography variant="body2">Use {marginNumber}% for all stock items from now on</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Items without a selling price will start at cost + {marginNumber}%
+                        </Typography>
+                      </Box>
+                    }
                   />
                 )}
 

@@ -47,6 +47,9 @@ const stockPriceService = {
   use: async (rfqId: number, itemId: number, body: { unitPrice: number; exStock: boolean; currencyId?: number | null }) =>
     (await axiosInstance.post<{ quoteId: number; quoteNo: string }>(`/api/rfq/${rfqId}/items/${itemId}/stock-price`, body)).data,
 
+  getMargin: async () =>
+    (await axiosInstance.get<{ marginPercent: number | null }>('/api/rfq/stock-margin')).data,
+
   saveMargin: async (marginPercent: number | null) =>
     (await axiosInstance.put<{ marginPercent: number | null }>('/api/rfq/stock-margin', { marginPercent })).data,
 };

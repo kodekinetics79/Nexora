@@ -53,6 +53,14 @@ public sealed class RfqLinePricingController(
 
     public sealed record SaveMarginCommand(decimal? MarginPercent);
 
+    [HttpGet("stock-margin")]
+    [RequireModulePermission("Quote Configuration", PermissionAction.View)]
+    public async Task<IActionResult> GetMargin(CancellationToken ct)
+    {
+        if (!TryTenant(out var tenant)) return Unauthorized();
+        return Ok(new { marginPercent = await pricing.GetStandardMarginAsync(tenant, ct) });
+    }
+
     [HttpPut("stock-margin")]
     [RequireModulePermission("Quote Configuration", PermissionAction.Edit)]
     public async Task<IActionResult> SaveMargin([FromBody] SaveMarginCommand command, CancellationToken ct)

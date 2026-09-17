@@ -81,11 +81,11 @@ describe('Price from stock', () => {
     expect(within(dialog).getByText('Quoted 2 times · won 2')).toBeInTheDocument();
     expect(within(dialog).getAllByText(/Al Jazirah/)).toHaveLength(1);
     expect(within(dialog).getByLabelText('Offer ex stock')).toBeChecked();
-    expect(within(dialog).queryByText(/company margin for stock/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/for all stock items/)).not.toBeInTheDocument();
 
     fireEvent.change(within(dialog).getByLabelText('Margin percent'), { target: { value: '25' } });
     expect(within(dialog).getByLabelText('Unit price')).toHaveValue(125);
-    fireEvent.click(within(dialog).getByLabelText(/Make 25% the company margin for stock/));
+    fireEvent.click(within(dialog).getByLabelText(/Use 25% for all stock items from now on/));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
 
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 125, exStock: true, currencyId: 1 }));
@@ -101,7 +101,7 @@ describe('Price from stock', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use last won price' }));
     expect(within(dialog).getByLabelText('Unit price')).toHaveValue(150);
-    expect(within(dialog).queryByText(/company margin for stock/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/for all stock items/)).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 150, exStock: true, currencyId: 1 }));
     expect(mocks.saveMargin).not.toHaveBeenCalled();
