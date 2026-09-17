@@ -106,14 +106,14 @@ const AllRFQsPage: React.FC = () => {
     {
       field: 'nexoraSerial',
       headerName: 'Nexora Serial',
-      width: 180,
+      width: 190,
       // No fallback through the lead or RFQ. The API used to substitute the parent's case when
       // this document carried none, so a document outside the commercial case displayed one
       // anyway. A blank here is real, and "Not linked" says so rather than reading as a
       // still-loading cell.
       valueGetter: (_value, row) => row.nexoraSerial || '',
       renderCell: (p) => (
-        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'warning.main' }}>
+        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'warning.main', whiteSpace: 'normal', overflowWrap: 'anywhere', lineHeight: 1.3, py: 1 }}>
           {p.value || 'Not linked'}
         </Typography>
       ),
@@ -121,10 +121,10 @@ const AllRFQsPage: React.FC = () => {
     {
       field: 'rfqno',
       headerName: t('rfq_number'),
-      width: 180,
+      width: 190,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
-          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', letterSpacing: '-0.02em', mb: 0.2 }}>
+          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', letterSpacing: '-0.02em', mb: 0.2, whiteSpace: 'normal', overflowWrap: 'anywhere', lineHeight: 1.3 }}>
             {p.row.rfqno || `RFQ-${p.row.id}`}
           </Typography>
           {p.row.leadId && (
