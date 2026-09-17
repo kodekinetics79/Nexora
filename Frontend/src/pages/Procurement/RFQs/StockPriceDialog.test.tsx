@@ -277,4 +277,27 @@ describe('Price from stock', () => {
     expect(screen.queryByRole('button', { name: 'Price it' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Never quoted before|Last quoted/)).not.toBeInTheDocument();
   });
+
+  it('revising a sent quote with no cost on file starts from the sent price and delivery', async () => {
+    mocks.get.mockResolvedValue(view({
+      coveredByStock: false, stock: { onHand: 0, free: 0, heldForOrders: 0, places: [] },
+      price: { source: 'NONE', sellingPrice: null, unitCost: null, marginPercent: 20, unitPrice: null },
+      onQuote: { quoteId: 8, quoteNo: 'QT-0926-0004-R2', unitPrice: 50, exStock: false, currencyCode: 'SAR', state: 'SENT', leadTimeDays: 21 },
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <LinePriceAction rfqId={6} itemId={22} canPrice primary={false} />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Change price' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByLabelText('Unit price')).toHaveValue(50));
+    expect(within(dialog).getByLabelText('Delivery time')).toHaveValue(3);
+    expect(within(dialog).getByRole('button', { name: 'Make a revision with this price' })).toBeEnabled();
+  });
 });

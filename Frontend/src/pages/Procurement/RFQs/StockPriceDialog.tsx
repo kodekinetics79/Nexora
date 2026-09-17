@@ -141,7 +141,9 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     // A draft line keeps the price already on it. A sent quote is being revised, so it starts from
     // today's suggested price (the note below still says what was sent).
     const priced = view.onQuote && view.onQuote.unitPrice > 0 && view.onQuote.state === "DRAFT" ? view.onQuote : null;
-    const start = priced?.unitPrice || view.price.unitPrice || null;
+    // With nothing better to suggest, a revision starts from what was sent, not from an empty box.
+    const sentBefore = view.onQuote && view.onQuote.unitPrice > 0 && view.onQuote.state !== "DRAFT" ? view.onQuote : null;
+    const start = priced?.unitPrice || view.price.unitPrice || sentBefore?.unitPrice || null;
     setPrice(start != null ? String(start) : "");
     // A cost with no company margin starts with an empty margin box, not a "0%" nobody chose.
     const derived = start != null && (priced || view.price.source !== "COST_ONLY") ? marginFromPrice(start) : null;
@@ -153,7 +155,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     const best = (view.supplierPrices ?? []).filter((x) => x.valid).sort((a, b) => a.cost - b.cost)[0];
     setChosenSupplier(!priced && (view.price.source === "SUPPLIER_PLUS_MARGIN" || view.price.source === "BLENDED_PLUS_MARGIN") && best ? { name: best.supplierName, cost: best.cost } : null);
     setSendStockNow(priced ? priced.exStockQuantity != null && priced.exStockQuantity > 0 : true);
-    setLead(priced?.leadTimeDays && priced.leadTimeDays > 0 ? priced.leadTimeDays : best?.leadTimeDays ?? null);
+    setLead(priced?.leadTimeDays && priced.leadTimeDays > 0 ? priced.leadTimeDays : best?.leadTimeDays ?? sentBefore?.leadTimeDays ?? null);
   }, [open, view]);
 
   function setLead(days: number | null | undefined) {
