@@ -672,7 +672,7 @@ export function OtherMakerStockAction({ rfqId, itemId, canPrice }: { rfqId: numb
           </Typography>
           {canPrice && (
             <Button size="small" variant={priced ? "outlined" : "contained"} startIcon={<LocalOffer />} onClick={() => setOpenFor(option.productId)}
-              aria-label={`Price ${option.label} from stock`}>
+              aria-label={priced ? `Change price · ${option.label}` : `Price from stock · ${option.label}`}>
               {priced ? "Change price" : "Price from stock"}
             </Button>
           )}
@@ -733,12 +733,12 @@ export function LinePriceAction({ rfqId, itemId, canPrice, primary, onAskAgain }
           {staleElsewhere.supplierName} price expired {day(staleElsewhere.validUntil)}
         </Typography>
       )}
-      {priced ? (
+      {priced && !otherInStock ? (
         <Typography variant="caption" sx={{ fontWeight: 700, color: "success.main" }}>
           {priced.state === "DRAFT" ? "Priced" : "Quoted"} {formatMoney(priced.unitPrice, priced.currencyCode)} on {priced.quoteNo}
           {priced.state === "SENT" ? " · sent" : priced.state === "DECIDED" ? " · customer decided" : ""}{deliveryShort(priced.leadTimeDays, priced.exStockQuantity)}
         </Typography>
-      ) : otherInStock ? null : (
+      ) : priced || otherInStock ? null : (
         <Typography variant="caption" color="text.secondary">{recordHint(view)}</Typography>
       )}
       <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap" }}>
@@ -746,7 +746,7 @@ export function LinePriceAction({ rfqId, itemId, canPrice, primary, onAskAgain }
           <Button size="small" variant="outlined" onClick={() => onAskAgain([staleElsewhere.supplierId])}>Ask again</Button>
         )}
         {canPrice && priced?.state !== "DECIDED" && (
-          otherInStock && !priced ? (
+          otherInStock ? (
             <Button size="small" variant="text" onClick={() => setOpen(true)}>Price the named part instead</Button>
           ) : (
             <Button size="small" variant={primary && !priced ? "contained" : "outlined"} startIcon={<LocalOffer />} onClick={() => setOpen(true)}>

@@ -164,7 +164,7 @@ describe('Price from stock', () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText('SIEMENS 3RT2046-1AN20 in stock · 30')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Price SIEMENS 3RT2046-1AN20 from stock' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Price from stock · SIEMENS 3RT2046-1AN20' }));
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText(/one of the makers the customer accepts/)).toBeInTheDocument();
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(2, 10, 17));
@@ -299,5 +299,28 @@ describe('Price from stock', () => {
     await waitFor(() => expect(within(dialog).getByLabelText('Unit price')).toHaveValue(50));
     expect(within(dialog).getByLabelText('Delivery time')).toHaveValue(3);
     expect(within(dialog).getByRole('button', { name: 'Make a revision with this price' })).toBeEnabled();
+  });
+
+  it('a priced line with another maker in stock shows the price and one button, not two', async () => {
+    mocks.otherMakers.mockResolvedValue([{ productId: 17, partNumber: '3RT2046-1AN20', label: 'SIEMENS 3RT2046-1AN20', onHand: 30, free: 30 }]);
+    mocks.get.mockResolvedValue(view({
+      coveredByStock: false, stock: { onHand: 0, free: 0, heldForOrders: 0, places: [] },
+      onQuote: { quoteId: 9, quoteNo: 'QT-0926-0002-R2', unitPrice: 480, exStock: false, currencyCode: 'SAR', state: 'DRAFT' },
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <OtherMakerStockAction rfqId={2} itemId={7} canPrice />
+            <LinePriceAction rfqId={2} itemId={7} canPrice primary={false} />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('SIEMENS 3RT2046-1AN20 in stock · 30')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText(/Priced SAR\s?480\.00 on QT-0926-0002-R2/)).toHaveLength(1));
+    expect(screen.getAllByRole('button', { name: /Change price/ })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Price the named part instead' })).toBeInTheDocument();
   });
 });
