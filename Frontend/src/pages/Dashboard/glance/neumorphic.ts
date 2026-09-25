@@ -27,19 +27,34 @@ const LIGHT = Object.freeze({
 });
 
 const SHADE = Object.freeze({
-  light: 'rgba(160, 148, 128, 0.58)',
-  dark: 'rgba(0, 0, 0, 0.72)',
+  light: 'rgba(150, 137, 116, 0.66)',
+  dark: 'rgba(0, 0, 0, 0.8)',
 });
 
 
 /** Distance of the shadow pair; blur is twice it. */
 export type NeuDepth = 2 | 3 | 4 | 6 | 8 | 12 | 16 | 20;
 
+/**
+ * The crisp rim that makes an edge read as dense rather than hazy: a hard 1px lit bevel on the
+ * top-left and a hard 1px shade on the bottom-right, inside the shape. The soft pair gives the lift;
+ * the rim gives the outline.
+ */
+const RIM = Object.freeze({
+  light: { lit: 'rgba(255, 255, 255, 0.95)', shade: 'rgba(120, 108, 90, 0.38)' },
+  dark: { lit: 'rgba(255, 255, 255, 0.10)', shade: 'rgba(0, 0, 0, 0.65)' },
+});
+
+// Blur is 1.5× the distance (it was 2×): a tighter shadow pair keeps the silhouette dense.
+const blur = (depth: number) => Math.round(depth * 1.5);
+
 export const neuRaised = (mode: PaletteMode, depth: NeuDepth = 8): string =>
-  `${-depth}px ${-depth}px ${depth * 2}px ${LIGHT[mode]}, ${depth}px ${depth}px ${depth * 2}px ${SHADE[mode]}`;
+  `inset 1px 1px 0 ${RIM[mode].lit}, inset -1px -1px 0 ${RIM[mode].shade}, `
+  + `${-depth}px ${-depth}px ${blur(depth)}px ${LIGHT[mode]}, ${depth}px ${depth}px ${blur(depth)}px ${SHADE[mode]}`;
 
 export const neuInset = (mode: PaletteMode, depth: NeuDepth = 4): string =>
-  `inset ${depth}px ${depth}px ${depth * 2}px ${SHADE[mode]}, inset ${-depth}px ${-depth}px ${depth * 2}px ${LIGHT[mode]}`;
+  `inset 1px 1px 0 ${RIM[mode].shade}, inset -1px -1px 0 ${RIM[mode].lit}, `
+  + `inset ${depth}px ${depth}px ${blur(depth)}px ${SHADE[mode]}, inset ${-depth}px ${-depth}px ${blur(depth)}px ${LIGHT[mode]}`;
 
 /** A raised slab: same colour as the ground, lit from the top-left. */
 export const neuSlab = (mode: PaletteMode, depth: NeuDepth = 8) => ({
@@ -94,6 +109,6 @@ export const neuCssVariables = (mode: PaletteMode): Record<string, string> => ({
   '--nx-neu-inset-sm': neuInset(mode, 3),
   // The same soft pair for SVG marks, which cannot take a box-shadow.
   '--nx-neu-drop': mode === 'dark'
-    ? 'drop-shadow(-2px -2px 3px rgba(255, 255, 255, 0.06)) drop-shadow(3px 3px 4px rgba(0, 0, 0, 0.7))'
-    : 'drop-shadow(-2px -2px 3px rgba(255, 255, 255, 1)) drop-shadow(3px 3px 4px rgba(160, 148, 128, 0.6))',
+    ? 'drop-shadow(-2px -2px 2px rgba(255, 255, 255, 0.08)) drop-shadow(3px 3px 3px rgba(0, 0, 0, 0.8))'
+    : 'drop-shadow(-2px -2px 2px rgba(255, 255, 255, 1)) drop-shadow(3px 3px 3px rgba(150, 137, 116, 0.7))',
 });

@@ -36,7 +36,7 @@ describe('dashboard clay', () => {
   });
 
   it('lights raised objects from the top-left and presses wells in', () => {
-    expect(neuRaised('light', 8)).toMatch(/^-8px -8px 16px .*, 8px 8px 16px /);
-    expect(neuInset('dark', 2)).toMatch(/^inset 2px 2px 4px .*, inset -2px -2px 4px /);
+    expect(neuRaised('light', 8)).toMatch(/^inset 1px 1px 0 .*, -8px -8px 12px .*, 8px 8px 12px /);
+    expect(neuInset('dark', 2)).toMatch(/^inset 1px 1px 0 .*, inset 2px 2px 3px .*, inset -2px -2px 3px /);
   });
 });
