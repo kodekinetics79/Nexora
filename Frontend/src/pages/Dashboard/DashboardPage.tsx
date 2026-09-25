@@ -15,6 +15,8 @@ import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
+import { NEU_SURFACE, NEU_TRANSITION, neuInset, neuRaised } from './glance/neumorphic';
+import { glanceCssVariables } from './glance/tokens';
 
 /**
  * The dashboard, read top to bottom as one sentence.
@@ -189,7 +191,18 @@ export default function DashboardPage() {
   })();
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', p: { xs: 1, sm: 2, md: 3 } }}>
+    <Box
+      sx={(theme) => ({
+        // The clay ground every band is pressed from (glance/neumorphic.ts). Neumorphism only reads
+        // when the object and its ground are one colour, so the screen lays its own ground rather
+        // than sitting on the app canvas and its brass washes.
+        // The seal chrome is published here too, so the period keys wear the same brass ink.
+        ...glanceCssVariables(theme.palette.mode),
+        maxWidth: 1280, mx: 'auto', p: { xs: 1.5, sm: 2.5, md: 4 },
+        backgroundColor: NEU_SURFACE[theme.palette.mode],
+        borderRadius: { xs: 3, md: 5 },
+      })}
+    >
       <Typography
         variant="h4"
         component="h1"
@@ -269,10 +282,25 @@ export default function DashboardPage() {
                 size="small"
                 clickable
                 aria-pressed={period === choice.key}
-                variant={period === choice.key ? 'filled' : 'outlined'}
-                color={period === choice.key ? 'primary' : 'default'}
+                variant="outlined"
                 onClick={() => choosePeriod(choice.key)}
-                sx={{ fontWeight: 700 }}
+                sx={(theme) => {
+                  // Soft keys: the chosen period stays pressed in, in brass, the way the seals it
+                  // governs are pressed in below; the others stand proud and sink on press.
+                  const mode = theme.palette.mode;
+                  const chosen = period === choice.key;
+                  return {
+                    ...NEU_TRANSITION,
+                    height: 32, px: 0.75, fontWeight: 700,
+                    backgroundColor: NEU_SURFACE[mode],
+                    border: '1px solid',
+                    borderColor: chosen ? 'var(--nx-glance-seal-rim)' : 'transparent',
+                    color: chosen ? 'var(--nx-glance-seal-ink)' : 'text.primary',
+                    boxShadow: chosen ? neuInset(mode, 2) : neuRaised(mode, 2),
+                    '&&:hover': { backgroundColor: NEU_SURFACE[mode], boxShadow: chosen ? neuInset(mode, 2) : neuRaised(mode, 4) },
+                    '&&:active': { boxShadow: neuInset(mode, 2) },
+                  };
+                }}
               />
             ))}
           </Stack>

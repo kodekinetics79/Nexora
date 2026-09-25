@@ -19,6 +19,7 @@ import {
 } from '@mui/material';
 import { ArrowForward as DrillDownIcon, Close as CloseIcon } from '@mui/icons-material';
 import type { Release01KpiDTO, Release01KpiUnit } from '../../../api/services/dashboardService';
+import { neuRaised, neuSlab } from '../glance/neumorphic';
 
 /**
  * One verified Release 01 KPI with its definition, its "insufficient data" honesty and the
@@ -59,15 +60,17 @@ export default function KpiCard({ kpi, index = 0 }: { kpi: Release01KpiDTO; inde
     <Paper
       component="article"
       variant="outlined"
-      className="nx-glass nx-enter"
+      className="nx-neu nx-enter"
       data-decorative-motion="true"
       style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
-      sx={{
-        p: 2, minHeight: 160, borderRadius: 2, display: 'flex', flexDirection: 'column',
+      sx={(theme) => ({
+        // The dashboard's clay (glance/neumorphic.ts): a raised key that rises further on hover.
+        ...neuSlab(theme.palette.mode, 6),
+        p: 2, minHeight: 160, borderRadius: 3, display: 'flex', flexDirection: 'column',
         transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 180ms ease-out',
-        '&:hover': { transform: 'translateY(-3px)', boxShadow: (theme) => `inset 0 1px 0 rgba(255,255,255,${theme.palette.mode === 'dark' ? 0.08 : 0.9}), 0 22px 44px -22px rgba(15,18,24,${theme.palette.mode === 'dark' ? 0.9 : 0.4})` },
+        '&:hover': { transform: 'translateY(-2px)', boxShadow: neuRaised(theme.palette.mode, 12) },
         '@media (prefers-reduced-motion: reduce)': { transition: 'none', '&:hover': { transform: 'none' } },
-      }}
+      })}
     >
       <Stack direction="row" spacing={1} sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>

@@ -3,11 +3,12 @@ import { Alert, AlertTitle, Box, Button, Paper, Stack, Tooltip, Typography } fro
 import { LockOutlined as ForbiddenIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { glanceCssVariables } from './tokens';
+import { NEU_TRANSITION, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
 import RefreshFailedNotice from '../../../components/common/RefreshFailedNotice';
 import { SCOPE_UNRESOLVED } from './scopeWords';
 
 /**
- * One band of the glance screen: a glass slab with its title, its seal, and whatever it draws.
+ * One band of the glance screen: a clay slab (neumorphic.ts) with its title, its seal, and whatever it draws.
  *
  * Every band on the screen is the same object so the reader learns it once. The one part they have
  * to learn is the seal, top-right, in identical position and typography on every band: whose
@@ -100,11 +101,12 @@ export default function BandShell({
       return (
         <Box
           role="status"
-          sx={{
-            mt: 1, borderRadius: 2, minHeight: minHeight - 72,
-            border: '1px dashed', borderColor: 'divider',
+          sx={(theme) => ({
+            // A pressed-in well the figures will rise out of, rather than a dashed hole.
+            ...neuWell(theme.palette.mode, 4),
+            mt: 1, borderRadius: 2.5, minHeight: minHeight - 72,
             display: 'grid', placeItems: 'center',
-          }}
+          })}
         >
           <Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading {title.toLowerCase()}…</Typography>
         </Box>
@@ -120,7 +122,7 @@ export default function BandShell({
     <Paper
       component="section"
       variant="outlined"
-      className="nx-glass nx-enter"
+      className="nx-neu nx-enter"
       data-decorative-motion="true"
       style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}
       aria-label={title}
@@ -130,8 +132,11 @@ export default function BandShell({
         // band draws inherits them and a band rendered on its own — in a test, or in a page that
         // does not mount the whole screen — still paints in the validated palette.
         ...glanceCssVariables(theme.palette.mode),
-        p: { xs: 2, md: 2.5 },
-        borderRadius: 3,
+        ...neuSlab(theme.palette.mode, 8),
+        ...NEU_TRANSITION,
+        p: { xs: 2, md: 3 },
+        borderRadius: 4,
+        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 12) },
         minHeight,
         display: 'flex',
         flexDirection: 'column',
@@ -142,14 +147,20 @@ export default function BandShell({
         spacing={1}
         sx={{ alignItems: { sm: 'flex-start' }, justifyContent: 'space-between', mb: 1.5 }}
       >
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', minWidth: 0 }}>
+        <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', minWidth: 0 }}>
           {step && (
             <Typography
               aria-hidden
-              sx={{
+              sx={(theme) => ({
+                // The step numeral sits in a small pressed dimple, so the sentence the screen reads
+                // as (1 → 6) is something the eye can count down the left edge.
+                ...neuWell(theme.palette.mode, 2),
+                alignSelf: 'center',
+                width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                display: 'grid', placeItems: 'center',
                 fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
-                fontSize: 14, color: 'var(--nx-glance-seal-ink)', fontVariantNumeric: 'tabular-nums',
-              }}
+                fontSize: 13, color: 'var(--nx-glance-seal-ink)', fontVariantNumeric: 'tabular-nums',
+              })}
             >
               {step}
             </Typography>
@@ -163,14 +174,17 @@ export default function BandShell({
             data-testid="band-seal"
             data-governed={seal.governed ? 'true' : 'false'}
             aria-label={`${sealText}. ${sealExplanation}`}
-            sx={{
+            sx={(theme) => ({
               flexShrink: 0,
               alignSelf: { xs: 'flex-start', sm: 'auto' },
-              px: 1, py: 0.375,
+              px: 1.25, py: 0.5,
               borderRadius: 999,
               border: '1px solid',
               borderColor: 'var(--nx-glance-seal-rim)',
               backgroundColor: seal.governed ? 'var(--nx-glance-seal-ground)' : 'transparent',
+              // Governed = pressed in, like the period key that governs it; fixed windows stand
+              // proud. Filled-vs-outlined still carries the fact on its own; depth only repeats it.
+              boxShadow: seal.governed ? neuInset(theme.palette.mode, 2) : neuRaised(theme.palette.mode, 2),
               color: 'var(--nx-glance-seal-ink)',
               fontSize: 12,
               fontWeight: seal.governed ? 700 : 600,
@@ -180,7 +194,7 @@ export default function BandShell({
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               maxWidth: { xs: '100%', sm: 340 },
-            }}
+            })}
           >
             {sealText}
           </Box>
