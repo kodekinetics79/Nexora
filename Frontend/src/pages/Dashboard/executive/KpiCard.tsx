@@ -65,10 +65,10 @@ export default function KpiCard({ kpi, index = 0 }: { kpi: Release01KpiDTO; inde
       style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
       sx={(theme) => ({
         // The dashboard's clay (glance/neumorphic.ts): a raised key that rises further on hover.
-        ...neuSlab(theme.palette.mode, 6),
-        p: 2, minHeight: 160, borderRadius: 3, display: 'flex', flexDirection: 'column',
+        ...neuSlab(theme.palette.mode, 12),
+        p: 2.5, minHeight: 170, borderRadius: 5, display: 'flex', flexDirection: 'column',
         transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 180ms ease-out',
-        '&:hover': { transform: 'translateY(-2px)', boxShadow: neuRaised(theme.palette.mode, 12) },
+        '&:hover': { transform: 'translateY(-2px)', boxShadow: neuRaised(theme.palette.mode, 16) },
         '@media (prefers-reduced-motion: reduce)': { transition: 'none', '&:hover': { transform: 'none' } },
       })}
     >

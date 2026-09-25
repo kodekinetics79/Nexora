@@ -3,7 +3,7 @@ import { Alert, AlertTitle, Box, Button, Paper, Stack, Tooltip, Typography } fro
 import { LockOutlined as ForbiddenIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { glanceCssVariables } from './tokens';
-import { NEU_TRANSITION, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
+import { NEU_TRANSITION, neuCssVariables, neuEmboss, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
 import RefreshFailedNotice from '../../../components/common/RefreshFailedNotice';
 import { SCOPE_UNRESOLVED } from './scopeWords';
 
@@ -101,12 +101,7 @@ export default function BandShell({
       return (
         <Box
           role="status"
-          sx={(theme) => ({
-            // A pressed-in well the figures will rise out of, rather than a dashed hole.
-            ...neuWell(theme.palette.mode, 4),
-            mt: 1, borderRadius: 2.5, minHeight: minHeight - 72,
-            display: 'grid', placeItems: 'center',
-          })}
+          sx={{ minHeight: minHeight - 120, display: 'grid', placeItems: 'center' }}
         >
           <Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading {title.toLowerCase()}…</Typography>
         </Box>
@@ -132,11 +127,12 @@ export default function BandShell({
         // band draws inherits them and a band rendered on its own — in a test, or in a page that
         // does not mount the whole screen — still paints in the validated palette.
         ...glanceCssVariables(theme.palette.mode),
-        ...neuSlab(theme.palette.mode, 8),
+        ...neuCssVariables(theme.palette.mode),
+        ...neuSlab(theme.palette.mode, 16),
         ...NEU_TRANSITION,
         p: { xs: 2, md: 3 },
-        borderRadius: 4,
-        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 12) },
+        borderRadius: { xs: 5, md: 6 },
+        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 20) },
         minHeight,
         display: 'flex',
         flexDirection: 'column',
@@ -145,7 +141,7 @@ export default function BandShell({
       <Stack
         direction={{ xs: 'column', sm: 'row' }}
         spacing={1}
-        sx={{ alignItems: { sm: 'flex-start' }, justifyContent: 'space-between', mb: 1.5 }}
+        sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', mb: 2 }}
       >
         <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', minWidth: 0 }}>
           {step && (
@@ -154,9 +150,9 @@ export default function BandShell({
               sx={(theme) => ({
                 // The step numeral sits in a small pressed dimple, so the sentence the screen reads
                 // as (1 → 6) is something the eye can count down the left edge.
-                ...neuWell(theme.palette.mode, 2),
+                boxShadow: neuRaised(theme.palette.mode, 3),
                 alignSelf: 'center',
-                width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
                 display: 'grid', placeItems: 'center',
                 fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
                 fontSize: 13, color: 'var(--nx-glance-seal-ink)', fontVariantNumeric: 'tabular-nums',
@@ -165,7 +161,10 @@ export default function BandShell({
               {step}
             </Typography>
           )}
-          <Typography component="h2" sx={{ fontWeight: 800, fontSize: { xs: 16, md: 18 }, lineHeight: 1.25 }}>
+          <Typography
+            component="h2"
+            sx={(theme) => ({ fontWeight: 800, fontSize: { xs: 16, md: 19 }, lineHeight: 1.25, textShadow: neuEmboss(theme.palette.mode) })}
+          >
             {title}
           </Typography>
         </Stack>
@@ -177,14 +176,14 @@ export default function BandShell({
             sx={(theme) => ({
               flexShrink: 0,
               alignSelf: { xs: 'flex-start', sm: 'auto' },
-              px: 1.25, py: 0.5,
+              px: 1.5, py: 0.625,
               borderRadius: 999,
               border: '1px solid',
               borderColor: 'var(--nx-glance-seal-rim)',
               backgroundColor: seal.governed ? 'var(--nx-glance-seal-ground)' : 'transparent',
               // Governed = pressed in, like the period key that governs it; fixed windows stand
               // proud. Filled-vs-outlined still carries the fact on its own; depth only repeats it.
-              boxShadow: seal.governed ? neuInset(theme.palette.mode, 2) : neuRaised(theme.palette.mode, 2),
+              boxShadow: seal.governed ? neuInset(theme.palette.mode, 3) : neuRaised(theme.palette.mode, 3),
               color: 'var(--nx-glance-seal-ink)',
               fontSize: 12,
               fontWeight: seal.governed ? 700 : 600,
@@ -200,7 +199,20 @@ export default function BandShell({
           </Box>
         </Tooltip>
       </Stack>
-      <Box sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>{body}</Box>
+      {/*
+        The band's content is pressed INTO the slab: a raised object holding a sunken tray is the
+        signature shape of the material, and it keeps charts on a calm ground of their own.
+      */}
+      <Box
+        sx={(theme) => ({
+          ...neuWell(theme.palette.mode, 6),
+          borderRadius: { xs: 3, md: 4 },
+          p: { xs: 1.5, md: 2.5 },
+          flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+        })}
+      >
+        {body}
+      </Box>
     </Paper>
   );
 }

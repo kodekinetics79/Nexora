@@ -7,6 +7,7 @@ import { toPresentableError } from '../../../utils/apiErrors';
 import BandShell from './BandShell';
 import { scopeWords } from './scopeWords';
 import { seriesVar, type SeriesToken } from './tokens';
+import { neuBar, neuInset, neuRaised } from './neumorphic';
 
 /**
  * Band 4 — what is closing on us.
@@ -174,7 +175,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
           sx={{
             display: 'grid',
             gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
-            gap: { xs: 0.5, sm: 1 },
+            gap: { xs: 1, sm: 2 },
             alignItems: 'end',
           }}
         >
@@ -187,23 +188,26 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                 key={column.key}
                 onClick={() => openBucket(column.key)}
                 aria-label={`${column.label}: ${plural(column.leads, 'open enquiry', 'open enquiries')}, ${plural(column.lineItems, 'line', 'lines')}. Opens the enquiries this counted.`}
-                sx={{
+                sx={(theme) => ({
+                  // Each column is a soft key on the clay: it stands proud, rises on hover and
+                  // presses in when opened — the column is the button that opens its enquiries.
                   flexDirection: 'column',
                   alignItems: 'stretch',
                   justifyContent: 'flex-end',
-                  borderRadius: 2,
-                  px: 0.25,
-                  pt: 0.5,
-                  pb: 0.75,
+                  borderRadius: 3,
+                  px: 0.75,
+                  pt: 1,
+                  pb: 1,
                   textAlign: 'center',
-                  transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), background-color 180ms ease-out',
-                  '&:hover': { transform: 'translateY(-3px)', backgroundColor: 'action.hover' },
-                  '&:active': { transform: 'translateY(1px)' },
+                  boxShadow: neuRaised(theme.palette.mode, 4),
+                  transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 180ms ease-out',
+                  '&:hover': { transform: 'translateY(-2px)', boxShadow: neuRaised(theme.palette.mode, 6) },
+                  '&:active': { transform: 'translateY(1px)', boxShadow: neuInset(theme.palette.mode, 3) },
                   '@media (prefers-reduced-motion: reduce)': {
                     transition: 'none',
                     '&:hover, &:active': { transform: 'none' },
                   },
-                }}
+                })}
               >
                 <Typography
                   component="span"
@@ -226,10 +230,10 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                     className="nx-enter"
                     data-decorative-motion="true"
                     style={{ animationDelay: `${columnIndex * 45}ms` }}
-                    sx={{
+                    sx={(theme) => ({
                       width: '100%',
                       height: `${height}px`,
-                      borderRadius: column.leads === 0 ? 0.5 : '5px 5px 2px 2px',
+                      borderRadius: column.leads === 0 ? 0.5 : '10px 10px 4px 4px',
                       // Lit slab, not a flat rectangle: the face falls off downwards, a highlight
                       // sits on the top edge and the shadow is cast beneath. All of the depth is
                       // in the lighting, none of it in the geometry, so the top of the bar is the
@@ -238,10 +242,8 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                       backgroundImage: column.leads === 0
                         ? 'none'
                         : 'linear-gradient(180deg, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.06) 42%, rgba(0,0,0,0.14) 100%)',
-                      boxShadow: column.leads === 0
-                        ? 'none'
-                        : 'inset 0 1px 0 rgba(255,255,255,0.45), 0 6px 14px -8px rgba(15,18,24,0.55)',
-                    }}
+                      boxShadow: column.leads === 0 ? 'none' : neuBar(theme.palette.mode),
+                    })}
                   />
                 </Box>
                 {/* The baseline. One rule under every column, drawn even where the bar is a tick,

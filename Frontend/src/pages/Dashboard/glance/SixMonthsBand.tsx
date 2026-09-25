@@ -291,7 +291,7 @@ export default function SixMonthsBand({
           }
           return (
             <Tooltip key={label + i} title={`${label}: ${row.count.toLocaleString('en-US')} requests received`}>
-              <path d={columnPath(x, barW, countY(row.count))} fill="url(#nx-six-months-column)" />
+              <path d={columnPath(x, barW, countY(row.count))} fill="url(#nx-six-months-column)" style={{ filter: 'var(--nx-neu-drop)' }} />
             </Tooltip>
           );
         })}
