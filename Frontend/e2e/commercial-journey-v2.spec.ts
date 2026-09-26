@@ -1081,12 +1081,20 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   // exists instead of offering to prepare a second one, so there is no prepare button here to
   // assert on. What the screen must not do is offer a route to a second commercial record.
   //
-  // The gate the two branches below used to check — a draft is refused ONLY on NO_QUOTE_REVIEW,
-  // never for lines merely needing sourcing, which is the normal case for a distributor — is
-  // asserted in both states, with the reason text, by ViewRFQPage.test.tsx
-  // ("the primary action states why it is unavailable").
+  // The gate this test used to check here — a draft is refused ONLY on NO_QUOTE_REVIEW, never for
+  // lines merely needing sourcing, which is the normal case for a distributor — is asserted in both
+  // states, with the reason text, by ViewRFQPage.test.tsx ("the primary action states why it is
+  // unavailable").
+  //
+  // The button's name is READ from the same endpoint the header reads, not guessed: this fixture's
+  // quotes are numbered CORE-QUOTE-006, not the app's QT- series.
+  const seeded = await jsonOk<{ quoteNo: string; state: string }>(await api(
+    page, token, 'get', `/api/rfq/${rfqId()}/latest-quote`,
+  ));
   await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: new RegExp(`^Open QT-|QT-.* sent$`) })).toBeVisible();
+  await expect(page.getByRole('button', {
+    name: seeded.state === 'DRAFT' ? `Open ${seeded.quoteNo}` : `${seeded.quoteNo} sent`,
+  })).toBeVisible();
   await fs.mkdir(v1EvidenceDir, { recursive: true });
   await page.screenshot({
     path: path.join(v1EvidenceDir, 'gate-02-opportunity-digital-twin.png'),
