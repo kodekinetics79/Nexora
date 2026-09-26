@@ -15,7 +15,7 @@ import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
-import { NEU_SURFACE, NEU_TRANSITION, neuCssVariables, neuEmboss, neuInset, neuKey, neuRaised } from './glance/neumorphic';
+import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuInset, neuKey, neuRaised } from './glance/neumorphic';
 import { glanceCssVariables } from './glance/tokens';
 
 /**
@@ -199,6 +199,8 @@ export default function DashboardPage() {
         // The seal chrome is published here too, so the period keys wear the same brass ink.
         ...glanceCssVariables(theme.palette.mode),
         ...neuCssVariables(theme.palette.mode),
+        // Theme inks were derived against white paper; the clay is darker, so re-derive them here.
+        ...clayInkOverrides(theme.palette),
         maxWidth: 1280, mx: 'auto', p: { xs: 1.5, sm: 2.5, md: 4 },
         backgroundColor: NEU_SURFACE[theme.palette.mode],
         borderRadius: { xs: 3, md: 5 },

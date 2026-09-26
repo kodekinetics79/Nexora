@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { getContrastRatio } from '@mui/material/styles';
-import { NEU_SURFACE, neuInset, neuRaised } from './neumorphic';
+import { NEU_SURFACE, clayInk, neuInset, neuRaised } from './neumorphic';
 import { SEAL_WORST_GROUND, glanceCssVariables } from './tokens';
 
 // The theme's text tokens (ThemeContext.tsx). Stated rather than imported: the clay is only
@@ -29,6 +29,14 @@ describe('dashboard clay', () => {
       expect(getContrastRatio(ink, NEU_SURFACE[mode])).toBeGreaterThanOrEqual(4.5);
     });
   }
+
+  // The exact inks axe failed in CI on PR #219 (theme brass link, theme success green, both derived
+  // against white): re-derived for the clay they must clear AA, in both modes.
+  it.each(['#8c6612', '#257e58', '#c9931a', '#2f9e6e', '#c62828'])('re-derives %s to AA on the clay', (color) => {
+    for (const mode of ['light', 'dark'] as const) {
+      expect(getContrastRatio(clayInk(color, mode), NEU_SURFACE[mode])).toBeGreaterThanOrEqual(4.5);
+    }
+  });
 
   it('states the governed seal ground as it actually composites onto the clay', () => {
     expect(blend('#C9931A', 0.14, NEU_SURFACE.light)).toBe(SEAL_WORST_GROUND.light);

@@ -1,4 +1,5 @@
 import type { PaletteMode } from '@mui/material';
+import { readableOn } from '../../../utils/contrast';
 
 /**
  * The dashboard's soft, pressed-clay material (owner request 2026-09-25: "neumorphic touch").
@@ -112,3 +113,38 @@ export const neuCssVariables = (mode: PaletteMode): Record<string, string> => ({
     ? 'drop-shadow(-2px -2px 2px rgba(255, 255, 255, 0.08)) drop-shadow(3px 3px 3px rgba(0, 0, 0, 0.8))'
     : 'drop-shadow(-2px -2px 2px rgba(255, 255, 255, 1)) drop-shadow(3px 3px 3px rgba(150, 137, 116, 0.7))',
 });
+
+/**
+ * A text colour that the theme derived against WHITE paper, re-derived against the clay.
+ *
+ * The clay is darker than paper, so brand and status inks that clear 4.5:1 on white (the brass link
+ * at 4.6, the success green) drop just under it here — axe caught 4.41 and 4.23 in CI. Anything on
+ * the dashboard that is set in a theme ink goes through this instead of trusting the global value.
+ */
+export const clayInk = (color: string, mode: PaletteMode): string => readableOn(color, NEU_SURFACE[mode], 4.6);
+
+/**
+ * Descendant rules for the dashboard ground: every MUI text surface that paints in a palette ink is
+ * repainted in its clay-safe version. Scoped to the dashboard, and two classes deep so it outranks
+ * the theme's own single-class rules without `!important`.
+ */
+export const clayInkOverrides = (palette: {
+  mode: PaletteMode;
+  primary: { main: string };
+  success: { main: string };
+  error: { main: string };
+  warning: { main: string };
+  info: { main: string };
+}) => {
+  const ink = (c: string) => clayInk(c, palette.mode);
+  const rules: Record<string, Record<string, string>> = {
+    '& .MuiButton-text.MuiButton-colorPrimary, & .MuiButton-outlined.MuiButton-colorPrimary, & .MuiLink-root, & .MuiIconButton-colorPrimary': {
+      color: ink(palette.primary.main),
+    },
+  };
+  for (const tone of ['primary', 'success', 'error', 'warning', 'info'] as const) {
+    const cap = tone[0].toUpperCase() + tone.slice(1);
+    rules[`& .MuiChip-outlined.MuiChip-color${cap}`] = { color: ink(palette[tone].main), borderColor: ink(palette[tone].main) };
+  }
+  return rules;
+};
