@@ -8,6 +8,7 @@ import { formatMoney } from '../../../utils/currency';
 import BandShell from './BandShell';
 import { pipelineSeal, usePipelineAnalytics } from './pipelineAnalytics';
 import { seriesVar } from './tokens';
+import { neuBar } from './neumorphic';
 
 /**
  * Band 3 — why we lost.
@@ -97,7 +98,7 @@ const Column = ({ row, above, scale }: ColumnProps) => {
       data-testid={`loss-bar-${row.code}`}
       data-side={above ? 'above' : 'below'}
       aria-hidden
-      sx={{
+      sx={(theme) => ({
         width: '100%',
         maxWidth: 46,
         height: `${height}px`,
@@ -107,8 +108,9 @@ const Column = ({ row, above, scale }: ColumnProps) => {
         backgroundImage: height === 0
           ? 'none'
           : 'linear-gradient(180deg, rgba(255,255,255,0.28) 0%, rgba(255,255,255,0.05) 45%, rgba(0,0,0,0.14) 100%)',
-        borderRadius: above ? '4px 4px 0 0' : '0 0 4px 4px',
-      }}
+        borderRadius: above ? '10px 10px 3px 3px' : '3px 3px 10px 10px',
+        boxShadow: height === 0 ? 'none' : neuBar(theme.palette.mode),
+      })}
     />
   );
   const label = (

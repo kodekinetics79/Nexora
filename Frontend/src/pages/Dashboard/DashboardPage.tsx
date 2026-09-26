@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Alert, Box, Button, Chip, Stack, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, GlobalStyles, Stack, TextField, Typography } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -15,6 +15,8 @@ import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
+import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuInset, neuKey, neuRaised } from './glance/neumorphic';
+import { glanceCssVariables } from './glance/tokens';
 
 /**
  * The dashboard, read top to bottom as one sentence.
@@ -189,11 +191,38 @@ export default function DashboardPage() {
   })();
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', p: { xs: 1, sm: 2, md: 3 } }}>
+    <Box
+      sx={(theme) => ({
+        // The clay ground every band is pressed from (glance/neumorphic.ts). Neumorphism only reads
+        // when the object and its ground are one colour, so the screen lays its own ground rather
+        // than sitting on the app canvas and its brass washes.
+        // The seal chrome is published here too, so the period keys wear the same brass ink.
+        ...glanceCssVariables(theme.palette.mode),
+        ...neuCssVariables(theme.palette.mode),
+        // Theme inks were derived against white paper; the clay is darker, so re-derive them here.
+        ...clayInkOverrides(theme.palette),
+        maxWidth: 1280, mx: 'auto', p: { xs: 1.5, sm: 2.5, md: 4 },
+        backgroundColor: NEU_SURFACE[theme.palette.mode],
+        borderRadius: { xs: 3, md: 5 },
+      })}
+    >
+      {/*
+        While the dashboard is on screen the whole canvas is the same clay, so the tray has no
+        visible edge and every band reads as pressed out of one surface — the defining trait of
+        the material. The glass shell (app bar, rail) still floats above it.
+      */}
+      <GlobalStyles
+        styles={(theme) => ({
+          body: { backgroundColor: `${NEU_SURFACE[theme.palette.mode]} !important`, backgroundImage: 'none !important' },
+        })}
+      />
       <Typography
         variant="h4"
         component="h1"
-        sx={{ fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em' }}
+        sx={(theme) => ({
+          fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em',
+          textShadow: neuEmboss(theme.palette.mode),
+        })}
       >
         Dashboard
       </Typography>
@@ -269,10 +298,25 @@ export default function DashboardPage() {
                 size="small"
                 clickable
                 aria-pressed={period === choice.key}
-                variant={period === choice.key ? 'filled' : 'outlined'}
-                color={period === choice.key ? 'primary' : 'default'}
+                variant="outlined"
                 onClick={() => choosePeriod(choice.key)}
-                sx={{ fontWeight: 700 }}
+                sx={(theme) => {
+                  // Soft keys: the chosen period stays pressed in, in brass, the way the seals it
+                  // governs are pressed in below; the others stand proud and sink on press.
+                  const mode = theme.palette.mode;
+                  const chosen = period === choice.key;
+                  return {
+                    ...NEU_TRANSITION,
+                    height: 32, px: 0.75, fontWeight: 700,
+                    backgroundColor: NEU_SURFACE[mode],
+                    border: '1px solid',
+                    borderColor: chosen ? 'var(--nx-glance-seal-rim)' : 'transparent',
+                    color: chosen ? 'var(--nx-glance-seal-ink)' : 'text.primary',
+                    boxShadow: chosen ? neuInset(mode, 2) : neuRaised(mode, 2),
+                    '&&:hover': { backgroundColor: NEU_SURFACE[mode], boxShadow: chosen ? neuInset(mode, 2) : neuRaised(mode, 4) },
+                    '&&:active': { boxShadow: neuInset(mode, 2) },
+                  };
+                }}
               />
             ))}
           </Stack>
@@ -309,7 +353,7 @@ export default function DashboardPage() {
         </Alert>
       )}
 
-      <Stack spacing={2}>
+      <Stack spacing={4}>
         <VerdictBand from={applied.from} to={applied.to} index={1} />
 
         {/*
@@ -359,7 +403,7 @@ export default function DashboardPage() {
           <Typography variant="h6" component="h2" sx={{ fontWeight: 700, fontSize: 15 }}>
             Verified performance
           </Typography>
-          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 2, mt: 1 }}>
+          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 3, mt: 2 }}>
             {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
           </Stack>
           {notYetMeasurable > 0 && (
@@ -375,19 +419,19 @@ export default function DashboardPage() {
         The screens behind the bands, each shown only when the reader's own module grant would let
         the route open — a link that lands on "Access denied" is worse than no link.
       */}
-      <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1, mt: 2.5 }}>
+      <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 2, mt: 4 }}>
         {hasPermission('Leads') && (
-          <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={{ fontWeight: 700 }}>
+          <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
             Every deadline in full
           </Button>
         )}
         {hasPermission('Dashboard') && (
-          <Button size="small" onClick={() => navigate('/sales/performance')} sx={{ fontWeight: 700 }}>
+          <Button size="small" onClick={() => navigate('/sales/performance')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
             Performance by rep
           </Button>
         )}
         {hasPermission('Leads') && (
-          <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={{ fontWeight: 700 }}>
+          <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
             Documents to check
           </Button>
         )}

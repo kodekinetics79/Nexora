@@ -3,11 +3,12 @@ import { Alert, AlertTitle, Box, Button, Paper, Stack, Tooltip, Typography } fro
 import { LockOutlined as ForbiddenIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { glanceCssVariables } from './tokens';
+import { NEU_TRANSITION, neuCssVariables, neuEmboss, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
 import RefreshFailedNotice from '../../../components/common/RefreshFailedNotice';
 import { SCOPE_UNRESOLVED } from './scopeWords';
 
 /**
- * One band of the glance screen: a glass slab with its title, its seal, and whatever it draws.
+ * One band of the glance screen: a clay slab (neumorphic.ts) with its title, its seal, and whatever it draws.
  *
  * Every band on the screen is the same object so the reader learns it once. The one part they have
  * to learn is the seal, top-right, in identical position and typography on every band: whose
@@ -100,11 +101,7 @@ export default function BandShell({
       return (
         <Box
           role="status"
-          sx={{
-            mt: 1, borderRadius: 2, minHeight: minHeight - 72,
-            border: '1px dashed', borderColor: 'divider',
-            display: 'grid', placeItems: 'center',
-          }}
+          sx={{ minHeight: minHeight - 120, display: 'grid', placeItems: 'center' }}
         >
           <Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading {title.toLowerCase()}…</Typography>
         </Box>
@@ -120,7 +117,7 @@ export default function BandShell({
     <Paper
       component="section"
       variant="outlined"
-      className="nx-glass nx-enter"
+      className="nx-neu nx-enter"
       data-decorative-motion="true"
       style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}
       aria-label={title}
@@ -130,8 +127,12 @@ export default function BandShell({
         // band draws inherits them and a band rendered on its own — in a test, or in a page that
         // does not mount the whole screen — still paints in the validated palette.
         ...glanceCssVariables(theme.palette.mode),
-        p: { xs: 2, md: 2.5 },
-        borderRadius: 3,
+        ...neuCssVariables(theme.palette.mode),
+        ...neuSlab(theme.palette.mode, 16),
+        ...NEU_TRANSITION,
+        p: { xs: 2, md: 3 },
+        borderRadius: { xs: 5, md: 6 },
+        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 20) },
         minHeight,
         display: 'flex',
         flexDirection: 'column',
@@ -140,21 +141,30 @@ export default function BandShell({
       <Stack
         direction={{ xs: 'column', sm: 'row' }}
         spacing={1}
-        sx={{ alignItems: { sm: 'flex-start' }, justifyContent: 'space-between', mb: 1.5 }}
+        sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', mb: 2 }}
       >
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', minWidth: 0 }}>
+        <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', minWidth: 0 }}>
           {step && (
             <Typography
               aria-hidden
-              sx={{
+              sx={(theme) => ({
+                // The step numeral sits in a small pressed dimple, so the sentence the screen reads
+                // as (1 → 6) is something the eye can count down the left edge.
+                boxShadow: neuRaised(theme.palette.mode, 3),
+                alignSelf: 'center',
+                width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
+                display: 'grid', placeItems: 'center',
                 fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
-                fontSize: 14, color: 'var(--nx-glance-seal-ink)', fontVariantNumeric: 'tabular-nums',
-              }}
+                fontSize: 13, color: 'var(--nx-glance-seal-ink)', fontVariantNumeric: 'tabular-nums',
+              })}
             >
               {step}
             </Typography>
           )}
-          <Typography component="h2" sx={{ fontWeight: 800, fontSize: { xs: 16, md: 18 }, lineHeight: 1.25 }}>
+          <Typography
+            component="h2"
+            sx={(theme) => ({ fontWeight: 800, fontSize: { xs: 16, md: 19 }, lineHeight: 1.25, textShadow: neuEmboss(theme.palette.mode) })}
+          >
             {title}
           </Typography>
         </Stack>
@@ -163,14 +173,17 @@ export default function BandShell({
             data-testid="band-seal"
             data-governed={seal.governed ? 'true' : 'false'}
             aria-label={`${sealText}. ${sealExplanation}`}
-            sx={{
+            sx={(theme) => ({
               flexShrink: 0,
               alignSelf: { xs: 'flex-start', sm: 'auto' },
-              px: 1, py: 0.375,
+              px: 1.5, py: 0.625,
               borderRadius: 999,
               border: '1px solid',
               borderColor: 'var(--nx-glance-seal-rim)',
               backgroundColor: seal.governed ? 'var(--nx-glance-seal-ground)' : 'transparent',
+              // Governed = pressed in, like the period key that governs it; fixed windows stand
+              // proud. Filled-vs-outlined still carries the fact on its own; depth only repeats it.
+              boxShadow: seal.governed ? neuInset(theme.palette.mode, 3) : neuRaised(theme.palette.mode, 3),
               color: 'var(--nx-glance-seal-ink)',
               fontSize: 12,
               fontWeight: seal.governed ? 700 : 600,
@@ -180,13 +193,26 @@ export default function BandShell({
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               maxWidth: { xs: '100%', sm: 340 },
-            }}
+            })}
           >
             {sealText}
           </Box>
         </Tooltip>
       </Stack>
-      <Box sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>{body}</Box>
+      {/*
+        The band's content is pressed INTO the slab: a raised object holding a sunken tray is the
+        signature shape of the material, and it keeps charts on a calm ground of their own.
+      */}
+      <Box
+        sx={(theme) => ({
+          ...neuWell(theme.palette.mode, 6),
+          borderRadius: { xs: 3, md: 4 },
+          p: { xs: 1.5, md: 2.5 },
+          flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+        })}
+      >
+        {body}
+      </Box>
     </Paper>
   );
 }
