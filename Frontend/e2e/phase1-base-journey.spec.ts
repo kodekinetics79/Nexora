@@ -304,10 +304,12 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await expect(page.getByRole('button', { name: 'Open Canonical Lead' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export PDF' })).toBeDisabled();
 
-    // The operator repeats the same visible action from the RFQ. The service must return the
-    // original draft rather than create a second commercial record.
+    // The operator returns to the RFQ. The header no longer offers to prepare a draft a second
+    // time: it names the draft that exists and opens THAT one, so there is no visible route to a
+    // second commercial record. The quote count below proves only one was ever created.
     await page.goto(`/procurement/rfqs/view/${partialRfqId}`);
-    await page.getByRole('button', { name: 'Prepare Quote Draft' }).click();
+    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toHaveCount(0);
+    await page.getByRole('button', { name: /^Open QT-/ }).click();
     await expect(page).toHaveURL(`/sales/quotes/view/${partialQuoteId}`);
     const quotesResponse = await readApi(page, await token(page), '/api/Quote?pageNumber=1&pageSize=250');
     expect(quotesResponse.ok(), await quotesResponse.text()).toBeTruthy();

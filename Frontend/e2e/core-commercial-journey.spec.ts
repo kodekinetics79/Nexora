@@ -260,7 +260,9 @@ test('40 approved Lead lines remain the sole RFQ scope and Quote preparation is 
   expect(countBefore).toBe(1);
 
   await page.goto(`/procurement/rfqs/view/${rfqId}`);
-  await page.getByRole('button', { name: /Prepare Quote Draft/i }).click();
+  // The header now names the draft it already has, so the repeat action is "Open QT-…" and it
+  // lands on the SAME quote. Pressing it twice cannot mint a second one.
+  await page.getByRole('button', { name: /^Open QT-/ }).click();
   await expect(page).toHaveURL(new RegExp(firstQuoteUrl.replace(/^.*(\/sales\/quotes\/view\/\d+)$/, '$1') + '$'));
 
   const quotesAfter = await jsonOk<{ items: Array<{ id: number; rfqId?: number }> }>(

@@ -535,7 +535,9 @@ test('04 RFQ line outcomes use progressive disclosure for the next commercial ac
   await page.getByRole('button', { name: /Sourcing required/i }).click();
   const sourcingRow = page.getByRole('row').filter({ hasText: required('E2E_CORE_PARTIAL_ATP_PART') });
   await expect(sourcingRow).toContainText(/to source/i);
-  await expect(sourcingRow.getByRole('button', { name: 'Create / Open Sourcing Case' })).toBeVisible();
+  // The line's one action is Find supplier, which opens the small window on this screen. The old
+  // "Create / Open Sourcing Case" sent the rep to a second screen to make the same decision.
+  await expect(sourcingRow.getByRole('button', { name: 'Find supplier' })).toBeVisible();
 });
 
 test('05 out-of-stock RFQ line opens a real Sourcing Case with known Suppliers', async ({ page }) => {
