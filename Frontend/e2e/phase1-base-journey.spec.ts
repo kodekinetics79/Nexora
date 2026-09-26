@@ -304,10 +304,12 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await expect(page.getByRole('button', { name: 'Open Canonical Lead' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export PDF' })).toBeDisabled();
 
-    // The operator repeats the same visible action from the RFQ. The service must return the
-    // original draft rather than create a second commercial record.
+    // The operator returns to the RFQ. The header no longer offers to prepare a draft a second
+    // time: it names the draft that exists and opens THAT one, so there is no visible route to a
+    // second commercial record. The quote count below proves only one was ever created.
     await page.goto(`/procurement/rfqs/view/${partialRfqId}`);
-    await page.getByRole('button', { name: 'Prepare Quote Draft' }).click();
+    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toHaveCount(0);
+    await page.getByRole('button', { name: /^Open QT-/ }).click();
     await expect(page).toHaveURL(`/sales/quotes/view/${partialQuoteId}`);
     const quotesResponse = await readApi(page, await token(page), '/api/Quote?pageNumber=1&pageSize=250');
     expect(quotesResponse.ok(), await quotesResponse.text()).toBeTruthy();
@@ -364,8 +366,10 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
     expect((await quoteResponse.json()).revisionImpact).toBe('DRAFT_STALE_REVIEW_REQUIRED');
     await page.goto(`/sales/quotes/view/${partialQuoteId}`);
-    await expect(page.getByText('Customer Revision Received', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Mark review complete' })).toBeVisible();
+    // The panel names the revision and offers the two honest choices: apply the new quantities,
+    // or keep the draft as quoted (which records the review).
+    await expect(page.getByText('Customer revision received', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Keep as quoted' })).toBeVisible();
     await page.getByRole('button', { name: 'Open Canonical Lead' }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/leads/view/${env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID}$`));
     await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();

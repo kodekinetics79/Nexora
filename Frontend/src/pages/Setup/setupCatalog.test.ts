@@ -112,19 +112,31 @@ describe('the setup catalogue', () => {
     // a URL change: bookmarks, the a11y spec's title assertions and the e2e suite all point at
     // these paths. A rename here would spend those links to buy nothing the reader can see.
     expect(SETUP_ADOPTED_ROUTES.map((route) => route.path).sort()).toEqual([
-      '/admin/platform/ai-trust',
       '/admin/platform/archive',
       '/admin/platform/integrations',
-      '/admin/platform/lifecycle',
-      '/admin/platform/quality',
-      '/admin/platform/releases',
       '/admin/platform/retention',
-      '/admin/platform/taxonomy',
       '/security/roles',
       '/security/users',
     ]);
     for (const route of SETUP_ADOPTED_ROUTES) {
       expect(route.path.startsWith('/setup'), `${route.path} is not an adopted address`).toBe(false);
+    }
+  });
+
+  it('shows a tenant no platform raw material: no AI policy, model, taxonomy or release screen', () => {
+    // Owner decision 2026-09-16: providers, model policy, extraction skills, lifecycle, quality
+    // thresholds and release control are configured at Platform Admin level. A client buys the
+    // finished product and never sees the ingredients, so none of these may be listed or routed.
+    const platformOnly = ['/admin/platform/ai-trust', '/admin/platform/taxonomy', '/admin/platform/lifecycle', '/admin/platform/quality', '/admin/platform/releases'];
+    for (const path of platformOnly) {
+      expect(SETUP_ENTRIES.find((entry) => entry.path === path), `${path} is listed to tenants`).toBeUndefined();
+      expect(SETUP_ADOPTED_ROUTES.find((route) => route.path === path), `${path} is routed for tenants`).toBeUndefined();
+    }
+    expect(SETUP_GROUPS.find((group) => group.key === 'ai-governance')).toBeUndefined();
+    for (const entry of SETUP_ENTRIES) {
+      for (const word of ['model', 'llm', 'egress', 'provider', 'token']) {
+        expect(`${entry.label} ${entry.description}`.toLowerCase(), `${entry.key} names platform machinery: ${word}`).not.toContain(word);
+      }
     }
   });
 

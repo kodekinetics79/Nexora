@@ -1139,7 +1139,9 @@ const DecidePage: React.FC = () => {
       <ResolveClientDialog
         open={customerDialogOpen}
         leadId={customerDialogOpen ? leadId : null}
-        prefill={{ email: workbench.senderEmail, contactName: workbench.buyerName }}
+        // The organisation the document printed opens the search, so "no match" is the start of
+        // adding the client rather than a name to retype.
+        prefill={{ name: workbench.extractedClientName, email: workbench.senderEmail, contactName: workbench.buyerName }}
         onClose={() => setCustomerDialogOpen(false)}
         onResolved={() => { setCustomerDialogOpen(false); void refresh(); }}
       />

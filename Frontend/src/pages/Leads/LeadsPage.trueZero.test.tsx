@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SnackbarProvider } from 'notistack';
@@ -8,8 +8,8 @@ import LeadsPage from './LeadsPage';
 /**
  * A tenant with NO inquiries, read by the people the list opens narrowed for.
  *
- * The grid opens on a working set — "Unassigned" for a manager, "Mine" for a rep — and the
- * empty-state copy keyed only on whether a filter was active. So a brand-new tenant's manager
+ * The grid can be narrowed to "Unassigned" or "Mine", and the empty-state copy keyed only on
+ * whether a filter was active. So a brand-new tenant's manager who narrowed to Unassigned
  * read "Every inquiry here already has an owner" over a list that had nothing to own, and the
  * banner for a reader without a rep profile pointed at "Sales > Rep directory", a menu path that
  * does not exist in the rail. Both told a day-one user to look for something that was not there.
@@ -99,9 +99,12 @@ beforeEach(() => {
 });
 
 describe('LeadsPage — a tenant with no inquiries at all', () => {
-  it('says "No inquiries yet" to a manager even though the list opened narrowed to Unassigned', async () => {
+  it('says "No inquiries yet" to a manager even when they narrow the list to Unassigned', async () => {
     tenantHolds(0);
     renderPage();
+    await screen.findByText(/no inquiries yet/i);
+    fireEvent.click(screen.getByRole('button', { name: /^unassigned$/i }));
+    await waitFor(() => expect(getAll.mock.calls.some((call) => String((call[0] as { view?: string }).view).includes('unassigned'))).toBe(true));
 
     expect(await screen.findByText(/no inquiries yet/i)).toBeInTheDocument();
     expect(screen.queryByText(/every inquiry here already has an owner/i)).not.toBeInTheDocument();
@@ -112,6 +115,7 @@ describe('LeadsPage — a tenant with no inquiries at all', () => {
   it('still says the filter emptied the list when the tenant does hold inquiries', async () => {
     tenantHolds(3);
     renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /^unassigned$/i }));
 
     expect(await screen.findByText(/every inquiry here already has an owner/i)).toBeInTheDocument();
     expect(screen.queryByText(/no inquiries yet/i)).not.toBeInTheDocument();

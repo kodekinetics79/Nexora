@@ -88,6 +88,26 @@ namespace ERP_RFQ_Automation.Notifications.Templating
 </table>
 """;
 
+        /// <summary>
+        /// The frame a SUPPLIER sees: the buying company's name in the header and footer, never the
+        /// platform's, and no link into Nexora (a supplier has no login there). Owner rule 2026-09-16:
+        /// the request is the company's; Nexora is the paper it is written on.
+        /// </summary>
+        private static string WrapForSupplier(string title, string preheader, string content) =>
+            Wrap(title, preheader, content)
+                .Replace(
+                    """<span style="font-size:22px; font-weight:700; letter-spacing:0.5px; color:#ffffff;">Nexora</span>""",
+                    """<span style="font-size:22px; font-weight:700; letter-spacing:0.5px; color:#ffffff;">{{buyerCompany}}</span>""")
+                .Replace(
+                    """<span style="font-size:12px; color:#94a3b8; margin-left:8px;">Supply &amp; Procurement</span>""",
+                    """<span style="font-size:12px; color:#94a3b8; margin-left:8px;">Request for Quotation</span>""")
+                .Replace(
+                    "This is an automated message from the Nexora platform. If you were not expecting it, you can safely ignore it.",
+                    "Sent by {{buyerCompany}}. Please reply to this email with your quotation.")
+                .Replace(
+                    """<p style="margin:8px 0 0 0; color:#94a3b8; font-size:12px;">&copy; Nexora &middot; Automated notification</p>""",
+                    string.Empty);
+
         private static string Wrap(string title, string preheader, string content) =>
             Shell
                 .Replace("{{__TITLE__}}", title)
@@ -137,39 +157,41 @@ Review it here: {{ctaUrl}}
 
                 [RfqToSupplier] = new EmailTemplateDefinition
                 {
-                    Subject = "Request for Quotation {{rfqNumber}} from {{buyerCompany}}",
-                    Html = Wrap(
+                    Subject = "{{subjectLine}}",
+                    Html = WrapForSupplier(
                         "Request for Quotation",
-                        "You've received a new RFQ from {{buyerCompany}} on Nexora.",
+                        "{{buyerCompany}} is asking for your quotation.",
                         """
 <h1 style="margin:0 0 16px 0; font-size:20px; color:#0f172a;">Request for Quotation</h1>
-<p style="margin:0 0 16px 0;">Dear {{supplierName}},</p>
-<p style="margin:0 0 16px 0;">{{buyerCompany}} invites you to submit a quotation for the following request. We'd appreciate your best pricing and lead times.</p>
+<p style="margin:0 0 16px 0;">{{greetingHtml}}</p>
+<p style="margin:0 0 16px 0;">{{openingHtml}}</p>
 <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:8px 0; border-collapse:collapse;">
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px; width:40%;">RFQ number</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{rfqNumber}}</td></tr>
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Title</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{rfqTitle}}</td></tr>
-  <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Items</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{itemSummary}}</td></tr>
+{{itemRowsHtml}}
   <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Respond by</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{dueDate}}</td></tr>
 </table>
-<p style="margin:0 0 8px 0;">{{message}}</p>
-""" + CtaButton),
+<p style="margin:0 0 8px 0;">{{messageHtml}}</p>
+<p style="margin:16px 0 8px 0;">Please reply to this email with your price, availability, lead time and how long your price is valid.</p>
+<p style="margin:0 0 8px 0;">{{signOffHtml}}</p>
+"""),
                     Text = """
 Request for Quotation {{rfqNumber}}
 
-Dear {{supplierName}},
+{{greeting}}
 
-{{buyerCompany}} invites you to submit a quotation for the following request.
+{{opening}}
 
 RFQ number: {{rfqNumber}}
 Title:      {{rfqTitle}}
-Items:      {{itemSummary}}
+{{itemRowsText}}
 Respond by: {{dueDate}}
 
 {{message}}
 
-Submit your quotation here: {{ctaUrl}}
+Please reply to this email with your price, availability, lead time and how long your price is valid.
 
-— Nexora (automated notification)
+{{signOff}}
 """
                 },
 

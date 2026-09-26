@@ -56,18 +56,7 @@ namespace ERP_RFQ_Automation.Notifications
             RfqToSupplierNotification request,
             CancellationToken ct = default)
         {
-            var model = new Dictionary<string, string?>
-            {
-                ["supplierName"] = request.SupplierName,
-                ["buyerCompany"] = request.BuyerCompany,
-                ["rfqNumber"] = request.RfqNumber,
-                ["rfqTitle"] = request.RfqTitle,
-                ["itemSummary"] = request.ItemSummary,
-                ["dueDate"] = request.DueDate,
-                ["message"] = request.Message,
-                ["ctaUrl"] = ResolveCta(request.CtaPath),
-                ["ctaLabel"] = "Submit quotation"
-            };
+            var model = RfqToSupplierModel(request, ResolveCta(request.CtaPath));
             return DispatchWithReceiptAsync(EmailTemplates.RfqToSupplier, request, model, ct);
         }
 
@@ -181,9 +170,16 @@ namespace ERP_RFQ_Automation.Notifications
                     // mailbox when it has one (issue #54). Parsed, not assumed: a request with no
                     // parseable business unit is system mail and leaves from the platform address.
                     OwningBusinessUnitId = OwningBusinessUnit(request.BusinessUnitId),
+                    OwningMailboxId = request.SendFromMailboxId,
+                    FromDisplayName = string.IsNullOrWhiteSpace(request.FromDisplayName) ? null : request.FromDisplayName,
+                    ReplyTo = string.IsNullOrWhiteSpace(request.ReplyToAddress) ? null : new EmailAddress(request.ReplyToAddress.Trim()),
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
+                foreach (var cc in request.CcAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Cc.Add(new EmailAddress(cc.Trim()));
+                foreach (var bcc in request.BccAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Bcc.Add(new EmailAddress(bcc.Trim()));
 
                 var receipt = await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
 
@@ -233,9 +229,16 @@ namespace ERP_RFQ_Automation.Notifications
                     // mailbox when it has one (issue #54). Parsed, not assumed: a request with no
                     // parseable business unit is system mail and leaves from the platform address.
                     OwningBusinessUnitId = OwningBusinessUnit(request.BusinessUnitId),
+                    OwningMailboxId = request.SendFromMailboxId,
+                    FromDisplayName = string.IsNullOrWhiteSpace(request.FromDisplayName) ? null : request.FromDisplayName,
+                    ReplyTo = string.IsNullOrWhiteSpace(request.ReplyToAddress) ? null : new EmailAddress(request.ReplyToAddress.Trim()),
                     Attachments = request.Attachments
                 };
                 message.AddTo(request.ToEmail, request.ToName);
+                foreach (var cc in request.CcAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Cc.Add(new EmailAddress(cc.Trim()));
+                foreach (var bcc in request.BccAddresses.Where(x => !string.IsNullOrWhiteSpace(x)))
+                    message.Bcc.Add(new EmailAddress(bcc.Trim()));
 
                 var receipt = await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
                 if (receipt is null)
@@ -267,6 +270,55 @@ namespace ERP_RFQ_Automation.Notifications
         /// relative path is combined with <c>Notifications:AppBaseUrl</c>. When no
         /// path is supplied the app base URL is used.
         /// </summary>
+        /// <summary>
+        /// Rep-typed plain text made safe for the HTML part: encoded, with each line break kept as
+        /// a <c>&lt;br&gt;</c> so a two-paragraph message still reads as two paragraphs.
+        /// </summary>
+        /// <summary>The template model for a supplier request; shared with the Send window's preview.</summary>
+        internal static Dictionary<string, string?> RfqToSupplierModel(RfqToSupplierNotification request, string? ctaUrl)
+        {
+            var d = ERP_RFQ_Automation.Procurement.SupplierEmail.SupplierEmailDefaults.Texts;
+            string Wording(string value, string fallback) => string.IsNullOrWhiteSpace(value)
+                ? ERP_RFQ_Automation.Procurement.SupplierEmail.SupplierEmailDefaults.Fill(fallback, request.SupplierName, request.BuyerCompany, request.RfqNumber)
+                : value;
+            var greeting = Wording(request.Greeting, d.Greeting);
+            var opening = Wording(request.Opening, d.Opening);
+            var signOff = Wording(request.SignOff, d.SignOff);
+            var model = RfqToSupplierBaseModel(request, ctaUrl);
+            model["subjectLine"] = Wording(request.SubjectLine, d.Subject).Replace("\n", " ");
+            model["greeting"] = greeting;
+            model["greetingHtml"] = HtmlParagraph(greeting);
+            model["opening"] = opening;
+            model["openingHtml"] = HtmlParagraph(opening);
+            model["signOff"] = signOff;
+            model["signOffHtml"] = HtmlParagraph(signOff);
+            return model;
+        }
+
+        private static Dictionary<string, string?> RfqToSupplierBaseModel(RfqToSupplierNotification request, string? ctaUrl) => new()
+        {
+            ["supplierName"] = request.SupplierName,
+            ["buyerCompany"] = request.BuyerCompany,
+            ["rfqNumber"] = request.RfqNumber,
+            ["rfqTitle"] = request.RfqTitle,
+            ["itemSummary"] = request.ItemSummary,
+            // The renderer substitutes raw text, so the per-line rows are built (and HTML-encoded)
+            // here rather than trusting a product description with markup.
+            ["itemRowsHtml"] = RfqToSupplierLineFormatter.HtmlRows(request.Lines, request.ItemSummary),
+            ["itemRowsText"] = RfqToSupplierLineFormatter.TextRows(request.Lines, request.ItemSummary),
+            ["dueDate"] = request.DueDate,
+            ["message"] = request.Message,
+            // The rep types this; encode it before it enters the HTML part and keep their paragraph breaks.
+            ["messageHtml"] = HtmlParagraph(request.Message),
+            ["ctaUrl"] = ctaUrl,
+            ["ctaLabel"] = "Submit quotation"
+        };
+
+        private static string HtmlParagraph(string? text)
+            => System.Net.WebUtility.HtmlEncode(text ?? string.Empty)
+                .Replace("\r\n", "\n")
+                .Replace("\n", "<br>");
+
         private string ResolveCta(string? ctaPath)
         {
             var baseUrl = string.IsNullOrWhiteSpace(_options.AppBaseUrl)

@@ -119,6 +119,12 @@ const productService = {
     return response.data;
   },
 
+  /** Puts a part into the catalogue (true) or keeps it out (false) without touching anything else. */
+  setCatalogue: async (id: number, isCatalogItem: boolean): Promise<{ id: number; isCatalogItem: boolean }> => {
+    const response = await axiosInstance.post<{ id: number; isCatalogItem: boolean }>(`/api/Product/${id}/catalogue`, { isCatalogItem });
+    return response.data;
+  },
+
   create: async (data: FormData): Promise<ProductDTO> => {
     const response = await axiosInstance.post<ProductDTO>('/api/Product', data, {
       headers: { 'Content-Type': 'multipart/form-data' },

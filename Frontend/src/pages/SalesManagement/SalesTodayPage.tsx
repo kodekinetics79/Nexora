@@ -38,11 +38,36 @@ import opportunityPriorityService, {
   createOpportunityCommandIdentity,
   type OpportunityPriorityItem,
 } from '../../api/services/opportunityPriorityService';
+import extractionReviewService from '../../api/services/extractionReviewService';
+import leadService from '../../api/services/leadService';
 import { useAuth } from '../../context/AuthContext';
 import { MetricGrid, PageShell, QueryState, ResponsiveTable, formatDateTime } from './CommercialPagePrimitives';
 import { statusLabel } from '../../utils/statusLabels';
+import { formatDateSafe } from '../../utils/dates';
 
 const percentage = (value: number) => `${value <= 1 ? Math.round(value * 100) : Math.round(value)}%`;
+
+/**
+ * One row of the attention queue, whatever it came from. The server's follow-up items are one
+ * source; the two piles the tiles above already count — inquiries nobody owns and documents a
+ * person still has to check — are the others. The tiles said "Unassigned leads 2" while the queue
+ * beneath them said "Nothing requires sales attention right now"; the same page contradicting
+ * itself. The rows now come from the same reads the Inbox uses for those piles.
+ */
+export interface AttentionRow {
+  key: string;
+  priority: string;
+  reference: string;
+  customer: string;
+  owner: string;
+  reason: string;
+  due?: string | null;
+  target: string | null;
+}
+
+/** "3 cases" / "1 case" — a sample size in words. */
+const cases = (count: number) => `${count} ${count === 1 ? 'case' : 'cases'}`;
+
 const money = (value?: number | null, currency?: string | null) => value == null
   ? 'Not measured'
   : `${currency ?? ''} ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`.trim();
@@ -95,11 +120,14 @@ function CoachingFindingRow({ item, canAcknowledge, onOpen, onAcknowledge }: {
         </Box>
         <Chip size="small" label={statusLabel(item.severity)} color={severityColor(item.severity)} />
       </Stack>
+      {/* One sentence a manager can repeat to the rep: what was seen, what was expected, on how many
+          cases. The policy version and the confidence figure are machinery, not coaching. */}
       <Typography variant="body2">
-        {item.observedValue == null ? 'Observed value not available' : `Observed ${item.observedValue}${item.observedUnit ? ` ${item.observedUnit}` : ''}`}
-        {item.thresholdValue == null ? '' : `; policy threshold ${item.thresholdValue}`}. Sample {item.sampleSize}; confidence {percentage(item.confidence)}.
+        {item.observedValue == null
+          ? `Nothing measurable yet, from ${cases(item.sampleSize)}.`
+          : `Seen ${item.observedValue}${item.observedUnit ? ` ${item.observedUnit}` : ''}${item.thresholdValue == null ? '' : `, expected at least ${item.thresholdValue}`}, from ${cases(item.sampleSize)}.`}
       </Typography>
-      <Typography variant="caption" color="text.secondary">Policy {item.policyVersion} | Evidence through {formatDateTime(item.asOf)}</Typography>
+      <Typography variant="caption" color="text.secondary">Evidence through {formatDateTime(item.asOf)}</Typography>
       {item.latestAcknowledgement && <Alert severity="success" sx={{ py: 0 }}>{statusLabel(item.latestAcknowledgement.disposition)}: {item.latestAcknowledgement.reason}</Alert>}
       <SourceEvidence evidence={item.evidence} identity={`finding-${item.findingKey}`} />
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
@@ -178,7 +206,7 @@ function PriorityMobileCard({ item, onOpen }: { item: OpportunityPriorityItem; o
           <Typography variant="body2"><strong>Sample:</strong> {item.sampleSize}</Typography>
         </Box>
         <Typography variant="caption" color="text.secondary">
-          Policy {item.policyVersion} | Evidence through {formatDateTime(item.evidenceCutoffAtUtc)}
+          Evidence as of {formatDateTime(item.evidenceCutoffAtUtc)}
         </Typography>
         <RecommendationEvidence item={item} idPrefix="mobile" />
         <Button variant="outlined" endIcon={<OpenInNew />} onClick={onOpen} aria-label={`Open opportunity ${item.nexoraSerial}`}>
@@ -252,8 +280,70 @@ export default function SalesTodayPage() {
       await queryClient.invalidateQueries({ queryKey: ['commercial-intelligence', 'coaching-recovery'] });
     },
   });
-  const items = query.data?.attentionItems ?? [];
   const priorityItems = priorities.data?.items ?? [];
+
+  // The two piles the tiles count, read the way the Inbox reads them, so the queue and the tiles
+  // cannot disagree. Gated on the Leads module like everything else on this page that names a lead.
+  const canSeeLeads = hasPermission('Leads');
+  const unownedLeads = useQuery({
+    queryKey: ['sales-today', 'unowned-leads'],
+    queryFn: () => leadService.getOutstandingLeads({ pageNumber: 1, pageSize: 25, excludeAssigned: true }),
+    enabled: canSeeLeads,
+    refetchInterval: 60_000,
+    meta: { silenceGlobalError: true },
+  });
+  const documentsToCheck = useQuery({
+    queryKey: ['sales-today', 'documents-to-check'],
+    queryFn: () => extractionReviewService.getNeedsReview({ pageNumber: 1, pageSize: 25 }),
+    enabled: canSeeLeads,
+    refetchInterval: 60_000,
+    meta: { silenceGlobalError: true },
+  });
+
+  const attentionRows = useMemo<AttentionRow[]>(() => {
+    const rows: AttentionRow[] = (query.data?.attentionItems ?? []).map((item) => ({
+      key: `${item.recordType}-${item.id}`,
+      priority: item.priority,
+      reference: item.nexoraSerial || item.reference,
+      customer: item.customerName || 'Customer unresolved',
+      owner: item.ownerName || 'Unassigned',
+      reason: item.reason,
+      due: item.dueAt,
+      target: item.recordType.toLowerCase() === 'quote'
+        ? `/sales/quotes/view/${item.recordId}`
+        : item.recordType.toLowerCase() === 'lead'
+          ? `/procurement/leads/view/${item.recordId}`
+          : item.nexoraSerial ? `/commercial-cases?search=${encodeURIComponent(item.nexoraSerial)}` : null,
+    }));
+    for (const lead of unownedLeads.data?.items ?? []) {
+      rows.push({
+        key: `unowned-lead-${lead.id}`,
+        priority: lead.isUnassignedOverdue ? 'Critical' : 'Waiting',
+        reference: lead.rfqno || `Inquiry ${lead.id}`,
+        customer: lead.customerName || lead.buyersName || 'Customer not resolved',
+        owner: 'Nobody yet',
+        reason: lead.unassignedHours != null && lead.unassignedHours >= 1
+          ? `Nobody owns this inquiry; waiting ${Math.round(lead.unassignedHours)} h`
+          : 'Nobody owns this inquiry yet',
+        due: lead.requiredDeliveryDate,
+        target: `/procurement/leads/view/${lead.id}`,
+      });
+    }
+    for (const document of documentsToCheck.data?.items ?? []) {
+      rows.push({
+        key: `document-${document.id}`,
+        priority: 'Waiting',
+        reference: document.rfqno || `Document ${document.id}`,
+        customer: document.buyersName || 'Buyer not read yet',
+        owner: 'Nobody yet',
+        reason: 'A person has to check what was read from this document',
+        due: document.bidClosingDate,
+        target: `/procurement/extraction/review/${document.id}`,
+      });
+    }
+    return rows;
+  }, [query.data, unownedLeads.data, documentsToCheck.data]);
+  const attentionLoading = query.isLoading || (canSeeLeads && (unownedLeads.isLoading || documentsToCheck.isLoading));
 
   const scopeSubtitle = query.data?.scope === 'tenant'
     ? 'Tenant-wide commercial work that needs attention now.'
@@ -264,15 +354,18 @@ export default function SalesTodayPage() {
   return <PageShell title="Sales today" subtitle={scopeSubtitle}>
     <MetricGrid metrics={query.data?.metrics ?? []} />
 
-    <Stack spacing={1.5} sx={{ mb: 3 }}>
+    {/* Shown only when there is a suggested order of work to show. An empty block that explained
+        its own cohort statistics ("0 eligible | 0 insufficient evidence…") said nothing a rep could
+        use; a manager who can rebuild the suggestions still gets the button. */}
+    {(priorities.isLoading || priorities.isError || priorityItems.length > 0 || canReconcile) && <Stack spacing={1.5} sx={{ mb: 3 }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' } }}>
         <Box>
-          <Typography variant="h6" sx={{ fontWeight: 900 }}>Opportunity priority</Typography>
+          <Typography variant="h6" sx={{ fontWeight: 900 }}>Suggested order of work</Typography>
           <Typography variant="body2" color="text.secondary">
-            Server-ranked guidance in shadow mode. Opening a recommendation does not execute or change commercial workflow.
+            Nexora&apos;s suggestion of what to pick up first. Opening one changes nothing.
           </Typography>
         </Box>
-        {canReconcile && <Tooltip title="Reconcile persisted opportunity evidence">
+        {canReconcile && <Tooltip title="Rebuild the suggestions from today's evidence">
           <span>
             <Button
               variant="outlined"
@@ -280,37 +373,32 @@ export default function SalesTodayPage() {
               disabled={reconcile.isPending}
               onClick={() => reconcile.mutate()}
             >
-              {reconcile.isPending ? 'Reconciling...' : 'Reconcile'}
+              {reconcile.isPending ? 'Rebuilding...' : 'Rebuild suggestions'}
             </Button>
           </span>
         </Tooltip>}
       </Stack>
-      {reconcile.isError && <Alert severity="error">{reconcile.error instanceof Error ? reconcile.error.message : 'Opportunity evidence could not be reconciled. Retry safely.'}</Alert>}
-      {reconcile.isSuccess && <Alert severity="success">Reconciliation completed for {reconcile.data.evaluated} opportunities across all available batches.</Alert>}
-      {priorities.data && (
-        <Stack spacing={0.25}>
-          <Typography variant="caption" color="text.secondary">
-            Scope: {statusLabel(priorities.data.accessScope)} | Generated {formatDateTime(priorities.data.generatedAtUtc)}
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            Cohort: {priorities.data.cohort.eligibleRecommendations} eligible | {priorities.data.cohort.insufficientEvidenceRecommendations} insufficient evidence | {priorities.data.cohort.recommendationsWithObservedOutcome} with observed outcomes. Accuracy: {priorities.data.cohort.accuracyStatus}
-          </Typography>
-        </Stack>
+      {reconcile.isError && <Alert severity="error">{reconcile.error instanceof Error ? reconcile.error.message : 'The suggestions could not be rebuilt. Nothing was changed — try again.'}</Alert>}
+      {reconcile.isSuccess && <Alert severity="success">Suggestions rebuilt for {reconcile.data.evaluated} opportunities.</Alert>}
+      {priorities.data && priorityItems.length > 0 && (
+        <Typography variant="caption" color="text.secondary">
+          Last worked out {formatDateTime(priorities.data.generatedAtUtc)}
+        </Typography>
       )}
       <QueryState
         loading={priorities.isLoading}
         error={priorities.isError}
         empty={!priorityItems.length}
         onRetry={() => void priorities.refetch()}
-        emptyText="No persisted shadow priorities are available for this scope."
+        emptyText="No suggestions yet. They appear once there are open inquiries with enough history to rank."
       >
         <Box sx={{ display: { xs: 'grid', md: 'none' }, gap: 1.5 }}>
           {priorityItems.map((item) => <PriorityMobileCard key={item.recommendationId} item={item} onOpen={() => navigate(`/commercial-cases/${item.commercialCaseId}`)} />)}
         </Box>
         <Box sx={{ display: { xs: 'none', md: 'block' } }}>
-          <ResponsiveTable label="Opportunity priority shadow queue">
+          <ResponsiveTable label="Suggested order of work">
             <Table size="small">
-              <TableHead><TableRow><TableCell>Rank</TableCell><TableCell>Opportunity</TableCell><TableCell>Recommendation</TableCell><TableCell>Priority evidence</TableCell><TableCell>Confidence</TableCell><TableCell>Evidence version</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead>
+              <TableHead><TableRow><TableCell>Rank</TableCell><TableCell>Opportunity</TableCell><TableCell>Recommendation</TableCell><TableCell>Priority evidence</TableCell><TableCell>Confidence</TableCell><TableCell>Evidence as of</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead>
               <TableBody>
                 {priorityItems.map((item) => (
                   <TableRow hover key={item.recommendationId}>
@@ -319,7 +407,7 @@ export default function SalesTodayPage() {
                     <TableCell><Typography sx={{ fontWeight: 800 }}>{item.recommendedActionLabel}</Typography><Typography variant="caption" color="text.secondary">Blocker: {item.currentBlocker}</Typography><br /><Typography variant="caption" color="text.secondary">Deadline: {item.responseDeadline ? formatDateTime(item.responseDeadline) : 'Not available'}</Typography><RecommendationEvidence item={item} idPrefix="desktop" /></TableCell>
                     <TableCell><Typography variant="body2">{item.priorityBand} | Score {item.priorityScore}</Typography><Typography variant="caption" color="text.secondary">Advisory ECV {money(item.expectedCommercialValue, item.expectedCommercialValueCurrency)} | {statusLabel(item.expectedCommercialValueStatus)}</Typography><br /><Typography variant="caption" color="text.secondary">Not used in cross-currency rank | Completeness {percentage(item.completeness)} | Sample {item.sampleSize}</Typography></TableCell>
                     <TableCell>{percentage(item.confidence)}</TableCell>
-                    <TableCell><Typography variant="body2">Policy {item.policyVersion}</Typography><Typography variant="caption" color="text.secondary">Through {formatDateTime(item.evidenceCutoffAtUtc)}</Typography></TableCell>
+                    <TableCell><Typography variant="body2">{formatDateTime(item.evidenceCutoffAtUtc)}</Typography></TableCell>
                     <TableCell align="right"><Button size="small" endIcon={<OpenInNew />} onClick={() => navigate(`/commercial-cases/${item.commercialCaseId}`)} aria-label={`Open opportunity ${item.nexoraSerial}`}>Open opportunity</Button></TableCell>
                   </TableRow>
                 ))}
@@ -338,12 +426,12 @@ export default function SalesTodayPage() {
           </Stack>
         )}
       </QueryState>
-    </Stack>
+    </Stack>}
 
     <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Attention queue</Typography>
-    <QueryState loading={query.isLoading} error={query.isError} hasData={query.data !== undefined} updatedAt={query.dataUpdatedAt} empty={!items.length} onRetry={() => void query.refetch()} emptyText="Nothing requires sales attention right now.">
+    <QueryState loading={attentionLoading} error={query.isError} hasData={query.data !== undefined} updatedAt={query.dataUpdatedAt} empty={!attentionRows.length} onRetry={() => { void query.refetch(); void unownedLeads.refetch(); void documentsToCheck.refetch(); }} emptyText="Nothing is waiting on you right now: every inquiry has an owner, every document has been checked, and no follow-up is due.">
       <ResponsiveTable label="Sales attention queue"><Table size="small"><TableHead><TableRow><TableCell>Priority</TableCell><TableCell>Reference</TableCell><TableCell>Customer</TableCell><TableCell>Owner</TableCell><TableCell>Why it needs attention</TableCell><TableCell>Due</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>
-        {items.map(item => { const target = item.recordType.toLowerCase() === 'quote' ? `/sales/quotes/view/${item.recordId}` : item.recordType.toLowerCase() === 'lead' ? `/procurement/leads/view/${item.recordId}` : item.nexoraSerial ? `/commercial-cases?search=${encodeURIComponent(item.nexoraSerial)}` : null; return <TableRow hover key={`${item.recordType}-${item.id}`}><TableCell><Chip size="small" label={item.priority} color={item.priority.toLowerCase() === 'critical' ? 'error' : 'warning'} /></TableCell><TableCell>{item.nexoraSerial || item.reference}</TableCell><TableCell>{item.customerName || 'Customer unresolved'}</TableCell><TableCell>{item.ownerName || 'Unassigned'}</TableCell><TableCell>{item.reason}</TableCell><TableCell>{formatDateTime(item.dueAt)}</TableCell><TableCell align="right">{target && <Button size="small" endIcon={<OpenInNew />} onClick={() => navigate(target)}>Open</Button>}</TableCell></TableRow>; })}
+        {attentionRows.map(row => <TableRow hover key={row.key}><TableCell><Chip size="small" label={row.priority} color={row.priority.toLowerCase() === 'critical' ? 'error' : 'warning'} /></TableCell><TableCell>{row.reference}</TableCell><TableCell>{row.customer}</TableCell><TableCell>{row.owner}</TableCell><TableCell>{row.reason}</TableCell><TableCell>{row.due ? formatDateSafe(row.due) : 'Not stated'}</TableCell><TableCell align="right">{row.target && <Button size="small" endIcon={<OpenInNew />} onClick={() => navigate(row.target!)}>Open</Button>}</TableCell></TableRow>)}
       </TableBody></Table></ResponsiveTable>
     </QueryState>
 
@@ -351,7 +439,7 @@ export default function SalesTodayPage() {
       <Typography id="coaching-recovery-heading" variant="h6" sx={{ fontWeight: 900 }}>Coaching and recovery</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>Evidence-backed coaching and recoverable commercial work for the selected 90-day cohort.</Typography>
       {coaching.data && <Typography variant="caption" color="text.secondary">
-        Scope: {statusLabel(coaching.data.scope)} | Policy {coaching.data.policyVersion} | Generated {formatDateTime(coaching.data.generatedAt)}
+        {statusLabel(coaching.data.scope)} · worked out {formatDateTime(coaching.data.generatedAt)}
       </Typography>}
       {coaching.data?.dataCompleteness.status === 'partial' && <Alert severity="warning" sx={{ mt: 1 }}>
         This cohort is partial because the bounded source limit was reached for: {coaching.data.dataCompleteness.incompleteSources.join(', ')}.

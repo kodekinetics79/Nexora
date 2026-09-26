@@ -99,6 +99,11 @@ public static class TenantBaselineCatalog
     //                      be rejected with a reason.
     //   RFQType            The RFQ form's type picker (Direct vs Agreement pricing).
     //   QuoteOutcomeReason The reason recorded when a quote is lost or withdrawn.
+    //   LineSkipReason     Why one line of a request is left out of the quote, chosen on the
+    //                      decision screen before any quote exists. Its own list, because the
+    //                      quote-outcome words ("Lost to competitor", "Expired automatically")
+    //                      describe how a quote ended and were being offered for a line that had
+    //                      not been quoted yet.
     //
     // Lifecycle states (LeadStatus, RFQStatus, QuoteStatus, OrderStatus, PaymentStatus) are NOT
     // here: they are governed by LifecyclePolicy and seeded from LifecycleStatusCatalog, and
@@ -151,6 +156,14 @@ public static class TenantBaselineCatalog
             new("CUSTOMER_CANCELLED", "Customer cancelled", "Customer cancelled"),
             new("NO_RESPONSE", "No response", "No response"),
             new("AUTO_EXPIRED", "Expired automatically", "Expired automatically"),
+            new("OTHER", "Other", "Other")
+        ]),
+        new("LineSkipReason",
+        [
+            new("PRICE", "Price too high", "Price too high"),
+            new("LEAD_TIME", "Lead time too long", "Lead time too long"),
+            new("NO_STOCK", "Item unavailable", "Item unavailable"),
+            new("OUT_OF_SCOPE", "Outside approved product scope", "Outside approved product scope"),
             new("OTHER", "Other", "Other")
         ])
     ];

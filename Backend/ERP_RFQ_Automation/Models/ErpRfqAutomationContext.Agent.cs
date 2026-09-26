@@ -116,6 +116,7 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.NexoraSerial).HasMaxLength(100);
             e.Property(x => x.SupplierRfqNumber).HasMaxLength(100);
             e.Property(x => x.Notes).HasMaxLength(1000);
+            e.Property(x => x.BuyerMessage).HasMaxLength(2000);
             e.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
             e.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
             e.Property(x => x.RequestedRfqItemIdsJson).HasColumnType("jsonb").HasDefaultValue("[]").IsRequired();

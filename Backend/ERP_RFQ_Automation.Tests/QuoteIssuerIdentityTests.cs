@@ -92,12 +92,13 @@ public class QuoteIssuerIdentityTests
     }
 
     [Fact]
-    public async Task A_missing_registration_is_named_on_the_document_rather_than_blocking_it()
+    public async Task A_missing_registration_is_omitted_from_the_document_and_refused_at_the_send()
     {
-        // Deliberately NOT symmetrical with identity. A tenant that is not yet VAT-registered
-        // still sends valid quotations, and the delivery note already prints this same gap on
-        // the face of the artefact instead of refusing. What must never happen is silence: the
-        // sender sees "not on file" on their own copy and can act on it.
+        // This used to print "VAT: not on file" on the face of the customer's copy, reasoning that
+        // silence was worse. Driving QT-0926-0001 (D28) showed what that reads as to a buyer: a
+        // seller advertising that it does not know its own registrations. The document now omits
+        // the line; the send-readiness check is where the gap is named, to the seller, with the
+        // screen that fixes it (QuoteSellerRegistrationTests). The preview still renders.
         using var db = new TestDb();
         await using var context = db.ContextFor(Tenant);
         var quoteId = SeedQuote(context, buyerEmail: "procurement@aramco.example");
@@ -105,8 +106,14 @@ public class QuoteIssuerIdentityTests
         var service = new QuoteService(context, null!, Configured());
         var text = PdfText(await service.GenerateQuotePdfAsync(quoteId, Tenant));
 
-        Assert.Contains("VAT:", text);
-        Assert.Contains("not on file", text);
+        // The registration gap is gone from the document. (This fixture has no customer, so the
+        // address block correctly reads "Address not on file" — a different, true statement.)
+        Assert.DoesNotContain("CR: not on file", text);
+        Assert.DoesNotContain("VAT: not on file", text);
+        Assert.DoesNotContain("VAT:", text);
+        Assert.DoesNotContain("CR:", text);
+        Assert.Contains((await service.EvaluateSendReadinessAsync(quoteId, Tenant)).Blockers,
+            x => x.Code == "SELLER_REGISTRATION_INCOMPLETE");
     }
 
     [Fact]

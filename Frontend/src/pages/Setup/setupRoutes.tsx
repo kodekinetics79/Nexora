@@ -7,6 +7,7 @@ const WarehousePage = lazyWithRetry(() => import('./Warehouse/WarehousePage'));
 const UomPage = lazyWithRetry(() => import('./UOM/UomPage'));
 const LocationMaster = lazyWithRetry(() => import('./Location/LocationMaster'));
 const QuoteFormatPage = lazyWithRetry(() => import('./QuoteFormat/QuoteFormatPage'));
+const SupplierEmailPage = lazyWithRetry(() => import('./SupplierEmail/SupplierEmailPage'));
 const BusinessUnitPage = lazyWithRetry(() => import('./BusinessUnit/BusinessUnitPage'));
 const PriceStructurePage = lazyWithRetry(() => import('./PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazyWithRetry(() => import('./Sla/SlaSettingsPage'));
@@ -20,13 +21,8 @@ const CustomFieldsPage = lazyWithRetry(() => import('./CustomFields/CustomFields
 // "Platform Governance" rails.
 const UsersPage = lazyWithRetry(() => import('../Security/Users/UsersPage'));
 const RolesPermissionsPage = lazyWithRetry(() => import('../Security/Roles/RolesPermissionsPage'));
-const TaxonomySkillStudioPage = lazyWithRetry(() => import('../PlatformGovernance/TaxonomySkillStudioPage'));
-const AiTrustCenterPage = lazyWithRetry(() => import('../PlatformGovernance/AiTrustCenterPage'));
-const LifecycleStudioPage = lazyWithRetry(() => import('../PlatformGovernance/LifecycleStudioPage'));
 const IntegrationHubPage = lazyWithRetry(() => import('../PlatformGovernance/IntegrationHubPage'));
-const ReleaseCenterPage = lazyWithRetry(() => import('../PlatformGovernance/ReleaseCenterPage'));
 const CommercialDocumentArchivePage = lazyWithRetry(() => import('../PlatformGovernance/CommercialDocumentArchivePage'));
-const QualityAnalyticsPage = lazyWithRetry(() => import('../PlatformGovernance/QualityAnalyticsPage'));
 const StorageRetentionPage = lazyWithRetry(() => import('../PlatformGovernance/StorageRetentionPage'));
 
 export interface SetupRoute {
@@ -74,6 +70,9 @@ export const SETUP_ROUTES: SetupRoute[] = [
   // onto "Business Units". "Locations" is not a permission module and nothing enforces it.
   { path: 'locations', moduleName: 'Business Units', component: LocationMaster },
   { path: 'quote-format', moduleName: 'Quote Configuration', component: QuoteFormatPage },
+  // The wording around supplier RFQ emails (subject, greeting, opening, message, signature). It is
+  // company-facing document wording like the quote format, so it shares that module.
+  { path: 'supplier-email', moduleName: 'Quote Configuration', component: SupplierEmailPage },
   { path: 'business-unit', moduleName: 'Business Units', component: BusinessUnitPage },
   // Margin and mark-up structures a quote line is priced against — guarded by "Quotations",
   // the module that owns quote pricing. Stored as Setup_Master rows, so the server rule is
@@ -120,15 +119,13 @@ export const SETUP_ROUTES: SetupRoute[] = [
  * mounts these under the same `SetupShell` as the rest, so they carry the breadcrumb and the jump
  * field and read as part of Setup regardless of the address bar.
  */
+// The AI trust, taxonomy, lifecycle, quality and release studios are no longer mounted for a
+// tenant. They are platform configuration (see the note in setupCatalog.tsx); the pages stay in
+// PlatformGovernance/ for the Platform Admin app to host.
 export const SETUP_ADOPTED_ROUTES: SetupRoute[] = [
   { path: '/security/users', moduleName: 'Users', component: UsersPage },
   { path: '/security/roles', moduleName: 'Roles & Permissions', component: RolesPermissionsPage },
-  { path: '/admin/platform/taxonomy', moduleName: 'Users', component: TaxonomySkillStudioPage },
-  { path: '/admin/platform/ai-trust', moduleName: 'Users', component: AiTrustCenterPage },
-  { path: '/admin/platform/lifecycle', moduleName: 'Users', component: LifecycleStudioPage },
   { path: '/admin/platform/integrations', moduleName: 'Users', component: IntegrationHubPage },
-  { path: '/admin/platform/releases', moduleName: 'Users', component: ReleaseCenterPage },
   { path: '/admin/platform/archive', moduleName: 'Users', component: CommercialDocumentArchivePage },
-  { path: '/admin/platform/quality', moduleName: 'Users', component: QualityAnalyticsPage },
   { path: '/admin/platform/retention', moduleName: 'Users', component: StorageRetentionPage },
 ];

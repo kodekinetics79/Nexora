@@ -1129,6 +1129,21 @@ namespace ERP_RFQ_Automation.Repositories
                 .ToListAsync();
             var needingCheckByLead = ledgerLines.ToDictionary(x => x.LeadId, x => x.NeedingCheck);
 
+            // A unit the business has never transacted in ("BANANAS") is a reason to check the
+            // document, and the queue must say so — the review screen flags the line for the
+            // same reason. Judged by the ONE canonicaliser the write path uses, against the
+            // tenant's own unit table, so the queue never disagrees with what a save would accept.
+            var lineUnits = await _context.LeadItems.AsNoTracking()
+                .Where(i => leadIds.Contains(i.LeadId) && i.UnitOfMeasure != null && i.UnitOfMeasure != "")
+                .Select(i => new { i.LeadId, i.UnitOfMeasure })
+                .ToListAsync();
+            var tenantUnits = await _context.SetUoms.AsNoTracking()
+                .Where(u => u.BusinessUnitId == businessUnitId && u.IsActive)
+                .ToListAsync();
+            var unitReasonsByLead = UnitReviewReasons(
+                lineUnits.Select(x => (x.LeadId, x.UnitOfMeasure!)),
+                ERP_RFQ_Automation.Services.Uom.SetUomVocabulary.From(tenantUnits));
+
             var dtos = leads.Select(l => new LeadNeedsReviewItemDTO
             {
                 Id = l.Id,
@@ -1139,7 +1154,9 @@ namespace ERP_RFQ_Automation.Repositories
                 LeadSource = l.LeadSource,
                 Aiconfidence = l.Aiconfidence,
                 ItemCount = l.ItemCount,
-                ReviewReason = ExtractReviewReason(l.HeaderRemarks),
+                ReviewReason = JoinReviewReasons(
+                    ExtractReviewReason(l.HeaderRemarks),
+                    unitReasonsByLead.GetValueOrDefault(l.Id)),
                 ReceivedOn = l.ReceivedOn,
                 ReviewVersion = l.ReviewVersion,
                 // Null, not zero: a document whose extraction path wrote no ledger has no
@@ -1305,9 +1322,7 @@ namespace ERP_RFQ_Automation.Repositories
             var historicalAutoVerificationNeedsHumanAuthority = action == "approve"
                 && lead.CommercialFactsVerified
                 && !lead.RequiresCommercialReview
-                && string.Equals(lead.ReviewApprovedBy,
-                    ERP_RFQ_Automation.Extraction.LeadPersister.AutoVerifyActor,
-                    StringComparison.Ordinal)
+                && ERP_RFQ_Automation.Extraction.LeadPersister.IsSystemVerifier(lead.ReviewApprovedBy)
                 && sourceOccurrenceCount > 0;
             var awaitingReview = (lead.EmailIngests != null
                 ? string.Equals(lead.EmailIngests.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase)
@@ -2199,6 +2214,40 @@ namespace ERP_RFQ_Automation.Repositories
             // trips: only overwrite when the reviewer explicitly supplies a value.
             if (dto.ExtraFields != null)
                 item.ExtraFields = ExtraFieldsJson.Serialize(dto.ExtraFields);
+        }
+
+        /// <summary>
+        /// One sentence per distinct unit a person must look at, per lead: "Unit 'BANANAS' is not
+        /// one of your units — pick one". A unit the canonicaliser maps, or the tenant's own table
+        /// carries, produces nothing. Packaging, shapes and ambiguous tokens carry the
+        /// canonicaliser's own explanation.
+        /// </summary>
+        internal static Dictionary<long, string> UnitReviewReasons(
+            IEnumerable<(long LeadId, string Unit)> lineUnits,
+            ERP_RFQ_Automation.Services.Uom.IUomVocabulary vocabulary)
+        {
+            var reasons = new Dictionary<long, List<string>>();
+            var seen = new HashSet<(long, string)>();
+            foreach (var (leadId, unit) in lineUnits)
+            {
+                var verdict = ERP_RFQ_Automation.Services.Uom.UomCanonicalizer.Canonicalize(unit, vocabulary);
+                if (!verdict.NeedsReview) continue;
+                var shown = verdict.SourceText ?? unit.Trim();
+                if (!seen.Add((leadId, shown.ToUpperInvariant()))) continue;
+                var sentence = verdict.ReviewReason == ERP_RFQ_Automation.Services.Uom.UomReviewReason.Unknown
+                    ? $"Unit '{shown}' is not one of your units — pick one"
+                    : $"Unit '{shown}': {ERP_RFQ_Automation.Services.Uom.UomCanonicalizer.Explain(verdict.ReviewReason)}";
+                if (!reasons.TryGetValue(leadId, out var list)) reasons[leadId] = list = new List<string>();
+                list.Add(sentence);
+            }
+            return reasons.ToDictionary(x => x.Key, x => string.Join("; ", x.Value));
+        }
+
+        private static string? JoinReviewReasons(string? recorded, string? units)
+        {
+            if (string.IsNullOrWhiteSpace(units)) return recorded;
+            if (string.IsNullOrWhiteSpace(recorded)) return units;
+            return $"{recorded.TrimEnd('.', ';', ' ')}; {units}";
         }
 
         // Returns the review reason parsed from HeaderRemarks, or null when the lead is not

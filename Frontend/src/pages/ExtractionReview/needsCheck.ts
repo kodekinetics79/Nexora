@@ -94,15 +94,88 @@ export const isBlockingSignal = (signal: FieldCheckSignal | string | null | unde
 export interface DocumentAssertions {
   unitOfMeasure: boolean;
   partNumber: boolean;
+  /**
+   * The tenant's own units (`GET /api/Uom`), folded with `foldUnit`. Undefined while they are
+   * still loading or could not be loaded — a unit is then never flagged, because "we do not
+   * know your units yet" must not read as "this unit is wrong".
+   */
+  knownUnits?: ReadonlySet<string>;
 }
 
-export const documentAssertions = (lines: readonly CheckableLine[]): DocumentAssertions => ({
+export const documentAssertions = (
+  lines: readonly CheckableLine[],
+  knownUnits?: ReadonlySet<string>,
+): DocumentAssertions => ({
   unitOfMeasure: lines.some((line) => !isBlank(line.unitOfMeasure)),
   partNumber: lines.some((line) => !isBlank(line.manufacturerPartNumber) || !isBlank(line.itemMaterialCode)),
+  knownUnits,
 });
 
 /** A document with no lines asserts nothing; used when no context is supplied. */
 const NOTHING_ASSERTED: DocumentAssertions = { unitOfMeasure: false, partNumber: false };
+
+// ---------------------------------------------------------------------------
+// UNIT OF MEASURE — "BANANAS" is not a unit
+//
+// A line whose unit is a word the business has never transacted in used to
+// pass as "Verified: all required fields present", because the only question
+// asked was "is the cell non-blank". The question that matters is "is this one
+// of your units, or a spelling of one". The server's UomCanonicalizer
+// (Backend/ERP_RFQ_Automation/Services/Uom/UomCanonicalizer.cs) is the source
+// of truth for spellings; the list below mirrors its vocabulary so the review
+// screen agrees with what the write path would accept. Anything not in the
+// tenant's units and not in this list is a gap a human must close — the same
+// severity as a blank quantity.
+// ---------------------------------------------------------------------------
+
+/** Upper-case, alphanumerics only: "Sq. Mtr" → "SQMTR", "m²" → "M2". */
+export const foldUnit = (value: string): string =>
+  value.normalize('NFKD').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+/** Spellings the server maps to a canonical unit without asking anyone. */
+const UNIT_SPELLINGS: ReadonlySet<string> = new Set([
+  'EACH', 'EACHES', 'EA', 'EAS', 'PC', 'PCS', 'PCE', 'PCES', 'PIECE', 'PIECES', 'NO', 'NOS', 'NR', 'NUMBER', 'NUMBERS',
+  'ITEM', 'ITEMS', 'UNIT', 'UNITS', 'SET', 'SETS', 'KIT', 'KITS', 'PAIR', 'PAIRS', 'PR', 'PRS', 'DOZEN', 'DOZENS', 'DOZ', 'DZ',
+  'ACTIVUNIT', 'ACTIVITYUNIT', 'ACTIVITYUNITS', 'AU', 'LOT', 'LOTS', 'LS', 'LUMPSUM',
+  'MM', 'MILLIMETER', 'MILLIMETRE', 'MILLIMETERS', 'MILLIMETRES', 'CM', 'CENTIMETER', 'CENTIMETRE', 'CENTIMETERS', 'CENTIMETRES',
+  'M', 'MTR', 'MTRS', 'MTS', 'METER', 'METRE', 'METERS', 'METRES', 'LM', 'RM', 'LINEARMETER', 'LINEARMETRE', 'RUNNINGMETER', 'RUNNINGMETRE',
+  'RMT', 'RMTS', 'LMT', 'LMTS', 'LINEARMETERS', 'LINEARMETRES', 'RUNNINGMETERS', 'RUNNINGMETRES',
+  'KM', 'KILOMETER', 'KILOMETRE', 'KILOMETERS', 'KILOMETRES', 'IN', 'INCH', 'INCHES', 'FT', 'FOOT', 'FEET', 'YD', 'YARD', 'YARDS',
+  'M2', 'SQM', 'SQMTR', 'SQUAREMETER', 'SQUAREMETRE', 'SQMT', 'SQMTRS', 'SQMETER', 'SQMETRE', 'SQMETERS', 'SQMETRES', 'SQUAREMETERS', 'SQUAREMETRES',
+  'FT2', 'SQFT', 'SQUAREFOOT', 'SQUAREFEET', 'M3', 'CBM', 'CUM', 'CUBICMETER', 'CUBICMETRE', 'CUMTR', 'CUMTRS', 'CUMETER', 'CUMETRE', 'CUBICMETERS', 'CUBICMETRES',
+  'L', 'LTR', 'LTRS', 'LITER', 'LITRE', 'LITERS', 'LITRES', 'ML', 'MILLILITER', 'MILLILITRE',
+  'KG', 'KGS', 'KGM', 'KILO', 'KILOS', 'KILOGRAM', 'KILOGRAMS', 'KILOGRAMME', 'G', 'GM', 'GMS', 'GRAM', 'GRAMS',
+  'MT', 'TONNE', 'TONNES', 'METRICTON', 'METRICTONS', 'LB', 'LBS', 'POUND', 'POUNDS',
+  'HR', 'HRS', 'HOUR', 'HOURS', 'MANHOUR', 'MANHOURS', 'DAY', 'DAYS', 'MANDAY', 'MANDAYS', 'WK', 'WKS', 'WEEK', 'WEEKS',
+  'MTH', 'MONTH', 'MONTHS', 'YR', 'YRS', 'YEAR', 'YEARS',
+]);
+
+/**
+ * Words the server deliberately refuses to map: packaging ("Pack", "Pallet"), a shape ("Length",
+ * "Coil") or an ambiguous token ("ST", "Ton"). They are units on the page but not counts of the
+ * thing being bought, so a person must say what one of them holds.
+ */
+const UNIT_REFUSALS: ReadonlySet<string> = new Set([
+  'PACK', 'PACKS', 'PK', 'PKS', 'PKT', 'PACKET', 'PACKETS', 'PACKAGE', 'PACKAGES', 'PKG', 'PALLET', 'PALLETS', 'PLT',
+  'BOX', 'BOXES', 'CARTON', 'CARTONS', 'CTN', 'CASE', 'CASES', 'CRATE', 'CRATES', 'DRUM', 'DRUMS', 'BAG', 'BAGS', 'SACK', 'SACKS',
+  'BUNDLE', 'BUNDLES', 'BDL', 'CONTAINER', 'CONTAINERS', 'BOTTLE', 'BOTTLES', 'CAN', 'CANS', 'TIN', 'TINS',
+  'LENGTH', 'LENGTHS', 'PIPE', 'PIPES', 'ROLL', 'ROLLS', 'REEL', 'REELS', 'COIL', 'COILS', 'SPOOL', 'SPOOLS', 'ROD', 'RODS', 'BAR', 'BARS', 'SHEET', 'SHEETS',
+  'ST', 'TON', 'TONS', 'T', 'GAL', 'GALLON', 'GALLONS', 'OZ', 'OUNCE', 'OUNCES',
+]);
+
+/**
+ * Why this line's unit needs a person, or null when it is one of the tenant's units (or a
+ * spelling of one). Never flags while the tenant's units are unknown.
+ */
+export const unitCheckReason = (unit: string | null | undefined, knownUnits?: ReadonlySet<string>): string | null => {
+  if (!knownUnits || isBlank(unit)) return null;
+  const shown = unit!.trim();
+  const key = foldUnit(shown.replace(/^\d+(?:[.,]\d+)?\s*/, ''));
+  if (key.length === 0) return `Unit '${shown}' is not a unit — pick one`;
+  if (knownUnits.has(key) || UNIT_SPELLINGS.has(key)) return null;
+  if (UNIT_REFUSALS.has(key)) return `Unit '${shown}' is packaging or a shape, not a count — confirm what one holds and pick a unit`;
+  return `Unit '${shown}' is not one of your units — pick one`;
+};
 
 /**
  * Fields the quote-to-cash flow cannot proceed without.
@@ -153,6 +226,9 @@ export const checkLine = (
   if (missing.length === 1) reasons.push(`${missing[0]} is blank`);
   else if (missing.length > 1) reasons.push(`${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]} are blank`);
 
+  const unitReason = unitCheckReason(line.unitOfMeasure, assertions.knownUnits);
+  if (unitReason) reasons.push(unitReason);
+
   if (flaggedFields) {
     for (const [field, signal] of flaggedFields) {
       if (isBlockingSignal(signal)) {
@@ -174,8 +250,9 @@ export interface CheckSummary {
 export const summariseChecks = (
   lines: readonly CheckableLine[],
   flaggedByLine?: ReadonlyMap<number, ReadonlyMap<string, FieldCheckSignal | string>>,
+  knownUnits?: ReadonlySet<string>,
 ): CheckSummary => {
-  const assertions = documentAssertions(lines);
+  const assertions = documentAssertions(lines, knownUnits);
   const needsCheckIds: number[] = [];
   for (const line of lines) {
     if (checkLine(line, flaggedByLine?.get(line.id), assertions).state === 'needs-check') {

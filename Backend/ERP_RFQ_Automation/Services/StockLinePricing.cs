@@ -1,0 +1,410 @@
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.Inventory;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace ERP_RFQ_Automation.Services;
+
+/// <summary>
+/// Everything a rep needs to price an RFQ line that stock covers, in one read: what is on the
+/// shelf and where, the price the company would charge (selling price, else cost plus the
+/// company's standard margin), and what this part last sold for and last won an order at.
+///
+/// <para>Nothing is held. Quoting goes to hundreds of customers, so stock is offered
+/// "ex stock, subject to prior sale" and is reserved only when the customer commits with an order
+/// (<c>OrderStockReservationService</c>).</para>
+/// </summary>
+public interface IStockLinePricingService
+{
+    /// <param name="productId">Another accepted maker's catalogue product to price from instead of the line's own.</param>
+    Task<StockLinePriceView?> GetAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, long? productId = null);
+
+    /// <summary>
+    /// Catalogue products of the OTHER makers the customer accepts for this line (matched by the
+    /// part number written next to each maker), with what is on the shelf. inStockOnly drops the empty ones.
+    /// </summary>
+    Task<IReadOnlyList<AcceptedMakerStock>> OtherMakersInStockAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, bool inStockOnly = true);
+    Task<decimal?> GetStandardMarginAsync(long businessUnitId, CancellationToken ct);
+    Task SaveStandardMarginAsync(long businessUnitId, decimal? marginPercent, string actor, CancellationToken ct);
+}
+
+public sealed record StockLinePriceView(
+    long RfqItemId,
+    long? ProductId,
+    string? PartNumber,
+    string? Description,
+    string? Maker,
+    decimal RequestedQuantity,
+    string? Unit,
+    StockOnShelf Stock,
+    StockPriceSuggestion Price,
+    PartTrackRecord TrackRecord,
+    IReadOnlyList<PriceReference> History,
+    QuoteLineNow? OnQuote,
+    StockCurrency? Currency,
+    AcceptedMakerStock? OtherMaker = null,
+    IReadOnlyList<SupplierPriceOption>? SupplierPrices = null,
+    bool CoveredByStock = false,
+    PartialStock? Partial = null);
+
+/// <summary>
+/// Stock covers part of the quantity: FromStock at the stock cost, ToOrder at a supplier's price.
+/// The suggested price is the blended cost of the two plus the margin, on one quote line.
+/// </summary>
+public sealed record PartialStock(decimal FromStock, decimal ToOrder, decimal? StockUnitCost);
+
+/// <summary>
+/// A price a supplier gave for this part: for this RFQ line, or for the same product on another
+/// request. Cost is the landed cost when freight/duty were captured, else the unit price.
+/// </summary>
+public sealed record SupplierPriceOption(long Id, long SupplierId, string SupplierName, decimal Cost, string? CurrencyCode, int? LeadTimeDays,
+    DateTime? ValidUntil, bool Valid, string? Reference, bool ForThisRequest, DateTime? QuotedOn);
+
+/// <summary>Label: "SIEMENS 3RT2046-1AN20" — the brand and the part number, as the rep and the customer say it.</summary>
+public sealed record AcceptedMakerStock(long ProductId, string PartNumber, string Label, decimal OnHand, decimal Free);
+
+public sealed record StockOnShelf(decimal OnHand, decimal Free, decimal HeldForOrders, IReadOnlyList<StockPlace> Places);
+
+public sealed record StockPlace(string Warehouse, decimal OnHand, decimal Free);
+
+/// <summary>Source: SELLING_PRICE, SUPPLIER_PLUS_MARGIN (a valid supplier price is the cost), COST_PLUS_MARGIN, COST_ONLY (cost known, no margin set) or NONE.</summary>
+public sealed record StockPriceSuggestion(string Source, decimal? SellingPrice, decimal? UnitCost, decimal? MarginPercent, decimal? UnitPrice);
+
+/// <summary>Kind: SOLD (an order line), WON (a quote the customer accepted), QUOTED (any other sent quote).</summary>
+public sealed record PriceReference(string Kind, decimal UnitPrice, string? CurrencyCode, decimal Quantity, string? Customer, DateTime? On, string Reference)
+{
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long? QuoteId { get; init; }
+}
+
+/// <summary>
+/// Owner, 2026-09-17: the company's own record on this part — what it last quoted (to anyone) and
+/// when it last won the order, or that it never has. Won = an accepted quote, or an order that did
+/// not come from a quote already counted.
+/// </summary>
+public sealed record PartTrackRecord(PriceReference? LastQuoted, PriceReference? LastWon, int TimesQuoted, int TimesWon);
+
+/// <summary>
+/// The line on this RFQ's latest quote. State: DRAFT (price can change here), SENT (a new price
+/// makes a draft revision; the customer sees nothing until it is sent), DECIDED (the customer has
+/// already accepted or rejected, so the price is final).
+/// </summary>
+public sealed record QuoteLineNow(long QuoteId, string QuoteNo, decimal UnitPrice, bool ExStock, string? CurrencyCode, string State, int? LeadTimeDays = null,
+    decimal? ExStockQuantity = null);
+
+public sealed record StockCurrency(long Id, string Code);
+
+public sealed class StockLinePricingService : IStockLinePricingService
+{
+    /// <summary>How many prices to other customers the window lists under the two headline figures.</summary>
+    public const int HistoryRows = 5;
+
+    private static readonly HashSet<string> WonCodes = new(StringComparer.OrdinalIgnoreCase) { "ACCEPTED", "ORDERED" };
+    private static readonly HashSet<string> NotSentCodes = new(StringComparer.OrdinalIgnoreCase) { "DRAFT", "CANCELLED" };
+
+    private readonly ErpRfqAutomationContext _db;
+
+    public StockLinePricingService(ErpRfqAutomationContext db) => _db = db;
+
+    public async Task<IReadOnlyList<AcceptedMakerStock>> OtherMakersInStockAsync(
+        long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, bool inStockOnly = true)
+    {
+        var line = await _db.Rfqitems.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == rfqItemId && x.Rfqid == rfqId && x.Rfq.BusinessUnitId == businessUnitId, ct);
+        if (line is null) return [];
+        var approved = await Procurement.ProcurementApplicationService.ApprovedMakersForLineAsync(_db, line, ct);
+        if (approved is null) return [];
+
+        var identity = Procurement.Discovery.SupplierDiscoveryIdentity.From(
+            line.ManufacturerPartNumber, line.ManufacturerName, line.ProductShortDescription, approved);
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in identity.Pairs.Where(x => x.Part is not null))
+        {
+            var brand = Procurement.Discovery.SupplierDiscoveryIdentity.BrandOf(pair.Maker);
+            labels.TryAdd(pair.Part!, brand is null ? pair.Part! : $"{brand} {pair.Part}");
+        }
+        if (labels.Count == 0) return [];
+
+        var wanted = labels.Keys.Select(x => x.ToUpperInvariant()).ToArray();
+        var products = await _db.Products.AsNoTracking()
+            .Where(x => x.Buid == businessUnitId && x.IsActive == true && x.Id != line.ProductId
+                && wanted.Contains(x.PartNo.ToUpper()))
+            .Select(x => new { x.Id, x.PartNo })
+            .ToListAsync(ct);
+
+        var result = new List<AcceptedMakerStock>();
+        foreach (var product in products)
+        {
+            var shelf = await ShelfAsync(businessUnitId, product.Id, ct);
+            if (inStockOnly && shelf.Free <= 0m) continue;
+            result.Add(new AcceptedMakerStock(product.Id, product.PartNo,
+                labels.TryGetValue(product.PartNo, out var label) ? label : product.PartNo, shelf.OnHand, shelf.Free));
+        }
+        return result.OrderByDescending(x => x.Free).ToList();
+    }
+
+    public async Task<StockLinePriceView?> GetAsync(long businessUnitId, long rfqId, long rfqItemId, CancellationToken ct, long? productId = null)
+    {
+        AcceptedMakerStock? otherMaker = null;
+        if (productId is not null)
+        {
+            otherMaker = (await OtherMakersInStockAsync(businessUnitId, rfqId, rfqItemId, ct, inStockOnly: false))
+                .FirstOrDefault(x => x.ProductId == productId);
+        }
+
+        var line = await _db.Rfqitems.AsNoTracking()
+            .Where(x => x.Id == rfqItemId && x.Rfqid == rfqId && x.Rfq.BusinessUnitId == businessUnitId)
+            .Select(x => new
+            {
+                x.Id, x.ProductId, x.ManufacturerPartNumber, x.ItemMaterialCode, x.ProductShortDescription,
+                x.ProductShortName, x.ManufacturerName, x.Quantity, x.UnitOfMeasure
+            })
+            .SingleOrDefaultAsync(ct);
+        if (line is null) return null;
+        if (productId is not null && productId != line.ProductId && otherMaker is null) return null;
+        var pricedProductId = otherMaker?.ProductId ?? line.ProductId;
+
+        var product = pricedProductId is null ? null : await _db.Products.AsNoTracking()
+            .Where(x => x.Id == pricedProductId)
+            .Select(x => new { x.SellingPrice, x.UnitCost, x.FinalSalesPrice })
+            .SingleOrDefaultAsync(ct);
+
+        var stock = await ShelfAsync(businessUnitId, pricedProductId, ct);
+        var margin = await GetStandardMarginAsync(businessUnitId, ct);
+        var covered = stock.Free >= (line.Quantity ?? 0m) && (line.Quantity ?? 0m) > 0m;
+        var supplierPrices = await SupplierPricesAsync(businessUnitId, rfqItemId, pricedProductId, ct);
+        var price = Suggest(product?.SellingPrice ?? product?.FinalSalesPrice ?? stock.SellingPrice,
+            stock.UnitCost ?? product?.UnitCost, margin);
+        // Not on the shelf: what a supplier will charge is the cost that matters, not an old stock cost.
+        var bestSupplier = supplierPrices.Where(x => x.Valid).OrderBy(x => x.Cost).FirstOrDefault();
+        var need = line.Quantity ?? 0m;
+        var partial = !covered && stock.Free > 0m && need > 0m
+            ? new PartialStock(Math.Min(stock.Free, need), need - Math.Min(stock.Free, need), stock.UnitCost ?? product?.UnitCost)
+            : null;
+        if (!covered && price.Source != "SELLING_PRICE" && bestSupplier is not null)
+        {
+            // Part from the shelf at stock cost, the rest at the supplier's price: one blended cost.
+            var cost = partial?.StockUnitCost is decimal stockCost
+                ? Math.Round((partial.FromStock * stockCost + partial.ToOrder * bestSupplier.Cost) / need, 4)
+                : bestSupplier.Cost;
+            price = new StockPriceSuggestion(partial?.StockUnitCost is not null ? "BLENDED_PLUS_MARGIN" : "SUPPLIER_PLUS_MARGIN",
+                null, cost, margin, Math.Round(cost * (1m + (margin ?? 0m) / 100m), 2));
+        }
+
+        var history = pricedProductId is null
+            ? new List<PriceReference>()
+            : await HistoryAsync(businessUnitId, pricedProductId.Value, rfqId, ct);
+        var quotes = history.Where(x => x.Kind is "QUOTED" or "WON").ToList();
+        var wonQuoteIds = history.Where(x => x.Kind == "WON").Select(x => x.QuoteId).ToHashSet();
+        var wins = history.Where(x => x.Kind == "WON" || x.Kind == "SOLD" && (x.QuoteId is null || !wonQuoteIds.Contains(x.QuoteId))).ToList();
+        var lastQuoted = quotes.FirstOrDefault();
+        var lastWon = wins.FirstOrDefault();
+        var track = new PartTrackRecord(lastQuoted, lastWon, quotes.Count, wins.Count);
+
+        var onQuoteRow = await _db.QuoteItems.AsNoTracking()
+            .Where(x => x.RfqitemId == rfqItemId && x.Quote.BusinessUnitId == businessUnitId)
+            .OrderByDescending(x => x.Quote.RevisionNo).ThenByDescending(x => x.Quote.Id)
+            .Select(x => new
+            {
+                x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0, x.DeliveryLeadTime, x.ExStockQuantity,
+                Currency = x.Quote.Currency != null ? x.Quote.Currency.Code : null,
+                Status = x.Quote.Status != null ? x.Quote.Status.SetupCode : null,
+                StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
+            })
+            .FirstOrDefaultAsync(ct);
+        var onQuote = onQuoteRow is null ? null : new QuoteLineNow(onQuoteRow.QuoteId, onQuoteRow.QuoteNo, onQuoteRow.UnitPrice,
+            onQuoteRow.ExStock, onQuoteRow.Currency, QuoteState(LifecyclePolicy.Canonicalize("Quote", onQuoteRow.Status, onQuoteRow.StatusValue)),
+            onQuoteRow.DeliveryLeadTime, onQuoteRow.ExStockQuantity);
+
+        var currency = await _db.Quotes.AsNoTracking()
+            .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId && x.Currency != null)
+            .OrderByDescending(x => x.Id)
+            .Select(x => new StockCurrency(x.Currency!.Id, x.Currency.Code))
+            .FirstOrDefaultAsync(ct)
+            ?? await _db.Currencies.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive == true && x.IsBaseCurrency == true)
+                .Select(x => new StockCurrency(x.Id, x.Code))
+                .FirstOrDefaultAsync(ct);
+
+        return new StockLinePriceView(
+            line.Id, line.ProductId,
+            otherMaker?.PartNumber ?? line.ManufacturerPartNumber ?? line.ItemMaterialCode,
+            line.ProductShortDescription ?? line.ProductShortName,
+            otherMaker is null ? line.ManufacturerName : NullIfEmpty(otherMaker.Label.Replace(otherMaker.PartNumber, "", StringComparison.OrdinalIgnoreCase).Trim()),
+            line.Quantity ?? 0m,
+            line.UnitOfMeasure,
+            new StockOnShelf(stock.OnHand, stock.Free, stock.Held, stock.Places),
+            price,
+            track,
+            history.Where(x => !ReferenceEquals(x, lastQuoted) && !ReferenceEquals(x, lastWon)).Take(HistoryRows).ToList(),
+            onQuote,
+            currency,
+            otherMaker,
+            supplierPrices,
+            covered,
+            partial);
+    }
+
+    /// <summary>How many supplier prices the window lists: the valid ones first, cheapest first.</summary>
+    public const int SupplierPriceRows = 6;
+
+    private async Task<List<SupplierPriceOption>> SupplierPricesAsync(long businessUnitId, long rfqItemId, long? productId, CancellationToken ct)
+    {
+        var today = DateTime.UtcNow.Date;
+        var rows = await _db.SupplierQuotedItems.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive && x.UnitPrice > 0m
+                && (x.RfqItemId == rfqItemId || (productId != null && x.ProductId == productId)))
+            .OrderByDescending(x => x.CreatedDate)
+            .Take(40)
+            .Select(x => new
+            {
+                x.Id, x.SupplierId, SupplierName = x.Supplier.Name, x.UnitPrice, x.LandedUnitCost, x.LeadTimeDays,
+                x.ValidUntil, x.QuoteReference, x.RfqItemId, x.QuoteDate, x.CreatedDate,
+                Currency = _db.Currencies.Where(c => c.Id == x.CurrencyId).Select(c => c.Code).FirstOrDefault()
+            })
+            .ToListAsync(ct);
+        return rows
+            // One row per supplier: their latest price.
+            .GroupBy(x => x.SupplierId).Select(g => g.First())
+            .Select(x => new SupplierPriceOption(x.Id, x.SupplierId, x.SupplierName, Math.Round(x.LandedUnitCost ?? x.UnitPrice!.Value, 4), x.Currency,
+                x.LeadTimeDays, x.ValidUntil, x.ValidUntil is null || x.ValidUntil.Value.Date >= today, x.QuoteReference,
+                x.RfqItemId == rfqItemId, x.QuoteDate ?? x.CreatedDate))
+            .OrderByDescending(x => x.Valid).ThenBy(x => x.Cost)
+            .Take(SupplierPriceRows)
+            .ToList();
+    }
+
+    private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;
+
+    public static string QuoteState(string? canonicalStatus) => canonicalStatus?.ToUpperInvariant() switch
+    {
+        null or "" or "DRAFT" => "DRAFT",
+        "ACCEPTED" or "ORDERED" or "REJECTED" or "LOST" or "CANCELLED" or "EXPIRED" => "DECIDED",
+        _ => "SENT",
+    };
+
+    /// <summary>
+    /// Selling price wins. Without one, cost plus the company margin. A cost with no margin set is
+    /// offered as the cost itself so the rep sees a starting figure, never a silent zero.
+    /// </summary>
+    public static StockPriceSuggestion Suggest(decimal? sellingPrice, decimal? unitCost, decimal? marginPercent)
+    {
+        if (sellingPrice is > 0m)
+            return new StockPriceSuggestion("SELLING_PRICE", sellingPrice, unitCost, marginPercent, Math.Round(sellingPrice.Value, 2));
+        if (unitCost is > 0m && marginPercent is not null)
+            return new StockPriceSuggestion("COST_PLUS_MARGIN", null, unitCost, marginPercent,
+                Math.Round(unitCost.Value * (1m + marginPercent.Value / 100m), 2));
+        if (unitCost is > 0m)
+            return new StockPriceSuggestion("COST_ONLY", null, unitCost, null, Math.Round(unitCost.Value, 2));
+        return new StockPriceSuggestion("NONE", null, null, marginPercent, null);
+    }
+
+    private async Task<(decimal OnHand, decimal Free, decimal Held, List<StockPlace> Places, decimal? UnitCost, decimal? SellingPrice)> ShelfAsync(
+        long businessUnitId, long? productId, CancellationToken ct)
+    {
+        if (productId is null) return (0m, 0m, 0m, new List<StockPlace>(), null, null);
+
+        var rows = await _db.Set<Models.Inventory>().AsNoTracking()
+            .Where(x => x.Buid == businessUnitId && x.ProductId == productId)
+            .Select(x => new
+            {
+                x.Id, x.QtyOnHand, x.AllocatedQuantity, x.QuarantineQuantity, x.DamagedQuantity,
+                x.ExpiredQuantity, x.SafetyStockQuantity, x.UnitCost, x.SellingPrice, x.WarehouseId
+            })
+            .ToListAsync(ct);
+        var warehouseIds = rows.Where(x => x.WarehouseId != null).Select(x => x.WarehouseId!.Value).Distinct().ToArray();
+        var warehouseNames = await _db.Warehouses.AsNoTracking()
+            .Where(x => warehouseIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, x => x.WarehouseName, ct);
+        var ids = rows.Select(x => x.Id).ToArray();
+        var reserved = await _db.Set<StockReservation>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && ids.Contains(x.InventoryId) && x.Status == StockReservationStatus.Active)
+            .GroupBy(x => x.InventoryId)
+            .Select(x => new { InventoryId = x.Key, Quantity = x.Sum(y => y.Quantity) })
+            .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity, ct);
+
+        var places = rows
+            .GroupBy(x => x.WarehouseId is long w && warehouseNames.TryGetValue(w, out var name) ? name : "Unassigned")
+            .Select(g => new StockPlace(g.Key, g.Sum(x => x.QtyOnHand), g.Sum(x => InventoryQuantityMath.AvailableToPromise(
+                x.QtyOnHand, reserved.GetValueOrDefault(x.Id), x.AllocatedQuantity, x.QuarantineQuantity,
+                x.DamagedQuantity, x.ExpiredQuantity, x.SafetyStockQuantity))))
+            .Where(x => x.OnHand > 0m)
+            .OrderByDescending(x => x.Free)
+            .ToList();
+
+        var onHand = rows.Sum(x => x.QtyOnHand);
+        // Cost weighted by what is on each shelf, so one old row priced long ago does not set the figure.
+        var costed = rows.Where(x => x.UnitCost is > 0m && x.QtyOnHand > 0m).ToList();
+        decimal? cost = costed.Count == 0 ? rows.FirstOrDefault(x => x.UnitCost is > 0m)?.UnitCost
+            : Math.Round(costed.Sum(x => x.UnitCost!.Value * x.QtyOnHand) / costed.Sum(x => x.QtyOnHand), 4);
+        return (onHand, places.Sum(x => x.Free), reserved.Values.Sum(), places, cost,
+            rows.FirstOrDefault(x => x.SellingPrice is > 0m)?.SellingPrice);
+    }
+
+    // This RFQ's own quotes are left out: the line already says what it was quoted at here.
+    private async Task<List<PriceReference>> HistoryAsync(long businessUnitId, long productId, long rfqId, CancellationToken ct)
+    {
+        var sold = await _db.OrderItems.AsNoTracking()
+            .Where(x => x.ProductId == productId && x.Order.BusinessUnitId == businessUnitId && x.Order.IsActive && x.UnitPrice > 0m
+                && (x.Order.Rfqid == null || x.Order.Rfqid != rfqId))
+            .OrderByDescending(x => x.Order.OrderDate).ThenByDescending(x => x.Id)
+            .Take(50)
+            .Select(x => new
+            {
+                x.UnitPrice, x.Quantity, x.Order.OrderDate, x.Order.OrderNo, x.Order.QuoteId,
+                Customer = x.Order.Customer.Name,
+                Currency = x.Order.Currency != null ? x.Order.Currency.Code : null,
+                Status = x.Order.Status.SetupCode, StatusValue = x.Order.Status.SetupValue
+            })
+            .ToListAsync(ct);
+
+        var quoted = await _db.QuoteItems.AsNoTracking()
+            .Where(x => x.ProductId == productId && x.Quote.BusinessUnitId == businessUnitId && x.UnitPrice > 0m
+                && (x.Quote.Rfqid == null || x.Quote.Rfqid != rfqId))
+            .OrderByDescending(x => x.Quote.QuoteDate).ThenByDescending(x => x.Id)
+            .Take(100)
+            .Select(x => new
+            {
+                x.UnitPrice, x.Quantity, x.Quote.QuoteDate, x.Quote.QuoteNo, x.QuoteId,
+                Customer = x.Quote.Customer != null ? x.Quote.Customer.Name : null,
+                Currency = x.Quote.Currency != null ? x.Quote.Currency.Code : null,
+                Status = x.Quote.Status != null ? x.Quote.Status.SetupCode : null,
+                StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
+            })
+            .ToListAsync(ct);
+
+        var all = new List<PriceReference>();
+        all.AddRange(sold
+            .Where(x => !string.Equals(LifecyclePolicy.Canonicalize("Order", x.Status, x.StatusValue), "CANCELLED", StringComparison.OrdinalIgnoreCase))
+            .Select(x => new PriceReference("SOLD", x.UnitPrice, x.Currency, x.Quantity, x.Customer, x.OrderDate, x.OrderNo) { QuoteId = x.QuoteId }));
+        foreach (var q in quoted)
+        {
+            var code = LifecyclePolicy.Canonicalize("Quote", q.Status, q.StatusValue) ?? string.Empty;
+            if (NotSentCodes.Contains(code)) continue;
+            all.Add(new PriceReference(WonCodes.Contains(code) ? "WON" : "QUOTED", q.UnitPrice, q.Currency, q.Quantity, q.Customer, q.QuoteDate, q.QuoteNo) { QuoteId = q.QuoteId });
+        }
+        return all.OrderByDescending(x => x.On ?? DateTime.MinValue).ToList();
+    }
+
+    public async Task<decimal?> GetStandardMarginAsync(long businessUnitId, CancellationToken ct) =>
+        await _db.QuoteConfigurations.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId)
+            .Select(x => x.StockMarginPercent)
+            .FirstOrDefaultAsync(ct);
+
+    public async Task SaveStandardMarginAsync(long businessUnitId, decimal? marginPercent, string actor, CancellationToken ct)
+    {
+        if (marginPercent is < 0m or > 1000m)
+            throw new ArgumentOutOfRangeException(nameof(marginPercent), "Margin must be between 0% and 1000%.");
+        var config = await _db.QuoteConfigurations.SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId, ct);
+        if (config is null)
+        {
+            config = new QuoteConfiguration { BusinessUnitId = businessUnitId };
+            _db.QuoteConfigurations.Add(config);
+        }
+        config.StockMarginPercent = marginPercent is null ? null : Math.Round(marginPercent.Value, 2);
+        config.ModifiedBy = actor;
+        config.ModifiedOn = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+    }
+}

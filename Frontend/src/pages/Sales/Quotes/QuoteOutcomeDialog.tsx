@@ -75,7 +75,12 @@ const QuoteOutcomeDialog: React.FC<QuoteOutcomeDialogProps> = ({
       <DialogContent dividers>
         <RadioGroup
           value={outcome}
-          onChange={(e) => setOutcome(e.target.value as QuoteOutcome)}
+          onChange={(e) => {
+            const next = e.target.value as QuoteOutcome;
+            setOutcome(next);
+            // A reason picked for a loss must not ride along with a win.
+            if (next === 'won') setReasonCode('');
+          }}
           sx={{ mb: 2 }}
         >
           <FormControlLabel value="won" control={<Radio color="success" />} label={<Typography sx={{ fontWeight: 700 }}>We won it</Typography>} />
@@ -84,21 +89,26 @@ const QuoteOutcomeDialog: React.FC<QuoteOutcomeDialogProps> = ({
         </RadioGroup>
 
         <Stack spacing={2}>
-          <TextField
-            select
-            fullWidth
-            size="small"
-            label={reasonRequired ? 'Why? (required)' : 'Why? (optional)'}
-            value={reasonCode}
-            onChange={(e) => setReasonCode(e.target.value)}
-            disabled={reasonsLoading}
-            helperText={reasonsLoading ? 'Loading reasons…' : undefined}
-          >
-            {!reasonRequired && <MenuItem value="">No particular reason</MenuItem>}
-            {selectableReasons.map((r) => (
-              <MenuItem key={r.code} value={r.code}>{r.label}</MenuItem>
-            ))}
-          </TextField>
+          {/* "Why?" is a question about losing. The governed list is loss reasons — price, a
+              competitor, a cancelled requirement, no response — so it is offered only where a
+              reason is required (Lost, Expired). Shown against "We won it" it listed reasons for
+              a loss under a win. */}
+          {reasonRequired && (
+            <TextField
+              select
+              fullWidth
+              size="small"
+              label="Why? (required)"
+              value={reasonCode}
+              onChange={(e) => setReasonCode(e.target.value)}
+              disabled={reasonsLoading}
+              helperText={reasonsLoading ? 'Loading reasons…' : undefined}
+            >
+              {selectableReasons.map((r) => (
+                <MenuItem key={r.code} value={r.code}>{r.label}</MenuItem>
+              ))}
+            </TextField>
+          )}
 
           <TextField
             fullWidth

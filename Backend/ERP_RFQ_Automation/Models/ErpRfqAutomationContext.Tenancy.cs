@@ -337,6 +337,11 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ApplyReorderAlertModel(
             e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         ConfigureProcurementModel(modelBuilder);
+        // Internet supplier discovery: the 30-day search cache and the supplier Website/Role columns
+        // it writes. See Models/ErpRfqAutomationContext.SupplierDiscovery.cs.
+        ConfigureSupplierDiscoveryModel(modelBuilder);
+        // Supplier request email wording: company standard and each sales person's own. See .SupplierEmail.cs.
+        ConfigureSupplierEmailModel(modelBuilder);
         // Gate 5 / FR-MTR-01..05. Must follow the procurement configuration: material lots hang off
         // the supplier purchase order, its lines and the goods receipt, and reference their
         // (BusinessUnitId, Id) alternate keys. See Models/ErpRfqAutomationContext.Traceability.cs.

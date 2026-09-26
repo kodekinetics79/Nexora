@@ -6,10 +6,28 @@ public interface IProcurementApplicationService
 {
     Task<SourcingCaseView> CreateOrOpenSourcingCaseAsync(CreateSourcingCaseCommand command, CancellationToken ct = default)
         => throw new NotSupportedException("Sourcing Cases are not supported by this procurement adapter.");
+    /// <summary>The exact email a supplier would receive from this line, before anything is sent.</summary>
+    Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
+        decimal? quantity, string? message, DateTime? dueOn, CancellationToken ct = default)
+        => PreviewSupplierRfqEmailAsync(businessUnitId, sourcingCaseId, quantity, message, dueOn, null, null, ct);
+
+    Task<SupplierRfqEmailPreview> PreviewSupplierRfqEmailAsync(long businessUnitId, long sourcingCaseId,
+        decimal? quantity, string? message, DateTime? dueOn, long? userId, long? sendFromMailboxId, CancellationToken ct = default,
+        IReadOnlyList<string>? cc = null, IReadOnlyList<string>? bcc = null, SupplierEmailWordingEdit? wording = null)
+        => throw new NotSupportedException("Supplier request previews are not supported by this procurement adapter.");
+
     Task<SourcingCaseView> GetSourcingCaseAsync(long businessUnitId, long sourcingCaseId, CancellationToken ct = default)
         => throw new NotSupportedException("Sourcing Cases are not supported by this procurement adapter.");
     Task<SourcingCandidateSearchResult> SearchSourcingCandidatesAsync(SearchSourcingCandidatesCommand command, CancellationToken ct = default)
         => throw new NotSupportedException("Supplier candidate search is not supported by this procurement adapter.");
+    /// <summary>
+    /// Re-runs the case's candidate rule after the supplier list changed under it — today, after
+    /// the rep adopts suppliers from the internet search. Before outreach starts it rebuilds the
+    /// list exactly as the search button does; once a Supplier RFQ has been prepared it only adds
+    /// the suppliers that are new, so nothing already prepared loses its candidate row.
+    /// </summary>
+    Task<SourcingCaseView> RefreshCandidatesAfterSupplierChangeAsync(RefreshSourcingCandidatesCommand command, CancellationToken ct = default)
+        => throw new NotSupportedException("Supplier candidate refresh is not supported by this procurement adapter.");
     Task<PreparedSupplierRfqResult> PrepareSupplierRfqAsync(PrepareSupplierRfqCommand command, CancellationToken ct = default)
         => throw new NotSupportedException("Supplier RFQ preparation is not supported by this procurement adapter.");
     Task<QueuedSupplierRfqResult> QueuePreparedSupplierRfqAsync(QueuePreparedSupplierRfqCommand command, CancellationToken ct = default)
@@ -79,6 +97,12 @@ public sealed record SearchSourcingCandidatesCommand(
     string Actor,
     string CorrelationId);
 
+public sealed record RefreshSourcingCandidatesCommand(
+    long BusinessUnitId,
+    long SourcingCaseId,
+    string Actor,
+    string CorrelationId);
+
 public sealed record PrepareSupplierRfqCommand(
     long BusinessUnitId,
     long SourcingCaseId,
@@ -87,7 +111,21 @@ public sealed record PrepareSupplierRfqCommand(
     long ExpectedVersion,
     string IdempotencyKey,
     string Actor,
-    string CorrelationId);
+    string CorrelationId,
+    string? Message = null,
+    decimal? Quantity = null,
+    /// <summary>Who pressed Send: their own default message and signature apply.</summary>
+    long? UserId = null,
+    /// <summary>The company's outgoing mailbox the rep chose; null uses the default.</summary>
+    long? SendFromMailboxId = null,
+    /// <summary>Copied on every supplier's email of this send.</summary>
+    IReadOnlyList<string>? Cc = null,
+    IReadOnlyList<string>? Bcc = null,
+    /// <summary>The rep's edits to the wording for this send; null parts use the saved wording.</summary>
+    SupplierEmailWordingEdit? Wording = null);
+
+/// <summary>Per-send wording, placeholders allowed. The part lines are not part of it and cannot be edited.</summary>
+public sealed record SupplierEmailWordingEdit(string? Subject = null, string? Greeting = null, string? Opening = null, string? SignOff = null);
 
 public sealed record QueuePreparedSupplierRfqCommand(
     long BusinessUnitId,
@@ -115,7 +153,9 @@ public sealed record SourcingCaseView(
     string NexoraSerial,
     long? ProductId,
     string? RequestedPartNumber,
+    string? Manufacturer,
     string Description,
+    string? UnitOfMeasure,
     decimal RequestedQuantity,
     decimal StockQuantity,
     decimal UnfulfilledQuantity,
@@ -559,3 +599,7 @@ public sealed class ProcurementConflictException : InvalidOperationException
 {
     public ProcurementConflictException(string message) : base(message) { }
 }
+
+/// <summary>Subject and plain-text body of a supplier request, exactly as it would be sent.</summary>
+public sealed record SupplierRfqEmailPreview(string Subject, string Body, string? From = null, string? ReplyTo = null,
+    IReadOnlyList<string>? Cc = null, IReadOnlyList<string>? Bcc = null);

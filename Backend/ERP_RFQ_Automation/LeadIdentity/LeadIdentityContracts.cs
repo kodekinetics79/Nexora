@@ -164,7 +164,45 @@ public sealed record BatchReconciliationItemDto(long OccurrenceId, long? LeadId,
     /// </para>
     /// </summary>
     public bool RecoverableSecurityHold { get; init; }
+
+    /// <summary>
+    /// For an <c>ExactDuplicate</c>: the inquiry this file is a byte-for-byte repeat of, so the
+    /// batch page can name it and open it instead of spinning on "Identifying the customer" for a
+    /// document that will never be read. Null when the original was never reconciled into a lead
+    /// (a hash match against a file that itself stopped at intake).
+    /// </summary>
+    public DuplicateOfDto? DuplicateOf { get; init; }
+
+    /// <summary>The customer's own RFQ number on the lead this row belongs to (Lead.Rfqno).</summary>
+    public string? CustomerReference { get; init; }
+
+    /// <summary>
+    /// For a <c>Revision</c>: what the new document changed, compacted from
+    /// <c>LeadRevisionDifferences</c> into line/field/from/to so the batch page can say
+    /// "line 2 qty 20→35" instead of "One inquiry is ready". Empty when nothing commercial moved.
+    /// </summary>
+    public IReadOnlyList<LeadRevisionChangeDto> Changes { get; init; } = Array.Empty<LeadRevisionChangeDto>();
+
+    /// <summary>
+    /// Set when the lead this row belongs to has already become an RFQ. A converted lead is never
+    /// offered "Decide" again; the page sends the rep to the RFQ instead.
+    /// </summary>
+    public LeadRfqLinkDto? Rfq { get; init; }
 }
+
+/// <summary>The inquiry an exact-duplicate upload repeats, in the words the batch page prints.</summary>
+public sealed record DuplicateOfDto(long LeadId, string? RfqNo, string? NexoraSerial, string? CustomerName, string? OwnerName);
+
+/// <summary>
+/// One thing a revision changed. <c>Line</c> is the customer's line number (null for a header
+/// field); <c>Field</c> is in a salesperson's words ("qty", "unit", "part", "closing date");
+/// <c>From</c>/<c>To</c> are plain values, null when the line itself was added or removed.
+/// </summary>
+public sealed record LeadRevisionChangeDto(string? Line, string Field, string? From, string? To);
+
+/// <summary>The RFQ a lead became, and whose desk it is on.</summary>
+public sealed record LeadRfqLinkDto(long RfqId, string RfqNo, string? OwnerName);
+
 public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadId, string NexoraSerial,
     string? CustomerRfqReference, decimal Confidence, string MatchEvidenceJson, string DifferencesJson,
     string DownstreamImpactJson, string ReviewState, int Version);

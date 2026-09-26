@@ -7,7 +7,7 @@ namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 
 public sealed class NativeSpreadsheetParser
 {
-    private const string CsvWorksheetName = "CSV";
+    internal const string CsvWorksheetName = "CSV";
 
     static NativeSpreadsheetParser() => Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
@@ -580,13 +580,13 @@ public sealed class NativeSpreadsheetParser
         return result;
     }
 
-    private static string DecodeUtf8(byte[] bytes)
+    internal static string DecodeUtf8(byte[] bytes)
     {
         var text = Encoding.UTF8.GetString(bytes);
         return text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text;
     }
 
-    private static List<CsvRecord> ParseCsvRecords(string text)
+    internal static List<CsvRecord> ParseCsvRecords(string text)
     {
         var records = new List<CsvRecord>();
         var fields = new List<string>();
@@ -667,5 +667,5 @@ public sealed class NativeSpreadsheetParser
         return records;
     }
 
-    private sealed record CsvRecord(int StartLine, IReadOnlyList<string> Values);
+    internal sealed record CsvRecord(int StartLine, IReadOnlyList<string> Values);
 }

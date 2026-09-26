@@ -70,6 +70,53 @@ describe('a caller that can only deliver a recipient', () => {
   });
 });
 
+describe('a quote send, where the rep reviews and edits what the customer receives', () => {
+  // Owner ask 2026-09-15 (D26): the dialog showed only "Recipient Email" + "Send quote". The
+  // subject and body were composed on the server and the rep never saw them. The server now
+  // hands the default over (GET {id}/email-draft) and accepts the edited words back.
+  const draft = {
+    initialSubject: 'Quote #QT-0926-0001 from Noor and Sons',
+    initialBody: 'Dear Marafiq,\n\nPlease find attached our quotation #QT-0926-0001.\nTotal: SAR 4,205.00',
+    attachmentName: 'Quote_QT-0926-0001.pdf',
+  };
+
+  it('shows the default subject and message the server would send, ready to edit', () => {
+    renderDialog({ composerFields: 'message', confirmLabel: 'Send quote', ...draft });
+
+    expect(screen.getByLabelText(/^Subject/i)).toHaveValue('Quote #QT-0926-0001 from Noor and Sons');
+    expect(screen.getByLabelText(/^Message/i)).toHaveValue(draft.initialBody);
+    // No customer picker: that belongs to the RFQ approval, not to a quote already bound to one.
+    expect(screen.queryByPlaceholderText(/Search customer/i)).not.toBeInTheDocument();
+  });
+
+  it('names the PDF that rides along under the message', () => {
+    renderDialog({ composerFields: 'message', confirmLabel: 'Send quote', ...draft });
+    expect(screen.getByText(/Attached: Quote_QT-0926-0001\.pdf/i)).toBeVisible();
+  });
+
+  it('sends the edited subject and message, and nothing it did not show', () => {
+    renderDialog({ composerFields: 'message', confirmLabel: 'Send quote', ...draft });
+    fireEvent.change(screen.getByLabelText(/^Subject/i), {
+      target: { value: 'Re: tender 77 — our quotation' },
+    });
+    fireEvent.change(screen.getByLabelText(/^Message/i), {
+      target: { value: 'Dear Ahmed,\n35 pieces on line 2 as discussed.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send quote/i }));
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm.mock.calls[0]).toEqual([
+      'buyer@aramco.com', 'Re: tender 77 — our quotation', 'Dear Ahmed,\n35 pieces on line 2 as discussed.',
+    ]);
+  });
+
+  it('does not let the rep send while the default message is still loading', () => {
+    renderDialog({ composerFields: 'message', confirmLabel: 'Send quote', draftLoading: true });
+    expect(screen.getByRole('button', { name: /send quote/i })).toBeDisabled();
+    expect(screen.getByText(/Loading the default message/i)).toBeInTheDocument();
+  });
+});
+
 describe('the RFQ approval callers, which do deliver all four fields', () => {
   it('still offers the full composer by default', () => {
     renderDialog();

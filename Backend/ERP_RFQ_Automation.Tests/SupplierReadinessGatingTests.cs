@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.DTOs.BusinessUnit;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
@@ -14,32 +15,41 @@ using Microsoft.EntityFrameworkCore;
 namespace ERP_RFQ_Automation.Tests;
 
 /// <summary>
-/// Supplier readiness is the gate that stops an unapproved, unverified, non-compliant or
-/// high-risk supplier from receiving a Supplier RFQ or a purchase order. It is enforced by
-/// two INDEPENDENT copies of the same rule — one in
-/// <c>ProcurementApplicationService.SupplierRfqBlockingReasons</c> and one in
-/// <c>SupplierController.SupplierRfqBlockingReasons</c>. Duplicated governance logic is only
-/// safe while both copies agree, so these tests drive every readiness dimension through both
-/// surfaces and require both to refuse.
+/// Two gates, two moments (owner decision 2026-09-16: "tick who to ask, send, next line").
+///
+/// <para>ASKING a supplier for a price is not a commitment: it needs an address and a supplier
+/// nobody has shut out (inactive, blocked, high or blocked risk). Both surfaces that send the
+/// request — <c>ProcurementApplicationService.SupplierAskBlockingReasons</c> and
+/// <c>SupplierController.SupplierRfqBlockingReasons</c> — must refuse exactly those.</para>
+///
+/// <para>Approval, verification, compliance and readiness no longer stop the request. They stop
+/// the commitment: picking that supplier's price and raising an order, which still run the full
+/// <c>SupplierRfqBlockingReasons</c> rule.</para>
 /// </summary>
 public sealed class SupplierReadinessGatingTests
 {
-    /// <summary>Every field flip here must independently block outreach.</summary>
-    public static TheoryData<string> BlockingDimensions() =>
+    /// <summary>Every flip here must independently stop the request being sent.</summary>
+    public static TheoryData<string> AskBlockingDimensions() =>
     [
         "inactive",
         "no-contact-email",
+        "risk-high",
+        "risk-blocked",
+        "governance-blocked"
+    ];
+
+    /// <summary>Every flip here is checked when a price is picked, and must NOT stop the request.</summary>
+    public static TheoryData<string> ApprovalOnlyDimensions() =>
+    [
         "governance-unverified",
         "verification-pending",
         "compliance-not-cleared",
-        "risk-high",
-        "risk-blocked",
         "readiness-review-required"
     ];
 
     [Theory]
-    [MemberData(nameof(BlockingDimensions))]
-    public async Task The_procurement_service_refuses_to_prepare_a_supplier_rfq(string dimension)
+    [MemberData(nameof(AskBlockingDimensions))]
+    public async Task The_procurement_service_refuses_to_ask_a_supplier_nobody_can_send_to(string dimension)
     {
         using var fixture = new ProcurementScenario();
         await MakeSourcingReadyAsync(fixture);
@@ -66,8 +76,92 @@ public sealed class SupplierReadinessGatingTests
     }
 
     [Theory]
-    [MemberData(nameof(BlockingDimensions))]
-    public async Task The_supplier_controller_refuses_to_compose_an_outreach_email(string dimension)
+    [MemberData(nameof(ApprovalOnlyDimensions))]
+    public async Task An_unapproved_supplier_can_still_be_asked_for_a_price(string dimension)
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            new CreateSourcingCaseCommand(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId,
+                10, false, $"ask-{dimension}", "qa", $"corr-ask-{dimension}")));
+        var candidate = Assert.Single(created.Candidates);
+
+        await using (var setup = fixture.Context())
+        {
+            var supplier = await setup.Suppliers.SingleAsync(x => x.Id == candidate.SupplierId);
+            ApplyBlockingDimension(supplier, dimension);
+            await setup.SaveChangesAsync();
+        }
+
+        var prepared = await fixture.Execute(service =>
+            service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
+                fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+                $"ask-prepare-{dimension}", "qa", $"corr-ask-prepare-{dimension}")));
+        Assert.True(prepared.SupplierSolicitationId > 0);
+    }
+
+    [Fact]
+    public async Task The_rep_chooses_how_many_to_ask_for_and_the_shortfall_is_only_the_default()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            new CreateSourcingCaseCommand(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId,
+                10, false, "ask-quantity", "qa", "corr-ask-quantity")));
+        var candidate = Assert.Single(created.Candidates);
+
+        await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
+            service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
+                fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+                "ask-quantity-zero", "qa", "corr-ask-quantity-zero", Quantity: 0m))));
+
+        var prepared = await fixture.Execute(service =>
+            service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
+                fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+                "ask-quantity-7", "qa", "corr-ask-quantity-7", Quantity: 7m)));
+
+        await using var verify = fixture.Context();
+        var createdEvent = await verify.ProcurementEvents
+            .Where(x => x.AggregateType == "SupplierSolicitation" && x.AggregateId == prepared.SupplierSolicitationId
+                && x.EventType == "SUPPLIER_RFQ_CREATED")
+            .SingleAsync();
+        Assert.Contains("\"Quantity\":7", createdEvent.PayloadJson);
+    }
+
+    [Theory]
+    [InlineData(SolicitationStatus.DeliveryFailed)]
+    [InlineData(SolicitationStatus.Sent)]
+    [InlineData(SolicitationStatus.Responded)]
+    public async Task The_rep_can_ask_the_same_supplier_again(SolicitationStatus earlier)
+    {
+        // The last email failed, the supplier has not answered, or their price has expired: asking
+        // again is the rep's choice and makes a new numbered request.
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            new CreateSourcingCaseCommand(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId,
+                10, false, $"again-{earlier}", "qa", $"corr-again-{earlier}")));
+        var candidate = Assert.Single(created.Candidates);
+        var first = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+            $"again-first-{earlier}", "qa", $"corr-again-first-{earlier}")));
+        await using (var setup = fixture.Context())
+        {
+            var row = await setup.Set<ERP_RFQ_Automation.Agent.Models.SupplierSolicitation>().SingleAsync(x => x.Id == first.SupplierSolicitationId);
+            row.Status = earlier;
+            await setup.SaveChangesAsync();
+        }
+
+        var second = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new PrepareSupplierRfqCommand(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, first.SourcingCaseVersion,
+            $"again-second-{earlier}", "qa", $"corr-again-second-{earlier}")));
+
+        Assert.NotEqual(first.SupplierSolicitationId, second.SupplierSolicitationId);
+    }
+
+    [Theory]
+    [MemberData(nameof(AskBlockingDimensions))]
+    public async Task The_supplier_controller_refuses_to_compose_a_request_nobody_can_send(string dimension)
     {
         var supplier = ReadySupplier();
         ApplyBlockingDimension(supplier, dimension);
@@ -83,6 +177,23 @@ public sealed class SupplierReadinessGatingTests
         var problem = Assert.IsType<ProblemDetails>(conflict.Value);
         Assert.Equal(StatusCodes.Status409Conflict, problem.Status);
         Assert.True(problem.Extensions.ContainsKey("traceId"));
+    }
+
+    [Theory]
+    [MemberData(nameof(ApprovalOnlyDimensions))]
+    public async Task The_supplier_controller_composes_a_request_to_an_unapproved_supplier(string dimension)
+    {
+        var supplier = ReadySupplier();
+        ApplyBlockingDimension(supplier, dimension);
+        var controller = Controller(new StubSupplierRepository(supplier));
+
+        var result = await controller.ComposeQuoteEmail(new BatchQuoteRequestDTO
+        {
+            SupplierId = supplier.Id,
+            Items = [new QuoteItemDTO { PartNumber = "P-1", Quantity = 1 }]
+        });
+
+        Assert.IsType<OkObjectResult>(result.Result);
     }
 
     [Fact]
@@ -134,6 +245,7 @@ public sealed class SupplierReadinessGatingTests
                 supplier.ComplianceStatus = SupplierComplianceStatuses.Pending; break;
             case "risk-high": supplier.RiskStatus = SupplierRiskStatuses.High; break;
             case "risk-blocked": supplier.RiskStatus = SupplierRiskStatuses.Blocked; break;
+            case "governance-blocked": supplier.GovernanceStatus = SupplierGovernanceStatuses.Blocked; break;
             case "readiness-review-required":
                 supplier.ReadinessStatus = SupplierReadinessStatuses.ReviewRequired; break;
             default: throw new ArgumentOutOfRangeException(nameof(dimension), dimension, "Unknown readiness dimension.");

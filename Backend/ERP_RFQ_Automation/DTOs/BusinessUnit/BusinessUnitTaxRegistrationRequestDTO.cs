@@ -21,5 +21,14 @@ namespace ERP_RFQ_Automation.DTOs.BusinessUnit
         [Display(Name = "Tax registration number")]
         [ERP_RFQ_Automation.Tax.TaxRegistrationNumber]
         public string? TaxRegistrationNumber { get; set; }
+
+        /// <summary>
+        /// The seller's commercial registration (CR) number — the other statutory identifier a
+        /// Saudi quotation carries, and the other one only the trading entity can state. Omitted
+        /// (null) leaves the stored value alone, so older callers of this route keep working;
+        /// an empty string clears it. Validated by <c>CommercialRegistrationNumbers</c> when present.
+        /// </summary>
+        [Display(Name = "Commercial registration number")]
+        public string? CommercialRegistrationNumber { get; set; }
     }
 }

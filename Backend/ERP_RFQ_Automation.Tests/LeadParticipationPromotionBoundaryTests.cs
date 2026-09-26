@@ -564,7 +564,9 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("link.SourceDocumentId == sourceDocumentId", controller, StringComparison.Ordinal);
         Assert.Contains("occurrence.SourceDocumentId == sourceDocumentId", controller, StringComparison.Ordinal);
         Assert.Contains("document.PurgeState != EvidencePurgeState.Present", controller, StringComparison.Ordinal);
-        Assert.Contains("job.StoragePath, document.ContentHash", controller, StringComparison.Ordinal);
+        // The verified read takes the job's storage path and the document's digest, whatever
+        // null-forgiveness the compiler needs around them after the shared resolver returned them.
+        Assert.Matches(@"OpenVerifiedReadAsync\(\s*job!?\.StoragePath!?,\s*document!?\.ContentHash", controller);
         var sourceMethod = controller[(controller.IndexOf("DownloadSourceDocument", StringComparison.Ordinal))..];
         Assert.DoesNotContain("OriginalFileName ==", sourceMethod, StringComparison.Ordinal);
     }

@@ -38,6 +38,7 @@ import {
   Person,
   Language,
   Close as CloseIcon,
+  ForwardToInbox,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { useAppTheme } from '../../context/ThemeContext';
@@ -56,6 +57,7 @@ import {
   rememberSearchHit,
 } from './globalSearchHistory';
 import { GLOBAL_SEARCH_FAILURE_MESSAGE, GLOBAL_SEARCH_LABEL } from './globalSearchPresentation';
+import MySupplierEmailDialog from './MySupplierEmailDialog';
 
 interface NavbarProps {
   onToggleSidebar: () => void;
@@ -131,6 +133,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
   const [searchValue, setSearchValue] = React.useState('');
   const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
   const [colorMenuAnchor, setColorMenuAnchor] = React.useState<null | HTMLElement>(null);
+  const [mySupplierEmailOpen, setMySupplierEmailOpen] = React.useState(false);
 
   // FE-14: never fall back to a hardcoded person's name/role — derive a label
   // and initials from the real userData, with a neutral generic fallback while
@@ -755,6 +758,16 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
             />
           </MenuItem>
 
+          <MenuItem onClick={() => { handleClose(); setMySupplierEmailOpen(true); }} sx={{ borderRadius: 2, py: 1.5 }}>
+            <ListItemIcon><ForwardToInbox fontSize="small" sx={{ opacity: 0.7 }} /></ListItemIcon>
+            <ListItemText
+              primary="My supplier email"
+              slotProps={{
+                primary: { variant: 'body2', sx: { fontWeight: 600 } }
+              }}
+            />
+          </MenuItem>
+
           <MenuItem
             onClick={handleColorMenuOpen}
             aria-haspopup="menu"
@@ -788,6 +801,11 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
             />
           </MenuItem>
         </Menu>
+
+        {/* Mounted only while open, so the navbar needs no data until the rep asks for it. */}
+        {mySupplierEmailOpen && (
+          <MySupplierEmailDialog open onClose={() => setMySupplierEmailOpen(false)} />
+        )}
 
         {/* Color Selection Sub-Menu */}
         <Menu

@@ -11,6 +11,8 @@ export interface BusinessUnitDTO {
    * tax number, which identifies who pays for Nexora.
    */
   taxRegistrationNumber?: string;
+  /** The seller's commercial registration (CR) number, printed beside the VAT on its quotations. */
+  commercialRegistrationNumber?: string;
   isActive: boolean;
   createdOn?: string;
   createdBy?: string;
@@ -59,10 +61,17 @@ const businessUnitService = {
    * statutory identifier only the trading entity can state, and without it the entity deducting
    * recoverable input VAT from landed cost cannot name itself as the claimant.
    */
-  updateTaxRegistration: async (id: number, taxRegistrationNumber: string | null) => {
+  updateTaxRegistration: async (
+    id: number,
+    taxRegistrationNumber: string | null,
+    /** The CR number; "" clears it. Omitted, the server leaves the stored value alone. */
+    commercialRegistrationNumber?: string | null,
+  ) => {
     const response = await axiosInstance.put<BusinessUnitDTO>(
       `/api/BusinessUnit/${id}/tax-registration`,
-      { taxRegistrationNumber },
+      commercialRegistrationNumber === undefined
+        ? { taxRegistrationNumber }
+        : { taxRegistrationNumber, commercialRegistrationNumber: commercialRegistrationNumber ?? '' },
     );
     return response.data;
   },

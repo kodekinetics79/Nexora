@@ -82,4 +82,17 @@ public sealed class WeightedEligibleRepScoringEngine
     {
         if (value.Kind != DateTimeKind.Utc) throw new SalesValidationException($"{name} must be UTC.");
     }
+
+    /// <summary>
+    /// The value a caller may hand to <see cref="RequireUtc"/> when it came out of the database.
+    /// Every UTC column here is <c>timestamp without time zone</c> under Npgsql's legacy switch, so
+    /// EF returns <see cref="DateTimeKind.Unspecified"/>; that is UTC by this codebase's contract.
+    /// A Local value is converted; a Utc value is returned as is.
+    /// </summary>
+    internal static DateTime AsUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
 }

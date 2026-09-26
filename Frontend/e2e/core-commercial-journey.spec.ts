@@ -242,10 +242,25 @@ test('40 approved Lead lines remain the sole RFQ scope and Quote preparation is 
   expect(rfq.rfqitems.map((line) => line.sourceLeadItemRevisionId).sort((a, b) => Number(a) - Number(b)))
     .toEqual(approvedRevisionIds);
 
+  // The RFQ header offers exactly ONE route to this RFQ's quote: it prepares the draft while none
+  // exists, and from then on it names the draft it has. Both must reach the same record, so the
+  // journey presses whichever is showing — an earlier test in this suite may already have prepared
+  // it, and the button's name is read from the endpoint the header itself reads.
+  const openTheQuote = async () => {
+    const latest = await api(page, token, 'get', `/api/rfq/${rfqId}/latest-quote`);
+    const existing = latest.status() === 200
+      ? await latest.json() as { quoteNo: string; state: string }
+      : null;
+    const name = existing === null
+      ? 'Prepare Quote Draft'
+      : existing.state === 'DRAFT' ? `Open ${existing.quoteNo}` : `${existing.quoteNo} sent`;
+    await page.getByRole('button', { name }).click();
+    await expect(page).toHaveURL(/\/sales\/quotes\/view\/\d+$/);
+  };
+
   await page.goto(`/procurement/rfqs/view/${rfqId}`);
   await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId}$`));
-  await page.getByRole('button', { name: /Prepare Quote Draft/i }).click();
-  await expect(page).toHaveURL(/\/sales\/quotes\/view\/\d+$/);
+  await openTheQuote();
   const firstQuoteUrl = page.url();
 
   await fs.mkdir(evidenceDir, { recursive: true });
@@ -260,7 +275,7 @@ test('40 approved Lead lines remain the sole RFQ scope and Quote preparation is 
   expect(countBefore).toBe(1);
 
   await page.goto(`/procurement/rfqs/view/${rfqId}`);
-  await page.getByRole('button', { name: /Prepare Quote Draft/i }).click();
+  await openTheQuote();
   await expect(page).toHaveURL(new RegExp(firstQuoteUrl.replace(/^.*(\/sales\/quotes\/view\/\d+)$/, '$1') + '$'));
 
   const quotesAfter = await jsonOk<{ items: Array<{ id: number; rfqId?: number }> }>(

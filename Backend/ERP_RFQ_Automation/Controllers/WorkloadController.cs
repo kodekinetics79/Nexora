@@ -99,14 +99,15 @@ namespace ERP_RFQ_Automation.Controllers
             if (from.HasValue != to.HasValue)
                 return BadRequest(new { message = "State both ends of the period, or neither." });
 
+            var now = DateTime.UtcNow;
             var effectiveFrom = NormalizeUtc(from);
-            var effectiveTo = NormalizeUtc(to);
+            var effectiveTo = ThroughEndOfDay(NormalizeUtc(to), now);
             if (effectiveFrom >= effectiveTo)
                 return BadRequest(new { message = "The reporting window must start before it ends." });
-            if (effectiveTo > DateTime.UtcNow.AddMinutes(1))
+            if (effectiveTo > now.AddMinutes(1))
                 return BadRequest(new { message = "The reporting window cannot end in the future." });
 
-            var scope = await _accountScope.ResolveAsync(userId, roleId, businessUnitId, DateTime.UtcNow, ct);
+            var scope = await _accountScope.ResolveAsync(userId, roleId, businessUnitId, now, ct);
 
             var data = await _repository.GetPipelineAnalyticsAsync(
                 businessUnitId, scope, effectiveFrom, effectiveTo, ct);
@@ -132,7 +133,7 @@ namespace ERP_RFQ_Automation.Controllers
             if (businessUnitId <= 0) return Forbid();
 
             var generatedAt = DateTime.UtcNow;
-            var effectiveTo = NormalizeUtc(to) ?? generatedAt;
+            var effectiveTo = ThroughEndOfDay(NormalizeUtc(to), generatedAt) ?? generatedAt;
             var effectiveFrom = NormalizeUtc(from) ?? effectiveTo.AddDays(-DefaultMarginWindowDays);
 
             if (effectiveFrom >= effectiveTo)
@@ -159,5 +160,23 @@ namespace ERP_RFQ_Automation.Controllers
             : value.Value.Kind == DateTimeKind.Utc
                 ? value.Value
                 : DateTime.SpecifyKind(value.Value, DateTimeKind.Utc);
+
+        /// <summary>
+        /// A date-only <c>to</c> ("2026-09-15", the period control's "today") means THROUGH that
+        /// day, not up to its first second. The window end is exclusive, so midnight of the
+        /// chosen day excluded every lead, quote and RFQ created that day: with "Last 30 days"
+        /// selected, the funnel showed 0 received / 0 accepted / 0 quoted while six leads, an RFQ
+        /// and a quote sat on today's date, and its seal read one day short of the band above it.
+        /// This is the same rule <c>DashboardController.GetRelease01</c> applies, so every band
+        /// under one period control covers the same days. Clamped to now: a day still in progress
+        /// ends when the figures are generated, never in the future.
+        /// </summary>
+        private static DateTime? ThroughEndOfDay(DateTime? to, DateTime now)
+        {
+            if (to is null) return null;
+            if (to.Value.TimeOfDay != TimeSpan.Zero) return to;
+            var endOfDay = to.Value.AddDays(1);
+            return endOfDay < now ? endOfDay : now;
+        }
     }
 }

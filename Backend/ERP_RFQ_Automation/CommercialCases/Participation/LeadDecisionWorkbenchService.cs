@@ -21,12 +21,14 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
     private readonly ErpRfqAutomationContext _db;
     private readonly ILeadOutcomeReasons _leadOutcomeReasons;
     private readonly ILeadConversionIntelligence _conversionIntelligence;
+    private readonly ILineSkipReasons _lineSkipReasons;
     public LeadDecisionWorkbenchService(ErpRfqAutomationContext db, ILeadOutcomeReasons leadOutcomeReasons,
-        ILeadConversionIntelligence conversionIntelligence)
+        ILeadConversionIntelligence conversionIntelligence, ILineSkipReasons? lineSkipReasons = null)
     {
         _db = db;
         _leadOutcomeReasons = leadOutcomeReasons;
         _conversionIntelligence = conversionIntelligence;
+        _lineSkipReasons = lineSkipReasons ?? new LineSkipReasons(db);
     }
 
     public LeadDecisionWorkbenchService(ErpRfqAutomationContext db, ILeadOutcomeReasons leadOutcomeReasons)
@@ -302,7 +304,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                     ? criticalEvidence.Complete
                         ? lead.CommercialFactsVerified
                             ? "Exact retained source evidence covers identity, quantity, and unit; the commercial facts are verified."
-                            : "Exact retained source evidence exists; commercial verification is still required."
+                            : "Read from the document; not yet checked by a person."
                         : $"The retained source does not yet prove {string.Join(", ", criticalEvidence.Missing())}. Correct and approve the extraction before committing a Bid line."
                     : "No persisted field evidence maps to this canonical Lead line.",
                 lineDecision is null ? null : new LineParticipationDto(lineDecision.Choice.ToString(),
@@ -311,7 +313,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                     lineDecision.CatalogPolicyVersion, lineDecision.WarningSnapshotJson),
                 // The buyer's own number and their long text: the maker's part number above is a
                 // different thing, and a rep needs both to know what is being asked for.
-                canonical?.ItemMaterialCode, canonical?.MaterialPotext, LineExtras(canonical));
+                canonical?.ItemMaterialCode, canonical?.MaterialPotext, LineExtras(canonical),
+                criticalEvidence.Complete);
         }).ToArray();
 
         var hasFrozenCommercialHeader = LeadRevisionCommercialSnapshot.TryParse(
@@ -370,10 +373,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             blockers.Add(new("LEAD_NOT_ELIGIBLE", ex.Message, "Open Lead lifecycle", $"/procurement/leads/view/{lead.Id}"));
         }
 
-        var governedNoBidReasons = (await _leadOutcomeReasons.GetAsync(businessUnitId, ct))
-            .Select(x => new DecisionReasonCodeDto(x.Code, x.Label, new[] { "NoBid" },
-                "Governed business-unit outcome reason."));
-        var reasonCodes = governedNoBidReasons.Concat(ClarificationReasonCodes).ToArray();
+        var reasonCodes = ComposeReasonCodes(
+                await _lineSkipReasons.GetAsync(businessUnitId, ct),
+                await _leadOutcomeReasons.GetAsync(businessUnitId, ct))
+            .Concat(ClarificationReasonCodes).ToArray();
         var unitOptions = await _db.SetUoms.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive)
             .OrderBy(x => x.UomCode)
@@ -424,7 +427,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 : new PromotionReceiptDto(rfq.Id, rfq.Rfqno, promotedRevision.RevisionNumber, promotedDecision.Sequence,
                     rfq.NoOfLineItems ?? 0, promotion.PromotedAtUtc, promotion.PromotedBy,
                     NameFor(namesByEmail, PersonActor(promotion.PromotedBy)), promotedRevisionLineCount), blockers,
-            sourceOccurrence?.SourceChannel, uploadBatch?.CreatedAtUtc, uploadedBy, NameFor(namesByEmail, uploadedBy));
+            sourceOccurrence?.SourceChannel, uploadBatch?.CreatedAtUtc, uploadedBy, NameFor(namesByEmail, uploadedBy),
+            string.IsNullOrWhiteSpace(lead.CustomerCompanyNameExtracted) ? null : lead.CustomerCompanyNameExtracted.Trim());
     }
 
     /// <summary>
@@ -457,6 +461,45 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .Where(u => u.Name.Length > 0)
             .GroupBy(u => u.Key)
             .ToDictionary(group => group.Key, group => group.First().Name);
+    }
+
+    /// <summary>
+    /// The reason list the screen picks from, with each reason saying what it applies to.
+    ///
+    /// <para><c>NoBid</c> is a LINE left out of the quote: the tenant's line-skip list. <c>Decline</c>
+    /// is the whole request turned down: the tenant's quote-outcome list, which the lifecycle
+    /// records the lead's loss against. They used to be one list, so "Why skip line 4" offered
+    /// "Lost to competitor" and "Expired automatically" for a line nobody had quoted yet. A code
+    /// that appears on both lists (the baselines share "Price too high") is one reason with both
+    /// uses, so a saved choice keeps its label whichever list it came from.</para>
+    /// </summary>
+    internal static IReadOnlyList<DecisionReasonCodeDto> ComposeReasonCodes(
+        IReadOnlyList<LineSkipReason> lineSkipReasons, IReadOnlyList<OutcomeReasonDto> outcomeReasons)
+    {
+        var composed = new List<DecisionReasonCodeDto>();
+        var byCode = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var reason in lineSkipReasons)
+        {
+            if (string.IsNullOrWhiteSpace(reason.Code) || byCode.ContainsKey(reason.Code)) continue;
+            byCode[reason.Code] = composed.Count;
+            composed.Add(new DecisionReasonCodeDto(reason.Code, reason.Label, new[] { "NoBid" },
+                "Why this line is not quoted."));
+        }
+        foreach (var reason in outcomeReasons)
+        {
+            if (string.IsNullOrWhiteSpace(reason.Code)) continue;
+            if (byCode.TryGetValue(reason.Code, out var index))
+            {
+                var existing = composed[index];
+                if (!existing.AppliesTo.Contains("Decline"))
+                    composed[index] = existing with { AppliesTo = existing.AppliesTo.Append("Decline").ToArray() };
+                continue;
+            }
+            byCode[reason.Code] = composed.Count;
+            composed.Add(new DecisionReasonCodeDto(reason.Code, reason.Label, new[] { "Decline" },
+                "Governed business-unit outcome reason."));
+        }
+        return composed;
     }
 
     private static readonly DecisionReasonCodeDto[] ClarificationReasonCodes =
@@ -696,7 +739,10 @@ public sealed record LeadDecisionLineDto(long Id, long RevisionLineId, string? L
     string WarningSnapshotJson, string VerificationStatus,
     string? VerificationDetail, LineParticipationDto? Participation,
     string? ItemMaterialCode = null, string? Specification = null,
-    IReadOnlyDictionary<string, string>? Extras = null);
+    IReadOnlyDictionary<string, string>? Extras = null,
+    // True when retained cell evidence covers the item, its quantity and its unit — the line was
+    // read from the document, whatever a person has or has not yet confirmed about it.
+    bool SourceEvidenceComplete = false);
 public sealed record FitCriterionDto(string Code, string Label, string? Description, string Decision, string? Note);
 public sealed record FitAssessmentDto(int Version, string OverallDecision, string Rationale,
     IReadOnlyList<FitCriterionDto> Criteria, string? AssessedBy, DateTimeOffset? AssessedAtUtc);
@@ -718,4 +764,7 @@ public sealed record LeadDecisionWorkbenchDto(long LeadId, long LeadRevisionId, 
     IReadOnlyList<DecisionValueOptionDto> CurrencyOptions, FitAssessmentDto? FitAssessment,
     PromotionReceiptDto? Promotion, IReadOnlyList<DecisionBlockerDto> Blockers,
     string? SourceChannel = null, DateTimeOffset? UploadedAtUtc = null, string? UploadedBy = null,
-    string? UploadedByName = null);
+    string? UploadedByName = null,
+    // The buying organisation as the document printed it: what the client dialog opens its search
+    // on, so "no match" is the start of adding the client rather than a name to retype.
+    string? ExtractedClientName = null);

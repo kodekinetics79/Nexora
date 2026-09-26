@@ -4,6 +4,7 @@ import { Box, CircularProgress } from '@mui/material';
 import TenantShell from './components/layout/TenantShell';
 import lazyWithRetry from './utils/lazyWithRetry';
 import PermissionGuard, { RequireAuth, RequireManager } from './components/common/PermissionGuard';
+import { useAuth } from './context/AuthContext';
 import RouteAnnouncer from './components/layout/RouteAnnouncer';
 import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from './pages/Setup/setupRoutes';
 
@@ -143,6 +144,17 @@ const PageLoader = () => (
   </Box>
 );
 
+/**
+ * The root of the app is not a page, it is a fork. A signed-in user who types the bare address
+ * (or follows a bookmark to it) used to be shown the login form even though every other route
+ * still worked — the token was in hand and the form asked for it again. They go to the dashboard;
+ * a visitor with no token goes to login, as before.
+ */
+const RootRedirect = () => {
+  const { token } = useAuth();
+  return <Navigate to={token ? '/dashboard' : '/login'} replace />;
+};
+
 function App() {
   return (
     <>
@@ -151,7 +163,7 @@ function App() {
     <RouteAnnouncer />
     <Suspense fallback={<PageLoader />}>
     <Routes>
-      <Route path="/" element={<Navigate to="/login" replace />} />
+      <Route path="/" element={<RootRedirect />} />
 
       {/* The landing screen is module-agnostic, not authentication-agnostic. A signed-in user whose
           grants are still loading — or who holds none — reaches the explanatory Inbox instead of

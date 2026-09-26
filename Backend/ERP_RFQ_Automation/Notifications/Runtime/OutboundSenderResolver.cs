@@ -61,6 +61,10 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
     public interface ITenantOutboundSenderSource
     {
         Task<TenantOutboundSender?> ResolveAsync(long businessUnitId, CancellationToken ct = default);
+
+        /// <summary>The tenant's outgoing mailbox with this id (active, SMTP), or the default when null or not found.</summary>
+        Task<TenantOutboundSender?> ResolveAsync(long businessUnitId, long? mailboxId, CancellationToken ct = default)
+            => ResolveAsync(businessUnitId, ct);
     }
 
     /// <summary>
@@ -93,6 +97,10 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
         /// outbound row).
         /// </summary>
         Task<ResolvedOutboundSender> ResolveAsync(long? businessUnitId, CancellationToken ct = default);
+
+        /// <summary>As above, from the tenant mailbox the user chose when <paramref name="mailboxId"/> is set.</summary>
+        Task<ResolvedOutboundSender> ResolveAsync(long? businessUnitId, long? mailboxId, CancellationToken ct = default)
+            => ResolveAsync(businessUnitId, ct);
 
         /// <summary>
         /// A sender for one specific tenant mailbox, for the tenant's "send test message"
@@ -135,7 +143,10 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
             _loggerFactory = loggerFactory;
         }
 
-        public async Task<ResolvedOutboundSender> ResolveAsync(long? businessUnitId, CancellationToken ct = default)
+        public Task<ResolvedOutboundSender> ResolveAsync(long? businessUnitId, CancellationToken ct = default)
+            => ResolveAsync(businessUnitId, null, ct);
+
+        public async Task<ResolvedOutboundSender> ResolveAsync(long? businessUnitId, long? mailboxId, CancellationToken ct = default)
         {
             var platform = await _platform.ResolveAsync(ct).ConfigureAwait(false);
             if (businessUnitId is not { } tenant)
@@ -150,7 +161,7 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                 var source = scope.ServiceProvider.GetService<ITenantOutboundSenderSource>();
                 mailbox = source is null
                     ? null
-                    : await source.ResolveAsync(tenant, ct).ConfigureAwait(false);
+                    : await source.ResolveAsync(tenant, mailboxId, ct).ConfigureAwait(false);
             }
 
             return mailbox is null ? Platform(platform) : ForMailbox(mailbox, platform.Settings);

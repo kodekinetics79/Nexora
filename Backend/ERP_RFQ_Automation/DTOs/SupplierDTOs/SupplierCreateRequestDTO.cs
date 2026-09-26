@@ -50,5 +50,14 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
         [Display(Name = "Credit days")]
         [Range(0, int.MaxValue, ErrorMessage = "Credit days cannot be negative.")]
         public int? CreditDays { get; set; }
+
+        [Display(Name = "Website")]
+        [StringLength(500)]
+        public string? Website { get; set; }
+
+        [Display(Name = "Role")]
+        [StringLength(SupplierRoleInput.MaximumLength)]
+        [SupplierRole]
+        public string? Role { get; set; }
     }
 }

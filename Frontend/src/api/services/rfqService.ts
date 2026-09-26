@@ -64,6 +64,8 @@ export interface RfqitemResponseDTO {
     lineItemNo?: string;
     productId?: number;
     productName?: string;
+    /** False when the linked part was kept out of the catalogue. */
+    productIsCatalogItem?: boolean | null;
     productResolvedBy?: string | null;
     productResolvedOn?: string | null;
     productResolutionReason?: string | null;
@@ -79,6 +81,12 @@ export interface RfqitemResponseDTO {
     unitPrice?: number;
     quantity: number;
     extraFields?: string | null;
+    /** Set when the part asked for is obsolete or discontinued and something else is being offered. */
+    offeredPartNumber?: string | null;
+    offeredMakerName?: string | null;
+    offeredKind?: string | null;
+    offeredNote?: string | null;
+    offeredSpecs?: string | null;
     storageLocation?: string;
     warehouseId?: number;
     warehouseName?: string;
@@ -193,6 +201,38 @@ export interface RfqCreatePayload {
 }
 
 const rfqService = {
+    /** The RFQ's latest quote, or null when none has been started. state: DRAFT | SENT | DECIDED. */
+    getLatestQuote: async (rfqId: number): Promise<{ quoteId: number; quoteNo: string; state: 'DRAFT' | 'SENT' | 'DECIDED' } | null> => {
+        const response = await axiosInstance.get(`/api/rfq/${rfqId}/latest-quote`);
+        return response.status === 204 || !response.data ? null : response.data;
+    },
+
+    /** The part actually offered for an RFQ line when the one asked for is obsolete or discontinued. Empty body clears it. */
+    saveOfferedPart: async (rfqId: number, itemId: number, body: {
+        partNumber?: string; makerName?: string | null; kind?: 'REPLACEMENT' | 'EQUIVALENT'; note?: string | null; specs?: string | null; productId?: number | null;
+    }) => {
+        const response = await axiosInstance.put(`/api/rfq/${rfqId}/items/${itemId}/offered-part`, body);
+        return response.data as { offeredPartNumber?: string | null; productId?: number | null };
+    },
+
+    /** One draft quote line: ESTIMATE with a price, TO_FOLLOW, NOT_QUOTED with a reason, or null for a plain price. */
+    saveLinePricing: async (quoteId: number, lineId: number, body: { status: 'ESTIMATE' | 'TO_FOLLOW' | 'NOT_QUOTED' | null; note?: string | null; unitPrice?: number | null }) => {
+        const response = await axiosInstance.put(`/api/rfq/quotes/${quoteId}/lines/${lineId}/pricing`, body);
+        return response.data as { quoteId: number };
+    },
+
+    /** Currency (only while the quote has none) and validity date of a draft quote. */
+    saveQuoteTerms: async (quoteId: number, terms: { currencyId?: number | null; validUntil?: string | null }) => {
+        const response = await axiosInstance.put(`/api/rfq/quotes/${quoteId}/terms`, terms);
+        return response.data as { quoteId: number; currencyId?: number | null; validUntil?: string | null };
+    },
+
+    /** The makers the customer accepts for one line, separated by ";" ("ABB 1SDA; GE THQL32010; Eaton"). Empty clears the list. */
+    saveAcceptedMakers: async (rfqId: number, itemId: number, acceptedMakers: string): Promise<{ acceptedMakers: string[] }> => {
+        const response = await axiosInstance.put<{ acceptedMakers: string[] }>(`/api/rfq/${rfqId}/items/${itemId}/makers`, { acceptedMakers });
+        return response.data;
+    },
+
     getAll: async (params: RfqFilterParams): Promise<PaginatedRfqResponseDTO> => {
         const response = await axiosInstance.get<PaginatedRfqResponseDTO>("/api/Rfq", { params });
         return response.data;

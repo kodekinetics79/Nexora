@@ -158,6 +158,29 @@ public sealed class Phase1AwardToQuoteSeamTests
             awardId = approved.Id;
         }
 
+        // ---- D17: the comparison the buyer re-reads AFTER the award --------------------------
+        //
+        // The line is now covered — by this very offer — and the coverage blocker used to fire on
+        // it too. The row the buyer had just approved read "Not scored — this offer cannot be
+        // awarded as it stands: sourcing requirement already covered", with the chip and a "Needs
+        // attention: 1 supplier offer cannot be awarded" banner above it. The offer that covered
+        // the requirement is not blocked by having covered it; both reads the screen makes agree.
+        await using (var recompare = spine.Context())
+        {
+            var comparison = await new ProcurementApplicationService(recompare)
+                .CompareQuotesAsync(UpstreamSpine.Tenant, rfqItemId);
+            var awardedLine = comparison.Lines.Single(x => x.SupplierQuotedItemId == supplierQuotedItemId);
+            Assert.DoesNotContain("sourcing requirement already covered", awardedLine.Blockers);
+            Assert.True(awardedLine.Eligible,
+                $"the offer that was just awarded is presented as unawardable: {string.Join("; ", awardedLine.Blockers)}");
+
+            var workbench = await new ProcurementApplicationService(recompare)
+                .GetWorkbenchAsync(UpstreamSpine.Tenant, rfqId);
+            var offerView = workbench.Offers.Single(x => x.Id == supplierQuotedItemId);
+            Assert.True(offerView.Awarded, "the workbench does not say the offer is awarded");
+            Assert.DoesNotContain("sourcing requirement already covered", offerView.BlockingReasons);
+        }
+
         // ---- the customer quote ------------------------------------------------------------
         await using (var decide = spine.Context())
         {

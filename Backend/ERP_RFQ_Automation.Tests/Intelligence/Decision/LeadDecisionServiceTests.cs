@@ -1,4 +1,6 @@
+using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.Intelligence.Decision;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Reporting;
 using ERP_RFQ_Automation.Tests.Support;
@@ -425,6 +427,160 @@ public sealed class LeadDecisionServiceTests
 
         var summary = Assert.Single(await service.GetSummariesAsync([1], TenantId, default)).Value;
         Assert.Equal(0m, summary.CoveragePct);
+    }
+
+    // ---------------------------------------------------------------- D5: what "Nexora's read" says about value
+
+    [Fact]
+    public async Task Lines_that_all_state_one_currency_but_no_price_are_reported_as_unpriced_not_as_missing_currency()
+    {
+        using var database = new TestDb();
+        await using (var seed = database.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 1, TenantId, buyersName: null);
+            lead.LeadItems.Add(Item(1001, "P-1", null, "Gate valve", 4, null, "SAR"));
+            lead.LeadItems.Add(Item(1002, "P-2", null, "Globe valve", 6, null, " sar "));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
+
+        Assert.Equal("SAR", brief.Currency);
+        Assert.Null(brief.EstimatedValue);
+        Assert.Contains(brief.Reasons, reason => reason.StartsWith("No price information on any line", StringComparison.Ordinal)
+                                                 && reason.Contains("SAR", StringComparison.Ordinal));
+        Assert.DoesNotContain(brief.Reasons, reason => reason.Contains("one known currency", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Priced_lines_in_two_currencies_are_told_apart_from_lines_with_no_currency()
+    {
+        using var database = new TestDb();
+        await using (var seed = database.ContextFor(null))
+        {
+            var mixed = Seed.Lead(seed, 1, TenantId, buyersName: null);
+            mixed.LeadItems.Add(Item(1001, "P-1", null, "USD line", 2, 100m, "USD"));
+            mixed.LeadItems.Add(Item(1002, "P-2", null, "EUR line", 3, 80m, "EUR"));
+            var blank = Seed.Lead(seed, 2, TenantId, buyersName: null);
+            blank.LeadItems.Add(Item(2001, "P-3", null, "Priced in SAR", 1, 100m, "SAR"));
+            blank.LeadItems.Add(Item(2002, "P-4", null, "Priced, no currency", 1, 50m, null));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var service = new LeadDecisionService(context, new GrossMarginService(context));
+
+        var mixedBrief = await service.GetBriefAsync(1, TenantId, default);
+        Assert.Null(mixedBrief.Currency);
+        Assert.Null(mixedBrief.EstimatedValue);
+        Assert.Contains(mixedBrief.Reasons, reason =>
+            reason.Contains("more than one currency (EUR, USD)", StringComparison.Ordinal));
+
+        var blankBrief = await service.GetBriefAsync(2, TenantId, default);
+        Assert.Null(blankBrief.EstimatedValue);
+        Assert.Contains(blankBrief.Reasons, reason =>
+            reason.Contains("1 of 2 priced lines state no currency", StringComparison.Ordinal));
+        Assert.DoesNotContain(blankBrief.Reasons, reason => reason.Contains("one known currency", StringComparison.Ordinal));
+    }
+
+    // ---------------------------------------------------------------- D5: coverage counts what a person resolved
+
+    [Fact]
+    public async Task A_line_a_person_bound_to_a_catalogue_product_counts_as_covered_and_lends_its_currency()
+    {
+        using var database = new TestDb();
+        await using (var seed = database.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 1, TenantId, buyersName: null);
+            // Line 1 matches by exact code. Line 2's code is unknown to the matcher — the rep
+            // bound it to product 502 on the Decide screen and gave it a currency there.
+            lead.LeadItems.Add(Item(1001, "KNOWN-1", null, "Known part", 2, 10m, "SAR"));
+            lead.LeadItems.Add(Item(1002, "GOLD-QUOTE-0004", null, "Resolved by hand", 2, 10m, null));
+            seed.Products.Add(Product(501, "KNOWN-1", "Known product", 5m, 8m, 10m));
+            seed.Products.Add(Product(502, "CATALOGUE-502", "Hand-resolved product", 5m, 8m, 10m));
+            await seed.SaveChangesAsync();
+            await SettleLineAsync(seed, lead, leadItemId: 1002, productId: 502, currency: "SAR");
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
+
+        Assert.Equal(2, brief.Coverage.CoveredItems);
+        Assert.Equal(100m, brief.Coverage.CoveragePct);
+        var resolved = Assert.Single(brief.Coverage.Items, item => item.LeadItemId == 1002);
+        Assert.True(resolved.Matched);
+        Assert.Equal(502, resolved.ProductId);
+        Assert.Equal("resolved", resolved.MatchType);
+        Assert.Contains(brief.Reasons, reason => reason.Contains("2 of 2 items", StringComparison.Ordinal));
+        // The currency the rep set on the line is the lead's currency; the total follows.
+        Assert.Equal("SAR", brief.Currency);
+        Assert.Equal(40m, brief.EstimatedValue);
+    }
+
+    /// <summary>
+    /// Records what a rep settled on the Decide screen for one line: the current revision's
+    /// participation decision carrying the chosen product and currency for that lead item.
+    /// </summary>
+    private static async Task SettleLineAsync(ErpRfqAutomationContext seed, Lead lead, long leadItemId,
+        long productId, string currency)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var batch = new LeadIngestionBatch
+        {
+            Id = Guid.NewGuid(), BusinessUnitId = TenantId, SourceChannel = "DecisionTests",
+            CreatedBy = "tests", CreatedAtUtc = now, UpdatedAtUtc = now
+        };
+        var occurrence = new LeadIngestionOccurrence
+        {
+            Id = 9_001, BusinessUnitId = TenantId, Batch = batch, Lead = lead, SourceChannel = "DecisionTests",
+            IdempotencyKey = "decision-occurrence", LogicalInquiryFingerprint = new string('a', 64),
+            Classification = LeadOccurrenceClassification.New, Confidence = 1m,
+            ProcessingPath = LeadProcessingPath.Deterministic, IngestedAtUtc = now, CreatedAtUtc = now,
+            ActorType = "TestFixture", ActorId = "tests", CorrelationId = "decision-fixture"
+        };
+        seed.Add(occurrence);
+        await seed.SaveChangesAsync();
+        var revision = new LeadRevision
+        {
+            Id = 9_002, BusinessUnitId = TenantId, Lead = lead, RevisionNumber = 1,
+            EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = new string('b', 64),
+            SnapshotJson = "{}", CreatedAtUtc = now, CreatedBy = "tests", ProcessingPath = LeadProcessingPath.Deterministic
+        };
+        seed.Add(revision);
+        await seed.SaveChangesAsync();
+        var revisionLine = new LeadItemRevision
+        {
+            Id = 9_003, BusinessUnitId = TenantId, LeadId = lead.Id, LeadRevisionId = revision.Id,
+            LeadItemId = leadItemId, LineNumber = 2, LineFingerprint = new string('c', 64), SnapshotJson = "{}"
+        };
+        seed.Add(revisionLine);
+        await seed.SaveChangesAsync();
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = revision.RevisionNumber;
+        var fit = new LeadFitAssessment
+        {
+            Id = 9_004, BusinessUnitId = TenantId, LeadId = lead.Id, LeadRevisionId = revision.Id, Sequence = 1,
+            PolicyVersion = "decision-tests/v1", Recommendation = "FIT", IsActionable = true, AssessmentJson = "{}",
+            IdempotencyKey = "decision-fit", RequestHash = new string('d', 64), AssessedBy = "tests", AssessedAtUtc = now
+        };
+        seed.Add(fit);
+        await seed.SaveChangesAsync();
+        var decision = new LeadParticipationDecision
+        {
+            Id = 9_005, BusinessUnitId = TenantId, LeadId = lead.Id, LeadRevisionId = revision.Id,
+            FitAssessmentId = fit.Id, Sequence = 1, IsCommitted = false, Outcome = LeadParticipationOutcome.FullBid,
+            IdempotencyKey = "decision-draft", RequestHash = new string('e', 64), DecidedBy = "tests", DecidedAtUtc = now
+        };
+        decision.Lines.Add(new LeadLineParticipationDecision
+        {
+            Id = 9_006, BusinessUnitId = TenantId, LeadId = lead.Id, LeadRevisionId = revision.Id,
+            LeadItemRevisionId = revisionLine.Id, DecisionIsCommitted = false, Choice = LeadLineParticipationChoice.Bid,
+            ProductId = productId, Quantity = 2, UnitOfMeasure = "EA", Currency = currency,
+            CatalogPolicyVersion = "decision-tests/v1", WarningSnapshotJson = "{}"
+        });
+        seed.Add(decision);
+        await seed.SaveChangesAsync();
     }
 
     private static LeadItem Item(

@@ -58,6 +58,13 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
 
         /// <summary>
+        /// The default covering e-mail for this quote — subject, plain-text body, attachment name
+        /// and the customer's address on record — for the rep to review and edit before sending.
+        /// Composed by the same code the send uses, so it cannot say something the send will not.
+        /// </summary>
+        Task<QuoteEmailDraftDTO> GetEmailDraftAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
+
+        /// <summary>
         /// Everything that will refuse this quote's send, BEFORE the rep opens the send dialog.
         /// See <see cref="QuoteService.EvaluateSendReadinessAsync"/>.
         /// </summary>
@@ -73,6 +80,12 @@ namespace ERP_RFQ_Automation.Services
         Task<DeliveredQuoteReconciliation> ReconcileDeliveredQuotesAsync(long businessUnitId, CancellationToken ct = default);
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
+        /// <summary>Prices one RFQ line on its quote draft (creating the draft when there is none). exStock prints "Ex stock, subject to prior sale".</summary>
+        /// <summary>Estimate / price to follow / not quoted on one draft line, or back to a plain price (status null).</summary>
+        Task<QuoteResponseDTO> SetLinePricingStatusAsync(long quoteId, long quoteItemId, long businessUnitId, string actor, string? status, string? note, decimal? unitPrice, CancellationToken ct = default);
+        /// <summary>The quote currency (only while none is set) and validity date of a draft, without resubmitting its lines.</summary>
+        Task<QuoteResponseDTO> SetDraftTermsAsync(long quoteId, long businessUnitId, string actor, long? currencyId, DateTime? validUntil, CancellationToken ct = default);
+        Task<QuoteResponseDTO> PriceRfqLineAsync(long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock, long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null, int? leadTimeDays = null, decimal? exStockQuantity = null);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
         Task<QuoteResponseDTO> GetQuoteAsync(long id);
@@ -111,6 +124,17 @@ namespace ERP_RFQ_Automation.Services
         Task<IReadOnlyList<QuoteValidityExtensionDTO>> GetValidityExtensionsAsync(
             long quoteId, long businessUnitId, CancellationToken ct = default);
         Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
+            string idempotencyKey, CancellationToken ct = default);
+
+        /// <summary>
+        /// "Apply the new quantities": for every draft line that exists on the arriving lead
+        /// revision, set its quantity to the revision's, re-total the draft, and resolve the open
+        /// revision impact in the same transaction. Lines the draft has and the customer's document
+        /// never had are untouched; lines the revision added that the draft lacks are reported, not
+        /// invented. Refused (→ 409) on anything but a draft — a quote already with the customer is
+        /// revised, not edited.
+        /// </summary>
+        Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesAsync(long quoteId, long businessUnitId, string actor,
             string idempotencyKey, CancellationToken ct = default);
     }
 
@@ -502,6 +526,9 @@ namespace ERP_RFQ_Automation.Services
                         // line number so the printed quote can echo their reference back.
                         UnitOfMeasure = item.UnitOfMeasure,
                         CustomerLineRef = item.LineItemNo,
+                        OfferedNote = OfferedPartKinds.Sentence(item.OfferedKind, item.OfferedMakerName, item.OfferedPartNumber,
+                            item.ManufacturerPartNumber, item.OfferedNote),
+                        OfferedSpecs = item.OfferedSpecs,
                         UnitPrice = 0m,
                         TotalAmount = 0m,
                         // R17/R19: an unpriced draft line has nothing to derive tax FROM, so both
@@ -566,18 +593,13 @@ namespace ERP_RFQ_Automation.Services
             return $"{prefix}{nextSequence:D4}";
         }
 
-        public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
+        /// <summary>
+        /// The one rule for whether a quote's figures may still change: DRAFT, and no delivery that
+        /// reached, is reaching, or may have reached the customer. Shared by the Edit screen's save
+        /// and the RFQ line's "Use this price".
+        /// </summary>
+        private async Task EnsureQuoteEditableAsync(Quote quote)
         {
-            var quote = await _context.Quotes
-                .Include(q => q.QuoteItems)
-                .FirstOrDefaultAsync(q => q.Id == id);
-
-            if (quote == null) throw new KeyNotFoundException($"Quote with ID {id} not found.");
-
-            // FIN-05: a quote's financial content may only be modified while it is still in DRAFT.
-            // Once it has been SENT / ACCEPTED / ORDERED, the customer already holds a PDF with
-            // fixed totals; silently recalculating here would diverge the stored figures from that
-            // issued document. Reject the edit and require a new revision instead.
             if (!await IsQuoteInDraftAsync(quote))
             {
                 throw new InvalidOperationException(
@@ -616,6 +638,174 @@ namespace ERP_RFQ_Automation.Services
                     $"Quote '{quote.QuoteNo}' may already have reached the customer: its delivery was interrupted " +
                     "and never confirmed either way. It cannot be edited. Check with the customer; if the quote " +
                     "did not arrive, create a new revision and send that.");
+        }
+
+        public async Task<QuoteResponseDTO> SetLinePricingStatusAsync(long quoteId, long quoteItemId, long businessUnitId, string actor,
+            string? status, string? note, decimal? unitPrice, CancellationToken ct = default)
+        {
+            status = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant();
+            if (!QuoteLinePricing.IsKnown(status)) throw new InvalidOperationException("Unknown line choice.");
+            note = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
+            if (note is { Length: > QuoteLinePricing.MaxNote }) throw new InvalidOperationException("Keep the note under 300 characters.");
+
+            var quote = await _context.Quotes.Include(q => q.QuoteItems)
+                .SingleOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException("The quote was not found.");
+            await EnsureQuoteEditableAsync(quote);
+            var line = quote.QuoteItems.FirstOrDefault(i => i.Id == quoteItemId)
+                ?? throw new KeyNotFoundException("The quote line was not found.");
+
+            switch (status)
+            {
+                case QuoteLinePricing.Estimate:
+                    if (unitPrice is not > 0m) throw new InvalidOperationException("Enter the estimated price.");
+                    line.UnitPrice = Math.Round(unitPrice.Value, 2);
+                    break;
+                case QuoteLinePricing.NotQuoted:
+                    if (note is null) throw new InvalidOperationException("Say why this line is not quoted.");
+                    line.UnitPrice = 0m;
+                    break;
+                case QuoteLinePricing.ToFollow:
+                    line.UnitPrice = 0m;
+                    break;
+                default:
+                    if (line.UnitPrice <= 0m) throw new InvalidOperationException("Price the line first.");
+                    note = null;
+                    break;
+            }
+            line.PricingStatus = status;
+            line.PricingNote = note;
+            line.ModifiedBy = actor;
+            line.ModifiedDate = DateTime.UtcNow;
+            quote.ModifiedBy = actor;
+            quote.ModifiedDate = DateTime.UtcNow;
+            await CalculateQuoteTotals(quote);
+            await _context.SaveChangesAsync(ct);
+            return await GetQuoteByIdAsync(quote.Id);
+        }
+
+        public async Task<QuoteResponseDTO> SetDraftTermsAsync(long quoteId, long businessUnitId, string actor, long? currencyId,
+            DateTime? validUntil, CancellationToken ct = default)
+        {
+            var quote = await _context.Quotes.Include(q => q.QuoteItems)
+                .SingleOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException("The quote was not found.");
+            await EnsureQuoteEditableAsync(quote);
+
+            if (currencyId is not null && currencyId != quote.CurrencyId)
+            {
+                // A currency is chosen once. Changing it later would silently restate every price.
+                if (quote.CurrencyId is not null)
+                    throw new InvalidOperationException("This quote already has a currency.");
+                var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId && c.IsActive == true, ct);
+                if (!known) throw new InvalidOperationException("Choose one of your company's currencies.");
+                quote.CurrencyId = currencyId;
+            }
+            if (validUntil is not null)
+            {
+                var day = DateTime.SpecifyKind(validUntil.Value.Date, DateTimeKind.Unspecified);
+                if (day < DateTime.UtcNow.Date) throw new InvalidOperationException("The quote cannot be valid until a date that has passed.");
+                if (day > DateTime.UtcNow.Date.AddYears(2)) throw new InvalidOperationException("Choose a validity date within two years.");
+                quote.ValidUntil = day;
+            }
+            quote.ModifiedBy = actor;
+            quote.ModifiedDate = DateTime.UtcNow;
+            await _context.SaveChangesAsync(ct);
+            return await GetQuoteByIdAsync(quote.Id);
+        }
+
+        public async Task<QuoteResponseDTO> PriceRfqLineAsync(
+            long rfqId, long rfqItemId, long businessUnitId, string actor, decimal unitPrice, bool exStock,
+            long? currencyId, CancellationToken ct = default, bool reviseIfSent = false, long? productId = null, string? productLabel = null,
+            int? leadTimeDays = null, decimal? exStockQuantity = null)
+        {
+            if (leadTimeDays is < 0 or > 730) throw new InvalidOperationException("Delivery time must be between 0 and 730 days.");
+            if (unitPrice <= 0m) throw new InvalidOperationException("Enter a price above zero.");
+            if (unitPrice > 1_000_000_000m) throw new InvalidOperationException("That price is too large.");
+
+            // A quote the customer already holds is never edited. With the rep's say-so, the new
+            // price goes on a draft revision; the customer sees nothing until that is sent.
+            var latest = await _context.Quotes.AsNoTracking()
+                .Include(q => q.Status)
+                .Where(q => q.Rfqid == rfqId && q.BusinessUnitId == businessUnitId)
+                .OrderByDescending(q => q.RevisionNo).ThenByDescending(q => q.Id)
+                .FirstOrDefaultAsync(ct);
+            if (latest is not null && LifecyclePolicy.Canonicalize("Quote", latest.Status?.SetupCode, latest.Status?.SetupValue) != "DRAFT")
+            {
+                if (!reviseIfSent)
+                    throw new InvalidOperationException(
+                        $"Quote '{latest.QuoteNo}' was already sent to the customer. Make a revision to change the price.");
+                await ReviseQuoteAsync(latest.Id, businessUnitId, actor);
+                _context.ChangeTracker.Clear();
+            }
+
+            var draft = await PrepareDraftFromRfqAsync(rfqId, businessUnitId, actor, ct);
+            var quote = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .SingleAsync(q => q.Id == draft.Id && q.BusinessUnitId == businessUnitId, ct);
+            await EnsureQuoteEditableAsync(quote);
+
+            var line = quote.QuoteItems.FirstOrDefault(i => i.RfqitemId == rfqItemId)
+                ?? throw new InvalidOperationException("This line is not on the quote. Mark it to quote first.");
+            if (quote.CurrencyId is null && currencyId is not null)
+            {
+                var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId, ct);
+                if (!known) throw new InvalidOperationException("Choose one of your company's currencies.");
+                quote.CurrencyId = currencyId;
+            }
+
+            // Another maker the customer accepts, from our own stock: the quote line names what is
+            // actually offered ("… — SIEMENS 3RT2046-1AN20"), so the customer is never surprised.
+            var rfqLine = await _context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == rfqItemId, ct);
+            // What the customer is actually being offered when the part they asked for is obsolete.
+            line.OfferedNote = OfferedPartKinds.Sentence(rfqLine.OfferedKind, rfqLine.OfferedMakerName, rfqLine.OfferedPartNumber,
+                rfqLine.ManufacturerPartNumber, rfqLine.OfferedNote);
+            line.OfferedSpecs = rfqLine.OfferedSpecs;
+            var targetProductId = productId ?? rfqLine.ProductId;
+            if (targetProductId != line.ProductId)
+            {
+                var baseDescription = rfqLine.ProductShortDescription ?? rfqLine.ProductShortName ?? rfqLine.ItemText ?? rfqLine.ItemMaterialCode;
+                line.ProductId = targetProductId;
+                line.ItemDescription = productId is not null && !string.IsNullOrWhiteSpace(productLabel)
+                    ? $"{baseDescription} — {productLabel}"
+                    : baseDescription;
+            }
+
+            line.UnitPrice = Math.Round(unitPrice, 2);
+            // A real price replaces "to follow", "not quoted" or an estimate.
+            line.PricingStatus = null;
+            line.PricingNote = null;
+            // 0 days = ex stock: printed as "Ex stock, subject to prior sale". Nothing is reserved;
+            // stock is held only when the customer commits with an order.
+            if (exStock) line.DeliveryLeadTime = 0;
+            else if (leadTimeDays is > 0) line.DeliveryLeadTime = leadTimeDays;
+            else if (line.DeliveryLeadTime == 0) line.DeliveryLeadTime = null;
+            // Part from stock, the balance later. Only a real split is kept: all of it is "ex stock".
+            line.ExStockQuantity = !exStock && exStockQuantity is > 0 && exStockQuantity < line.Quantity
+                ? Math.Round(exStockQuantity.Value, 4) : null;
+            line.ModifiedBy = actor;
+            line.ModifiedDate = DateTime.UtcNow;
+            quote.ModifiedBy = actor;
+            quote.ModifiedDate = DateTime.UtcNow;
+
+            await CalculateQuoteTotals(quote);
+            await _context.SaveChangesAsync(ct);
+            return await GetQuoteByIdAsync(quote.Id);
+        }
+
+        public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
+        {
+            var quote = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .FirstOrDefaultAsync(q => q.Id == id);
+
+            if (quote == null) throw new KeyNotFoundException($"Quote with ID {id} not found.");
+
+            // FIN-05: a quote's financial content may only be modified while it is still in DRAFT.
+            // Once it has been SENT / ACCEPTED / ORDERED, the customer already holds a PDF with
+            // fixed totals; silently recalculating here would diverge the stored figures from that
+            // issued document. Reject the edit and require a new revision instead.
+            await EnsureQuoteEditableAsync(quote);
 
             quote.QuoteNo = request.QuoteNo;
             quote.CustomerId = request.CustomerId;
@@ -666,7 +856,14 @@ namespace ERP_RFQ_Automation.Services
                         }
                         else
                         {
-                            existingItem.RfqitemId = itemDto.RfqItemId;
+                            // D20: the RFQ line link is the only join between a quoted line and
+                            // the supplier award that priced it (QuoteViewPage.sourceFor matches
+                            // awards by it). No screen edits this link, so an absent value means
+                            // "not supplied", never "cut the line loose". Assigning it
+                            // unconditionally nulled it on every Update Quote from the Edit
+                            // screen — one routine price change and every line read "Cost Source
+                            // Pending", with the award→price trace gone for the PO to follow.
+                            existingItem.RfqitemId = itemDto.RfqItemId ?? existingItem.RfqitemId;
                             existingItem.ProductId = itemDto.ProductId;
                             existingItem.ItemDescription = itemDto.ItemDescription;
                             existingItem.Quantity = itemDto.Quantity;
@@ -940,7 +1137,11 @@ namespace ERP_RFQ_Automation.Services
         /// A quote line collection loaded via Include carries no ordering guarantee at all,
         /// so without this the printed line sequence could differ between two exports.
         /// </summary>
-        internal static IReadOnlyList<QuoteItem> OrderQuoteLines(IEnumerable<QuoteItem> items) => items
+/// <summary>28 → "4 weeks"; 10 → "10 days". What the customer reads under the line.</summary>
+        internal static string DeliveryText(int days) =>
+            days % 7 == 0 ? $"{days / 7} week{(days == 7 ? "" : "s")}" : $"{days} day{(days == 1 ? "" : "s")}";
+
+                internal static IReadOnlyList<QuoteItem> OrderQuoteLines(IEnumerable<QuoteItem> items) => items
             .OrderBy(i => string.IsNullOrWhiteSpace(i.CustomerLineRef) ? 1 : 0)
             .ThenBy(i => long.TryParse(i.CustomerLineRef, out var n) ? n : long.MaxValue)
             .ThenBy(i => i.CustomerLineRef, StringComparer.OrdinalIgnoreCase)
@@ -1036,8 +1237,10 @@ namespace ERP_RFQ_Automation.Services
                 return prefix + "this quote has no lines. Add the lines you are quoting for.";
             if (!validUntil.HasValue)
                 return prefix + "this quote has no validity date. Set how long the prices hold before sending it.";
-            if (items.Any(item => item.UnitPrice <= 0))
-                return prefix + "one or more lines have no price. Price every line before sending the quote.";
+            if (items.Any(item => item.UnitPrice <= 0 && !QuoteLinePricing.IsUnpricedByChoice(item.PricingStatus)))
+                return prefix + "one or more lines have no price. Price every line, or mark it \"Price to follow\" or \"Not quoted\", before sending the quote.";
+            if (items.All(item => QuoteLinePricing.IsUnpricedByChoice(item.PricingStatus)))
+                return prefix + "no line on this quote has a price. Price at least one line before sending it.";
             return null;
         }
 
@@ -1067,6 +1270,49 @@ namespace ERP_RFQ_Automation.Services
         }
 
         /// <summary>
+        /// The pure half of the seller-registration gate. A Saudi quotation carries the seller's
+        /// commercial registration (CR) and VAT registration numbers; a buyer's finance team looks
+        /// for them before it looks at the price. The document used to print "not on file" in
+        /// their place — the seller advertising its own omission on the customer's copy (D28).
+        /// The gap is now named HERE, to the seller, with the screen that fixes it, and the
+        /// document simply omits the line.
+        /// </summary>
+        internal static (string Message, string SetupLabel, string SetupPath)? SellerRegistrationBlocker(
+            string? commercialRegistration, string? taxRegistration)
+        {
+            var missingCr = string.IsNullOrWhiteSpace(commercialRegistration);
+            var missingVat = string.IsNullOrWhiteSpace(taxRegistration);
+            if (!missingCr && !missingVat) return null;
+
+            var what = missingCr && missingVat
+                ? "commercial registration (CR) and VAT registration numbers are"
+                : missingCr ? "commercial registration (CR) number is" : "VAT registration number is";
+            var them = missingCr && missingVat ? "them" : "it";
+            return ($"This quotation cannot be sent because the seller's {what} not on file. A Saudi quotation "
+                    + $"must show both, and the customer's finance team looks for them before the price. Add {them} "
+                    + "under Setup → Business Units, then send again.",
+                "Setup → Business Units", "/setup/business-unit");
+        }
+
+        /// <summary>
+        /// The lines of a BILL TO / SHIP TO block: only the parts that exist, city and country on
+        /// one line joined only when both are present, and "Address not on file" when there is
+        /// nothing at all. The block used to print "N/A" for a missing street and ", " for a missing
+        /// city-and-country pair (D29).
+        /// </summary>
+        internal static IReadOnlyList<string> AddressLines(string? line1, string? line2, string? city, string? country)
+        {
+            var lines = new List<string>();
+            if (!string.IsNullOrWhiteSpace(line1)) lines.Add(line1.Trim());
+            if (!string.IsNullOrWhiteSpace(line2)) lines.Add(line2.Trim());
+            var place = string.Join(", ", new[] { city, country }
+                .Where(part => !string.IsNullOrWhiteSpace(part)).Select(part => part!.Trim()));
+            if (place.Length > 0) lines.Add(place);
+            if (lines.Count == 0) lines.Add("Address not on file");
+            return lines;
+        }
+
+        /// <summary>
         /// The pure half of the tax gate: the first line that has no derived tax, phrased for the
         /// person who has to fix it. Lines are named by the buyer's own reference where there is
         /// one, because "line 3" means nothing to a rep looking at a bid list numbered 00010,
@@ -1079,6 +1325,8 @@ namespace ERP_RFQ_Automation.Services
             for (var index = 0; index < ordered.Count; index++)
             {
                 var item = ordered[index];
+                // A line sent without a price by choice carries no tax to derive.
+                if (QuoteLinePricing.IsUnpricedByChoice(item.PricingStatus)) continue;
                 var label = string.IsNullOrWhiteSpace(item.CustomerLineRef)
                     ? (index + 1).ToString()
                     : item.CustomerLineRef!;
@@ -1259,6 +1507,11 @@ namespace ERP_RFQ_Automation.Services
                     HeaderDiscountAllocated = i.HeaderDiscountAllocated,
                     TaxableBase = i.TaxableBase,
                     DeliveryLeadTime = i.DeliveryLeadTime,
+                    ExStockQuantity = i.ExStockQuantity,
+                    PricingStatus = i.PricingStatus,
+                    PricingNote = i.PricingNote,
+                    OfferedNote = i.OfferedNote,
+                    OfferedSpecs = i.OfferedSpecs,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
                     RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
@@ -1518,20 +1771,22 @@ namespace ERP_RFQ_Automation.Services
                                     if (!string.IsNullOrWhiteSpace(companyEmail))
                                         details.Item().Text($"E: {companyEmail}").FontSize(8).FontColor(Colors.Grey.Medium);
 
-                                    // Registrations are printed as a NAMED GAP when absent rather
-                                    // than omitted. A Saudi buyer's finance team looks for the
-                                    // seller VAT number before it looks at the price; a line that
-                                    // is simply missing reads as an oversight by the reader,
-                                    // while "not on file" is unmistakably the sender's to fix —
-                                    // and the sender sees it on their own copy.
-                                    details.Item().PaddingTop(4).Text(
-                                        "CR: " + (string.IsNullOrWhiteSpace(sellerCommercialRegistration)
-                                            ? "not on file" : sellerCommercialRegistration))
-                                        .FontSize(8).FontColor(Colors.Grey.Medium);
-                                    details.Item().Text(
-                                        "VAT: " + (string.IsNullOrWhiteSpace(sellerTaxRegistration)
-                                            ? "not on file" : sellerTaxRegistration))
-                                        .FontSize(8).FontColor(Colors.Grey.Medium);
+                                    // Registrations appear only when they are on file. This used
+                                    // to print "CR: not on file" / "VAT: not on file", reasoning
+                                    // that a named gap beats silence — but the customer's copy is
+                                    // the wrong place to name it (D28). Send-readiness now refuses
+                                    // the send and names the gap to the seller instead
+                                    // (SellerRegistrationBlocker); the rep's preview still renders.
+                                    var registrationLines = new List<string>();
+                                    if (!string.IsNullOrWhiteSpace(sellerCommercialRegistration))
+                                        registrationLines.Add("CR: " + sellerCommercialRegistration);
+                                    if (!string.IsNullOrWhiteSpace(sellerTaxRegistration))
+                                        registrationLines.Add("VAT: " + sellerTaxRegistration);
+                                    for (var index = 0; index < registrationLines.Count; index++)
+                                    {
+                                        var item = index == 0 ? details.Item().PaddingTop(4) : details.Item();
+                                        item.Text(registrationLines[index]).FontSize(8).FontColor(Colors.Grey.Medium);
+                                    }
                                 });
                             });
 
@@ -1564,33 +1819,42 @@ namespace ERP_RFQ_Automation.Services
                         // Address Section
                         col.Item().Row(row =>
                         {
-                            void AddressBlock(string label, string name, string line1, string line2, string cityCountry, string email = null)
+                            // Only the parts that exist (AddressLines). "N/A" for a missing street
+                            // and ", " for a missing city-and-country pair used to print on the
+                            // customer's copy (D29).
+                            void AddressBlock(string label, string name, IReadOnlyList<string> lines, string email = null)
                             {
                                 row.RelativeItem().Border(1).BorderColor(Colors.Grey.Lighten4).Padding(12).Column(c =>
                                 {
                                     c.Item().Text(label).FontSize(8).ExtraBold().FontColor(primaryColor);
                                     c.Item().PaddingTop(5).Text(name).Bold().FontSize(11);
-                                    c.Item().Text(line1).FontSize(9);
-                                    if (!string.IsNullOrEmpty(line2)) c.Item().Text(line2).FontSize(9);
-                                    c.Item().Text(cityCountry).FontSize(9);
-                                    if (email != null) c.Item().PaddingTop(5).Text(email).FontSize(8).Italic();
+                                    foreach (var line in lines) c.Item().Text(line).FontSize(9);
+                                    if (!string.IsNullOrWhiteSpace(email)) c.Item().PaddingTop(5).Text(email).FontSize(8).Italic();
                                 });
                             }
 
+                            var customer = quote.Customer;
                             AddressBlock("BILL TO",
-                                quote.Customer?.Name ?? "Customer",
-                                quote.Customer?.BillingAddressLine1 ?? "N/A",
-                                quote.Customer?.BillingAddressLine2,
-                                $"{quote.Customer?.BillingCity ?? ""}, {quote.Customer?.BillingCountry ?? ""}",
-                                quote.Customer?.ContactEmail);
+                                customer?.Name ?? "Customer",
+                                AddressLines(customer?.BillingAddressLine1, customer?.BillingAddressLine2,
+                                    customer?.BillingCity, customer?.BillingCountry),
+                                customer?.ContactEmail);
 
                             row.ConstantItem(30); // Gap
 
+                            // The shipping address falls back to billing as a WHOLE, never field by
+                            // field: a shipping street paired with a billing city is an address
+                            // nobody has.
+                            var hasShipping = !string.IsNullOrWhiteSpace(customer?.ShippingAddressLine1)
+                                || !string.IsNullOrWhiteSpace(customer?.ShippingCity)
+                                || !string.IsNullOrWhiteSpace(customer?.ShippingCountry);
                             AddressBlock("SHIP TO",
-                                quote.Customer?.Name ?? "Customer",
-                                quote.Customer?.ShippingAddressLine1 ?? quote.Customer?.BillingAddressLine1 ?? "N/A",
-                                quote.Customer?.ShippingAddressLine2,
-                                $"{quote.Customer?.ShippingCity ?? quote.Customer?.BillingCity ?? ""}, {quote.Customer?.ShippingCountry ?? quote.Customer?.BillingCountry ?? ""}");
+                                customer?.Name ?? "Customer",
+                                hasShipping
+                                    ? AddressLines(customer?.ShippingAddressLine1, customer?.ShippingAddressLine2,
+                                        customer?.ShippingCity, customer?.ShippingCountry)
+                                    : AddressLines(customer?.BillingAddressLine1, customer?.BillingAddressLine2,
+                                        customer?.BillingCity, customer?.BillingCountry));
                         });
 
                         // Items Table
@@ -1631,18 +1895,40 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
+                                    if (!string.IsNullOrWhiteSpace(item.x.OfferedNote))
+                                        c.Item().Text(item.x.OfferedNote).FontSize(8).SemiBold().FontColor(Colors.Blue.Darken2);
+                                    if (!string.IsNullOrWhiteSpace(item.x.OfferedSpecs))
+                                        c.Item().Text($"Specification: {item.x.OfferedSpecs}").FontSize(8).FontColor(Colors.Grey.Darken1);
+                                    if (item.x.PricingStatus == QuoteLinePricing.NotQuoted)
+                                        c.Item().Text($"Not quoted{(string.IsNullOrWhiteSpace(item.x.PricingNote) ? "" : ": " + item.x.PricingNote)}").FontSize(8).FontColor(Colors.Red.Darken1);
+                                    else if (item.x.PricingStatus == QuoteLinePricing.ToFollow)
+                                        c.Item().Text($"Price to follow{(string.IsNullOrWhiteSpace(item.x.PricingNote) ? "" : ": " + item.x.PricingNote)}").FontSize(8).FontColor(Colors.Orange.Darken2);
+                                    else if (item.x.PricingStatus == QuoteLinePricing.Estimate)
+                                        c.Item().Text($"Estimate, subject to confirmation{(string.IsNullOrWhiteSpace(item.x.PricingNote) ? "" : ": " + item.x.PricingNote)}").FontSize(8).FontColor(Colors.Orange.Darken2);
+                                    if (item.x.DeliveryLeadTime == 0 && !QuoteLinePricing.IsUnpricedByChoice(item.x.PricingStatus))
+                                        c.Item().Text("Ex stock, subject to prior sale").FontSize(8).FontColor(Colors.Grey.Darken1);
+                                    else if (item.x.ExStockQuantity is decimal fromStock && fromStock > 0)
+                                        c.Item().Text(item.x.DeliveryLeadTime is int balanceDays && balanceDays > 0
+                                            ? $"Delivery: {fromStock:0.##} ex stock, balance in {DeliveryText(balanceDays)}"
+                                            : $"Delivery: {fromStock:0.##} ex stock, balance to follow").FontSize(8).FontColor(Colors.Grey.Darken1);
+                                    else if (item.x.DeliveryLeadTime is int days && days > 0)
+                                        c.Item().Text($"Delivery: {DeliveryText(days)}").FontSize(8).FontColor(Colors.Grey.Darken1);
                                     if (item.x.Discount > 0)
                                         c.Item().Text($"Discount: {quote.Currency?.Code} {item.x.Discount:N2}").FontSize(8).Italic().FontColor(Colors.Red.Medium);
                                 });
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
                                 table.Cell().Element(RowStyle).Text(item.x.UnitOfMeasure ?? string.Empty);
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.UnitPrice.ToString("N2"));
+                                var unpricedByChoice = QuoteLinePricing.IsUnpricedByChoice(item.x.PricingStatus);
+                                table.Cell().Element(RowStyle).AlignRight().Text(
+                                    item.x.PricingStatus == QuoteLinePricing.ToFollow ? "To follow"
+                                    : item.x.PricingStatus == QuoteLinePricing.NotQuoted ? "Not quoted"
+                                    : item.x.UnitPrice.ToString("N2"));
                                 // The line's own consideration, tax EXCLUDED. The stored TotalAmount
                                 // carries the line's tax inside it (calculation version 2), so
                                 // printing it here put VAT in the line column and then added the
                                 // same VAT again in the summary below — the printed lines could not
                                 // be added up to the printed subtotal.
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.TaxableBase.ToString("N2")).Bold();
+                                table.Cell().Element(RowStyle).AlignRight().Text(unpricedByChoice ? "—" : item.x.TaxableBase.ToString("N2")).Bold();
                             }
                         });
 
@@ -1654,6 +1940,8 @@ namespace ERP_RFQ_Automation.Services
                             {
                                 c.Item().PaddingTop(10).Text("Terms & Conditions").Bold().FontSize(10).FontColor(primaryColor);
                                 c.Item().PaddingTop(5).Text(termsContent).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
+                                if (orderedItems.Any(x => x.DeliveryLeadTime == 0 || x.ExStockQuantity > 0))
+                                    c.Item().PaddingTop(5).Text("Items marked ex stock are offered subject to prior sale. Stock is held for you once we receive your purchase order.").FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
 
                                 c.Item().PaddingTop(30).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
                             });
@@ -1807,6 +2095,13 @@ namespace ERP_RFQ_Automation.Services
                     config?.CompanyEmail) is { } issuerGap)
                 Block("ISSUER_IDENTITY_INCOMPLETE", issuerGap.Message, issuerGap.SetupLabel, issuerGap.SetupPath);
 
+            // The seller's CR and VAT numbers. The renderer omits the lines when they are unset
+            // (it used to print "not on file" on the customer's copy); this is where the gap is
+            // named instead — to the seller, before the send, with the screen that fixes it.
+            if (SellerRegistrationBlocker(quote.BusinessUnit?.CommercialRegistrationNumber,
+                    quote.BusinessUnit?.TaxRegistrationNumber) is { } registrationGap)
+                Block("SELLER_REGISTRATION_INCOMPLETE", registrationGap.Message, registrationGap.SetupLabel, registrationGap.SetupPath);
+
             // The one gate whose failure the rep can do nothing about after the fact: a
             // non-transmitting sender dead-letters the delivery on its FIRST attempt, and the
             // fixed idempotency key then makes the quote unsendable for good. Same authority
@@ -1861,6 +2156,8 @@ namespace ERP_RFQ_Automation.Services
             else if (delivery is { CompletedOn: null })
             {
                 readiness.DeliveryInFlight = true;
+                readiness.DeliveryRecipient = delivery.RecipientEmail;
+                readiness.DeliveryRequestedOn = delivery.RequestedOn;
                 Block("DELIVERY_IN_FLIGHT",
                     "This quote is already queued for delivery. Wait for it to complete rather than "
                     + "sending it twice.");
@@ -1872,6 +2169,8 @@ namespace ERP_RFQ_Automation.Services
                 // update threw and is being retried). The customer HAS this quote. Say so —
                 // never "uncertain", and never let it look sendable.
                 readiness.DeliveryOutcome = "DELIVERED";
+                readiness.DeliveryRecipient = delivery.RecipientEmail;
+                readiness.DeliveryRequestedOn = delivery.RequestedOn;
                 Block("DELIVERY_STATUS_PENDING",
                     $"This quote was delivered to the customer on {delivery.CompletedOn:yyyy-MM-dd HH:mm} UTC. "
                     + "Its status is still being updated; nothing needs to be resent.");
@@ -1896,6 +2195,104 @@ namespace ERP_RFQ_Automation.Services
             readiness.CanSend = readiness.Blockers.Count == 0;
             return readiness;
         }
+
+        /// <summary>
+        /// The default covering e-mail for a quote, as plain text.
+        ///
+        /// <para>"Our Company" and "Sales Team" were the same defect as the PDF's placeholder
+        /// identity, one layer out: a customer receiving mail from "Our Company" learns nothing
+        /// and trusts less. BusinessUnitName is non-null in the schema, so naming it directly is
+        /// not a narrowing.</para>
+        ///
+        /// <para>The body used to say only "please find attached", which told a buyer nothing they
+        /// could act on and nothing they could file. Everything here is a FACT ABOUT THIS QUOTE —
+        /// no marketing, no invented commitment — and each line is omitted entirely when its value
+        /// is absent: a customer-facing e-mail must never read "Valid until:" followed by nothing.
+        /// CustomerRfqReference is the buyer's OWN number for the enquiry; it matters more than
+        /// ours, because it is how they match this quote to the request they raised.</para>
+        /// </summary>
+        internal static (string Subject, string PlainBody) ComposeDefaultQuoteEmail(Quote quote)
+        {
+            var subject = $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
+
+            var greetingName = quote.Customer?.Name;
+            var greeting = string.IsNullOrWhiteSpace(greetingName) ? "Dear Customer" : $"Dear {greetingName}";
+
+            var facts = new List<string> { $"Please find attached our quotation #{quote.QuoteNo}." };
+            if (!string.IsNullOrWhiteSpace(quote.Rfq?.CustomerRfqReference))
+                facts.Add($"Your reference: {quote.Rfq!.CustomerRfqReference}");
+            if (quote.TotalAmount is decimal total && !string.IsNullOrWhiteSpace(quote.Currency?.Code))
+                facts.Add($"Total: {quote.Currency!.Code} {total:N2}");
+            if (quote.ValidUntil is DateTime validUntil)
+                facts.Add($"Valid until: {validUntil:d MMMM yyyy}");
+
+            var body = string.Join("\n\n", new[]
+            {
+                $"{greeting},",
+                string.Join("\n", facts),
+                "If anything here needs revisiting, reply to this message and we will pick it up.",
+                $"Kind regards,\n{quote.BusinessUnit?.BusinessUnitName}"
+            });
+            return (subject, body);
+        }
+
+        /// <summary>
+        /// Plain text → the HTML the mail carries: blank lines become paragraphs, single line
+        /// breaks become <c>&lt;br/&gt;</c>, and every character the rep typed is encoded, so a
+        /// "&lt;" in a part number arrives as a "&lt;" and not as broken markup.
+        /// </summary>
+        internal static string PlainTextToHtml(string text)
+        {
+            var normalized = (text ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+            var paragraphs = System.Text.RegularExpressions.Regex.Split(normalized, "\n{2,}")
+                .Select(paragraph => paragraph.Trim())
+                .Where(paragraph => paragraph.Length > 0)
+                .Select(paragraph => "<p>" + string.Join("<br/>",
+                    paragraph.Split('\n').Select(line => System.Net.WebUtility.HtmlEncode(line.TrimEnd()))) + "</p>");
+            return string.Join("\n", paragraphs);
+        }
+
+        /// <summary>
+        /// What the customer would receive if the rep sent this quote now, in words the rep can
+        /// edit before sending. Same composer as the send, so the preview cannot drift from it.
+        /// </summary>
+        public async Task<QuoteEmailDraftDTO> GetEmailDraftAsync(long quoteId, long businessUnitId, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            var quote = await _context.Quotes.AsNoTracking()
+                .Include(q => q.BusinessUnit)
+                .Include(q => q.Currency)
+                .Include(q => q.Customer)
+                .Include(q => q.Rfq)
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException("Quote not found");
+
+            var composed = ComposeDefaultQuoteEmail(quote);
+            // No address on the customer's record: offer the one their last quote actually went to,
+            // so the rep does not retype it for every quote and every revision.
+            var recipient = string.IsNullOrWhiteSpace(quote.Customer?.ContactEmail) ? null : quote.Customer!.ContactEmail!.Trim();
+            if (recipient is null && quote.CustomerId is long customerId)
+            {
+                recipient = await (from request in _context.QuoteDeliveryRequests.AsNoTracking()
+                                   join sent in _context.Quotes.AsNoTracking() on request.QuoteId equals sent.Id
+                                   where request.BusinessUnitId == businessUnitId && sent.CustomerId == customerId
+                                       && request.RecipientEmail != null && request.CompletedOn != null
+                                   orderby request.RequestedOn descending
+                                   select request.RecipientEmail).FirstOrDefaultAsync(ct);
+            }
+            return new QuoteEmailDraftDTO
+            {
+                QuoteId = quote.Id,
+                QuoteNo = quote.QuoteNo,
+                RecipientEmail = recipient,
+                Subject = composed.Subject,
+                Body = composed.PlainBody,
+                AttachmentFileName = QuoteAttachmentFileName(quote.QuoteNo)
+            };
+        }
+
+        /// <summary>The one spelling of the PDF's file name, for the delivery row and the dialog.</summary>
+        internal static string QuoteAttachmentFileName(string quoteNo) => $"Quote_{quoteNo}.pdf";
 
         public async Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null)
         {
@@ -1969,47 +2366,13 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
-            // "Our Company" and "Sales Team" below were the same defect as the PDF's placeholder
-            // identity, one layer out: a customer receiving mail from "Our Company" learns
-            // nothing and trusts less. BusinessUnitName is non-null in the schema, so naming it
-            // directly is not a narrowing — it removes a fallback that could only ever have
-            // fired on a broken row, and would have hidden that breakage behind a bland phrase.
-            var subject = !string.IsNullOrEmpty(customSubject)
-                ? customSubject
-                : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
-
-            // The default body used to say only "please find attached", which told a buyer nothing
-            // they could act on and nothing they could file. Everything added below is already
-            // known at this point and is a FACT ABOUT THIS QUOTE -- no marketing, no invented
-            // commitment. Each line is omitted entirely when its value is absent, because a
-            // customer-facing e-mail must never read "valid until" followed by nothing, and the
-            // greeting falls back rather than printing an empty name.
-            //
-            // CustomerRfqReference is the buyer's OWN number for the enquiry. It matters more than
-            // ours: it is how they match this quote to the request they raised, and without it a
-            // procurement desk has to open the attachment to find out what it answers.
-            var greetingName = quote.Customer?.Name;
-            var greeting = string.IsNullOrWhiteSpace(greetingName) ? "Dear Customer" : $"Dear {greetingName}";
-
-            var facts = new List<string>();
-            if (!string.IsNullOrWhiteSpace(quote.Rfq?.CustomerRfqReference))
-                facts.Add($"<p>Your reference: {quote.Rfq!.CustomerRfqReference}</p>");
-            if (quote.TotalAmount is decimal total && !string.IsNullOrWhiteSpace(quote.Currency?.Code))
-                facts.Add($"<p>Total: {quote.Currency!.Code} {total:N2}</p>");
-            if (quote.ValidUntil is DateTime validUntil)
-                facts.Add($"<p>Valid until: {validUntil:d MMMM yyyy}</p>");
-
-            var body = !string.IsNullOrEmpty(customBody)
-                ? customBody.Replace("\n", "<br/>")
-                : $@"
-                <p>{greeting},</p>
-                <p>Please find attached our quotation #{quote.QuoteNo}.</p>
-                {string.Join("\n                ", facts)}
-                <p>If anything here needs revisiting, reply to this message and we will pick it up.</p>
-                <br/>
-                <p>Kind regards,</p>
-                <p>{quote.BusinessUnit?.BusinessUnitName}</p>
-            ";
+            // One composer for the default words (ComposeDefaultQuoteEmail) and one renderer for
+            // whatever goes out (PlainTextToHtml), so the draft the rep reviews in the send dialog
+            // IS the mail the customer receives — edited or not. A blank custom field means "use
+            // the default", which is what the callers that post no body at all rely on.
+            var composed = ComposeDefaultQuoteEmail(quote);
+            var subject = !string.IsNullOrWhiteSpace(customSubject) ? customSubject.Trim() : composed.Subject;
+            var body = PlainTextToHtml(!string.IsNullOrWhiteSpace(customBody) ? customBody : composed.PlainBody);
 
             var issuerEmail = await _context.QuoteConfigurations.AsNoTracking()
                 .Where(x => x.BusinessUnitId == businessUnitId)
@@ -2074,7 +2437,7 @@ namespace ERP_RFQ_Automation.Services
                         // QuoteDeliverySender treats this tenant-owned company address as Reply-To;
                         // the transport's verified From identity remains authoritative.
                         FromEmail = string.IsNullOrWhiteSpace(issuerEmail) ? null : issuerEmail.Trim(),
-                        AttachmentFileName = $"Quote_{quote.QuoteNo}.pdf",
+                        AttachmentFileName = QuoteAttachmentFileName(quote.QuoteNo),
                         AttestedPriceFingerprint = boundFingerprint,
                         RequestedOn = DateTime.UtcNow,
                         AvailableOn = DateTime.UtcNow,
@@ -2222,14 +2585,14 @@ namespace ERP_RFQ_Automation.Services
             var correlation = $"quote-send:{quote.Id}";
             await _sales.AppendActivityAsync(quote.BusinessUnitId, new AppendCommercialActivityCommand(
                 owner, CommercialActivityType.QuoteSent, "Quote", quote.Id,
-                lead?.CustomerId, null, quote.SentOn.Value, "SENT", $"quote:{quote.Id}:sent",
+                lead?.CustomerId, null, WeightedEligibleRepScoringEngine.AsUtc(quote.SentOn.Value), "SENT", $"quote:{quote.Id}:sent",
                 actor, correlation, $"quote:{quote.Id}:sent-activity"), ct);
             var staleDays = await _context.Set<SlaPolicy>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == quote.BusinessUnitId).Select(x => (int?)x.StaleQuoteDays)
                 .SingleOrDefaultAsync(ct) ?? SlaPolicy.Default(quote.BusinessUnitId).StaleQuoteDays;
             await _sales.CreateFollowUpAsync(quote.BusinessUnitId, new CreateFollowUpTaskCommand(
                 owner, "Quote", quote.Id, lead?.CustomerId,
-                quote.SentOn.Value.AddDays(staleDays), 2, "QUOTE_RESPONSE",
+                WeightedEligibleRepScoringEngine.AsUtc(quote.SentOn.Value).AddDays(staleDays), 2, "QUOTE_RESPONSE",
                 actor, correlation, $"quote:{quote.Id}:sent-follow-up"), ct);
         }
 
@@ -2287,7 +2650,7 @@ namespace ERP_RFQ_Automation.Services
                     $"SELECT 1 FROM \"Quotes\" WHERE \"BusinessUnitID\" = {businessUnitId} AND \"ID\" = {quoteId} FOR UPDATE");
             }
             var source = await _context.Quotes
-                .Include(q => q.QuoteItems)
+                .Include(q => q.QuoteItems).ThenInclude(i => i.Rfqitem)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
             if (source == null) throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
 
@@ -2352,6 +2715,16 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = i.TaxCategory,
                     TaxCategoryReason = i.TaxCategoryReason,
                     DeliveryLeadTime = i.DeliveryLeadTime,
+                    ExStockQuantity = i.ExStockQuantity,
+                    PricingStatus = i.PricingStatus,
+                    PricingNote = i.PricingNote,
+                    // A revision is a new document: it states what is offered TODAY, which is why
+                    // this reads the RFQ line rather than copying the sent quote's sentence.
+                    OfferedNote = i.Rfqitem is null
+                        ? i.OfferedNote
+                        : OfferedPartKinds.Sentence(i.Rfqitem.OfferedKind, i.Rfqitem.OfferedMakerName, i.Rfqitem.OfferedPartNumber,
+                            i.Rfqitem.ManufacturerPartNumber, i.Rfqitem.OfferedNote),
+                    OfferedSpecs = i.Rfqitem is null ? i.OfferedSpecs : i.Rfqitem.OfferedSpecs,
                     CreatedBy = actor,
                     CreatedDate = now
                 }).ToList()
@@ -2823,25 +3196,217 @@ namespace ERP_RFQ_Automation.Services
                 return;
             }
 
-            foreach (var row in impacts)
+            AddImpactResolutionEvents(impacts.Select(row => (row.Impact, row.OccurrenceId)), quoteId, businessUnitId,
+                actor, idempotencyKey, applied: null);
+            await _context.SaveChangesAsync(ct);
+            if (transaction is not null) await transaction.CommitAsync(ct);
+        }
+
+        /// <summary>
+        /// The one way an impact is resolved: an append-only <c>REVISION_IMPACT_RESOLVED</c> audit
+        /// event whose correlation id names the impact (<see cref="ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries"/>).
+        /// "Keep as quoted" and "Apply the new quantities" both end here, so every reader agrees
+        /// the quote is no longer stale whichever the rep chose; the payload records which.
+        /// </summary>
+        private void AddImpactResolutionEvents(
+            IEnumerable<(ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact Impact, long OccurrenceId)> impacts,
+            long quoteId, long businessUnitId, string actor, string idempotencyKey,
+            IReadOnlyList<QuoteRevisionLineChangeDTO>? applied)
+        {
+            foreach (var (impact, occurrenceId) in impacts)
             {
-                var impact = row.Impact;
                 _context.Add(new ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent
                 {
                     BusinessUnitId = businessUnitId,
                     LeadId = impact.LeadId,
-                    OccurrenceId = row.OccurrenceId,
-                    EventType = "REVISION_IMPACT_RESOLVED",
-                    PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { impactId = impact.Id, quoteId }),
+                    OccurrenceId = occurrenceId,
+                    EventType = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.ResolvedEventType,
+                    PayloadJson = applied is null
+                        ? System.Text.Json.JsonSerializer.Serialize(new { impactId = impact.Id, quoteId, resolution = "KEPT_AS_QUOTED" })
+                        : System.Text.Json.JsonSerializer.Serialize(new
+                        {
+                            impactId = impact.Id, quoteId, resolution = "QUANTITIES_APPLIED",
+                            applied = applied.Select(x => new { line = x.Line, from = x.From, to = x.To })
+                        }),
                     ActorType = "User",
                     ActorId = actor,
-                    CorrelationId = $"quote-impact:{impact.Id}",
+                    CorrelationId = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.CorrelationIdFor(impact.Id),
                     IdempotencyKey = $"{idempotencyKey}:{impact.Id}",
                     OccurredAtUtc = DateTimeOffset.UtcNow
                 });
             }
+        }
+
+        public Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesAsync(long quoteId, long businessUnitId, string actor,
+            string idempotencyKey, CancellationToken ct = default)
+        {
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return ApplyRevisionQuantitiesCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return ApplyRevisionQuantitiesCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+            });
+        }
+
+        /// <summary>
+        /// Draft line → its RFQ line → the lead item revision the RFQ line was promoted from → that
+        /// item's row on the ARRIVING revision. The lead item id is the stable identity across
+        /// revisions; the buyer's line number is the fallback for legacy RFQ lines promoted before
+        /// <c>SourceLeadItemRevisionId</c> existed. A draft line with neither is the rep's own
+        /// addition and is left exactly as they wrote it.
+        /// </summary>
+        private async Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesCoreAsync(long quoteId, long businessUnitId,
+            string actor, string idempotencyKey, CancellationToken ct)
+        {
+            await using var transaction = _context.Database.IsNpgsql() && _context.Database.CurrentTransaction is null
+                ? await _context.Database.BeginTransactionAsync(ct)
+                : null;
+
+            if (_context.Database.IsNpgsql())
+            {
+                var lockKey = $"quote-impact-resolution:{businessUnitId}:{quoteId}";
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0))", ct);
+            }
+
+            var quote = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .Include(q => q.Status)
+                .SingleOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException();
+
+            var isDraft = string.Equals(quote.Status?.SetupCode, "DRAFT", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
+            if (!isDraft)
+                throw new InvalidOperationException(
+                    $"Quote {quote.QuoteNo} is already with the customer, so its quantities cannot be changed in place. "
+                    + "Issue it as a new revision and apply the customer's changes there.");
+
+            var impacts = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .OpenQuoteImpacts(_context, businessUnitId, quoteId)
+                .AsNoTracking()
+                .OrderBy(x => x.Id)
+                .Select(impact => new
+                {
+                    Impact = impact,
+                    OccurrenceId = _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>()
+                        .Where(revision => revision.BusinessUnitId == businessUnitId && revision.Id == impact.LeadRevisionId)
+                        .Select(revision => revision.EstablishedByOccurrenceId)
+                        .Single()
+                })
+                .ToListAsync(ct);
+            if (impacts.Count == 0)
+                throw new InvalidOperationException("There is no open customer revision on this quote to apply.");
+
+            var described = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .DescribeOpenQuoteImpactAsync(_context, businessUnitId, quoteId, ct);
+            var arrivingRevisionId = impacts[^1].Impact.LeadRevisionId;
+
+            // The arriving revision's lines, by lead item and by the buyer's line number.
+            var arrivingLines = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == arrivingRevisionId)
+                .Select(x => new { x.LeadItemId, x.SnapshotJson })
+                .ToListAsync(ct);
+            var byLeadItem = new Dictionary<long, (string Line, decimal? Quantity)>();
+            var byLineNo = new Dictionary<string, (string Line, decimal? Quantity)>(StringComparer.Ordinal);
+            var arrivingLabels = new List<string>();
+            foreach (var arriving in arrivingLines)
+            {
+                using var snapshot = System.Text.Json.JsonDocument.Parse(arriving.SnapshotJson);
+                var label = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                    .Text(snapshot.RootElement, "lineItemNo", "line") ?? string.Empty;
+                var quantity = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.QuantityValue(snapshot.RootElement);
+                if (arriving.LeadItemId is long leadItemId) byLeadItem[leadItemId] = (label, quantity);
+                if (NormalizeLineNo(label) is { } key) byLineNo.TryAdd(key, (label, quantity));
+                arrivingLabels.Add(label);
+            }
+
+            // The draft's RFQ lines and the lead item each was promoted from.
+            var rfqItemIds = quote.QuoteItems.Where(i => i.RfqitemId.HasValue).Select(i => i.RfqitemId!.Value).Distinct().ToList();
+            var rfqLines = await _context.Rfqitems.AsNoTracking()
+                .Where(r => rfqItemIds.Contains(r.Id))
+                .Select(r => new { r.Id, r.LineItemNo, r.SourceLeadItemRevisionId })
+                .ToDictionaryAsync(r => r.Id, ct);
+            var sourceItemRevisionIds = rfqLines.Values.Where(r => r.SourceLeadItemRevisionId.HasValue)
+                .Select(r => r.SourceLeadItemRevisionId!.Value).Distinct().ToList();
+            var sourceLeadItems = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && sourceItemRevisionIds.Contains(x.Id))
+                .Select(x => new { x.Id, x.LeadItemId })
+                .ToDictionaryAsync(x => x.Id, x => x.LeadItemId, ct);
+
+            var result = new QuoteRevisionApplyResultDTO
+            {
+                QuoteId = quote.Id,
+                FromRevision = described?.FromRevision ?? 0,
+                ToRevision = described?.ToRevision ?? 0
+            };
+            var matchedLabels = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in quote.QuoteItems.OrderBy(i => i.Id))
+            {
+                (string Line, decimal? Quantity)? target = null;
+                if (item.RfqitemId is long rfqItemId && rfqLines.TryGetValue(rfqItemId, out var rfqLine))
+                {
+                    if (rfqLine.SourceLeadItemRevisionId is long sourceId
+                        && sourceLeadItems.TryGetValue(sourceId, out var leadItemId)
+                        && leadItemId is long id && byLeadItem.TryGetValue(id, out var byItem))
+                        target = byItem;
+                    else if (NormalizeLineNo(rfqLine.LineItemNo ?? item.CustomerLineRef) is { } key
+                        && byLineNo.TryGetValue(key, out var byNo))
+                        target = byNo;
+                }
+                if (target is null) continue;
+
+                matchedLabels.Add(target.Value.Line);
+                if (target.Value.Quantity is not { } newQuantity || newQuantity <= 0m || newQuantity == item.Quantity) continue;
+
+                result.Applied.Add(new QuoteRevisionLineChangeDTO
+                {
+                    Line = target.Value.Line,
+                    Field = "quantity",
+                    From = item.Quantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture),
+                    To = newQuantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)
+                });
+                item.Quantity = newQuantity;
+                item.ModifiedBy = actor;
+                item.ModifiedDate = DateTime.UtcNow;
+            }
+            result.LinesUpdated = result.Applied.Count;
+            result.LinesNotOnQuote = arrivingLabels
+                .Where(label => !string.IsNullOrEmpty(label) && !matchedLabels.Contains(label))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (result.LinesUpdated > 0)
+            {
+                // Same arithmetic as every other write path: line nets, header discount, derived
+                // tax, and the stored total the customer's document prints.
+                await CalculateQuoteTotals(quote);
+                quote.ModifiedBy = actor;
+                quote.ModifiedDate = DateTime.UtcNow;
+            }
+            result.TotalAmount = quote.TotalAmount;
+
+            AddImpactResolutionEvents(impacts.Select(row => (row.Impact, row.OccurrenceId)), quoteId, businessUnitId,
+                actor, idempotencyKey, applied: result.Applied);
             await _context.SaveChangesAsync(ct);
             if (transaction is not null) await transaction.CommitAsync(ct);
+            return result;
+        }
+
+        /// <summary>"00020", "20" and "20 " are the same buyer line; "OPT-3" stays as it is.</summary>
+        private static string? NormalizeLineNo(string? lineNo)
+        {
+            if (string.IsNullOrWhiteSpace(lineNo)) return null;
+            var trimmed = lineNo.Trim().ToUpperInvariant();
+            if (trimmed.All(char.IsDigit))
+            {
+                var stripped = trimmed.TrimStart('0');
+                return stripped.Length == 0 ? "0" : stripped;
+            }
+            return trimmed;
         }
 
         public Task<QuoteResponseDTO> GetQuoteAsync(long id) => GetQuoteByIdAsync(id);

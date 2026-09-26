@@ -320,7 +320,11 @@ public sealed class RfqPromotionService : IRfqPromotionService
                         Quantity = quantity,
                         StorageLocation = frozenLine.StorageLocation,
                         ManufacturerName = frozenLine.ManufacturerName,
-                        ManufacturerPartNumber = frozenLine.ManufacturerPartNumber ?? part,
+                        // The maker's number only. `part` is the line's identity fallback (material code when
+                        // no maker part exists); writing it here put the CUSTOMER's SAP code into the maker
+                        // field on every multi-maker line, and from there into the catalogue PartNo and
+                        // the supplier RFQ email ("Maker part no. 300012346") — 2026-09-15.
+                        ManufacturerPartNumber = frozenLine.ManufacturerPartNumber,
                         AlternateProductName = frozenLine.AlternateProductName,
                         AlternatePartNumber = frozenLine.AlternatePartNumber,
                         ItemText = frozenLine.ItemText,

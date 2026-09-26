@@ -30,6 +30,13 @@ export default defineConfig({
     baseURL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    // The dashboard's bands rise into place over 280ms, staggered per band, and `nx-rise` animates
+    // opacity. axe reads the BLENDED colour, so a scan that lands mid-rise measures a contrast the
+    // reader never sees: the quiet caption on the clay is 4.89:1 at rest and axe reported 4.09
+    // from a half-faded frame — passing on one CI run and failing the next on the same commit.
+    // Reduce-motion is the product's own answer to that (ThemeContext switches every decorative
+    // animation off under it), so the gate scans the settled screen an assistive-tech user reads.
+    reducedMotion: 'reduce',
   },
   projects: [
     { name: 'auth-setup', testMatch: /auth\.setup\.ts/ },

@@ -15,6 +15,12 @@ const resolveLineProduct = vi.fn();
 const createProduct = vi.fn();
 const getProductById = vi.fn();
 const getProducts = vi.fn();
+const createOrOpenSourcingCase = vi.fn();
+const discoverSuppliers = vi.fn();
+const previewSupplierRfqEmail = vi.fn();
+const adoptDiscoveredSuppliers = vi.fn();
+const getSourcingCase = vi.fn();
+const prepareSupplierRfqs = vi.fn();
 const testAccess = vi.hoisted(() => ({
   navigate: vi.fn(),
   denied: new Set<string>(),
@@ -40,7 +46,23 @@ vi.mock('../../../api/services/productService', () => ({
   },
 }));
 vi.mock('../../../api/services/procurementService', () => ({
-  default: { getWorkbench: (...a: unknown[]) => getWorkbench(...a), createOrOpenSourcingCase: vi.fn() },
+  default: {
+    getWorkbench: (...a: unknown[]) => getWorkbench(...a),
+    createOrOpenSourcingCase: (...a: unknown[]) => createOrOpenSourcingCase(...a),
+    discoverSuppliers: (...a: unknown[]) => discoverSuppliers(...a),
+    previewSupplierRfqEmail: (...a: unknown[]) => previewSupplierRfqEmail(...a),
+    adoptDiscoveredSuppliers: (...a: unknown[]) => adoptDiscoveredSuppliers(...a),
+    getSourcingCase: (...a: unknown[]) => getSourcingCase(...a),
+    prepareSupplierRfqs: (...a: unknown[]) => prepareSupplierRfqs(...a),
+  },
+}));
+vi.mock('../../../api/services/supplierEmailSettingsService', () => ({
+  default: {
+    getEffective: vi.fn().mockResolvedValue({ subject: 's', greeting: 'g', opening: 'o', defaultMessage: 'Please submit your best pricing and lead times.', signOff: 'Kind regards' }),
+    getSendFrom: vi.fn().mockResolvedValue({ mailboxes: [], replyTo: null, companyName: 'QA Co' }),
+    getMine: vi.fn().mockResolvedValue({ defaultMessage: null, signOff: null, company: { defaultMessage: 'x', signOff: 'y' } }),
+    saveMine: vi.fn(),
+  },
 }));
 vi.mock('../../../api/services/commercialLearningService', () => ({
   default: { getRfqIntelligence: (...a: unknown[]) => getRfqIntelligence(...a) },
@@ -164,6 +186,12 @@ beforeEach(() => {
   getWorkbench.mockResolvedValue(workbench(rfq().rfqitems));
   getRfqIntelligence.mockResolvedValue(intelligence());
   getRfqLineResolutions.mockResolvedValue([]);
+  discoverSuppliers.mockResolvedValue({
+    status: 'Ready', message: 'Found 1', total: 1, offset: 0, limit: 10, fromCache: false, searchedAtUtc: '2026-09-16T00:00:00Z',
+    searchedFor: { maker: 'TELEDYNE', partNumber: 'MPN-1', description: 'VALVE', acceptableMakers: [] },
+    hits: [{ id: 'hit-1', name: 'Gulf Valves', website: 'https://gulfvalves.example', domain: 'gulfvalves.example', role: 'Distributor', country: 'SA', why: 'Lists MPN-1 on its page', contactEmail: 'sales@gulfvalves.example', existingSupplierId: null }],
+  });
+  previewSupplierRfqEmail.mockResolvedValue({ subject: 'Request for Quotation from QA Co', body: 'Line 1: VALVE\n    Part no. MPN-1\n    Quantity: 10 EA\n\nKind regards,\nQA Co' });
   resolveLineProduct.mockResolvedValue({ lineId: 1, productId: 501, replayed: false });
   createProduct.mockReset();
   getProductById.mockReset();
@@ -246,14 +274,14 @@ describe('ViewRFQPage — Sourcing Case authority', () => {
     testAccess.denied.add('Supplier History:view');
     render(<ViewRFQPage />, { wrapper });
 
-    await screen.findByText('10 to source · Shortage');
-    expect(screen.queryByRole('button', { name: 'Create / Open Sourcing Case' })).not.toBeInTheDocument();
+    await screen.findByText('10 to source');
+    expect(screen.queryByRole('button', { name: 'Find supplier' })).not.toBeInTheDocument();
   });
 
   it('offers the mutation only when both server-required grants are present', async () => {
     render(<ViewRFQPage />, { wrapper });
 
-    expect(await screen.findByRole('button', { name: 'Create / Open Sourcing Case' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Find supplier' })).toBeInTheDocument();
   });
 });
 
@@ -371,7 +399,7 @@ describe('ViewRFQPage — governed RFQ product resolution', () => {
     expect(createProduct).not.toHaveBeenCalled();
     expect(resolveLineProduct).not.toHaveBeenCalled();
     expect(screen.getByText('Not in catalogue · left for now')).toBeInTheDocument();
-    expect(screen.getByText('10 requested · left out of the catalogue for now, price it by hand')).toBeInTheDocument();
+    expect(screen.getByText('Not in your catalogue · left for now')).toBeInTheDocument();
     expect(screen.queryByText(/not in your catalogue yet/)).not.toBeInTheDocument();
     expect(screen.queryByText(/not been put to a supplier yet/)).not.toBeInTheDocument();
     // Quiet, not the screen's main button, and still there for later.
@@ -476,18 +504,101 @@ describe('ViewRFQPage — a line without a product says so, and is not offered a
     expect(screen.queryByText('Resolution not recorded')).not.toBeInTheDocument();
   });
 
-  it('offers the catalogue step instead of a Sourcing Case on an UNKNOWN line, and does not print a stock answer', async () => {
+  it('offers Find supplier and Add to catalogue on an UNKNOWN line, and does not print a stock answer', async () => {
     getRfq.mockResolvedValue(rfq({ rfqitems: [line(1)] }));
     const bench = workbench([line(1)]);
     bench.lines[0] = { ...bench.lines[0], availableQuantity: 0, shortfallQuantity: 10, resolution: 'UNKNOWN' as const };
     getWorkbench.mockResolvedValue(bench);
     render(<ViewRFQPage />, { wrapper });
 
-    expect(await screen.findByText('10 requested · needs a catalogue product before sourcing')).toBeInTheDocument();
+    expect(await screen.findByText('Not in your catalogue · no supplier yet')).toBeInTheDocument();
     expect(screen.getByText('Not checked')).toBeInTheDocument();
     expect(screen.queryByText(/Available 0 · Short 10/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create / Open Sourcing Case' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Find supplier' })).toHaveLength(1);
     expect(screen.getAllByRole('button', { name: 'Add to catalogue' })).toHaveLength(1);
+  });
+
+  const unknownLine = () => {
+    getRfq.mockResolvedValue(rfq({ rfqitems: [line(1, { manufacturerName: 'TELEDYNE', productShortDescription: 'VALVE,SOLN,1/4 IN PS' })] }));
+    const bench = workbench([line(1)]);
+    bench.lines[0] = { ...bench.lines[0], availableQuantity: 0, shortfallQuantity: 10, resolution: 'UNKNOWN' as const };
+    getWorkbench.mockResolvedValue(bench);
+    createOrOpenSourcingCase.mockResolvedValue({ id: 44, version: 3, candidates: [] });
+  };
+
+  it('Find supplier reuses the catalogue product with the same part number, links the line and opens the window on the same page', async () => {
+    unknownLine();
+    getProducts.mockResolvedValue({
+      items: [{ id: 501, partNo: 'mpn 1', productName: 'Valve', qtyOnHand: 0, reorderPoint: 0, isActive: true, createdBy: 'qa', createdOn: '2026-08-01T00:00:00Z', images: [], attachments: [] }],
+      totalItems: 1, pageNumber: 1, pageSize: 20, totalPages: 1,
+    });
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Find supplier' }));
+
+    await waitFor(() => expect(createOrOpenSourcingCase).toHaveBeenCalledWith(9001, 1, 10));
+    expect(createProduct).not.toHaveBeenCalled();
+    expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 501, expect.stringContaining('same part number'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Find supplier')).toBeInTheDocument();
+    expect(testAccess.navigate).not.toHaveBeenCalledWith('/procurement/sourcing-cases/44');
+  });
+
+  it('Find supplier adds the part when the catalogue has no such part number, links it, and the window shows the real email and sends', async () => {
+    unknownLine();
+    getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
+    createProduct.mockResolvedValue({
+      id: 777, partNo: 'MPN-1', productName: 'VALVE,SOLN,1/4 IN PS', qtyOnHand: 0, reorderPoint: 0, isActive: true,
+      createdBy: 'qa', createdOn: '2026-09-14T00:00:00Z', images: [], attachments: [],
+    });
+    resolveLineProduct.mockResolvedValue({ lineId: 1, productId: 777, replayed: false });
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Find supplier' }));
+
+    await waitFor(() => expect(createOrOpenSourcingCase).toHaveBeenCalledWith(9001, 1, 10));
+    const form = createProduct.mock.calls[0][0] as FormData;
+    expect(form.get('partNo')).toBe('MPN-1');
+    expect(form.get('description')).toBe('Manufacturer: TELEDYNE. VALVE,SOLN,1/4 IN PS');
+    // Kept out of the catalogue until the rep sends with "Add this part to my catalogue" ticked.
+    expect(form.get('isCatalogItem')).toBe('false');
+    expect(resolveLineProduct).toHaveBeenCalledWith(9001, 1, 777, expect.stringContaining('Added MPN-1'));
+
+    // The window: the email the supplier will receive, then tick, then send.
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/Part no\. MPN-1/)).toBeInTheDocument();
+    adoptDiscoveredSuppliers.mockResolvedValue({ adopted: [{ hitId: 'hit-1', supplierId: 61, supplierName: 'Gulf Valves', contactEmail: 'sales@gulfvalves.example', needsContactEmail: false, alreadyExisted: false }] });
+    getSourcingCase.mockResolvedValue({ id: 44, version: 4, candidates: [{ supplierId: 61, supplierName: 'Gulf Valves' }] });
+    prepareSupplierRfqs.mockResolvedValue([{ supplierId: 61, succeeded: true }]);
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: 'Ask Gulf Valves' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send to 1 supplier' }));
+
+    await waitFor(() => expect(prepareSupplierRfqs).toHaveBeenCalledWith(
+      44, [61], 4, expect.any(String), null, 'Please submit your best pricing and lead times.', 10, null,
+      { cc: [], bcc: [], wording: null }));
+    expect(adoptDiscoveredSuppliers).toHaveBeenCalledWith(44, ['hit-1']);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('does not open a case when the line could not be linked, and never offers Find supplier on a new part without catalogue rights', async () => {
+    unknownLine();
+    getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });
+    createProduct.mockResolvedValue({ id: 777, partNo: 'MPN-1', productName: 'x', qtyOnHand: 0, reorderPoint: 0, isActive: true, createdBy: 'qa', createdOn: '2026-09-14T00:00:00Z', images: [], attachments: [] });
+    resolveLineProduct.mockRejectedValue(new Error('conflict'));
+    const { unmount } = render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Find supplier' }));
+    await waitFor(() => expect(resolveLineProduct).toHaveBeenCalled());
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/could not be linked/)).toBeInTheDocument();
+    expect(createOrOpenSourcingCase).not.toHaveBeenCalled();
+    unmount();
+
+    testAccess.denied.add('Products:create');
+    render(<ViewRFQPage />, { wrapper });
+    expect(await screen.findByText('Not in your catalogue · no supplier yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Find supplier' })).not.toBeInTheDocument();
   });
 });
 

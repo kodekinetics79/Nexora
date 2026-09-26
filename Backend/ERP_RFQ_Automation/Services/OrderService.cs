@@ -446,7 +446,8 @@ namespace ERP_RFQ_Automation.Services
             order.InheritCommercialIdentity(quote);
 
             // Map Quote Items to Order Items
-            foreach (var qItem in quote.QuoteItems)
+            // Lines offered as "price to follow" or "not quoted" were never sold.
+            foreach (var qItem in quote.QuoteItems.Where(x => !QuoteLinePricing.IsUnpricedByChoice(x.PricingStatus)))
             {
                 var lineTax = DerivedTax(quote, qItem);
                 order.OrderItems.Add(new OrderItem

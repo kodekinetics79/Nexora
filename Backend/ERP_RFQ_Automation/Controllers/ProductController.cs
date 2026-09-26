@@ -381,6 +381,26 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
 
+        /// <summary>
+        /// Puts a part into the catalogue, or keeps it out, without editing anything else. Used by
+        /// the RFQ line's "Add to catalogue" for a part suppliers were asked about while kept out.
+        /// </summary>
+        [HttpPost("{id:long}/catalogue")]
+        [RequireModulePermission("Products", PermissionAction.Edit)]
+        public async Task<IActionResult> SetCatalogue(long id, [FromBody] SetProductCatalogueRequest request)
+        {
+            if (!TryGetTenantId(out var tenant)) return Forbid();
+            var product = await _context.Products.SingleOrDefaultAsync(x => x.Id == id && x.Buid == tenant);
+            if (product is null) return NotFound();
+            product.IsCatalogItem = request.IsCatalogItem;
+            product.ModifiedBy = Actor();
+            product.ModifiedOn = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+            return Ok(new { product.Id, product.IsCatalogItem });
+        }
+
+        public sealed record SetProductCatalogueRequest(bool IsCatalogItem);
+
         [HttpPut("{id}")]
         [RequireModulePermission("Products", PermissionAction.Edit)]
         public async Task<ActionResult<ProductResponseDTO>> Update(long id, [FromForm] ProductUpdateRequestDTO request)

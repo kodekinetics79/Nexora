@@ -99,6 +99,11 @@ public static class ListViewCatalog
                 new("actions", "Actions", Locked: true)
             ]),
 
+            // Keys match the grid fields rendered by Frontend/src/pages/Customers/CustomersPage.tsx.
+            // Every column the page renders is declared here: a rendered column the catalog does
+            // not know is appended AFTER the locked Actions column and is missing from the picker,
+            // so the picker's "7/10" was a lie against a grid showing thirteen. Asserted by
+            // CustomersGridWiringTests.
             ["customers.list"] = new("customers.list", "Customer",
             [
                 new("docId", "Customer code"),
@@ -106,6 +111,13 @@ public static class ListViewCatalog
                 new("contactEmail", "Email"),
                 new("billingCity", "Billing city"),
                 new("billingCountry", "Billing country"),
+                // FR-CST-01/02: the relationship and classification a rep reads at a glance.
+                new("accountTeamName", "Account team"),
+                new("sector", "Sector"),
+                new("regionName", "Region"),
+                // The registrations a counterparty is verified against: there when needed, off by default.
+                new("commercialRegistrationNumber", "CR number", DefaultVisible: false),
+                new("taxRegistrationNumber", "VAT number", DefaultVisible: false),
                 new("shippingCity", "Shipping city", DefaultVisible: false),
                 new("shippingCountry", "Shipping country", DefaultVisible: false),
                 new("isActive", "Status"),

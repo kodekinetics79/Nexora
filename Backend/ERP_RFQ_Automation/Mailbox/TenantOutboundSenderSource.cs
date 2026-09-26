@@ -22,16 +22,23 @@ namespace ERP_RFQ_Automation.Mailbox;
 /// </summary>
 public sealed class TenantOutboundSenderSource(ErpRfqAutomationContext context) : ITenantOutboundSenderSource
 {
-    public async Task<TenantOutboundSender?> ResolveAsync(long businessUnitId, CancellationToken ct = default)
+    public Task<TenantOutboundSender?> ResolveAsync(long businessUnitId, CancellationToken ct = default)
+        => ResolveAsync(businessUnitId, null, ct);
+
+    public async Task<TenantOutboundSender?> ResolveAsync(long businessUnitId, long? mailboxId, CancellationToken ct = default)
     {
         if (context.ScopedTenantId is { } scoped && scoped != businessUnitId)
             throw new InvalidOperationException(
                 $"Refusing to resolve the outbound sender of BU {businessUnitId} through a DbContext scoped to BU {scoped}.");
 
-        var row = await context.EmailConfigurations.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive && x.Protocol.ToUpper() == "SMTP")
-            .OrderBy(x => x.Id)
-            .FirstOrDefaultAsync(ct);
+        var outgoing = context.EmailConfigurations.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive && x.Protocol.ToUpper() == "SMTP");
+        // The mailbox the user chose, when it is still one of this company's active outgoing
+        // mailboxes; otherwise the company's first, as before.
+        var row = mailboxId is { } chosen
+            ? await outgoing.Where(x => x.Id == chosen).FirstOrDefaultAsync(ct)
+            : null;
+        row ??= await outgoing.OrderBy(x => x.Id).FirstOrDefaultAsync(ct);
         if (row is null) return null;
 
         var companyName = await context.BusinessUnits.AsNoTracking()

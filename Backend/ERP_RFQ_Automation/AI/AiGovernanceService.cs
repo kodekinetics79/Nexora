@@ -12,6 +12,12 @@ public static class AiPurposes
     public const string RfqExtraction = "RfqExtraction";
     public const string BoqDraft = "BoqDraft";
     public const string Agent = "Agent";
+
+    /// <summary>
+    /// Internet supplier discovery from a sourcing case: the part number and maker names leave the
+    /// box as a search query. No document text and no customer name ever travels under this purpose.
+    /// </summary>
+    public const string SupplierDiscovery = "SupplierDiscovery";
 }
 
 /// <summary>

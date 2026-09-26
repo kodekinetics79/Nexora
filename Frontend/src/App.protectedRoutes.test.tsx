@@ -23,6 +23,7 @@ vi.mock('./components/layout/RouteAnnouncer', () => ({ default: () => null }));
 vi.mock('./pages/Login/LoginPage', () => ({ default: () => <div>tenant login</div> }));
 vi.mock('./pages/Inbox/InboxPage', () => ({ default: () => <div>tenant inbox</div> }));
 vi.mock('./pages/Advanced/AllScreensPage', () => ({ default: () => <div>advanced directory</div> }));
+vi.mock('./pages/Dashboard/DashboardPage', () => ({ default: () => <div>tenant dashboard</div> }));
 
 import App from './App';
 
@@ -61,5 +62,25 @@ describe('authenticated tenant-shell routes', () => {
 
     expect(await screen.findByText('tenant inbox')).toBeInTheDocument();
     expect(screen.getByTestId('tenant-shell')).toBeInTheDocument();
+  });
+});
+
+describe('the root address', () => {
+  it('sends a signed-out visitor to login', async () => {
+    renderAt('/');
+
+    expect(await screen.findByText('tenant login')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'current route' })).toHaveTextContent('/login');
+    expect(screen.queryByTestId('tenant-shell')).not.toBeInTheDocument();
+  });
+
+  it('sends a signed-in user to the dashboard instead of showing the login form again', async () => {
+    authState.token = 'signed-in';
+
+    renderAt('/');
+
+    expect(await screen.findByText('tenant dashboard')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'current route' })).toHaveTextContent('/dashboard');
+    expect(screen.queryByText('tenant login')).not.toBeInTheDocument();
   });
 });

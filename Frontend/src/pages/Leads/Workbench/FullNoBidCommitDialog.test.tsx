@@ -16,7 +16,7 @@ describe('FullNoBidCommitDialog', () => {
       <FullNoBidCommitDialog
         open
         lineCount={3}
-        reasonCodes={[{ code: 'COMMERCIAL_NO_FIT', label: 'Commercially not viable', appliesTo: ['NoBid'] }]}
+        reasonCodes={[{ code: 'COMMERCIAL_NO_FIT', label: 'Commercially not viable', appliesTo: ['Decline'] }]}
         onCancel={vi.fn()}
         onConfirm={confirm}
       />,
@@ -30,12 +30,34 @@ describe('FullNoBidCommitDialog', () => {
     expect(confirm).toHaveBeenCalledWith('COMMERCIAL_NO_FIT', 'Margin and delivery constraints.');
   });
 
+  it('offers only reasons that describe turning the whole request down, never a line-skip-only reason', () => {
+    render(
+      <FullNoBidCommitDialog
+        open
+        lineCount={2}
+        reasonCodes={[
+          { code: 'OUT_OF_SCOPE', label: 'Outside approved product scope', appliesTo: ['NoBid'] },
+          { code: 'PRICE', label: 'Price too high', appliesTo: ['NoBid', 'Decline'] },
+          { code: 'NO_RESPONSE', label: 'No response', appliesTo: ['Decline'] },
+        ]}
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Full no-bid reason' }));
+    const listbox = screen.getByRole('listbox');
+    expect(within(listbox).getByText('Price too high')).toBeInTheDocument();
+    expect(within(listbox).getByText('No response')).toBeInTheDocument();
+    expect(within(listbox).queryByText('Outside approved product scope')).toBeNull();
+  });
+
   it('shows every line reason and note before closing the lead', () => {
     render(
       <FullNoBidCommitDialog
         open
         lineCount={2}
-        reasonCodes={[{ code: 'OUT_OF_SCOPE', label: 'Outside capability', appliesTo: ['NoBid'] }]}
+        reasonCodes={[{ code: 'OUT_OF_SCOPE', label: 'Outside capability', appliesTo: ['NoBid', 'Decline'] }]}
         lines={[
           { id: 1, revisionLineId: 101, lineItemNo: '10', verificationStatus: 'VERIFIED' },
           { id: 2, revisionLineId: 102, lineItemNo: '20', verificationStatus: 'VERIFIED' },
@@ -69,7 +91,7 @@ describe('FullNoBidCommitDialog', () => {
       <FullNoBidCommitDialog
         open
         lineCount={30}
-        reasonCodes={[{ code: 'OUT_OF_SCOPE', label: 'Outside capability', appliesTo: ['NoBid'] }]}
+        reasonCodes={[{ code: 'OUT_OF_SCOPE', label: 'Outside capability', appliesTo: ['NoBid', 'Decline'] }]}
         lines={lines}
         decisions={decisions}
         onCancel={vi.fn()}

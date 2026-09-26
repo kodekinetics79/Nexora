@@ -6,6 +6,8 @@ import {
   requiredLineFields,
   documentAssertions,
   isBlockingSignal,
+  unitCheckReason,
+  foldUnit,
   type CheckableLine,
 } from './needsCheck';
 
@@ -266,5 +268,47 @@ describe('checkHeadline', () => {
       { total: 2966, needsCheck: 37, needsCheckIds: [] },
     ];
     for (const state of states) expect(checkHeadline(state)).not.toMatch(/%/);
+  });
+});
+
+describe('unit of measure — "BANANAS" is not a unit', () => {
+  // What GET /api/Uom returns for the tenant, folded the way the page folds it.
+  const tenantUnits = new Set(['EA', 'EACH', 'M', 'METRE', 'KG', 'KILOGRAM', 'DRM']);
+
+  it('flags a unit the business has never transacted in, at the same severity as a blank quantity', () => {
+    const line = completeLine({ id: 3, unitOfMeasure: 'BANANAS' });
+    const result = checkLine(line, undefined, documentAssertions([line], tenantUnits));
+    expect(result.state).toBe('needs-check');
+    expect(result.reasons).toEqual(["Unit 'BANANAS' is not one of your units — pick one"]);
+  });
+
+  it('accepts the tenant\'s own units, their spellings, and any server-known spelling', () => {
+    expect(unitCheckReason('EA', tenantUnits)).toBeNull();
+    expect(unitCheckReason('each', tenantUnits)).toBeNull();
+    expect(unitCheckReason('Mtr', tenantUnits)).toBeNull();
+    expect(unitCheckReason('Nos', tenantUnits)).toBeNull();
+    expect(unitCheckReason('Sq. Mtr', tenantUnits)).toBeNull();
+    // A unit only THIS tenant uses is still theirs.
+    expect(unitCheckReason('drm', tenantUnits)).toBeNull();
+    expect(foldUnit('m²')).toBe('M2');
+  });
+
+  it('asks a person about packaging and shapes rather than accepting them as counts', () => {
+    expect(unitCheckReason('Pallet', tenantUnits)).toMatch(/packaging or a shape/);
+    expect(unitCheckReason('Coil', tenantUnits)).toMatch(/packaging or a shape/);
+  });
+
+  it('never flags a unit while the tenant\'s units are unknown, and never flags a blank one', () => {
+    expect(unitCheckReason('BANANAS', undefined)).toBeNull();
+    expect(unitCheckReason('', tenantUnits)).toBeNull();
+    expect(unitCheckReason(null, tenantUnits)).toBeNull();
+    const line = completeLine({ id: 4, unitOfMeasure: 'BANANAS' });
+    expect(checkLine(line, undefined, documentAssertions([line])).state).toBe('verified');
+  });
+
+  it('counts the bad-unit line in the summary the queue and headline read', () => {
+    const lines = [completeLine({ id: 1 }), completeLine({ id: 2, unitOfMeasure: 'BANANAS' })];
+    expect(summariseChecks(lines, undefined, tenantUnits)).toEqual({ total: 2, needsCheck: 1, needsCheckIds: [2] });
+    expect(summariseChecks(lines)).toEqual({ total: 2, needsCheck: 0, needsCheckIds: [] });
   });
 });

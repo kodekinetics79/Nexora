@@ -8,7 +8,12 @@ export type OverallFitDecision = 'FIT' | 'CONDITIONAL' | 'NOT_FIT';
 export interface DecisionReasonCodeDTO {
   code: string;
   label: string;
-  appliesTo: Array<'NoBid' | 'Clarify'>;
+  /**
+   * `NoBid`: why one line is left out of the quote. `Decline`: why the whole request is turned
+   * down (the quote-outcome list). `Clarify`: what the customer is being asked. One reason can
+   * carry more than one.
+   */
+  appliesTo: Array<'NoBid' | 'Decline' | 'Clarify'>;
   description?: string | null;
 }
 
@@ -66,6 +71,11 @@ export interface LeadDecisionLineDTO {
   warningSnapshotJson?: string | null;
   verificationStatus: 'VERIFIED' | 'NEEDS_CHECK' | 'MISSING_SOURCE' | 'MACHINE_SUGGESTION' | string;
   verificationDetail?: string | null;
+  /**
+   * True when retained cell evidence covers the item, its quantity and its unit: the line was read
+   * from the document. Says nothing about whether a person has confirmed it yet.
+   */
+  sourceEvidenceComplete?: boolean;
   participation?: {
     decision: LineParticipationDecision;
     reasonCode?: string | null;
@@ -123,6 +133,8 @@ export interface LeadDecisionWorkbenchDTO {
   customerRfqReference?: string | null;
   customerId?: number | null;
   customerName?: string | null;
+  /** The buying organisation as the document printed it, when no client is matched yet. */
+  extractedClientName?: string | null;
   buyerName?: string | null;
   senderEmail?: string | null;
   emailSubject?: string | null;
@@ -206,9 +218,38 @@ export interface RfqRevisionImpactResolutionResult {
   replayed: boolean;
 }
 
+/** One row of a source spreadsheet, numbered as the spreadsheet numbers it. */
+export interface SourceGridRowDTO {
+  number: number;
+  cells: string[];
+}
+
+export interface SourceGridSheetDTO {
+  name: string;
+  /** The row the parser read the column headings from, when it found one. */
+  headerRowNumber?: number | null;
+  rows: SourceGridRowDTO[];
+  /** True when the sheet had more rows or columns than are returned. */
+  truncated: boolean;
+}
+
+/** The cells of a retained spreadsheet source, as the parser read them. */
+export interface SourceGridDTO {
+  sheets: SourceGridSheetDTO[];
+}
+
 const leadDecisionService = {
   getWorkbench: async (leadId: number): Promise<LeadDecisionWorkbenchDTO> => {
     const response = await axiosInstance.get<LeadDecisionWorkbenchDTO>(`/api/leads/${leadId}/decision-workbench`);
+    return response.data;
+  },
+
+  /**
+   * The rows of a retained spreadsheet source (.xlsx, .xls, .csv), read from the same bytes the
+   * parser read. `documentPath` is the evidence's download path; the grid sits beside it.
+   */
+  getSourceGrid: async (documentPath: string): Promise<SourceGridDTO> => {
+    const response = await axiosInstance.get<SourceGridDTO>(`${documentPath}/grid`);
     return response.data;
   },
 

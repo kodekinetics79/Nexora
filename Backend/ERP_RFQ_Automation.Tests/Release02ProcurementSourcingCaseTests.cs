@@ -286,7 +286,7 @@ public sealed class Release02ProcurementSourcingCaseTests
     }
 
     [Fact]
-    public async Task Existing_sent_supplier_rfq_blocks_duplicate_outreach_to_same_candidate()
+    public async Task Asking_a_supplier_already_asked_is_a_deliberate_new_request_and_a_repeated_press_sends_once()
     {
         using var fixture = new ProcurementScenario();
         await MakeSourcingReadyAsync(fixture);
@@ -304,9 +304,19 @@ public sealed class Release02ProcurementSourcingCaseTests
             await update.SaveChangesAsync();
         }
 
-        await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
+        // The same press arriving twice is one request (owner decision 2026-09-16 keeps asking
+        // again a choice, never an accident).
+        var replay = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+            "sent-duplicate-prepare", "qa", "corr-sent-duplicate")));
+        Assert.Equal(prepared.SupplierSolicitationId, replay.SupplierSolicitationId);
+        Assert.True(replay.Replayed);
+
+        // A new press to ask them again is a new numbered request.
+        var second = await fixture.Execute(service =>
             service.PrepareSupplierRfqAsync(new(fixture.BusinessUnitId, created.Id, candidate.SupplierId,
-                null, prepared.SourcingCaseVersion, "sent-duplicate-second", "qa", "corr-sent-second"))));
+                null, prepared.SourcingCaseVersion, "sent-duplicate-second", "qa", "corr-sent-second")));
+        Assert.NotEqual(prepared.SupplierSolicitationId, second.SupplierSolicitationId);
     }
 
     [Fact]

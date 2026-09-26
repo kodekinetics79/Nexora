@@ -1,6 +1,7 @@
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.LeadIdentity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -280,80 +281,13 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<IActionResult> DownloadSourceDocument(long sourceDocumentId, CancellationToken ct)
         {
-            var rawBusinessUnitId = User.FindFirst("businessUnitId")?.Value;
-            if (!long.TryParse(rawBusinessUnitId, out var businessUnitId) || businessUnitId <= 0)
-                return BadRequest("Business Unit ID is required.");
-
             try
             {
-                var owningLeadIds = await _context.Set<LeadOccurrenceDocument>()
-                    .AsNoTracking()
-                    .Where(link => link.BusinessUnitId == businessUnitId
-                        && link.SourceDocumentId == sourceDocumentId
-                        && link.Occurrence.LeadId.HasValue)
-                    .Select(link => link.Occurrence.LeadId!.Value)
-                    .Distinct()
-                    .ToListAsync(ct);
-                if (owningLeadIds.Count == 0)
-                {
-                    owningLeadIds = await _context.Set<LeadIngestionOccurrence>()
-                        .AsNoTracking()
-                        .Where(occurrence => occurrence.BusinessUnitId == businessUnitId
-                            && occurrence.SourceDocumentId == sourceDocumentId
-                            && occurrence.LeadId.HasValue)
-                        .Select(occurrence => occurrence.LeadId!.Value)
-                        .Distinct()
-                        .ToListAsync(ct);
-                }
-                if (owningLeadIds.Count == 0)
-                    return NotFound();
-
-                var document = await _context.Set<SourceDocument>().AsNoTracking()
-                    .SingleOrDefaultAsync(candidate => candidate.BusinessUnitId == businessUnitId
-                        && candidate.Id == sourceDocumentId, ct);
-                if (document is null)
-                    return NotFound();
-                if (document.PurgeState != EvidencePurgeState.Present)
-                    return StatusCode(StatusCodes.Status410Gone, new
-                    {
-                        message = "The retained evidence bytes were removed under the tenant retention policy.",
-                        document.BytesPurgedOn,
-                        document.PurgePolicyCode
-                    });
-                if (document.SecurityStatus != DocumentSecurityStatus.Cleared)
-                    return Conflict("The source document is not cleared for viewing.");
-                if (!document.ExtractionJobId.HasValue)
-                    return NotFound("The source document has no exact stored-object relation.");
-
-                var job = await _context.Set<ExtractionJob>().AsNoTracking()
-                    .SingleOrDefaultAsync(candidate => candidate.BusinessUnitId == businessUnitId
-                        && candidate.Id == document.ExtractionJobId.Value
-                        && candidate.ContentHash == document.ContentHash, ct);
-                if (job is null || string.IsNullOrWhiteSpace(job.StoragePath))
-                    return NotFound("The source document has no exact stored-object relation.");
-
-                var mayRead = false;
-                foreach (var leadId in owningLeadIds)
-                {
-                    var stillLinked = await _context.Set<LeadOccurrenceDocument>().AsNoTracking()
-                        .AnyAsync(link => link.BusinessUnitId == businessUnitId
-                            && link.SourceDocumentId == sourceDocumentId
-                            && link.Occurrence.LeadId == leadId, ct)
-                        || await _context.Set<LeadIngestionOccurrence>().AsNoTracking()
-                            .AnyAsync(occurrence => occurrence.BusinessUnitId == businessUnitId
-                                && occurrence.SourceDocumentId == sourceDocumentId
-                                && occurrence.LeadId == leadId, ct);
-                    if (stillLinked && await _commercialAccess.CanAccessLeadAsync(leadId, ct))
-                    {
-                        mayRead = true;
-                        break;
-                    }
-                }
-                if (!mayRead)
-                    return NotFound();
+                var (refusal, document, job) = await ResolveReadableSourceDocumentAsync(sourceDocumentId, ct);
+                if (refusal is not null) return refusal;
 
                 var stream = await _evidenceStorage.OpenVerifiedReadAsync(
-                    job.StoragePath, document.ContentHash, ct);
+                    job!.StoragePath!, document!.ContentHash, ct);
                 Response.Headers[IntegrityHeader] = IntegrityVerified;
                 var contentType = string.IsNullOrWhiteSpace(document.DetectedMimeType)
                     ? "application/octet-stream"
@@ -376,6 +310,154 @@ namespace ERP_RFQ_Automation.Controllers
                     title: "The evidence object failed integrity verification.");
             }
         }
+
+        /// <summary>Spreadsheets larger than this are not read into rows for the browser.</summary>
+        internal const long MaxGridSourceBytes = 25L * 1024 * 1024;
+
+        /// <summary>
+        /// The rows of a retained spreadsheet source (.xlsx, .xls, .csv), read from the same
+        /// verified bytes <see cref="DownloadSourceDocument"/> serves, so the decision screen can
+        /// show the document beside the lines it produced. A browser cannot draw a workbook, and the
+        /// "check against the document" pane was empty for the most common shape an RFQ arrives in.
+        /// Same authorization as the download; 415 when the file is not a spreadsheet.
+        /// </summary>
+        [HttpGet("source-document/{sourceDocumentId:long}/grid")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
+        public async Task<IActionResult> SourceDocumentGrid(long sourceDocumentId, CancellationToken ct)
+        {
+            try
+            {
+                var (refusal, document, job) = await ResolveReadableSourceDocumentAsync(sourceDocumentId, ct);
+                if (refusal is not null) return refusal;
+                if (!SpreadsheetGridReader.IsSpreadsheet(document!.OriginalFileName, document.DetectedMimeType))
+                    return StatusCode(StatusCodes.Status415UnsupportedMediaType,
+                        "This document is not a spreadsheet, so it has no rows to show.");
+                if (document.ByteSize > MaxGridSourceBytes)
+                    return StatusCode(StatusCodes.Status413PayloadTooLarge,
+                        "This spreadsheet is too large to show as rows here. Open the file instead.");
+
+                byte[] bytes;
+                await using (var stream = await _evidenceStorage.OpenVerifiedReadAsync(
+                    job!.StoragePath!, document.ContentHash, ct))
+                {
+                    using var buffer = new MemoryStream();
+                    await stream.CopyToAsync(buffer, ct);
+                    bytes = buffer.ToArray();
+                }
+                var grid = SpreadsheetGridReader.Read(bytes, document.OriginalFileName, document.DetectedMimeType);
+                if (grid is null)
+                    return StatusCode(StatusCodes.Status415UnsupportedMediaType,
+                        "This document is not a spreadsheet, so it has no rows to show.");
+                Response.Headers[IntegrityHeader] = IntegrityVerified;
+                return Ok(grid);
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound("The requested source document was not found in evidence storage.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Rejected unsafe storage identity for source document {SourceDocumentId}.", sourceDocumentId);
+                return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Evidence integrity verification failed for source document {SourceDocumentId}.", sourceDocumentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The evidence object failed integrity verification.");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A workbook the library cannot open is a display failure, not a security event; the
+                // caller falls back to offering the file itself.
+                _logger.LogWarning(ex, "Source document {SourceDocumentId} could not be read as a spreadsheet.", sourceDocumentId);
+                return StatusCode(StatusCodes.Status422UnprocessableEntity,
+                    "The spreadsheet could not be read as rows. Open the file instead.");
+            }
+        }
+
+        /// <summary>
+        /// The one authorization path for a retained source document's bytes: the caller's tenant
+        /// must own a lead the document is still linked to, the caller must be allowed that lead,
+        /// and the document must be present, cleared and bound to the exact stored object. The
+        /// refusal, when there is one, is the response to return.
+        /// </summary>
+        private async Task<(IActionResult? Refusal, SourceDocument? Document, ExtractionJob? Job)>
+            ResolveReadableSourceDocumentAsync(long sourceDocumentId, CancellationToken ct)
+        {
+            var rawBusinessUnitId = User.FindFirst("businessUnitId")?.Value;
+            if (!long.TryParse(rawBusinessUnitId, out var businessUnitId) || businessUnitId <= 0)
+                return (BadRequest("Business Unit ID is required."), null, null);
+
+            var owningLeadIds = await _context.Set<LeadOccurrenceDocument>()
+                .AsNoTracking()
+                .Where(link => link.BusinessUnitId == businessUnitId
+                    && link.SourceDocumentId == sourceDocumentId
+                    && link.Occurrence.LeadId.HasValue)
+                .Select(link => link.Occurrence.LeadId!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+            if (owningLeadIds.Count == 0)
+            {
+                owningLeadIds = await _context.Set<LeadIngestionOccurrence>()
+                    .AsNoTracking()
+                    .Where(occurrence => occurrence.BusinessUnitId == businessUnitId
+                        && occurrence.SourceDocumentId == sourceDocumentId
+                        && occurrence.LeadId.HasValue)
+                    .Select(occurrence => occurrence.LeadId!.Value)
+                    .Distinct()
+                    .ToListAsync(ct);
+            }
+            if (owningLeadIds.Count == 0)
+                return (NotFound(), null, null);
+
+            var document = await _context.Set<SourceDocument>().AsNoTracking()
+                .SingleOrDefaultAsync(candidate => candidate.BusinessUnitId == businessUnitId
+                    && candidate.Id == sourceDocumentId, ct);
+            if (document is null)
+                return (NotFound(), null, null);
+            if (document.PurgeState != EvidencePurgeState.Present)
+                return (StatusCode(StatusCodes.Status410Gone, new
+                {
+                    message = "The retained evidence bytes were removed under the tenant retention policy.",
+                    document.BytesPurgedOn,
+                    document.PurgePolicyCode
+                }), null, null);
+            if (document.SecurityStatus != DocumentSecurityStatus.Cleared)
+                return (Conflict("The source document is not cleared for viewing."), null, null);
+            if (!document.ExtractionJobId.HasValue)
+                return (NotFound("The source document has no exact stored-object relation."), null, null);
+
+            var job = await _context.Set<ExtractionJob>().AsNoTracking()
+                .SingleOrDefaultAsync(candidate => candidate.BusinessUnitId == businessUnitId
+                    && candidate.Id == document.ExtractionJobId.Value
+                    && candidate.ContentHash == document.ContentHash, ct);
+            if (job is null || string.IsNullOrWhiteSpace(job.StoragePath))
+                return (NotFound("The source document has no exact stored-object relation."), null, null);
+
+            var mayRead = false;
+            foreach (var leadId in owningLeadIds)
+            {
+                var stillLinked = await _context.Set<LeadOccurrenceDocument>().AsNoTracking()
+                    .AnyAsync(link => link.BusinessUnitId == businessUnitId
+                        && link.SourceDocumentId == sourceDocumentId
+                        && link.Occurrence.LeadId == leadId, ct)
+                    || await _context.Set<LeadIngestionOccurrence>().AsNoTracking()
+                        .AnyAsync(occurrence => occurrence.BusinessUnitId == businessUnitId
+                            && occurrence.SourceDocumentId == sourceDocumentId
+                            && occurrence.LeadId == leadId, ct);
+                if (stillLinked && await _commercialAccess.CanAccessLeadAsync(leadId, ct))
+                {
+                    mayRead = true;
+                    break;
+                }
+            }
+            if (!mayRead)
+                return (NotFound(), null, null);
+
+            return (null, document, job);
+        }
+
 
         private async Task<bool> CanReadAttachmentParentAsync(
             bool isLead,

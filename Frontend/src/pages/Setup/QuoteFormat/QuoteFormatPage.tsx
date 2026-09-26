@@ -18,6 +18,64 @@ import { useAuth } from '../../../context/AuthContext';
 import { useTranslation } from 'react-i18next';
 import { useSnackbar } from 'notistack';
 import { handleApiError } from '../../../utils/errorHandler';
+import InputAdornment from '@mui/material/InputAdornment';
+import stockPriceService from '../../../api/services/stockPriceService';
+
+/**
+ * The usual margin on stock items: when a stock item has no selling price, "Price from stock"
+ * starts at cost plus this margin. One field, its own Save, plain words.
+ */
+function StockMarginSetting() {
+  const { hasPermission } = useAuth();
+  const canEdit = hasPermission('Quote Configuration', 'edit');
+  const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
+  const query = useQuery({ queryKey: ['stock-margin'], queryFn: () => stockPriceService.getMargin() });
+  const [value, setValue] = useState('');
+  useEffect(() => {
+    if (query.data) setValue(query.data.marginPercent == null ? '' : String(query.data.marginPercent));
+  }, [query.data]);
+  const number = value.trim() === '' ? null : Number(value);
+  const valid = number == null || (Number.isFinite(number) && number >= 0 && number <= 1000);
+  const changed = (query.data?.marginPercent ?? null) !== number;
+  const save = useMutation({
+    mutationFn: () => stockPriceService.saveMargin(number),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stock-margin'] });
+      queryClient.invalidateQueries({ queryKey: ['stock-price'] });
+      enqueueSnackbar(number == null ? 'Usual margin cleared.' : `Stock items now start at cost + ${number}%.`, { variant: 'success' });
+    },
+    onError: (error: any) => handleApiError(error),
+  });
+  const example = number != null && valid ? (100 * (1 + number / 100)).toLocaleString(undefined, { maximumFractionDigits: 2 }) : null;
+
+  return (
+    <Paper sx={{ p: 2.5, mt: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+      <Typography variant="h6" sx={{ fontWeight: 700 }}>Pricing items from stock</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        When an item in stock has no selling price, its price starts at cost plus this margin. Sales staff can still change the price on each quote.
+      </Typography>
+      <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <TextField
+          label="Usual margin"
+          type="number"
+          value={value}
+          disabled={!canEdit || query.isLoading}
+          onChange={(event) => setValue(event.target.value)}
+          error={!valid}
+          helperText={!valid ? 'Enter a margin between 0 and 1000' : example ? `Example: cost 100 → price ${example}` : 'Leave empty to start at cost'}
+          slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Usual margin on stock items' }, input: { endAdornment: <InputAdornment position="end">%</InputAdornment> } }}
+          sx={{ width: 220 }}
+        />
+        {canEdit && (
+          <Button variant="outlined" onClick={() => save.mutate()} disabled={!valid || !changed || save.isPending} sx={{ mt: 1 }}>
+            Save margin
+          </Button>
+        )}
+      </Box>
+    </Paper>
+  );
+}
 
 const QuoteFormatPage: React.FC = () => {
   const { t } = useTranslation();
@@ -121,6 +179,7 @@ const QuoteFormatPage: React.FC = () => {
               </Grid>
             </Grid>
           </Paper>
+          <StockMarginSetting />
         </Grid>
 
         <Grid size={{ xs: 12, md: 4 }}>

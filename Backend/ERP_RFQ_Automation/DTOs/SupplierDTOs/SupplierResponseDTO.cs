@@ -38,6 +38,10 @@
         /// "cash on delivery".
         /// </summary>
         public int? CreditDays { get; set; }
+        /// <summary>The supplier's website as an absolute origin; how the internet search recognises a known supplier.</summary>
+        public string? Website { get; set; }
+        /// <summary>Manufacturer, Distributor, Reseller or Unknown (<c>SupplierRoles</c>). Null means nobody has said.</summary>
+        public string? Role { get; set; }
         public long? Buid { get; set; }
         public string? BusinessUnitName { get; set; }
         public bool? IsActive { get; set; }

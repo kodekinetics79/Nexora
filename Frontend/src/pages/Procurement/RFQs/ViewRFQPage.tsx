@@ -18,6 +18,7 @@ import {
   Edit as EditIcon,
   CheckCircle as ApproveIcon,
   RequestQuote as QuoteDraftIcon,
+  Send as SendQuoteIcon,
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
   OpenInNew as WorkspaceIcon,
@@ -34,7 +35,7 @@ import {
   HourglassEmpty as WaitingIcon,
   AddCircleOutlined as AddIcon,
 } from '@mui/icons-material';
-import rfqService from '../../../api/services/rfqService';
+import rfqService, { type RfqitemResponseDTO } from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 import LifecycleActions from '../../../components/common/LifecycleActions';
@@ -50,6 +51,11 @@ import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
+import { LinePriceAction, OtherMakerStockAction, StockLineAction } from './StockPriceDialog';
+import SendQuoteDialog from './SendQuoteDialog';
+import { LineMakersCell, acceptedMakersOf, isApprovedMakersField } from './LineMakers';
+import { OfferedPartCell } from './OfferedPartDialog';
+import FindSupplierDialog, { RECONFIRM_PRICE_MESSAGE, type FindSupplierLine } from './FindSupplierDialog';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -259,26 +265,35 @@ const ViewRFQPage: React.FC = () => {
   // create the entry by hand, come back, search again. Nobody did (Render logs: searches, zero
   // saves). Adding the entry and binding the line is one governed step; the line is already
   // being quoted, so the entry is wanted. The record can be completed under Products later.
+  // One catalogue entry per customer part, built the same way wherever a line is added: the dialog's
+  // "Add to catalogue" and the line's "Ask suppliers" must not create two different records for one part.
+  const catalogueEntryFor = (item: RfqitemResponseDTO) => {
+    const partNo = (item.manufacturerPartNumber || item.itemMaterialCode || '').trim();
+    const description = (item.productShortDescription || item.itemText || item.materialPotext || '').trim();
+    if (!partNo && !description) return null;
+    const manufacturer = (item.manufacturerName || '').trim();
+    const fullDescription = [manufacturer && manufacturer.toUpperCase() !== 'N/A' ? `Manufacturer: ${manufacturer}.` : '', description]
+      .filter(Boolean).join(' ');
+    // Products.PartNo and ProductName are varchar(100); Description is varchar(500).
+    const form = new FormData();
+    form.append('partNo', (partNo || description).slice(0, 100));
+    form.append('productName', (description || partNo).slice(0, 100));
+    if (fullDescription) form.append('description', fullDescription.slice(0, 500));
+    form.append('isActive', 'true');
+    form.append('isCatalogItem', 'true');
+    form.append('createdBy', userData?.userName || 'System');
+    form.append('buid', String(userData?.businessUnitId || 0));
+    return { partNo, description, form };
+  };
+
   const addToCatalogueMutation = useMutation({
     mutationFn: async () => {
       const item = rfq?.rfqitems.find((x) => x.id === productResolutionItemId);
       if (!item) throw new Error('The RFQ line is no longer on this screen.');
-      const partNo = (item.manufacturerPartNumber || item.itemMaterialCode || '').trim();
-      const description = (item.productShortDescription || item.itemText || item.materialPotext || '').trim();
-      if (!partNo && !description) throw new Error('This line has neither a part number nor a description to add to the catalogue.');
-      const manufacturer = (item.manufacturerName || '').trim();
-      const fullDescription = [manufacturer && manufacturer.toUpperCase() !== 'N/A' ? `Manufacturer: ${manufacturer}.` : '', description]
-        .filter(Boolean).join(' ');
-      // Products.PartNo and ProductName are varchar(100); Description is varchar(500).
-      const form = new FormData();
-      form.append('partNo', (partNo || description).slice(0, 100));
-      form.append('productName', (description || partNo).slice(0, 100));
-      if (fullDescription) form.append('description', fullDescription.slice(0, 500));
-      form.append('isActive', 'true');
-      form.append('isCatalogItem', 'true');
-      form.append('createdBy', userData?.userName || 'System');
-      form.append('buid', String(userData?.businessUnitId || 0));
-      const created = await productService.create(form);
+      const entry = catalogueEntryFor(item);
+      if (!entry) throw new Error('This line has neither a part number nor a description to add to the catalogue.');
+      const { partNo, description } = entry;
+      const created = await productService.create(entry.form);
       const reason = productResolutionReason.trim()
         || `No catalogue product matched customer part ${partNo || description}. Added ${created.partNo} to the catalogue from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} because the line is being quoted.`;
       try {
@@ -304,6 +319,18 @@ const ViewRFQPage: React.FC = () => {
     onError: (error: any) => enqueueSnackbar(describeError(error, 'The part could not be added to the catalogue.'), { variant: 'error' }),
   });
 
+  const [sendQuoteOpen, setSendQuoteOpen] = React.useState(false);
+  // Set when a send was handed over: delivery finishes a few seconds later, so the header keeps
+  // checking until the quote reads as sent (at most a minute).
+  const [sentAt, setSentAt] = React.useState<number | null>(null);
+  const latestQuoteQuery = useQuery({
+    queryKey: ['send-quote-id', Number(id)],
+    queryFn: () => rfqService.getLatestQuote(Number(id)),
+    enabled: !!id && hasPermission('Quotations'),
+    refetchInterval: (query) => sentAt && Date.now() - sentAt < 60_000 && query.state.data?.state === 'DRAFT' ? 3000 : false,
+  });
+  const latestQuote = latestQuoteQuery.data ?? null;
+
   const quoteDraftMutation = useMutation({
     mutationFn: () => rfqService.prepareQuoteDraft(Number(id)),
     onSuccess: (quote) => {
@@ -316,14 +343,59 @@ const ViewRFQPage: React.FC = () => {
     ),
   });
 
-  const sourcingCaseMutation = useMutation({
-    mutationFn: (rfqItemId: number) => procurementService.createOrOpenSourcingCase(Number(id), rfqItemId, 10),
-    onSuccess: (sourcingCase) => navigate(`/procurement/sourcing-cases/${sourcingCase.id}`),
-    onError: (error: any) => enqueueSnackbar(
-      error?.response?.data?.detail || error?.response?.data?.message || 'The Sourcing Case could not be created.',
-      { variant: 'error' },
-    ),
+
+  // "Ask suppliers" on a line that is not in the catalogue. Supplier sourcing is keyed to a catalogue
+  // product (the server refuses a case without one), so the rep is not sent off to build a product
+  // record first: the part is found by its exact part number, or added, the line is linked to it, and the
+  // sourcing case opens with the suppliers who carry that part or maker. Three existing governed calls,
+  // in order; a failure part-way says which step stopped and leaves what already succeeded in place.
+  // Opens the sourcing record behind a line so Find supplier can list who to ask. A line not in the
+  // catalogue gets its part added (or matched by exact part number) and linked first, because
+  // supplier requests are keyed to a catalogue product; the rep does not have to do that by hand.
+  const openCaseForLine = async (item: RfqitemResponseDTO) => {
+    const existing = sourcingLines.get(item.id)?.sourcingCaseId;
+    if (item.productId && existing) return procurementService.getSourcingCase(existing);
+    if (item.productId) return procurementService.createOrOpenSourcingCase(Number(id), item.id, 10);
+    // Not in the catalogue: the part is created kept out of it, and the window's tick decides
+    // on Send whether it goes in (owner decision 2026-09-16).
+      const entry = catalogueEntryFor(item);
+      if (!entry) throw new Error('This line has neither a part number nor a description, so there is nothing to ask suppliers for.');
+      const compact = (value?: string | null) => (value ?? '').replace(/[^a-z0-9]/gi, '').toUpperCase();
+      let product: ProductDTO | undefined;
+      if (entry.partNo) {
+        const found = await productService.getAll({
+          businessUnitId: userData?.businessUnitId || 0, pageNumber: 1, pageSize: 20, search: entry.partNo, isActive: true,
+        });
+        product = found.items.find((candidate) => compact(candidate.partNo) === compact(entry.partNo));
+      }
+      const added = !product;
+      if (!product) {
+        entry.form.set('isCatalogItem', 'false');
+        product = await productService.create(entry.form);
+      }
+      const reason = added
+        ? `No catalogue product matched customer part ${entry.partNo || entry.description}. Added ${product.partNo} from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} to ask suppliers for a price.`
+        : `Customer part ${entry.partNo} is catalogue product ${product.partNo} (same part number). Linked from RFQ ${rfq?.rfqno ?? id} line ${item.lineItemNo ?? item.id} to ask suppliers for a price.`;
+      try {
+        await rfqService.resolveLineProduct(Number(id), item.id, product.id, reason);
+      } catch (error) {
+        throw new Error(`${added ? `${product.partNo} was added to the catalogue, but` : 'The'} line could not be linked to it: ${describeError(error, 'unknown error')}. Press "Ask suppliers" again.`, { cause: error });
+      }
+      try {
+        return await procurementService.createOrOpenSourcingCase(Number(id), item.id, 10);
+      } catch (error) {
+        throw new Error(`The line is now linked to ${product.partNo}, but the sourcing case could not be opened: ${describeError(error, 'unknown error')}. Press "Create / Open Sourcing Case" on the line.`, { cause: error });
+      }
+  };
+  const keepInCatalogueMutation = useMutation({
+    mutationFn: (productId: number) => productService.setCatalogue(productId, true),
+    onSuccess: async () => {
+      enqueueSnackbar('Added to your catalogue.', { variant: 'success' });
+      await invalidateLineViews();
+    },
+    onError: () => enqueueSnackbar('The part could not be added to your catalogue.', { variant: 'error' }),
   });
+  const [findSupplierFor, setFindSupplierFor] = React.useState<{ item: RfqitemResponseDTO; presetSupplierIds?: number[]; presetMessage?: string } | null>(null);
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
   if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this RFQ.</Alert></Box>;
@@ -370,6 +442,8 @@ const ViewRFQPage: React.FC = () => {
   const resolutionPartNumber = (productResolutionItem?.manufacturerPartNumber || productResolutionItem?.itemMaterialCode || '').trim();
   const resolutionDescription = (productResolutionItem?.productShortDescription || productResolutionItem?.itemText || productResolutionItem?.materialPotext || '').trim();
   const canAddToCatalogue = commercialAccess.canResolveRfqProduct && hasPermission('Products', 'create');
+  // Asking suppliers on an uncatalogued line adds the product and opens the case, so it needs both rights.
+  const canAskSuppliers = canAddToCatalogue && commercialAccess.canCreateOrOpenSourcingCase;
   // "Nothing matches" is a fact about the catalogue, not a dead end: it is offered as the add step.
   const catalogueMiss = productResolutionItem !== null && !effectiveProduct
     && productSearchQuery.isSuccess && (productSearchQuery.data?.length ?? 0) === 0
@@ -452,6 +526,11 @@ const ViewRFQPage: React.FC = () => {
   // customer deadline — the leak utils/dates.ts exists to close.
   const deadline = parseDateSafe(rfq.bidClosingDate);
   const overdue = deadline !== null && deadline < new Date();
+  // Closing today or tomorrow with the quote not yet out: say so, and offer to send what is ready.
+  // Calendar days, not hours: a bid closing tomorrow afternoon is "tomorrow" all day today.
+  const daysToClose = deadline === null ? null
+    : Math.round((new Date(deadline).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86_400_000);
+  const closingSoon = daysToClose !== null && daysToClose >= 0 && daysToClose <= 1 && latestQuote?.state !== 'SENT' && latestQuote?.state !== 'DECIDED';
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
   // What this RFQ is waiting for, in one sentence, from facts the page already holds.
   // Order is the order a rep works: match the catalogue, cover the shortages, then quote.
@@ -485,7 +564,9 @@ const ViewRFQPage: React.FC = () => {
           : unresolvedCount > 0
             ? {
                 tone: 'warning', title: 'Next step',
-                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} ${unresolvedCount === 1 ? 'is' : 'are'} not in your catalogue yet, so stock and suppliers cannot be checked. Use "Add to catalogue" on the line, or choose "Not now" there to price it by hand.${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
+                sentence: `${unresolvedCount} line${unresolvedCount === 1 ? '' : 's'} ${unresolvedCount === 1 ? 'is' : 'are'} not in your catalogue yet, so stock and suppliers cannot be checked. ${canAskSuppliers
+                  ? 'Press "Ask suppliers" on the line to add it and get supplier prices, or "Add to catalogue" to pick a product you already have or leave it out for now.'
+                  : 'Use "Add to catalogue" on the line, or choose "Not now" there to price it by hand.'}${!canPrepareQuote ? ' A commercial review is also outstanding.' : ''}`,
                 action: <Button variant="outlined" onClick={() => setLineFilter('unresolved')} sx={{ borderRadius: 2 }}>Show unmatched lines</Button>,
               }
             : shortNotAsked.length > 0
@@ -505,7 +586,7 @@ const ViewRFQPage: React.FC = () => {
                       tone: 'info', title: 'Next step',
                       sentence: `${leftOutCount} line${leftOutCount === 1 ? ' is' : 's are'} left out of the catalogue for now. ${canCreateQuote
                         ? `Prepare the quote draft and price ${leftOutCount === 1 ? 'it' : 'them'} by hand`
-                        : 'Ask someone with quoting rights to prepare the quote draft'}, or use "Add to catalogue" on the line.`,
+                        : 'Ask someone with quoting rights to prepare the quote draft'}, or ${canAskSuppliers ? 'press "Ask suppliers" on the line to get supplier prices' : 'use "Add to catalogue" on the line'}.`,
                     }
                 : quoteDraft
                   ? {
@@ -645,11 +726,29 @@ const ViewRFQPage: React.FC = () => {
                     '&:focus-visible': { outline: '3px solid', outlineColor: 'primary.main', outlineOffset: 2 },
                   }}
                 >
-                  <Button variant="contained" color="success" startIcon={<QuoteDraftIcon />}
-                    onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
-                    sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
-                    Prepare Quote Draft
-                  </Button>
+                  {latestQuote ? (
+                    <Button variant="outlined" startIcon={<QuoteDraftIcon />} onClick={() => navigate(`/sales/quotes/view/${latestQuote.quoteId}`)}
+                      sx={{ fontWeight: 800, borderRadius: 2, px: 2 }}>
+                      {latestQuote.state === 'DRAFT' ? `Open ${latestQuote.quoteNo}` : `${latestQuote.quoteNo} sent`}
+                    </Button>
+                  ) : (
+                    <Button variant="outlined" startIcon={<QuoteDraftIcon />}
+                      onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
+                      sx={{ fontWeight: 800, borderRadius: 2, px: 2 }}>
+                      Prepare Quote Draft
+                    </Button>
+                  )}
+                  {sentAt && latestQuote?.state === 'DRAFT' && Date.now() - sentAt < 60_000 ? (
+                    <Button variant="contained" color="success" disabled sx={{ fontWeight: 800, borderRadius: 2, px: 3, ml: 1 }}
+                      startIcon={<CircularProgress size={16} color="inherit" />}>
+                      Sending…
+                    </Button>
+                  ) : (!latestQuote || latestQuote.state === 'DRAFT') && hasPermission('Quotations', 'edit') && (
+                    <Button variant="contained" color="success" startIcon={<SendQuoteIcon />} sx={{ fontWeight: 800, borderRadius: 2, px: 3, ml: 1 }}
+                      disabled={!latestQuote && !canPrepareQuote} onClick={() => setSendQuoteOpen(true)}>
+                      Send quote
+                    </Button>
+                  )}
                 </Box>
               </Tooltip>
             )}
@@ -670,6 +769,12 @@ const ViewRFQPage: React.FC = () => {
             </Grid>
           </Grid>
         </Paper>
+        {closingSoon && hasPermission('Quotations', 'edit') && (
+          <Alert severity="warning" sx={{ mt: 2, borderRadius: 3 }}
+            action={<Button color="inherit" variant="outlined" size="small" onClick={() => setSendQuoteOpen(true)}>Send what's ready</Button>}>
+            <b>Bid closes {daysToClose === 0 ? 'today' : 'tomorrow'}.</b> Lines still waiting for suppliers can go out as Price to follow, an Estimate, or Not quoted, so the customer gets the full quote on time.
+          </Alert>
+        )}
         {nextStep && (
           <Box sx={{ mt: 2 }}>
             <NextStepPanel tone={nextStep.tone} title={nextStep.title} sentence={nextStep.sentence} action={nextStep.action} testId="rfq-next-step" />
@@ -738,7 +843,9 @@ const ViewRFQPage: React.FC = () => {
                 </TableHead>
                 <TableBody>
                   {visibleItems.map((item, idx) => {
-                    const extraFields = presentRfqExtraFields(item.extraFields);
+                    const presentedFields = presentRfqExtraFields(item.extraFields);
+                    // The accepted makers have their own place in the maker column.
+                    const extraFields = { ...presentedFields, fields: presentedFields.fields.filter((field) => !isApprovedMakersField(field.label)) };
                     return (
                     <TableRow key={item.id} hover sx={{ '&:last-child td': { border: 0 } }}>
                       {/* The buyer's line number is the identifier they will quote back at you, so
@@ -778,12 +885,8 @@ const ViewRFQPage: React.FC = () => {
                         ) : null}
                       </TableCell>
                       <TableCell>
-                        <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>
-                          {item.manufacturerName || 'N/A'}
-                        </Typography>
-                        <Typography variant="caption" sx={{ color: 'text.disabled' }}>
-                          {item.manufacturerPartNumber || 'N/A'}
-                        </Typography>
+                        <LineMakersCell rfqId={Number(id)} item={item} canEdit={hasPermission('RFQ Management', 'edit')} />
+                        <OfferedPartCell rfqId={Number(id)} line={item} canEdit={hasPermission('RFQ Management', 'edit')} />
                       </TableCell>
                       <TableCell align="right" sx={{ fontSize: '0.85rem', fontWeight: 900, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
                         {item.quantity?.toLocaleString()} {item.unitOfMeasure || 'EA'}
@@ -886,50 +989,85 @@ const ViewRFQPage: React.FC = () => {
                                 </Stack>
                               );
                             }
-                            return <Chip size="small" icon={<InventoryIcon />} color="success" variant="outlined" label="Use company inventory" />;
+                            return <StockLineAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} />;
                           }
-                          if (sourcingLine.resolution === 'UNKNOWN') {
-                            // ProcurementApplicationService refuses a Sourcing Case on a line with no
-                            // product ("Resolve this RFQ line to a tenant catalogue product before opening
-                            // Supplier sourcing"). Offering the case here was a button that could only fail.
-                            const leftOut = notNowLineIds.includes(item.id);
-                            return (
-                              <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
-                                <Typography variant="caption" color={leftOut ? 'text.secondary' : 'warning.main'} sx={{ fontWeight: 700 }}>
-                                  {leftOut
-                                    ? `${sourcingLine.requestedQuantity} requested · left out of the catalogue for now, price it by hand`
-                                    : `${sourcingLine.requestedQuantity} requested · needs a catalogue product before sourcing`}
+                          // One button per line: Find supplier. The line says where it stands in one sentence;
+                          // every choice (who, how many, what to say) is made in the small window.
+                          const unknown = sourcingLine.resolution === 'UNKNOWN';
+                          // A part suppliers were asked about while kept out of the catalogue.
+                          const keptOut = !unknown && Boolean(item.productId) && item.productIsCatalogItem === false;
+                          const leftOut = unknown && notNowLineIds.includes(item.id);
+                          const sentFor = (sourcingQuery.data?.solicitations ?? []).filter((request) => request.requestedRfqItemIds?.includes(item.id));
+                          // The server spells these both ways ("PENDINGDISPATCH" and "PENDING_DISPATCH"); compare without underscores.
+                          const statusOf = (request: { status: string }) => request.status.replace(/_/g, '').toUpperCase();
+                          const waiting = sentFor.filter((request) => ['PENDINGDISPATCH', 'DISPATCHING', 'SENT'].includes(statusOf(request)));
+                          const failedSends = sentFor.filter((request) => statusOf(request) === 'DELIVERYFAILED');
+                          const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+                          const offersFor = (sourcingQuery.data?.offers ?? []).filter((offer) => offer.rfqItemId === item.id);
+                          const validOffers = offersFor.filter((offer) => !offer.validUntil || new Date(offer.validUntil) >= startOfToday);
+                          const expiredOffers = offersFor.filter((offer) => offer.validUntil && new Date(offer.validUntil) < startOfToday);
+                          const inStock = unknown ? 0 : Math.max(0, sourcingLine.requestedQuantity - sourcingLine.shortfallQuantity);
+                          const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
+                          const openFind = (preset?: { presetSupplierIds?: number[]; presetMessage?: string }) => setFindSupplierFor({ item, ...preset });
+                          const canFind = commercialAccess.canCreateOrOpenSourcingCase && (!unknown || canAddToCatalogue);
+                          const status = validOffers.length > 0
+                            ? `${plural(validOffers.length, 'price')} in · pick one`
+                            : expiredOffers.length > 0
+                              ? `${expiredOffers[0].supplierName} price${expiredOffers[0].validUntil ? ` (valid to ${formatDateSafe(expiredOffers[0].validUntil)})` : ''} has expired`
+                              : waiting.length > 0
+                                ? `Sent to ${plural(waiting.length, 'supplier')} · waiting for prices`
+                                : unknown
+                                  ? leftOut ? 'Not in your catalogue · left for now' : 'Not in your catalogue · no supplier yet'
+                                  : keptOut ? `Not in your catalogue · ${sourcingLine.shortfallQuantity} to source`
+                                  : inStock > 0 ? `${inStock} in stock · ${sourcingLine.shortfallQuantity} to source` : `${sourcingLine.shortfallQuantity} to source`;
+                          const catalogueNote = keptOut ? 'Not in your catalogue' : null;
+                          const primaryIsFind = validOffers.length === 0 && expiredOffers.length === 0 && waiting.length === 0;
+                          return (
+                            <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
+                              <Typography variant="caption" sx={{ fontWeight: 700, color: validOffers.length > 0 ? 'success.main' : waiting.length > 0 ? 'info.main' : 'warning.main' }}>
+                                {status}
+                              </Typography>
+                              <OtherMakerStockAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} />
+                              {!unknown && (
+                                <LinePriceAction rfqId={Number(id)} itemId={item.id} canPrice={canCreateQuote} primary={validOffers.length > 0}
+                                  onAskAgain={canFind ? (supplierIds) => openFind({ presetSupplierIds: supplierIds, presetMessage: RECONFIRM_PRICE_MESSAGE }) : undefined} />
+                              )}
+                              {catalogueNote && validOffers.length + waiting.length > 0 && (
+                                <Typography variant="caption" color="text.secondary">{catalogueNote}</Typography>
+                              )}
+                              {failedSends.length > 0 && (
+                                <Typography variant="caption" color="error.main">
+                                  Email to {failedSends.map((request) => request.supplierName).join(', ')} did not go through
                                 </Typography>
-                                {commercialAccess.canResolveRfqProduct && (
-                                  <Button size="small" variant={leftOut ? 'outlined' : 'contained'} startIcon={<AddIcon />} onClick={() => openProductResolution(item)}>
+                              )}
+                              <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                                {validOffers.length > 0 && (
+                                  <Button size="small" variant="text" onClick={() => navigate(`/procurement/rfqs/${id}/sourcing`)}>Compare prices</Button>
+                                )}
+                                {validOffers.length === 0 && expiredOffers.length > 0 && canFind && (
+                                  <Button size="small" variant="contained" startIcon={<SourcingIcon />}
+                                    onClick={() => openFind({ presetSupplierIds: [...new Set(expiredOffers.map((offer) => offer.supplierId))], presetMessage: RECONFIRM_PRICE_MESSAGE })}>
+                                    Ask again
+                                  </Button>
+                                )}
+                                {canFind && (
+                                  <Button size="small" variant={primaryIsFind ? 'contained' : 'text'} startIcon={primaryIsFind ? <SourcingIcon /> : undefined} onClick={() => openFind()}>
+                                    {primaryIsFind ? 'Find supplier' : 'Find more suppliers'}
+                                  </Button>
+                                )}
+                                {keptOut && canAddToCatalogue && (
+                                  <Button size="small" variant="outlined" startIcon={<AddIcon />}
+                                    disabled={keepInCatalogueMutation.isPending}
+                                    onClick={() => keepInCatalogueMutation.mutate(item.productId!)}>
                                     Add to catalogue
                                   </Button>
                                 )}
-                                <Tooltip title="Inspect persisted source and normalization evidence"><Button size="small" variant="text" startIcon={<EvidenceIcon />} onClick={() => setEvidenceItemId(item.id)}>Evidence</Button></Tooltip>
+                                {unknown && commercialAccess.canResolveRfqProduct && (
+                                  <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => openProductResolution(item)}>
+                                    Add to catalogue
+                                  </Button>
+                                )}
                               </Stack>
-                            );
-                          }
-                          return (
-                            <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
-                              <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
-                                {sourcingLine.shortfallQuantity} to source · {statusLabel(sourcingLine.resolution)}
-                              </Typography>
-                              {commercialAccess.canCreateOrOpenSourcingCase && (
-                                <Button
-                                  size="small"
-                                  variant="contained"
-                                  startIcon={<SourcingIcon />}
-                                  disabled={sourcingCaseMutation.isPending}
-                                  // A button labelled "Open" used to call create-or-open, which the server
-                                  // refuses once the line is covered — so "Open" could fail on a case that
-                                  // exists. An existing case is opened directly; only a missing one is created.
-                                  onClick={() => sourcingLine.sourcingCaseId
-                                    ? navigate(`/procurement/sourcing-cases/${sourcingLine.sourcingCaseId}`)
-                                    : sourcingCaseMutation.mutate(item.id)}
-                                >
-                                  {sourcingLine.sourcingCaseId ? 'Open Sourcing Case' : 'Create / Open Sourcing Case'}
-                                </Button>
-                              )}
                               <Tooltip title="Inspect persisted source and normalization evidence"><Button size="small" variant="text" startIcon={<EvidenceIcon />} onClick={() => setEvidenceItemId(item.id)}>Evidence</Button></Tooltip>
                             </Stack>
                           );
@@ -1186,6 +1324,58 @@ const ViewRFQPage: React.FC = () => {
         </Grid>
       </Grid>
 
+      <SendQuoteDialog open={sendQuoteOpen} rfqId={Number(id)} onSent={() => setSentAt(Date.now())} onClose={() => {
+        setSendQuoteOpen(false);
+        queryClient.invalidateQueries({ queryKey: ['send-quote-id', Number(id)] });
+      }} />
+      {findSupplierFor && (() => {
+        const found = findSupplierFor.item;
+        const line = sourcingLines.get(found.id);
+        const requested = line?.requestedQuantity ?? found.quantity;
+        const unknownLine = !line || line.resolution === 'UNKNOWN';
+        const findLine: FindSupplierLine = {
+          rfqItemId: found.id,
+          partNumber: found.manufacturerPartNumber,
+          maker: found.manufacturerName,
+          acceptedMakers: acceptedMakersOf(found),
+          description: found.productShortDescription || found.productShortName || found.itemText,
+          unitOfMeasure: found.unitOfMeasure,
+          requested,
+          inStock: unknownLine ? 0 : Math.max(0, requested - (line?.shortfallQuantity ?? requested)),
+          toSource: unknownLine ? requested : (line?.shortfallQuantity ?? requested),
+        };
+        return (
+          <FindSupplierDialog
+            open
+            line={findLine}
+            openCase={() => openCaseForLine(found)}
+            presetSupplierIds={findSupplierFor.presetSupplierIds}
+            presetMessage={findSupplierFor.presetMessage}
+            catalogueChoice={unknownLine || found.productIsCatalogItem === false
+              ? { addToCatalogue: (productId: number) => productService.setCatalogue(productId, true) }
+              : undefined}
+            earlierRequests={new Map((sourcingQuery.data?.solicitations ?? [])
+              .filter((request) => request.requestedRfqItemIds?.includes(found.id))
+              .sort((a, b) => a.id - b.id)
+              .map((request) => {
+                const when = formatDateSafe(request.sentOn ?? request.updatedOn);
+                const status = request.status.replace(/_/g, '').toUpperCase();
+                const what = status === 'RESPONDED' ? 'replied'
+                  : status === 'DELIVERYFAILED' ? 'email did not go through'
+                  : status === 'DECLINED' ? 'declined'
+                  : 'waiting for reply';
+                return [request.supplierId, `Asked ${when} · ${what}`] as [number, string];
+              }))}
+            onClose={() => { setFindSupplierFor(null); void invalidateLineViews(); }}
+            onSent={(sentTo, allDone) => {
+              enqueueSnackbar(`Sent to ${sentTo.join(', ')}.`, { variant: 'success' });
+              if (notNowLineIds.includes(found.id)) rememberNotNow(notNowLineIds.filter((lineId) => lineId !== found.id));
+              void invalidateLineViews();
+              if (allDone) setFindSupplierFor(null);
+            }}
+          />
+        );
+      })()}
       <Dialog
         open={Boolean(productResolutionItem)}
         onClose={() => !productResolutionMutation.isPending && !addToCatalogueMutation.isPending && closeProductResolution()}

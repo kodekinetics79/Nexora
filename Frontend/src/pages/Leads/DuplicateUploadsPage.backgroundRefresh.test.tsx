@@ -81,6 +81,19 @@ const mount = () => {
   return client;
 };
 
+describe('DuplicateUploadsPage received time', () => {
+  it('prints the server timestamp in the shared style, reading an offset-less value as UTC', async () => {
+    getDuplicateUploads.mockReset();
+    // Exactly what the API sends: `timestamp without time zone`, no Z. Read as local time this
+    // used to land on the wrong side of midnight for readers east of UTC.
+    getDuplicateUploads.mockResolvedValue([{ ...row, ingestedAt: '2026-09-12T09:00:00' }]);
+    mount();
+    const cell = await screen.findByText(/12 Sep 2026, \d{2}:\d{2}/);
+    expect(cell).toBeInTheDocument();
+    expect(cell.textContent).not.toMatch(/\d+\/\d+\/\d{4}|[AP]M/);
+  });
+});
+
 describe('DuplicateUploadsPage background refresh', () => {
   beforeEach(() => {
     getDuplicateUploads.mockReset();

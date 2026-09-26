@@ -403,17 +403,24 @@ describe('LeadsPage — assigning a lead from the list', () => {
   // R2 — one filter
   // -------------------------------------------------------------------------
 
-  it('opensOnTheReadersOwnWork_notOnEveryRowEverRecorded', async () => {
+  it('opensOnEveryonesInquiries_withMineOneClickAway', async () => {
     renderPage();
-    // 'open' is the default queue (everything still live), composed with the owner filter.
+    // "All inquiries" means all: 'open' is the default queue (everything still live) and the
+    // owner filter starts on Everyone. The reader's own pile is one click, not a hidden default.
+    await waitFor(() => expect(lastListView()).toBe('open'));
+    await screen.findByText('Tariq Al-Harbi');
+
+    click(screen.getByRole('button', { name: /^mine$/i }));
     await waitFor(() => expect(lastListView()).toBe(`open,mine:${ME}`));
+    expect(clickCount).toBe(1);
   });
 
-  it('opensOnTheUnclaimedPile_forAManager', async () => {
+  it('opensOnEveryonesInquiries_forAManagerToo', async () => {
     authUser.isManager = true;
     authUser.roleName = 'Sales Manager';
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('open'));
+    expect(screen.getByRole('button', { name: /^everyone$/i })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('opensOnEverything_whenTheSessionCannotNameTheReader', async () => {
@@ -454,8 +461,10 @@ describe('LeadsPage — assigning a lead from the list', () => {
       params.pageSize === 1 ? { ...page([]), totalCount: 3 } : page([]),
     ));
     renderPage();
+    await waitFor(() => expect(lastListView()).toBe('open'));
 
-    // The default working set is the reader's own, so "no rows" here means "none of yours".
+    // Narrowed to the reader's own, "no rows" means "none of yours" — and says so.
+    fireEvent.click(screen.getByRole('button', { name: /^mine$/i }));
     expect(await screen.findByText(/nothing is assigned to you/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /show unassigned inquiries/i }));
 

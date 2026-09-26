@@ -467,9 +467,13 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         var activityIdentity = activityType is CommercialActivityType.Won or CommercialActivityType.Lost
             ? $"v{quote.LifecycleVersion}:{eventCode}"
             : eventCode;
+        // RespondedOn / SentOn come back from the database as Unspecified-kind values; the
+        // activity service refuses anything but UTC, so a rep recording "won" after "customer
+        // responded" got a 500 ("OccurredAtUtc must be UTC.") — the customer said yes and nothing
+        // could be recorded (2026-09-15). Stamp the kind here, once, for every timestamp we pass.
         await _sales.AppendActivityAsync(quote.BusinessUnitId, new AppendCommercialActivityCommand(
             owner, activityType, "Quote", quote.Id,
-            attribution?.CustomerId ?? quote.CustomerId, null, occurredOn,
+            attribution?.CustomerId ?? quote.CustomerId, null, WeightedEligibleRepScoringEngine.AsUtc(occurredOn),
             outcomeCode, $"quote:{quote.Id}:{eventCode.ToLowerInvariant()}", actor,
             $"quote:{quote.Id}:commercial-activity",
             $"quote:{quote.Id}:commercial-activity:{activityIdentity}"), ct);

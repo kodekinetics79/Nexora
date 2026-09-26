@@ -18,6 +18,7 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import customerService from '../../../api/services/customerService';
+import currencyService from '../../../api/services/currencyService';
 import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
 import productService from '../../../api/services/productService';
@@ -37,6 +38,11 @@ interface QuoteItem {
   productName: string;
   itemDescription: string;
   quantity: number;
+  // The line's link to the RFQ item it prices. Prepare Quote Draft writes it and it is the
+  // ONLY join between this line and the supplier award behind its cost (QuoteViewPage.sourceFor
+  // matches awards by it). Never edited here; echoed back on save so a price change cannot
+  // silently cut the line loose from its award (D20).
+  rfqItemId?: number | null;
   // Read-only carriers from the source RFQ line: shown, never edited here, and
   // echoed back on save so an edit round-trip cannot strip them.
   unitOfMeasure?: string | null;
@@ -55,9 +61,14 @@ interface QuoteItem {
   // The user's own statement of how the supply is taxed (R19), and the evidence for it.
   taxCategory: string;
   taxCategoryReason: string;
-  deliveryLeadTime: number;
+  /** Days. 0 = ex stock; null = not stated (nothing printed). */
+  deliveryLeadTime: number | null;
+  exStockQuantity?: number | null;
   isDeleted?: boolean;
 }
+
+/** "28 days" → "4 weeks"; "10 days" stays days. */
+export const deliveryText = (days: number) => (days % 7 === 0 ? `${days / 7} week${days === 7 ? '' : 's'}` : `${days} day${days === 1 ? '' : 's'}`);
 
 const EditQuotePage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -87,6 +98,13 @@ const EditQuotePage: React.FC = () => {
    * defect, not the absence of one.
    */
   const [currencyCode, setCurrencyCode] = useState<string | null>(null);
+  const [chosenCurrencyId, setChosenCurrencyId] = useState<number | null>(null);
+  const currenciesQuery = useQuery({
+    queryKey: ['currencies-for-quote', userData?.businessUnitId],
+    queryFn: async () => (await currencyService.getAll({ businessUnitId: userData?.businessUnitId, pageNumber: 1, pageSize: 100, isActive: true })).items ?? [],
+    enabled: !currencyCode && Boolean(userData?.businessUnitId),
+    staleTime: 10 * 60 * 1000,
+  });
 
   const [items, setItems] = useState<QuoteItem[]>([]);
 
@@ -140,6 +158,7 @@ const EditQuotePage: React.FC = () => {
       setCurrencyCode(quote.currencyCode ?? null);
       setItems(quote.quoteItems.map(i => ({
         id: i.id,
+        rfqItemId: i.rfqItemId ?? null,
         productId: i.productId ?? null,
         productName: i.productName || '',
         itemDescription: i.itemDescription || '',
@@ -155,7 +174,8 @@ const EditQuotePage: React.FC = () => {
         taxRatePercentApplied: i.taxRatePercentApplied ?? null,
         taxCategory: i.taxCategory || TAX_CATEGORY_STANDARD,
         taxCategoryReason: i.taxCategoryReason || '',
-        deliveryLeadTime: i.deliveryLeadTime || 7
+        deliveryLeadTime: i.deliveryLeadTime ?? null,
+        exStockQuantity: i.exStockQuantity ?? null
       })));
     }
   }, [quote]);
@@ -262,7 +282,7 @@ const EditQuotePage: React.FC = () => {
       discount: 0, discountTypeId: null, discountValue: 0,
       // A brand-new line has no derived tax until the server computes one on save.
       taxAmount: 0, taxRatePercentApplied: null, taxCategory: TAX_CATEGORY_STANDARD, taxCategoryReason: '',
-      deliveryLeadTime: 7
+      deliveryLeadTime: null
     }]);
   };
 
@@ -342,13 +362,16 @@ const EditQuotePage: React.FC = () => {
       // CurrencyId as "not supplied" rather than "clear it", so this is belt AND braces: the
       // payload states the truth, and the server no longer destroys it if some future caller
       // forgets to. This screen deliberately offers no way to CHANGE the currency.
-      currencyId: quote?.currencyId ?? null,
+      // A hand-priced quote has no currency until the rep picks one here; one set by supplier
+      // pricing is kept and cannot be changed from this screen.
+      currencyId: quote?.currencyId ?? chosenCurrencyId ?? null,
       headerRemarks,
       discountTypeId, discountValue, statusId,
       modifiedBy: userData?.userName || 'System',
       totalAmount: grandTotal,
       quoteItems: items.map((item, index) => ({
-        id: item.id, productId: item.productId, itemDescription: item.itemDescription || item.productName,
+        id: item.id, rfqItemId: item.rfqItemId ?? null,
+        productId: item.productId, itemDescription: item.itemDescription || item.productName,
         quantity: item.quantity, unitPrice: item.unitPrice,
         totalAmount: pricedByItemIndex.get(index)?.taxableBase ?? 0,
         unitOfMeasure: item.unitOfMeasure || null, customerLineRef: item.customerLineRef || null,
@@ -439,9 +462,21 @@ const EditQuotePage: React.FC = () => {
             testId="edit-quote-next-step"
           >
             {!currencyCode && (
-              <Typography variant="body2">
-                This quote has no currency yet. It is set when a line is priced from an approved supplier offer on the Sourcing workbench; it cannot be typed here.
-              </Typography>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { sm: 'center' } }}>
+                <Typography variant="body2">This quote has no currency yet. Pick the currency your prices are in:</Typography>
+                <TextField
+                  select
+                  size="small"
+                  label="Quote currency"
+                  value={chosenCurrencyId ?? ''}
+                  onChange={(event) => setChosenCurrencyId(Number(event.target.value))}
+                  sx={{ minWidth: 180 }}
+                >
+                  {(currenciesQuery.data ?? []).map((currency) => (
+                    <MenuItem key={currency.id} value={currency.id}>{currency.code} · {currency.currencyName}</MenuItem>
+                  ))}
+                </TextField>
+              </Stack>
             )}
           </NextStepPanel>
         );
@@ -551,6 +586,18 @@ const EditQuotePage: React.FC = () => {
                     </TableCell>
                     <TableCell>
                       <TextField fullWidth size="small" variant="standard" value={item.itemDescription} onChange={(e) => updateItem(index, { itemDescription: e.target.value })} />
+                      {item.exStockQuantity != null && item.exStockQuantity > 0 ? (
+                        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>
+                          {item.exStockQuantity} ex stock, balance {item.deliveryLeadTime ? `in ${deliveryText(item.deliveryLeadTime)}` : 'to follow'}
+                        </Typography>
+                      ) : item.deliveryLeadTime != null && item.deliveryLeadTime > 0 && (
+                        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>
+                          Delivery {deliveryText(item.deliveryLeadTime)}
+                        </Typography>
+                      )}
+                      {item.deliveryLeadTime === 0 && (
+                        <Typography variant="caption" color="success.main" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>Ex stock</Typography>
+                      )}
                     </TableCell>
                     <TableCell align="center">
                       <TextField type="number" size="small" variant="standard" sx={{ width: 60 }} value={item.quantity} onChange={(e) => updateItem(index, { quantity: Number(e.target.value) })} />

@@ -12,6 +12,8 @@
         /// <c>Platform.Tenant.TaxNumber</c>, which identifies who pays for Nexora.
         /// </summary>
         public string? TaxRegistrationNumber { get; set; }
+        /// <summary>The seller's commercial registration (CR) number, printed on its quotations.</summary>
+        public string? CommercialRegistrationNumber { get; set; }
         public bool? IsActive { get; set; }
         public string CreatedBy { get; set; } = null!;
         public DateTime CreatedOn { get; set; }

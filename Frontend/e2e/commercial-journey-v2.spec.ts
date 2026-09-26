@@ -282,9 +282,10 @@ async function captureAndProjectOffers(page: Parameters<typeof api>[0], token: s
       const checkbox = page.getByRole('checkbox', { name: `Select ${supplierName}` });
       if (!(await checkbox.isChecked())) await checkbox.check();
     }
-    await page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' }).click();
-    await expect(page.getByRole('heading', { name: 'Approve Supplier RFQ Delivery' })).toBeVisible();
-    await page.getByRole('button', { name: 'Approve and Queue' }).click();
+    // The screen drives the rep: "Ask N suppliers" opens the review window, "Send N RFQs" sends.
+    await page.getByRole('button', { name: /^Ask \d+ suppliers?$/ }).click();
+    await expect(page.getByRole('heading', { name: 'Send supplier RFQs' })).toBeVisible();
+    await page.getByRole('button', { name: /^Send \d+ RFQs?$/ }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/sourcing`));
     workbench = await getWorkbench(page, token);
   }
@@ -534,14 +535,16 @@ test('04 RFQ line outcomes use progressive disclosure for the next commercial ac
   await page.getByRole('button', { name: /Sourcing required/i }).click();
   const sourcingRow = page.getByRole('row').filter({ hasText: required('E2E_CORE_PARTIAL_ATP_PART') });
   await expect(sourcingRow).toContainText(/to source/i);
-  await expect(sourcingRow.getByRole('button', { name: 'Create / Open Sourcing Case' })).toBeVisible();
+  // The line's one action is Find supplier, which opens the small window on this screen. The old
+  // "Create / Open Sourcing Case" sent the rep to a second screen to make the same decision.
+  await expect(sourcingRow.getByRole('button', { name: 'Find supplier' })).toBeVisible();
 });
 
 test('05 out-of-stock RFQ line opens a real Sourcing Case with known Suppliers', async ({ page }) => {
   const token = await loginAs(page, 'manager');
   const sourcingCase = await ensureOutOfStockCase(page, token);
   await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
-  await expect(page.getByRole('heading', { name: 'Known Supplier candidates' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Suppliers for this part' })).toBeVisible();
   await expect(page.getByText('Precision Controls Supply').first()).toBeVisible();
   await expect(page.getByText('Atlas Automation Partners').first()).toBeVisible();
   await expect(page.getByText('Meridian Process Equipment').first()).toBeVisible();
@@ -552,11 +555,12 @@ test('06 Supplier candidate limit supports 10, 20, and 50 without external searc
   const sourcingCase = await ensureOutOfStockCase(page, token);
   await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
   for (const limit of [20, 50, 10]) {
-    const control = page.getByRole('button', { name: `Show ${limit} Supplier candidates` });
+    const control = page.getByRole('button', { name: `Show up to ${limit} suppliers` });
     await control.click();
     await expect(control).toHaveAttribute('aria-pressed', 'true');
   }
-  await expect(page.getByText('Tenant records only.')).toBeVisible();
+  // The list above is the company's own suppliers; the internet section is separate and below it.
+  await expect(page.getByText('From your own supplier list, strongest link first. Tick everyone you want to ask; each gets its own RFQ.')).toBeVisible();
 });
 
 test('07 selected known Suppliers become governed Supplier RFQs', async ({ page }) => {
@@ -567,9 +571,10 @@ test('07 selected known Suppliers become governed Supplier RFQs', async ({ page 
     await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
     await page.getByRole('checkbox', { name: 'Select Atlas Automation Partners' }).check();
     await page.getByRole('checkbox', { name: 'Select Meridian Process Equipment' }).check();
-    await page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' }).click();
-    await expect(page.getByRole('heading', { name: 'Approve Supplier RFQ Delivery' })).toBeVisible();
-    await page.getByRole('button', { name: 'Approve and Queue' }).click();
+    // The screen drives the rep: "Ask N suppliers" opens the review window, "Send N RFQs" sends.
+    await page.getByRole('button', { name: /^Ask \d+ suppliers?$/ }).click();
+    await expect(page.getByRole('heading', { name: 'Send supplier RFQs' })).toBeVisible();
+    await page.getByRole('button', { name: /^Send \d+ RFQs?$/ }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/sourcing`));
     workbench = await getWorkbench(page, token);
   }
@@ -1072,16 +1077,24 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   await expect(page.getByRole('button', { name: 'Apply pricing' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Return to RFQ' }).click();
   await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId()}$`));
-  // The client gate now matches the server: a draft is refused ONLY on NO_QUOTE_REVIEW.
-  // This assertion previously read `!== 'VIABLE_READY'`, which pinned a rule the server had
-  // already abandoned — it required every line covered by stock or an approved offer, so the
-  // button stayed disabled for any RFQ needing sourcing, i.e. the normal case for a
-  // distributor. The suite stayed green while enforcing it, which is why nobody noticed.
-  if (intelligence.commercialDecision === 'NO_QUOTE_REVIEW') {
-    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeDisabled();
-  } else {
-    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeEnabled();
-  }
+  // This RFQ is seeded WITH a quote (E2E_CORE_QUOTE_ID), and the header now names the quote that
+  // exists instead of offering to prepare a second one, so there is no prepare button here to
+  // assert on. What the screen must not do is offer a route to a second commercial record.
+  //
+  // The gate this test used to check here — a draft is refused ONLY on NO_QUOTE_REVIEW, never for
+  // lines merely needing sourcing, which is the normal case for a distributor — is asserted in both
+  // states, with the reason text, by ViewRFQPage.test.tsx ("the primary action states why it is
+  // unavailable").
+  //
+  // The button's name is READ from the same endpoint the header reads, not guessed: this fixture's
+  // quotes are numbered CORE-QUOTE-006, not the app's QT- series.
+  const seeded = await jsonOk<{ quoteNo: string; state: string }>(await api(
+    page, token, 'get', `/api/rfq/${rfqId()}/latest-quote`,
+  ));
+  await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toHaveCount(0);
+  await expect(page.getByRole('button', {
+    name: seeded.state === 'DRAFT' ? `Open ${seeded.quoteNo}` : `${seeded.quoteNo} sent`,
+  })).toBeVisible();
   await fs.mkdir(v1EvidenceDir, { recursive: true });
   await page.screenshot({
     path: path.join(v1EvidenceDir, 'gate-02-opportunity-digital-twin.png'),
@@ -1148,7 +1161,8 @@ test('37 local-first processing evidence and governed learning remain visible ac
   // Processing evidence folds under "Line intelligence and processing evidence" on the RFQ.
   await page.getByRole('button', { name: /Line intelligence and processing evidence/ }).click();
   await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
-  await expect(page.getByText('Local-first', { exact: true })).toBeVisible();
+  // A client sees the finished product only: no provider, model or cost wording (owner rule 2026-09-16).
+  await expect(page.getByText(/Local-first|External provider|Provider use|External cost/)).toHaveCount(0);
 
   const [supplierQuoteId] = await captureAndProjectOffers(page, token);
   await page.goto(`/procurement/supplier-quotes/${supplierQuoteId}`);

@@ -42,10 +42,19 @@ interface EmailPromptDialogProps {
    *
    * Rendering is now the caller's declaration of what it will send. Omitted for the RFQ callers,
    * whose behaviour is unchanged.
+   *
+   * 'message' is the quote send since 2026-09-15: the server hands over the default subject and
+   * body it would compose (GET /api/Quote/{id}/email-draft) and accepts the edited words back, so
+   * the rep reviews and can change what the customer receives. No customer picker — a quote is
+   * already bound to its customer.
    */
-  composerFields?: 'full' | 'recipient-only';
+  composerFields?: 'full' | 'recipient-only' | 'message';
   /** Verb for the primary action. "Confirm & Approve" is an approval, not a send. */
   confirmLabel?: string;
+  /** 'message' mode: the file that rides along, named under the message so the rep knows. */
+  attachmentName?: string;
+  /** 'message' mode: the default text is still on its way; sending now would send nothing reviewed. */
+  draftLoading?: boolean;
 }
 
 const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
@@ -61,8 +70,11 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
   customerId: preselectedCustomerId,
   composerFields = 'full',
   confirmLabel = 'Confirm & Approve',
+  attachmentName,
+  draftLoading = false,
 }) => {
   const showComposer = composerFields === 'full';
+  const showMessage = composerFields === 'message';
   const [email, setEmail] = useState('');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
@@ -76,11 +88,11 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
       setSubject(initialSubject || '');
       setBody(initialBody || '');
       setSelectedCustomerId(preselectedCustomerId || null);
-      
-      // Fetch initial customers
-      fetchCustomers('');
+
+      // The customer list feeds the RFQ approval's picker only.
+      if (showComposer) fetchCustomers('');
     }
-  }, [open, initialEmail, initialSubject, initialBody, preselectedCustomerId]);
+  }, [open, initialEmail, initialSubject, initialBody, preselectedCustomerId, showComposer]);
 
   const fetchCustomers = debounce(async (search: string) => {
     setFetchingCustomers(true);
@@ -103,6 +115,7 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
   const handleConfirm = () => {
     if (!email) return;
     // Never hand back fields this caller declared it cannot deliver.
+    if (showMessage) { onConfirm(email, subject, body); return; }
     if (!showComposer) { onConfirm(email); return; }
     onConfirm(email, subject, body, selectedCustomerId || undefined);
   };
@@ -179,6 +192,37 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
             onChange={(e) => setBody(e.target.value)}
           />
           </>)}
+
+{showMessage && (<>
+          <TextField
+            fullWidth
+            label="Subject"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            disabled={draftLoading}
+            slotProps={{ input: { sx: { fontWeight: 700 } } }}
+          />
+
+          <Box>
+            <TextField
+              fullWidth
+              multiline
+              minRows={8}
+              label="Message"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              disabled={draftLoading}
+              helperText={draftLoading
+                ? 'Loading the default message…'
+                : 'This is what the customer reads. Edit anything before sending.'}
+            />
+            {attachmentName && (
+              <Typography variant="caption" sx={{ mt: 0.75, display: 'block', color: 'text.secondary', fontWeight: 700 }}>
+                Attached: {attachmentName}
+              </Typography>
+            )}
+          </Box>
+          </>)}
         </Stack>
       </DialogContent>
 
@@ -187,7 +231,7 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
         <Button
           variant="contained"
           onClick={handleConfirm}
-          disabled={!email || loading}
+          disabled={!email || loading || (showMessage && draftLoading)}
           sx={{ fontWeight: 900, borderRadius: 2, px: 3, bgcolor: 'success.main', '&:hover': { bgcolor: 'success.dark' } }}
         >
           {loading ? <CircularProgress size={20} color="inherit" /> : confirmLabel}

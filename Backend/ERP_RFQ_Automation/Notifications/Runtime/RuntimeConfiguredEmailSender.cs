@@ -50,7 +50,7 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
         public async Task<EmailDeliveryReceipt?> SendAsync(EmailMessage message, CancellationToken ct = default)
         {
             ArgumentNullException.ThrowIfNull(message);
-            var sender = await ResolveSenderAsync(message.OwningBusinessUnitId, ct).ConfigureAwait(false);
+            var sender = await ResolveSenderAsync(message.OwningBusinessUnitId, message.OwningMailboxId, ct).ConfigureAwait(false);
 
             // The resolved identity, per send. This is the line an operator reads when a customer
             // asks "which address did my quote go out from?" — it must name the mailbox, not the
@@ -89,10 +89,10 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
             }
         }
 
-        private async Task<ResolvedOutboundSender> ResolveSenderAsync(long? owningBusinessUnitId, CancellationToken ct)
+        private async Task<ResolvedOutboundSender> ResolveSenderAsync(long? owningBusinessUnitId, long? mailboxId, CancellationToken ct)
         {
             if (_senders is not null)
-                return await _senders.ResolveAsync(owningBusinessUnitId, ct).ConfigureAwait(false);
+                return await _senders.ResolveAsync(owningBusinessUnitId, mailboxId, ct).ConfigureAwait(false);
 
             // No tenant authority registered: platform-only, exactly the pre-#54 behaviour.
             var transport = await _resolver.ResolveAsync(ct).ConfigureAwait(false);

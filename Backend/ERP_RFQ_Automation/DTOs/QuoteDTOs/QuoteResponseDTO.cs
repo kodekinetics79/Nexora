@@ -14,6 +14,12 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public int SourceLeadRevision { get; set; }
         public int SourceRfqRevision { get; set; }
         public string? RevisionImpact { get; set; }
+        /// <summary>
+        /// The open customer revision in full — revision span and per-line changes — on the
+        /// detail projection only. <see cref="RevisionImpact"/> stays as the type string every
+        /// existing reader branches on.
+        /// </summary>
+        public QuoteRevisionImpactDTO? RevisionImpactDetail { get; set; }
         public long? CommercialCaseId { get; set; }
         public string? NexoraSerial { get; set; }
         public long? ContactId { get; set; }
@@ -133,6 +139,14 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public decimal TaxableBase { get; set; }
 
         public int? DeliveryLeadTime { get; set; }
+        /// <summary>Quantity offered ex stock when the rest follows in DeliveryLeadTime days.</summary>
+        public decimal? ExStockQuantity { get; set; }
+        /// <summary>ESTIMATE, TO_FOLLOW, NOT_QUOTED, or null for a plain price.</summary>
+        public string? PricingStatus { get; set; }
+        public string? PricingNote { get; set; }
+        /// <summary>"Offered: GE THQL32010, replaces ABB AF96" when the part asked for is obsolete or discontinued.</summary>
+        public string? OfferedNote { get; set; }
+        public string? OfferedSpecs { get; set; }
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }
         public decimal? DiscountValue { get; set; }

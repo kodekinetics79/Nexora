@@ -166,6 +166,32 @@ describe('QuoteViewPage — the send blockers arrive before the dialog', () => {
     expect(screen.getByText(/new revision/i)).toBeVisible();
   });
 
+  it('says the quote is being delivered — to whom, since when — with nothing to fix and no button', async () => {
+    // D27: right after Send the panel read "Fix the item below, then send the quote." while the
+    // header said it was queued. A queued delivery is not a defect the rep can fix; it is the
+    // system doing its job, and the panel should say so in those words.
+    getSendReadiness.mockResolvedValue({
+      quoteId: 66,
+      canSend: false,
+      deliveryInFlight: true,
+      deliveryRecipient: 'procurement@marafiq.example',
+      deliveryRequestedOn: '2026-09-15T10:42:00Z',
+      blockers: [{
+        code: 'DELIVERY_IN_FLIGHT',
+        message: 'This quote is already queued for delivery. Wait for it to complete rather than sending it twice.',
+      }],
+    });
+    renderQuote();
+
+    const panel = await screen.findByTestId('quote-next-step');
+    await waitFor(() => expect(panel).toHaveTextContent(/Sent to procurement@marafiq\.example at /));
+    expect(panel).toHaveTextContent(/Being delivered — nothing to do\./);
+    expect(panel).not.toHaveTextContent(/Fix the item/i);
+    expect(panel).not.toHaveTextContent(/Before this quote can be sent/i);
+    // No control inside the panel: there is nothing for the rep to do.
+    expect(panel.querySelectorAll('button')).toHaveLength(0);
+  });
+
   it('keeps Send enabled and silent when the server reports the quote is ready', async () => {
     // THE CONTROL. A readiness check that always blocks would pass all three tests above and
     // stop the product working.

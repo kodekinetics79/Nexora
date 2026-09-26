@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { useQueries, type UseQueryResult } from '@tanstack/react-query';
+import { useQueries, useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -153,13 +153,31 @@ const InboxPage: React.FC = () => {
     query: results[index],
   }));
 
+  /**
+   * "Enquiries without an owner" is the ROUTING queue: accepted enquiries nobody has claimed. An
+   * enquiry that is unowned because nobody has accepted it yet is not in that queue, but it is
+   * still unowned — the Leads list (Owner = Unassigned) and Sales today both count it. Saying
+   * "Every enquiry has an owner" over two such enquiries was a lie by omission, so the same list
+   * the Leads page reads is asked for its count and the empty state says what is really true.
+   */
+  const asksForUnowned = visibleQueues.some((queue) => queue.key === 'leads-to-own');
+  const unownedOpen = useQuery({
+    queryKey: ['inbox', 'unowned-open', businessUnitId] as const,
+    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: 1, view: 'open,unassigned' }),
+    enabled: asksForUnowned,
+    staleTime: 30_000,
+    retry: false,
+    meta: { silenceGlobalError: true },
+  });
+  const unownedStillChecking = unownedOpen.data?.totalCount ?? 0;
+
   const anyLoading = queues.some((entry) => entry.query.isLoading);
   const failedCount = queues.filter((entry) => entry.query.isError).length;
   const waitingCount = queues.reduce(
     (total, entry) => total + (entry.query.isError ? 0 : entry.query.data?.length ?? 0),
     0,
   );
-  const allClear = !anyLoading && failedCount === 0 && waitingCount === 0 && queues.length > 0;
+  const allClear = !anyLoading && failedCount === 0 && waitingCount === 0 && unownedStillChecking === 0 && queues.length > 0;
 
   const refreshAll = () => queues.forEach((entry) => void entry.query.refetch());
 
@@ -244,7 +262,12 @@ const InboxPage: React.FC = () => {
 
       <Stack spacing={2.5} sx={{ mt: 2 }}>
         {queues.map(({ definition, query }) => (
-          <QueueSection key={definition.key} definition={definition} query={query} />
+          <QueueSection
+            key={definition.key}
+            definition={definition}
+            query={query}
+            emptyOverride={definition.key === 'leads-to-own' ? unownedEmptyState(unownedStillChecking) : undefined}
+          />
         ))}
       </Stack>
     </Box>
@@ -258,9 +281,38 @@ const InboxPage: React.FC = () => {
  * spinner, failure is an `ApiErrorNotice` with a retry, zero is a stated reason plus a button, and
  * rows are rows.
  */
-const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResult<InboxItem[] | null> }> = ({
+/** What a clear queue says when it is not clear at all — see `unownedOpen` above. */
+export interface EmptyStateOverride {
+  title: string;
+  message: string;
+  action: QueueDefinition['emptyAction'];
+}
+
+/**
+ * The truthful empty state for "Enquiries without an owner" when the routing queue is empty but
+ * unowned enquiries exist upstream of it. Undefined when there are none, so the definition's own
+ * "Every enquiry has an owner" stands.
+ */
+export const unownedEmptyState = (stillChecking: number): EmptyStateOverride | undefined => {
+  if (stillChecking <= 0) return undefined;
+  const noun = stillChecking === 1 ? 'enquiry is' : 'enquiries are';
+  return {
+    title: `${stillChecking} unowned ${noun} still being checked — see Documents to check`,
+    message: stillChecking === 1
+      ? 'It has no owner because nobody has accepted it yet, so it is not in the routing queue. Check the document, or open it from the unassigned list.'
+      : 'They have no owner because nobody has accepted them yet, so they are not in the routing queue. Check the documents, or open them from the unassigned list.',
+    action: { label: 'Open Documents to check', path: '/procurement/extraction/review', moduleName: 'Leads' },
+  };
+};
+
+const QueueSection: React.FC<{
+  definition: QueueDefinition;
+  query: UseQueryResult<InboxItem[] | null>;
+  emptyOverride?: EmptyStateOverride;
+}> = ({
   definition,
   query,
+  emptyOverride,
 }) => {
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
@@ -272,8 +324,8 @@ const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResul
   // tell a tenant with no Email Intake that their mail is all handled.
   if (query.data === null) return null;
 
-  const emptyActionAllowed =
-    !definition.emptyAction.moduleName || hasPermission(definition.emptyAction.moduleName);
+  const empty = emptyOverride ?? { title: definition.emptyTitle, message: definition.emptyMessage, action: definition.emptyAction };
+  const emptyActionAllowed = !empty.action.moduleName || hasPermission(empty.action.moduleName);
 
   return (
     <Paper
@@ -335,17 +387,17 @@ const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResul
         </Box>
       ) : items.length === 0 ? (
         <Box sx={{ px: { xs: 2, sm: 2.5 }, py: 3.5, textAlign: 'center' }}>
-          <Typography sx={{ fontWeight: 700 }}>{definition.emptyTitle}</Typography>
+          <Typography sx={{ fontWeight: 700 }}>{empty.title}</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 560, mx: 'auto' }}>
-            {definition.emptyMessage}
+            {empty.message}
           </Typography>
           {emptyActionAllowed && (
             <Button
               variant="outlined"
               sx={{ mt: 2, fontWeight: 700 }}
-              onClick={() => navigate(definition.emptyAction.path)}
+              onClick={() => navigate(empty.action.path)}
             >
-              {definition.emptyAction.label}
+              {empty.action.label}
             </Button>
           )}
         </Box>

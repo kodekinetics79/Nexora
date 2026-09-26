@@ -38,7 +38,7 @@ interface QuoteItem {
   discountTypeId: number | null;
   discountValue: number;
   taxAmount: number;
-  deliveryLeadTime: number;
+  deliveryLeadTime: number | null;
 }
 
 const CreateQuotePage: React.FC = () => {
@@ -186,7 +186,7 @@ const CreateQuotePage: React.FC = () => {
     setItems([...items, {
       productId: null, productName: '', itemDescription: '', quantity: 1, unitPrice: 0, 
       totalAmount: 0, discount: 0, discountTypeId: null, discountValue: 0, 
-      taxAmount: 0, deliveryLeadTime: 7
+      taxAmount: 0, deliveryLeadTime: null
     }]);
   };
 

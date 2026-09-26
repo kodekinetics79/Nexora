@@ -17,7 +17,12 @@ public static class EntitlementEnforcementCoverage
                 ["InventoryIntelligenceController", "MaterialTraceabilityController"],
             [TypedEntitlementCatalog.Ai] = ["AgentController"],
             [TypedEntitlementCatalog.EmailIntake] = ["EmailTriageController", "MailboxController"],
-            [TypedEntitlementCatalog.SupplierSearch] = ["ProcurementController.SearchSourcingCandidates"],
+            [TypedEntitlementCatalog.SupplierSearch] =
+            [
+                "ProcurementController.SearchSourcingCandidates",
+                "ProcurementController.DiscoverSuppliers",
+                "ProcurementController.AdoptDiscoveredSuppliers"
+            ],
             [TypedEntitlementCatalog.Integrations] = ["ProcurementIntegrationController"],
             [TypedEntitlementCatalog.Ocr] = ["ProductionDocumentReader.OCR"],
             [TypedEntitlementCatalog.Exports] =
