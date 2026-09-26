@@ -1,5 +1,6 @@
 import { Box, Stack, Typography } from '@mui/material';
 import { seriesVar } from './tokens';
+import { neuInset, neuRaised } from './neumorphic';
 
 /**
  * A figure that is not published yet, and exactly how far off it is.
@@ -43,19 +44,20 @@ export default function InsufficiencyPips({ have, need, label, unitPhrase = 'quo
           <Box
             key={i}
             data-testid={i < filled ? 'pip-filled' : 'pip-empty'}
-            sx={{
-              width: 10,
-              height: 10,
+            sx={(theme) => ({
+              width: 12,
+              height: 12,
               borderRadius: '50%',
               boxSizing: 'border-box',
-              // Filled pips are the brass mark — the thing the reader is accumulating. Empty pips
-              // are the same circle in outline, so the gap between having and needing is the only
-              // difference the eye has to resolve.
+              // Filled pips are raised brass beads — the thing the reader is accumulating. Empty
+              // pips are the same circle pressed into the clay with a brass rim, so the gap between
+              // having and needing is the only difference the eye has to resolve.
               backgroundColor: i < filled ? seriesVar('brassMark') : 'transparent',
               border: '1px solid',
               borderColor: seriesVar('brassMark'),
-              opacity: i < filled ? 1 : 0.45,
-            }}
+              boxShadow: i < filled ? neuRaised(theme.palette.mode, 2) : neuInset(theme.palette.mode, 2),
+              opacity: i < filled ? 1 : 0.6,
+            })}
           />
         ))}
       </Stack>

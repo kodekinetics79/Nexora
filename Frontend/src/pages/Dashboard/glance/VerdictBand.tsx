@@ -12,6 +12,7 @@ import BandShell from './BandShell';
 import InsufficiencyPips from './InsufficiencyPips';
 import Unavailable from './Unavailable';
 import { seriesVar } from './tokens';
+import { neuBar } from './neumorphic';
 import { priorWindow, scopeWords, type GlanceScopeWords } from './scopeWords';
 
 /**
@@ -230,20 +231,18 @@ const AxisRow = ({ lost, won, scale, height, ghost = false, countSize, lostLabel
     <Box
       data-testid={`${ghost ? 'ghost' : 'current'}-${side}-bar`}
       data-length={barWidth(value, scale)}
-      sx={{
+      sx={(theme) => ({
         width: barWidth(value, scale),
         height: '100%',
-        borderRadius: side === 'lost' ? '4px 0 0 4px' : '0 4px 4px 0',
+        borderRadius: side === 'lost' ? '10px 0 0 10px' : '0 10px 10px 0',
         background: side === 'lost' ? lostFill : wonFill,
         // Depth comes from the material — a lit top edge and a shadow the bar sits in — never from
         // turning the bar into a solid the reader has to read a value off the near face of.
         opacity: ghost ? 0.5 : 1,
-        boxShadow: ghost
-          ? 'none'
-          : 'inset 0 1px 0 rgba(255,255,255,0.28), 0 6px 14px -8px rgba(15,18,24,0.55)',
+        boxShadow: ghost ? 'none' : neuBar(theme.palette.mode),
         transition: 'width 420ms cubic-bezier(0.2, 0.7, 0.2, 1)',
         '@media (prefers-reduced-motion: reduce)': { transition: 'none' },
-      }}
+      })}
     />
   );
 

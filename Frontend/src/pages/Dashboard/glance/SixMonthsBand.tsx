@@ -293,7 +293,10 @@ export default function SixMonthsBand({
           }
           return (
             <Tooltip key={label + i} title={`${label}: ${row.count.toLocaleString('en-US')} RFQ${row.count === 1 ? '' : 's'} created`}>
-              <path d={columnPath(x, barW, countY(row.count))} fill="url(#nx-six-months-column)" />
+              {/* The Tooltip names its child with aria-label, and a bare <path> has no role that may
+                  carry a name (axe: aria-prohibited-attr). role="img" makes each column a named
+                  graphic, which is what it is. */}
+              <path role="img" d={columnPath(x, barW, countY(row.count))} fill="url(#nx-six-months-column)" style={{ filter: 'var(--nx-neu-drop)' }} />
             </Tooltip>
           );
         })}

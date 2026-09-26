@@ -277,9 +277,7 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
           <Box
             sx={{
               minHeight: LIST_MIN_HEIGHT,
-              borderRadius: 2,
-              border: '1px dashed',
-              borderColor: 'divider',
+              borderRadius: 3,
               display: 'grid',
               placeItems: 'center',
               p: 3,
@@ -313,7 +311,10 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
               ].join('. ');
               const surface = {
                 minHeight: ROW_HEIGHT,
-                borderRadius: 2,
+                // Each thing that needs you is a soft strip standing out of the band's tray.
+                borderRadius: 3,
+                boxShadow: 'var(--nx-neu-raised-sm)',
+                mb: 1.5,
                 px: 1.5,
                 gap: 1.5,
                 alignItems: 'center',

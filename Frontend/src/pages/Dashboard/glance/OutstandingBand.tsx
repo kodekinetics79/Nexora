@@ -204,7 +204,10 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
         {segments.map((segment, i) => {
           if (widths[i] <= 0) return null;
           return (
-            <g key={segment.key} data-testid={`book-segment-${segment.key}`} data-width={widths[i].toFixed(2)}>
+            <g
+              key={segment.key} data-testid={`book-segment-${segment.key}`} data-width={widths[i].toFixed(2)}
+              style={segment.open ? undefined : { filter: 'var(--nx-neu-drop)' }}
+            >
               <rect
                 x={starts[i]} y={BOOK_BAR_Y} width={widths[i]} height={BOOK_BAR_H}
                 fill={segment.open ? hatchFill(hatchId) : seriesVar(segment.tone)}
@@ -271,6 +274,7 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
                 data-zero={stage.count === 0 ? 'true' : 'false'}
                 x={FUNNEL_LABEL_W} y={4} width={width} height={FUNNEL_ROW - 8} rx={stage.count === 0 ? 1 : 5}
                 fill={seriesVar(won ? 'brassMark' : 'graphite')}
+                style={stage.count === 0 ? undefined : { filter: 'var(--nx-neu-drop)' }}
               />
               {stage.count > 0 && (
                 <rect x={FUNNEL_LABEL_W} y={4} width={width} height={1.5} rx={1} fill="rgba(255,255,255,0.35)" />

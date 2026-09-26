@@ -42,6 +42,15 @@ export const SERIES_VAR: Readonly<Record<SeriesToken, string>> = Object.freeze({
   muted: '--nx-series-muted',
 });
 
+/**
+ * The governed seal's ground (`--nx-glance-seal-ground`) flattened onto `NEU_SURFACE`, i.e. what the
+ * seal ink actually has to be read against. Asserted against the live composite in tokens.test.ts.
+ */
+export const SEAL_WORST_GROUND: Readonly<Record<PaletteMode, string>> = Object.freeze({
+  light: '#E9E0CA',
+  dark: '#3E3A31',
+});
+
 const SERIES_TOKENS = Object.keys(SERIES_PALETTE) as SeriesToken[];
 
 /** The literal hex for a token in a known mode. */
@@ -65,9 +74,9 @@ export const glanceCssVariables = (mode: PaletteMode): Record<string, string> =>
   vars['--nx-glance-seal-rim'] = mode === 'dark' ? 'rgba(227, 190, 113, 0.55)' : 'rgba(201, 147, 26, 0.55)';
   // The seal is set in brass, and 12px brass has to clear AA as text — the series values are
   // validated for marks (3:1), not for type. Derived the same way ThemeContext derives its brand
-  // ink, against the worst-case surface glass composites to, and aiming slightly above 4.5 because
-  // the glass shell lands near-white rather than on white.
-  vars['--nx-glance-seal-ink'] = readableOn(SERIES_PALETTE.brassBrand[mode], mode === 'dark' ? '#1b1f26' : '#ffffff', 4.9);
+  // ink, against the worst case it is drawn on: the governed seal's brass ground composited over
+  // the dashboard's clay (neumorphic.ts), which is darker than the clay alone in light mode.
+  vars['--nx-glance-seal-ink'] = readableOn(SERIES_PALETTE.brassBrand[mode], SEAL_WORST_GROUND[mode], 4.6);
   return vars;
 };
 
