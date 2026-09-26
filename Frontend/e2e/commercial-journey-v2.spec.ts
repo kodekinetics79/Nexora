@@ -1077,16 +1077,16 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   await expect(page.getByRole('button', { name: 'Apply pricing' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Return to RFQ' }).click();
   await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId()}$`));
-  // The client gate now matches the server: a draft is refused ONLY on NO_QUOTE_REVIEW.
-  // This assertion previously read `!== 'VIABLE_READY'`, which pinned a rule the server had
-  // already abandoned — it required every line covered by stock or an approved offer, so the
-  // button stayed disabled for any RFQ needing sourcing, i.e. the normal case for a
-  // distributor. The suite stayed green while enforcing it, which is why nobody noticed.
-  if (intelligence.commercialDecision === 'NO_QUOTE_REVIEW') {
-    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeDisabled();
-  } else {
-    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeEnabled();
-  }
+  // This RFQ is seeded WITH a quote (E2E_CORE_QUOTE_ID), and the header now names the quote that
+  // exists instead of offering to prepare a second one, so there is no prepare button here to
+  // assert on. What the screen must not do is offer a route to a second commercial record.
+  //
+  // The gate the two branches below used to check — a draft is refused ONLY on NO_QUOTE_REVIEW,
+  // never for lines merely needing sourcing, which is the normal case for a distributor — is
+  // asserted in both states, with the reason text, by ViewRFQPage.test.tsx
+  // ("the primary action states why it is unavailable").
+  await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: new RegExp(`^Open QT-|QT-.* sent$`) })).toBeVisible();
   await fs.mkdir(v1EvidenceDir, { recursive: true });
   await page.screenshot({
     path: path.join(v1EvidenceDir, 'gate-02-opportunity-digital-twin.png'),

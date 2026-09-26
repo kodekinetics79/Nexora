@@ -302,7 +302,7 @@ jobs:
   # trigger that reads "not failed" as "passed" would ship a commit nothing ever tested.
   # ---------------------------------------------------------------------------------------------
   frontend-unit:
-    name: Frontend unit suite (shard ${{ matrix.shard }}/7)
+    name: Frontend unit suite (shard ${{ matrix.shard }}/10)
     needs: changes
     if: ${{ needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
@@ -342,10 +342,16 @@ jobs:
     # brought the five-way shards to 23-28 minutes; shard 3 hit the 30-minute cap on four
     # consecutive pushes and was cancelled with every test it ran green. Seven shards, same
     # rule as before: file-level isolation, full coverage, no timeout raised.
+    #
+    # RESIZED AGAIN, 2026-09-26. The RFQ line pricing work took the suite to 261 files (38 of them
+    # new) and the seven-way shards to 15-24 minutes; shard 4 hit the 30-minute cap on both runs of
+    # the same commit and was cancelled with every test it ran green. Ten shards, same rule as
+    # before: file-level isolation, full coverage, no timeout raised. Only "CI green" is a required
+    # check on main, so the shard job names are free to change with the count.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     timeout-minutes: 30
     defaults:
       run:
@@ -369,7 +375,7 @@ jobs:
       - name: Unit suite (vitest)
         # fail-fast:false above so one failing shard does not cancel the others — you want the
         # whole picture from one run, not the first failure and three cancellations.
-        run: npm test -- --shard=${{ matrix.shard }}/7
+        run: npm test -- --shard=${{ matrix.shard }}/10
 
   # A compile, unit suite, or fixture server cannot certify the product's core commercial
   # boundary. This job creates an empty disposable PostgreSQL database, starts the real API and
