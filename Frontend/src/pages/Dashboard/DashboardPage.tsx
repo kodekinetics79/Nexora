@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Alert, Box, Button, Chip, GlobalStyles, Stack, TextField, Typography } from '@mui/material';
 import { visuallyHidden } from '@mui/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -103,13 +103,59 @@ const day = (value: string): string => {
  * One address, a view per role. A sales rep gets their own desk; a manager, admin or owner gets
  * the team/company screen below, which the server already scopes to their team or the company.
  */
+type DeskView = 'team' | 'mine';
+const VIEW_KEY = 'nx.dashboard.view';
+
 export default function DashboardPage() {
   const { userData } = useAuth();
   const leadsOthers = userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank;
-  return leadsOthers ? <TeamDashboard /> : <RepDesk />;
+  const [view, setView] = useState<DeskView>(() => {
+    try { return window.localStorage.getItem(VIEW_KEY) === 'mine' ? 'mine' : 'team'; } catch { return 'team'; }
+  });
+  if (!leadsOthers) return <RepDesk />;
+
+  // A manager also sells, so they can look at their own desk as well as the team's.
+  const choose = (next: DeskView) => {
+    setView(next);
+    try { window.localStorage.setItem(VIEW_KEY, next); } catch { /* remembered only when storage allows */ }
+  };
+  const switcher = <ViewSwitch view={view} onChange={choose} />;
+  return view === 'mine' ? <RepDesk switcher={switcher} /> : <TeamDashboard switcher={switcher} />;
 }
 
-function TeamDashboard() {
+function ViewSwitch({ view, onChange }: { view: DeskView; onChange: (next: DeskView) => void }) {
+  return (
+    <Stack direction="row" role="group" aria-label="Whose dashboard" sx={{ gap: 0.5 }}>
+      {([['mine', 'My desk'], ['team', 'Team']] as const).map(([key, label]) => {
+        const chosen = view === key;
+        return (
+          <Chip
+            key={key}
+            label={label}
+            size="small"
+            clickable
+            aria-pressed={chosen}
+            variant="outlined"
+            onClick={() => onChange(key)}
+            sx={(theme) => ({
+              ...NEU_TRANSITION,
+              ...neuFocus,
+              height: 28, px: 0.5, fontWeight: 700,
+              backgroundColor: NEU_SURFACE[theme.palette.mode],
+              border: '1px solid',
+              borderColor: chosen ? 'var(--nx-glance-seal-rim)' : 'transparent',
+              color: chosen ? 'var(--nx-glance-seal-ink)' : 'text.primary',
+              boxShadow: chosen ? neuInset(theme.palette.mode, 2) : neuRaised(theme.palette.mode, 2),
+              '&&:hover': { backgroundColor: NEU_SURFACE[theme.palette.mode] },
+            })}
+          />
+        );
+      })}
+    </Stack>
+  );
+}
+
+function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
   const { hasPermission, userData } = useAuth();
   const navigate = useNavigate();
   const today = useMemo(() => dayjs().startOf('day'), []);
@@ -254,7 +300,7 @@ function TeamDashboard() {
           mb: 1.5,
         }}
       >
-        <Stack direction="row" spacing={2} sx={{ alignItems: 'baseline', minWidth: 0, flexWrap: 'wrap', rowGap: 0.5 }}>
+        <Stack direction="row" spacing={2} sx={{ alignItems: 'center', minWidth: 0, flexWrap: 'wrap', rowGap: 0.5 }}>
           <Typography
             variant="h5"
             component="h1"
@@ -265,6 +311,7 @@ function TeamDashboard() {
           >
             Dashboard
           </Typography>
+          {switcher}
           <Box sx={{ minWidth: 0 }}>
             <Typography data-testid="scope-sentence" variant="body2" sx={{ fontWeight: 700 }}>
               {scopeSentence.words}

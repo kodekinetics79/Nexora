@@ -412,6 +412,16 @@ describe('a sales rep', () => {
     expect(screen.queryByRole('heading', { name: 'Why we lost' })).toBeNull();
   });
 
+  it('lets a manager switch between the team screen and their own desk', async () => {
+    getPerformance.mockResolvedValue(performance({ scope: 'managed_scope', representatives: [myRow] }));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'My desk' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'My desk' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Team' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
+  });
+
   it('shows a tile as a figure, not a link, when the rep may not open its list', async () => {
     auth.isManager = false;
     auth.grants = new Set(['Dashboard', 'Leads']);

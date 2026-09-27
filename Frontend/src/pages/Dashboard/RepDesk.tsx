@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Box, ButtonBase, Chip, GlobalStyles, Stack, Typography } from '@mui/material';
 import { ArrowForwardRounded as GoIcon } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
@@ -89,7 +89,7 @@ function Tile({ label, value, note, to, alert = false }: TileProps) {
   );
 }
 
-export default function RepDesk() {
+export default function RepDesk({ switcher }: { switcher?: ReactNode } = {}) {
   const { userData, hasPermission } = useAuth();
   const navigate = useNavigate();
   const [period, setPeriod] = useState<PeriodKey>('30d');
@@ -139,9 +139,12 @@ export default function RepDesk() {
       />
 
       <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5, mb: 2 }}>
-        <Typography variant="h5" component="h1" sx={{ fontWeight: 700, letterSpacing: '-0.02em' }}>
-          My desk
-        </Typography>
+        <Stack direction="row" sx={{ alignItems: 'center', gap: 2 }}>
+          <Typography variant="h5" component="h1" sx={{ fontWeight: 700, letterSpacing: '-0.02em' }}>
+            My desk
+          </Typography>
+          {switcher}
+        </Stack>
         <Stack direction="row" role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
           {PERIODS.map((choice) => {
             const chosen = period === choice.key;
