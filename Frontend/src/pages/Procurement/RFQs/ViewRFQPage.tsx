@@ -1,4 +1,3 @@
-import { alpha } from '@mui/material/styles';
 import { visuallyHidden } from '@mui/utils';
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -151,6 +150,16 @@ const writeNotNowLineIds = (key: string, ids: number[]) => {
     // Storage blocked: the choice lasts for this visit.
   }
 };
+
+/** The page's folds: 12px corners, one line per summary (title, then its description in grey). */
+const FOLD_SX = { borderRadius: 1.5, '&::before': { display: 'none' } } as const;
+const FOLD_SUMMARY_SX = { minHeight: 44, '& .MuiAccordionSummary-content': { my: 0.75, minWidth: 0 } } as const;
+const FOLD_LINE_SX = { display: 'flex', alignItems: 'baseline', gap: 1.5, minWidth: 0 } as const;
+/** The lineage facts in a grid, four across, instead of a tall stack of seven. */
+const LINEAGE_GRID_SX = {
+  display: 'grid', gridTemplateColumns: { xs: 'repeat(2, 1fr)', md: 'repeat(4, 1fr)' }, columnGap: 2, rowGap: 1,
+  '& > *': { mb: '0 !important' },
+} as const;
 
 const ViewRFQPage: React.FC = () => {
   const { t } = useTranslation();
@@ -1122,11 +1131,11 @@ const ViewRFQPage: React.FC = () => {
             {/* Explanations and details keep every field and control they had; they are
                 folded so the page reads top-down: lines, then how to fulfil them, then the
                 record behind them. Nothing here is a different screen. */}
-            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                <Box>
-                  <Typography sx={{ fontWeight: 900 }}>Ways to fulfil this request</Typography>
-                  <Typography variant="body2" color="text.secondary">{intelligence?.nextBestAction.label ?? 'Stock, supplier and split options with their evidence.'}</Typography>
+            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
+                <Box sx={FOLD_LINE_SX}>
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Ways to fulfil this request</Typography>
+                  <Typography variant="body2" color="text.secondary" noWrap>{intelligence?.nextBestAction.label ?? 'Stock, supplier and split options with their evidence.'}</Typography>
                 </Box>
               </AccordionSummary>
               <AccordionDetails>
@@ -1181,11 +1190,11 @@ const ViewRFQPage: React.FC = () => {
                 </Stack>
               </AccordionDetails>
             </Accordion>
-            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                <Box>
-                  <Typography sx={{ fontWeight: 900 }}>Line intelligence and processing evidence</Typography>
-                  <Typography variant="body2" color="text.secondary">What was checked in stock and sourcing for each line, and how the request was read.</Typography>
+            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
+                <Box sx={FOLD_LINE_SX}>
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Line intelligence and processing evidence</Typography>
+                  <Typography variant="body2" color="text.secondary" noWrap>What was checked in stock and sourcing for each line, and how the request was read.</Typography>
                 </Box>
               </AccordionSummary>
               <AccordionDetails>
@@ -1196,18 +1205,18 @@ const ViewRFQPage: React.FC = () => {
                 </Stack>
               </AccordionDetails>
             </Accordion>
-            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                <Box>
-                  <Typography sx={{ fontWeight: 900 }}>Request details</Typography>
-                  <Typography variant="body2" color="text.secondary">Who asked, when, and the terms preserved from their document.</Typography>
+            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
+                <Box sx={FOLD_LINE_SX}>
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Request details</Typography>
+                  <Typography variant="body2" color="text.secondary" noWrap>Who asked, when, and the terms preserved from their document.</Typography>
                 </Box>
               </AccordionSummary>
               <AccordionDetails>
                 <Stack spacing={3}>
                 {/* General Info */}
-                <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
+                <Paper sx={{ p: 2, borderRadius: 1.5, border: '1px solid', borderColor: 'divider' }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
                     <Typography sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em' }}>
                       General Information
                     </Typography>
@@ -1242,7 +1251,7 @@ const ViewRFQPage: React.FC = () => {
                   )}
                 </Paper>
 
-                <Paper component="section" aria-labelledby="customer-request-terms-heading" sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
+                <Paper component="section" aria-labelledby="customer-request-terms-heading" sx={{ p: 2, borderRadius: 1.5, border: '1px solid', borderColor: 'divider' }}>
                   <Typography id="customer-request-terms-heading" component="h2" sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em', mb: 0.5 }}>
                     Customer request terms
                   </Typography>
@@ -1262,24 +1271,25 @@ const ViewRFQPage: React.FC = () => {
                 </Stack>
               </AccordionDetails>
             </Accordion>
-          </Stack>
-        </Grid>
-
-        {/* Record lineage and history: kept whole, placed after the work rather than beside it
-            so the line table has the full width a nine-column table needs. */}
-        <Grid size={{ xs: 12 }}>
-          <Grid container spacing={3}>
-            <Grid size={{ xs: 12, md: 6 }}>
-            {/* Immutable Lead-to-RFQ lineage; no participation is editable after promotion. */}
-            <Paper component="section" aria-labelledby="promotion-lineage-heading" sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: (t) => alpha(t.palette.primary.main, t.palette.mode === 'dark' ? 0.14 : 0.06) }}>
-                <Typography variant="caption" sx={{ fontWeight: 900, color: 'primary.main', textTransform: 'uppercase', mb: 1, display: 'block' }}>
-                  RFQ promotion lineage
-                </Typography>
-                <Typography id="promotion-lineage-heading" sx={{ fontWeight: 900, fontSize: '0.95rem', mb: 1.5 }}>
+            {/* Where the RFQ came from, and what happened to it. Owner 2026-09-27: this was two
+                large cards and a full-width gold button under the folds; it is record-keeping a rep
+                rarely opens, so it folds like the others and reads as a compact two-column list. */}
+            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
+                <Box sx={FOLD_LINE_SX}>
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Where this RFQ came from</Typography>
+                  <Typography variant="body2" color="text.secondary" noWrap>The lead, the decision to quote, and the RFQ's history.</Typography>
+                </Box>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Grid container spacing={3}>
+                  <Grid size={{ xs: 12, md: 7 }}>
+                    <Box component="section" aria-labelledby="promotion-lineage-heading">
+                <Typography id="promotion-lineage-heading" sx={{ fontWeight: 800, fontSize: '0.9rem', mb: 1 }}>
                   {rfq.promotionId ? 'Governed promotion receipt' : 'Promotion receipt unavailable'}
                 </Typography>
                 {rfq.promotionId ? (
-                  <>
+                  <Box sx={LINEAGE_GRID_SX}>
                     <DataField label="Lead" value={rfq.leadId ? `#${rfq.leadId}` : null} />
                     <DataField
                       label="Immutable Lead revision"
@@ -1292,7 +1302,7 @@ const ViewRFQPage: React.FC = () => {
                     <DataField label="Promotion receipt" value={`#${rfq.promotionId}`} />
                     <DataField label="Promoted by" value={rfq.promotedBy ?? null} />
                     <DataField label="Promoted on" value={formatDateSafe(rfq.promotedAtUtc ?? null)} />
-                  </>
+                  </Box>
                 ) : (
                   <Alert severity="warning" sx={{ mb: 1.5 }}>
                     This RFQ has no governed promotion receipt in the response. It may be a legacy or manually created record; immutable source lineage cannot be claimed.
@@ -1300,23 +1310,21 @@ const ViewRFQPage: React.FC = () => {
                 )}
                 {rfq.leadId && commercialAccess.canViewLeadEvidence ? (
                   <Button
-                    fullWidth variant="contained" size="small"
+                    variant="outlined" size="small"
                     onClick={() => navigate(`/procurement/leads/${rfq.leadId}/workbench`)}
-                    sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2 }}
+                    sx={{ textTransform: 'none', fontWeight: 700, mt: 1 }}
                   >
                     Open Lead decision record
                   </Button>
                 ) : null}
-            </Paper>
-            </Grid>
-            <Grid size={{ xs: 12, md: 6 }}>
-            {/* Audit / Timeline */}
-            <Paper sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
-               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
-                 <HistoryIcon sx={{ color: 'text.secondary', fontSize: 20 }} />
-                 <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', textTransform: 'uppercase' }}>Workflow History</Typography>
-               </Box>
-               <Stack spacing={2}>
+                    </Box>
+                  </Grid>
+                  <Grid size={{ xs: 12, md: 5 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                      <HistoryIcon sx={{ color: 'text.secondary', fontSize: 18 }} />
+                      <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>Workflow history</Typography>
+                    </Box>
+               <Stack spacing={1}>
                   {[
                     { title: 'RFQ Created', user: rfq.createdBy, date: rfq.createdDate, icon: <EditIcon sx={{ fontSize: 14 }} /> },
                     rfq.modifiedBy && { title: 'Last Modified', user: rfq.modifiedBy, date: rfq.modifiedDate, icon: <HistoryIcon sx={{ fontSize: 14 }} /> },
@@ -1333,9 +1341,11 @@ const ViewRFQPage: React.FC = () => {
                     </Box>
                   ))}
                </Stack>
-            </Paper>
-            </Grid>
-          </Grid>
+                  </Grid>
+                </Grid>
+              </AccordionDetails>
+            </Accordion>
+          </Stack>
         </Grid>
       </Grid>
 
