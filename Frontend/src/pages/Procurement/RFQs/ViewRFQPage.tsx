@@ -1,4 +1,5 @@
 import { alpha } from '@mui/material/styles';
+import { visuallyHidden } from '@mui/utils';
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -9,7 +10,7 @@ import {
   AccordionSummary,
   Box, Typography, Paper, Button, Grid, Stack, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  CircularProgress, Divider, Breadcrumbs, Link, Alert, ButtonBase,
+  CircularProgress, Divider, Breadcrumbs, Link, Alert,
   Drawer, IconButton, LinearProgress, Tooltip, Autocomplete, TextField,
   Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material';
@@ -161,6 +162,22 @@ const ViewRFQPage: React.FC = () => {
   const queryClient = useQueryClient();
 
   const [lineFilter, setLineFilter] = React.useState('all');
+  // The line table fills the screen from wherever it starts down to the bottom edge, so its column
+  // headers stay put and only the lines scroll (owner 2026-09-27). Measured, not guessed: how tall
+  // the header block is depends on the screen width and on which banners are showing.
+  const linesBoxRef = React.useRef<HTMLDivElement>(null);
+  const [linesMaxHeight, setLinesMaxHeight] = React.useState<number | null>(null);
+  React.useLayoutEffect(() => {
+    const fit = () => {
+      const box = linesBoxRef.current;
+      if (!box) return;
+      const next = Math.max(320, Math.floor(window.innerHeight - box.getBoundingClientRect().top - 16));
+      setLinesMaxHeight((current) => (current !== null && Math.abs(current - next) < 3 ? current : next));
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  });
   const [evidenceItemId, setEvidenceItemId] = React.useState<number | null>(null);
   const [productResolutionItemId, setProductResolutionItemId] = React.useState<number | null>(null);
   const [productSearch, setProductSearch] = React.useState('');
@@ -496,7 +513,7 @@ const ViewRFQPage: React.FC = () => {
     { key: 'stock', label: 'Ready from stock', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'stock')).length, icon: <InventoryIcon fontSize="small" /> },
     { key: 'partial', label: 'Partially available', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'partial')).length, icon: <BlockerIcon fontSize="small" /> },
     { key: 'sourcing', label: 'Sourcing required', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'sourcing')).length, icon: <SourcingIcon fontSize="small" /> },
-    { key: 'quoted', label: 'Lines with supplier quotes', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'quoted')).length, icon: <QuoteDraftIcon fontSize="small" /> },
+    { key: 'quoted', label: 'Supplier quotes', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'quoted')).length, icon: <QuoteDraftIcon fontSize="small" /> },
     { key: 'unresolved', label: 'Unresolved matches', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length, icon: <BlockerIcon fontSize="small" /> },
     { key: 'pricing', label: `Pricing pending ${judgedScope}`, value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'pricing')).length, icon: <PricingIcon fontSize="small" /> },
     { key: 'ready', label: `Ready for quote ${judgedScope}`, value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'ready')).length, icon: <ApproveIcon fontSize="small" /> },
@@ -619,41 +636,21 @@ const ViewRFQPage: React.FC = () => {
                         };
 
   return (
-    <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
-      {/* Header */}
-      <Box sx={{ mb: 3 }}>
-        <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 2 }}>
-          <Link component="button" variant="caption" onClick={() => navigate('/procurement/rfqs/all')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
-            {t('rfq_management')}
-          </Link>
-          <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>
-            {rfq.rfqno}
-          </Typography>
-        </Breadcrumbs>
-
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, gap: 2, flexDirection: { xs: 'column', lg: 'row' } }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', minWidth: 0 }}>
-            <Typography variant="h4" sx={{ fontWeight: 800, color: 'text.primary', letterSpacing: 0, whiteSpace: 'nowrap' }}>
-              {rfq.rfqno}
-            </Typography>
-            {rfq.nexoraSerial ? (
-              <Chip
-                label={`Nexora Serial: ${rfq.nexoraSerial}`}
-                size="small"
-                variant="outlined"
-                sx={{ fontWeight: 900, fontFamily: 'monospace' }}
-              />
-            ) : (
-              // The API no longer borrows the lead's case for an RFQ that carries none, so this
-              // state is now reachable and is stated plainly instead of leaving a blank header.
-              <Chip
-                label="Not linked to a case"
-                size="small"
-                color="warning"
-                variant="outlined"
-                sx={{ fontWeight: 900 }}
-              />
-            )}
+    <Box sx={{ px: 3, pt: 1.5, pb: 3, maxWidth: 1800, mx: 'auto' }}>
+      {/* Header. Owner 2026-09-27: everything above the lines fits in about 1.5 inches, so the
+          lines start near the top: one title row, one facts row, a one-line next step and a row
+          of filter chips. Nothing is removed, only packed. */}
+      <Box sx={{ mb: 1 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', minWidth: 0 }}>
+            <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />}>
+              <Link component="button" variant="caption" onClick={() => navigate('/procurement/rfqs/all')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
+                {t('rfq_management')}
+              </Link>
+              <Typography variant="h5" component="h1" sx={{ fontWeight: 800, fontSize: '1.15rem', color: 'text.primary', letterSpacing: 0, whiteSpace: 'nowrap' }}>
+                {rfq.rfqno}
+              </Typography>
+            </Breadcrumbs>
             <Chip 
               label={rfq.rfqstatusValue || 'Unknown'} 
               color={isDraft ? "warning" : "success"}
@@ -661,15 +658,12 @@ const ViewRFQPage: React.FC = () => {
               sx={{ fontWeight: 900, fontSize: '0.65rem', textTransform: 'uppercase' }}
             />
           </Box>
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { lg: 'sticky' }, top: 8, zIndex: 2, p: 0.75, borderRadius: 2, bgcolor: (t) => alpha(t.palette.background.default, 0.72), backdropFilter: 'blur(10px)' }}>
-            <Button
-              variant="outlined"
-              startIcon={<BackIcon />}
-              onClick={() => navigate(-1)}
-              sx={{ fontWeight: 800, borderRadius: 2, px: 3, borderColor: 'divider', color: 'text.secondary' }}
-            >
-              Back
-            </Button>
+          <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: 'wrap', '& .MuiButton-root': { minHeight: 34, py: 0.25, px: 1.25, borderRadius: 1, fontSize: '0.8rem' } }}>
+            <Tooltip title="Back">
+              <IconButton size="small" aria-label="Back" onClick={() => navigate(-1)} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                <BackIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
             {rfq.commercialCaseId && (
               <Tooltip title="The whole case for this customer request: lead, RFQ, quote and order in one place." describeChild>
                 <Button
@@ -757,30 +751,56 @@ const ViewRFQPage: React.FC = () => {
             )}
           </Stack>
         </Box>
-        <Paper sx={{ mt: 2, p: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
-          <Grid container spacing={2} sx={{ alignItems: 'center' }}>
-            <Grid size={{ xs: 12, md: 3 }}><DataField label="Customer / contact" value={`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`} /></Grid>
-            <Grid size={{ xs: 6, md: 2 }}><DataField label="Account Owner" value={rfq.accountOwnerName || 'Unassigned'} /></Grid>
-            <Grid size={{ xs: 6, md: 2 }}><DataField label="Opportunity Owner" value={rfq.opportunityOwnerName || 'Unassigned'} /></Grid>
-            <Grid size={{ xs: 6, md: 2 }}><DataField label="Customer deadline" value={formatDateSafe(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
-            <Grid size={{ xs: 6, md: 3 }}>
-              <Typography variant="caption" color="text.secondary">Commercial readiness</Typography>
-              {/* A determinate bar pinned at 0 while the request is in flight is an assertion,
-                  and it is indistinguishable from an RFQ that genuinely scores zero. */}
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><LinearProgress variant={intelligence ? 'determinate' : 'indeterminate'} value={readinessPercent} sx={{ flex: 1, height: 8, borderRadius: 1 }} /><Typography sx={{ fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{intelligence ? `${readinessPercent}%` : '—'}</Typography></Stack>
-              <Typography variant="caption" color={intelligence?.commercialDecision === 'VIABLE_READY' ? 'success.main' : 'warning.main'} sx={{ display: 'block' }}>{readinessNarrative}</Typography>
-            </Grid>
-          </Grid>
-        </Paper>
+        <Stack direction="row" useFlexGap divider={<Divider orientation="vertical" flexItem />}
+          sx={{ mt: 0.75, gap: 1.5, flexWrap: 'wrap', alignItems: 'center', typography: 'body2',
+            '& .fact-label': { color: 'text.secondary', mr: 0.5, fontSize: '0.75rem' }, '& .fact-value': { fontWeight: 700 } }}>
+          <span><span className="fact-label">Customer</span><span className="fact-value">{`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`}</span></span>
+          {(rfq.accountOwnerName || 'Unassigned') === (rfq.opportunityOwnerName || 'Unassigned') ? (
+            <span><span className="fact-label">Owner</span><span className="fact-value">{rfq.accountOwnerName || 'Unassigned'}</span></span>
+          ) : (
+            <>
+              <span><span className="fact-label">Account owner</span><span className="fact-value">{rfq.accountOwnerName || 'Unassigned'}</span></span>
+              <span><span className="fact-label">Opportunity owner</span><span className="fact-value">{rfq.opportunityOwnerName || 'Unassigned'}</span></span>
+            </>
+          )}
+          <span><span className="fact-label">Customer deadline</span><Box component="span" className="fact-value" sx={{ color: overdue ? 'error.main' : 'text.primary' }}>{formatDateSafe(rfq.bidClosingDate || null)}</Box></span>
+          {/* A determinate bar pinned at 0 while the request is in flight is an assertion,
+              and it is indistinguishable from an RFQ that genuinely scores zero. */}
+          <Tooltip title={readinessNarrative} describeChild>
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+              <span className="fact-label">Commercial readiness</span>
+              <LinearProgress variant={intelligence ? 'determinate' : 'indeterminate'} value={readinessPercent} sx={{ width: 80, height: 6, borderRadius: 1 }} />
+              <Typography variant="body2" sx={{ fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{intelligence ? `${readinessPercent}%` : '—'}</Typography>
+            </Stack>
+          </Tooltip>
+          {rfq.nexoraSerial ? (
+              <Chip
+                label={`Nexora Serial: ${rfq.nexoraSerial}`}
+                size="small"
+                variant="outlined"
+                sx={{ fontWeight: 700, fontFamily: 'monospace', fontSize: '0.7rem', height: 22 }}
+              />
+            ) : (
+              // The API no longer borrows the lead's case for an RFQ that carries none, so this
+              // state is now reachable and is stated plainly instead of leaving a blank header.
+              <Chip
+                label="Not linked to a case"
+                size="small"
+                color="warning"
+                variant="outlined"
+                sx={{ fontWeight: 900 }}
+              />
+            )}
+        </Stack>
         {closingSoon && hasPermission('Quotations', 'edit') && (
-          <Alert severity="warning" sx={{ mt: 2, borderRadius: 3 }}
+          <Alert severity="warning" sx={{ mt: 0.75, py: 0, borderRadius: 1.5, alignItems: 'center' }}
             action={<Button color="inherit" variant="outlined" size="small" onClick={() => setSendQuoteOpen(true)}>Send what's ready</Button>}>
             <b>Bid closes {daysToClose === 0 ? 'today' : 'tomorrow'}.</b> Lines still waiting for suppliers can go out as Price to follow, an Estimate, or Not quoted, so the customer gets the full quote on time.
           </Alert>
         )}
         {nextStep && (
-          <Box sx={{ mt: 2 }}>
-            <NextStepPanel tone={nextStep.tone} title={nextStep.title} sentence={nextStep.sentence} action={nextStep.action} testId="rfq-next-step" />
+          <Box sx={{ mt: 0.75 }}>
+            <NextStepPanel dense tone={nextStep.tone} title={nextStep.title} sentence={nextStep.sentence} action={nextStep.action} testId="rfq-next-step" />
           </Box>
         )}
       </Box>
@@ -788,16 +808,24 @@ const ViewRFQPage: React.FC = () => {
       <Grid container spacing={3}>
         {/* RFQ Details */}
         <Grid size={{ xs: 12 }}>
-          <Stack spacing={3}>
+          <Stack spacing={1.5}>
             {/* THE WORK FIRST. A rep opens an RFQ to act on its lines; the tiles are the
                 table's filter, so they sit with it. Everything explanatory folds below. */}
             <Box>
-            <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center', flexWrap: 'wrap' }}>
-              {/* Clicking a tile silently swapped the table contents with no indication of which filter
-                  was applied and no labelled way back. The live region announces the change for a
-                  screen reader; the same sentence is the visible half, with a labelled reset beside
-                  it — the Total tile was the only way back and is not labelled as one. */}
-              <Typography variant="caption" role="status" aria-live="polite" sx={{ fontWeight: 700, color: 'text.secondary' }}>
+            {/* The filters as one row of chips, not eight tall tiles: same counts, same click, a
+                sixth of the height. */}
+            <Stack direction="row" useFlexGap sx={{ gap: 0.75, alignItems: 'center', flexWrap: 'wrap' }}>
+              {summary.map((item) => (
+                <Chip key={item.key} clickable size="small" icon={item.icon} aria-pressed={lineFilter === item.key}
+                  onClick={() => setLineFilter(item.key)}
+                  label={<><Box component="span" sx={{ fontWeight: 800, mr: 0.5, fontVariantNumeric: 'tabular-nums' }}>{item.value}</Box>{item.label}</>}
+                  color={lineFilter === item.key ? 'primary' : 'default'}
+                  variant={lineFilter === item.key ? 'filled' : 'outlined'}
+                  sx={{ height: 26, fontSize: '0.75rem', fontWeight: 600, color: lineFilter !== item.key && !Number(item.value) ? 'text.secondary' : undefined, '& .MuiChip-icon': { fontSize: 16 } }} />
+              ))}
+              <Box sx={{ flex: 1 }} />
+              <Typography variant="caption" role="status" aria-live="polite"
+                sx={lineFilter === 'all' ? visuallyHidden : { fontWeight: 700, color: 'text.secondary' }}>
                 {lineFilter === 'all'
                   ? `Showing all ${rfq.rfqitems.length} line${rfq.rfqitems.length === 1 ? '' : 's'}`
                   : `Showing ${visibleItems.length} of ${rfq.rfqitems.length} lines · ${summary.find((tile) => tile.key === lineFilter)?.label ?? statusLabel(lineFilter)}`}
@@ -808,29 +836,13 @@ const ViewRFQPage: React.FC = () => {
                 </Button>
               )}
             </Stack>
-
-            <Grid container spacing={1.5} sx={{ mb: 3 }}>
-              {summary.map((item) => (
-                <Grid key={item.key} size={{ xs: 6, sm: 4, md: 3, xl: 1.5 }}>
-                  <ButtonBase onClick={() => setLineFilter(item.key)} sx={{ width: '100%', textAlign: 'left', borderRadius: 1 }} aria-pressed={lineFilter === item.key}>
-                    <Paper sx={{ width: '100%', minHeight: 88, p: 1.5, borderRadius: 1, border: '1px solid', borderColor: lineFilter === item.key ? 'primary.main' : 'divider', bgcolor: lineFilter === item.key ? 'action.selected' : 'background.paper' }}>
-                      <Stack direction="row" sx={{ justifyContent: 'space-between', color: 'text.secondary' }}>{item.icon}<Typography variant="h6" sx={{ fontWeight: 900, fontVariantNumeric: 'tabular-nums' }}>{item.value}</Typography></Stack>
-                      <Typography variant="caption" sx={{ fontWeight: 700 }}>{item.label}</Typography>
-                    </Paper>
-                  </ButtonBase>
-                </Grid>
-              ))}
-            </Grid>
-
             </Box>
             {/* Line Items */}
             <Paper sx={{ borderRadius: 1, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-              <Box sx={{ p: 2.5, bgcolor: 'action.hover', borderBottom: '1px solid', borderColor: 'divider' }}>
-                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
-                  RFQ Lines ({rfq.rfqitems.length})
-                </Typography>
-              </Box>
-              <Box sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 1100 }}>
+              {/* Owner 2026-09-27: the column headers stay put and only the lines scroll. */}
+              <Box ref={linesBoxRef} sx={{ overflow: 'auto', maxHeight: linesMaxHeight ?? 'calc(100vh - 220px)', minHeight: 320 }}><Table size="small" stickyHeader aria-label={`RFQ lines (${rfq.rfqitems.length})`}
+                sx={{ minWidth: 1100, '& .MuiTableCell-root': { py: 0.75, px: 1.25 }, '& .MuiTableCell-stickyHeader': { bgcolor: 'background.paper', py: 1 },
+                  '& .MuiButton-root': { minHeight: 30, py: 0.25, px: 1, fontSize: '0.78rem' } }}>
                 <TableHead sx={{ bgcolor: 'action.hover' }}>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>#</TableCell>
