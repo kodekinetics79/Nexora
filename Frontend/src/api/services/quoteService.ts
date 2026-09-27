@@ -123,6 +123,8 @@ export interface QuoteDTO {
   outcomeNote?: string | null;
   isStale?: boolean;
   daysSinceSent?: number | null;
+  /** Set once a later revision was SENT: the customer holds that one, so this quote no longer counts. */
+  supersededByQuoteNo?: string | null;
   // Reasoned validity extensions (R7)
   /** When the validity date was last moved by an explicit, reasoned extend command. */
   validityExtendedOn?: string | null;

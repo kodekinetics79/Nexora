@@ -187,6 +187,65 @@ public sealed class PricingSheetTests
         Assert.Null(await QuoteService.HandBuiltLineForAsync(check, twoLines, sameLine, CancellationToken.None));
     }
 
+    private static async Task SeedRevisedQuoteAsync(ProcurementScenario fixture, bool revisionSent)
+    {
+        await using var setup = fixture.Context();
+        var original = new Quote
+        {
+            Id = 97_300, QuoteNo = "QT-REV-1", Rfqid = fixture.RfqId, BusinessUnitId = fixture.BusinessUnitId, CurrencyId = ProcurementTestData.Currency,
+            QuoteDate = DateTime.UtcNow, SentOn = DateTime.UtcNow.AddDays(-20), TotalAmount = 100m, RevisionNo = 1, LifecycleVersion = 1,
+            CreatedBy = "qa", CreatedDate = DateTime.UtcNow.AddDays(-21)
+        };
+        var revision = new Quote
+        {
+            Id = 97_301, QuoteNo = "QT-REV-1-R2", Rfqid = fixture.RfqId, BusinessUnitId = fixture.BusinessUnitId, CurrencyId = ProcurementTestData.Currency,
+            QuoteDate = DateTime.UtcNow, SentOn = revisionSent ? DateTime.UtcNow.AddDays(-1) : null, TotalAmount = 100m,
+            RevisionNo = 2, RevisionOfQuoteId = 97_300, LifecycleVersion = 1, CreatedBy = "qa", CreatedDate = DateTime.UtcNow.AddDays(-2)
+        };
+        setup.Quotes.AddRange(original, revision);
+        await setup.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task A_quote_whose_revision_was_sent_reads_superseded_in_the_list_and_is_not_stale()
+    {
+        using var fixture = new ProcurementScenario();
+        await SeedRevisedQuoteAsync(fixture, revisionSent: true);
+        await using var db = fixture.Context();
+
+        var (rows, _) = await new ERP_RFQ_Automation.Repositories.QuoteRepository(db).GetAllAsync(fixture.BusinessUnitId, 1, 50);
+
+        var original = rows.Single(r => r.QuoteNo == "QT-REV-1");
+        Assert.Equal(("QT-REV-1-R2", false), (original.SupersededByQuoteNo, original.IsStale));
+        Assert.Null(rows.Single(r => r.QuoteNo == "QT-REV-1-R2").SupersededByQuoteNo);
+    }
+
+    [Fact]
+    public async Task A_revision_still_in_draft_supersedes_nothing_the_customer_still_holds_the_original()
+    {
+        using var fixture = new ProcurementScenario();
+        await SeedRevisedQuoteAsync(fixture, revisionSent: false);
+        await using var db = fixture.Context();
+
+        var (rows, _) = await new ERP_RFQ_Automation.Repositories.QuoteRepository(db).GetAllAsync(fixture.BusinessUnitId, 1, 50);
+
+        Assert.Null(rows.Single(r => r.QuoteNo == "QT-REV-1").SupersededByQuoteNo);
+    }
+
+    [Fact]
+    public async Task The_dashboard_counts_a_revised_quote_once()
+    {
+        using var fixture = new ProcurementScenario();
+        await SeedRevisedQuoteAsync(fixture, revisionSent: true);
+        await using var db = fixture.Context();
+
+        var data = await new ERP_RFQ_Automation.Repositories.DashboardRepository(db).GetDashboardDataAsync(fixture.BusinessUnitId);
+
+        // Two rows, one offer: one quote worth 100, not two worth 200.
+        var component = Assert.Single(data.Stats.QuoteValueFx!.ByCurrency);
+        Assert.Equal((1, 100m), (component.RowCount, component.Subtotal));
+    }
+
     private static string Detail(IActionResult result) =>
         Assert.IsType<ProblemDetails>(Assert.IsType<BadRequestObjectResult>(result).Value).Detail ?? "";
 }

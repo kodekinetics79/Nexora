@@ -121,3 +121,20 @@ describe('the quote list opened through a filtered rail entry', () => {
     expect(screen.queryByRole('button', { name: 'Show all quotes' })).not.toBeInTheDocument();
   });
 });
+
+describe('a quote a sent revision replaced', () => {
+  it('reads "Superseded by" its revision, never Sent or Stale', async () => {
+    getAll.mockResolvedValue({
+      items: [
+        { ...sentQuotes[0], id: 21, quoteNo: 'QT-0926-0003', isStale: true, daysSinceSent: 12, supersededByQuoteNo: 'QT-0926-0003-R2' },
+        { ...sentQuotes[0], id: 22, quoteNo: 'QT-0926-0003-R2', daysSinceSent: 1 },
+      ],
+      totalItems: 2,
+    });
+    renderQuotes('/sales/quotes');
+
+    expect(await screen.findByText('Superseded by QT-0926-0003-R2')).toBeInTheDocument();
+    expect(screen.queryByText(/Stale · no reply/)).not.toBeInTheDocument();
+    expect(screen.getByText('Sent · 1 day ago')).toBeInTheDocument();
+  });
+});
