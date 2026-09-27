@@ -32,7 +32,8 @@ public static class EntitlementEnforcementCoverage
                 "ProductUploaderController.ExportProducts",
                 "ProductCategoryUploaderController.ExportCategoryData",
                 "ProductCategoryUploaderController.ExportSubCategoryData",
-                "BoqController.ExportCsv"
+                "BoqController.ExportCsv",
+                "RfqController.ExportLines"
             ],
             // Presentation boundary, not a controller gate: the session bootstrap
             // (UserController.GetMyPermissions) reports the grant and the client rail obeys it.

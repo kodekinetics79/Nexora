@@ -34,6 +34,7 @@ import {
   HelpOutlined as UndecidedIcon,
   HourglassEmpty as WaitingIcon,
   AddCircleOutlined as AddIcon,
+  FileDownloadOutlined as DownloadIcon,
 } from '@mui/icons-material';
 import rfqService, { type RfqitemResponseDTO } from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
@@ -155,7 +156,7 @@ const ViewRFQPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { userData, hasPermission } = useAuth();
+  const { userData, hasPermission, hasEntitlement } = useAuth();
   const commercialAccess = commercialActionPermissions(hasPermission);
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
@@ -323,6 +324,10 @@ const ViewRFQPage: React.FC = () => {
   // Set when a send was handed over: delivery finishes a few seconds later, so the header keeps
   // checking until the quote reads as sent (at most a minute).
   const [sentAt, setSentAt] = React.useState<number | null>(null);
+  const downloadLinesMutation = useMutation({
+    mutationFn: () => rfqService.downloadLinesExcel(Number(id), rfq?.rfqno),
+    onError: () => enqueueSnackbar("We couldn't make the Excel file. Please try again.", { variant: 'error' }),
+  });
   const latestQuoteQuery = useQuery({
     queryKey: ['send-quote-id', Number(id)],
     queryFn: () => rfqService.getLatestQuote(Number(id)),
@@ -708,6 +713,17 @@ const ViewRFQPage: React.FC = () => {
                   Smart Pricing
                 </Button>
               </Tooltip>
+            )}
+            {hasEntitlement('capability.exports') && (
+              <Button
+                variant="outlined"
+                startIcon={downloadLinesMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
+                onClick={() => downloadLinesMutation.mutate()}
+                disabled={downloadLinesMutation.isPending}
+                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+              >
+                {downloadLinesMutation.isPending ? 'Downloading…' : 'Download Excel'}
+              </Button>
             )}
             {hasPermission('RFQ Management', 'edit') && <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />}
             {hasPermission('Quotations', 'create') && (
