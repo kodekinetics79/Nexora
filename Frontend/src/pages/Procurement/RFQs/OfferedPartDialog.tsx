@@ -124,9 +124,9 @@ export default function OfferedPartDialog({ open, rfqId, line, onClose }: {
       <DialogContent>
         <RadioGroup value={kind} onChange={(event) => setKind(event.target.value as OfferedKind)}>
           <FormControlLabel value="REPLACEMENT" control={<Radio size="small" />}
-            label={<Typography variant="body2">Same brand, new part number <Typography component="span" variant="caption" color="text.secondary">(old number obsolete)</Typography></Typography>} />
+            label={<Typography variant="body2">Same brand, new part number</Typography>} />
           <FormControlLabel value="EQUIVALENT" control={<Radio size="small" />}
-            label={<Typography variant="body2">Different brand, similar part <Typography component="span" variant="caption" color="text.secondary">(customer must check it)</Typography></Typography>} />
+            label={<Typography variant="body2">Different brand, similar part</Typography>} />
         </RadioGroup>
 
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 1 }}>
@@ -192,7 +192,7 @@ export function OfferedPartCell({ rfqId, line, canEdit }: { rfqId: number; line:
           <Chip size="small" color="info" variant="outlined" icon={<SwapHoriz sx={{ fontSize: 14 }} />}
             label={`${line.offeredMakerName ? `${line.offeredMakerName} ` : ""}${line.offeredPartNumber}`} />
           <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-            {line.offeredKind === "EQUIVALENT" ? "offered instead: similar part, customer to check" : "offered instead: new part number"}
+            {line.offeredKind === "EQUIVALENT" ? "Similar part offered" : "New part number offered"}
           </Typography>
         </Box>
       )}

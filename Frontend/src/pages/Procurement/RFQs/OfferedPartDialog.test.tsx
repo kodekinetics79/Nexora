@@ -78,7 +78,7 @@ describe('Offer a different part', () => {
   it('shows what is offered on the line and can go back to the part asked for', async () => {
     renderCell({ offeredPartNumber: 'SEL-751A', offeredMakerName: 'SEL', offeredKind: 'EQUIVALENT', offeredSpecs: 'IEC 61850' });
     expect(screen.getByText('SEL SEL-751A')).toBeInTheDocument();
-    expect(screen.getByText('offered instead: similar part, customer to check')).toBeInTheDocument();
+    expect(screen.getByText('Similar part offered')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Offer a different part' }));
     const dialog = await screen.findByRole('dialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Offer as asked' }));

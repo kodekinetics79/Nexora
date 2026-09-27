@@ -168,9 +168,6 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
           </Typography>
         </DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Keep this list as the customer gave it in their RFQ, or as they later agreed. Find supplier asks suppliers for each brand, and you can quote any of them.
-          </Typography>
           <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap", mt: 1.5, minHeight: 32 }}>
             {brands.length === 0 && <Typography variant="body2" color="text.secondary">No brands yet. Add the first one below.</Typography>}
             {brands.map((brand) => (
@@ -190,7 +187,6 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (draft.trim()) add(); } }}
-              helperText="Press Enter to add. The part number is optional."
               slotProps={{ htmlInput: { maxLength: 150, "aria-label": "Add a brand" } }}
             />
             <Button variant="outlined" onClick={add} disabled={!draft.trim()} sx={{ flexShrink: 0 }}>Add</Button>
