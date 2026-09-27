@@ -88,10 +88,10 @@ export const acceptedMakersOf = (item: LineForMakers): string[] => {
 };
 
 /**
- * The brand column of an RFQ line, in the words of the customer's own document ("Approved
- * manufacturers"): the brand they named and part number, the other brands they approve, and one
- * "Approved brands" link to change the list. Owner 2026-09-27: "Makers" was too vague, and typing
- * brands separated by ";" was one step too many, so the list is edited as tags.
+ * The brand column of an RFQ line, saying who decides: the CUSTOMER. "Customer asked for" the brand
+ * they named, "Customer also accepts" the others, or "Customer accepts any of" when none is
+ * preferred. Owner 2026-09-27: "Makers" was too vague, and "Approved brands" begged the question
+ * "approved by whom?". Typing brands separated by ";" was one step too many, so the list is tags.
  */
 export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: LineForMakers; canEdit: boolean }) {
   const queryClient = useQueryClient();
@@ -113,11 +113,11 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
       }
       enqueueSnackbar(result.acceptedMakers.length > 1
         ? `Saved. Find supplier will look for suppliers of all ${result.acceptedMakers.length} brands.`
-        : "Approved brands saved.", { variant: "success" });
+        : "Brands saved.", { variant: "success" });
       setOpen(false);
     },
     onError: (error: { response?: { data?: { detail?: string } } }) =>
-      enqueueSnackbar(error?.response?.data?.detail || "The approved brands could not be saved.", { variant: "error" }),
+      enqueueSnackbar(error?.response?.data?.detail || "The brands could not be saved.", { variant: "error" }),
   });
 
   const add = () => {
@@ -129,15 +129,19 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
 
   return (
     <>
-      <Typography sx={{ fontSize: "0.8rem", fontWeight: 700 }}>
-        {item.manufacturerName || (others.length ? "Any approved brand" : "No brand named")}
-      </Typography>
-      {item.manufacturerName && item.manufacturerPartNumber && (
-        <Typography variant="caption" sx={{ color: "text.secondary", display: "block" }}>{item.manufacturerPartNumber}</Typography>
+      {item.manufacturerName ? (
+        <>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>Customer asked for</Typography>
+          <Typography sx={{ fontSize: "0.8rem", fontWeight: 700 }}>
+            {item.manufacturerName}{item.manufacturerPartNumber ? ` ${item.manufacturerPartNumber}` : ""}
+          </Typography>
+        </>
+      ) : others.length === 0 && (
+        <Typography variant="caption" color="text.secondary">No brand named by the customer</Typography>
       )}
       {others.length > 0 && (
-        <Box sx={{ mt: 0.5 }}>
-          {item.manufacturerName && <Typography variant="caption" color="text.secondary">Also approved</Typography>}
+        <Box sx={{ mt: item.manufacturerName ? 0.5 : 0 }}>
+          <Typography variant="caption" color="text.secondary">{item.manufacturerName ? "Customer also accepts" : "Customer accepts any of"}</Typography>
           <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap", mt: 0.25 }}>
             {others.map((maker) => (
               <Tooltip key={maker} title={maker}>
@@ -148,24 +152,24 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
         </Box>
       )}
       {canEdit && (
-        <Tooltip title="The brands the customer will accept for this part. Find supplier asks suppliers for each one." describeChild>
+        <Tooltip title="Change the brands the customer accepts for this part, as their RFQ or a later message says. Find supplier asks suppliers for each one." describeChild>
           <Button size="small" variant="text" startIcon={<Edit sx={{ fontSize: 14 }} />} sx={{ mt: 0.5, px: 0.5, minWidth: 0 }}
             onClick={() => { setBrands(accepted); setDraft(""); setOpen(true); }}>
-            Approved brands
+            Change brands
           </Button>
         </Tooltip>
       )}
 
       <Dialog open={open} onClose={save.isPending ? undefined : () => setOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ pb: 0.5 }}>
-          <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Approved brands for this part</Typography>
+          <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Brands the customer accepts for this part</Typography>
           <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }} noWrap>
             {item.productShortDescription || item.productShortName || "This line"}
           </Typography>
         </DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            The customer will accept any of these. Find supplier asks suppliers for each brand, and you quote whichever you choose.
+            Keep this list as the customer gave it in their RFQ, or as they later agreed. Find supplier asks suppliers for each brand, and you can quote any of them.
           </Typography>
           <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap", mt: 1.5, minHeight: 32 }}>
             {brands.length === 0 && <Typography variant="body2" color="text.secondary">No brands yet. Add the first one below.</Typography>}
