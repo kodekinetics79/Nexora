@@ -148,6 +148,8 @@ export interface SendQuoteDialogProps {
   onClose: () => void;
   /** Called once the quote was handed over for delivery (it becomes "sent" a moment later). */
   onSent?: () => void;
+  /** The customer's deadline. Once it has passed, Send asks first; it never refuses. */
+  deadline?: string | null;
 }
 
 /**
@@ -155,7 +157,14 @@ export interface SendQuoteDialogProps {
  * prices hold, where the prices came from, and the email the customer gets. Anything only a
  * manager can fix in Setup is named in plain words with a link.
  */
-export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQuoteDialogProps) {
+export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline }: SendQuoteDialogProps) {
+  const [confirmLate, setConfirmLate] = React.useState(false);
+  // The deadline is a calendar day at the customer's end; it has passed once that day is over.
+  const deadlineDay = (() => {
+    const match = deadline?.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : null;
+  })();
+  const deadlinePassed = deadlineDay != null && deadlineDay.getTime() + 24 * 60 * 60 * 1000 <= Date.now();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
@@ -470,11 +479,25 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQu
         <Button onClick={onClose} disabled={send.isPending}>Cancel</Button>
         {quote && !alreadySent && (
           <Button variant="contained" startIcon={send.isPending ? <CircularProgress size={16} color="inherit" /> : <Send />}
-            disabled={reasons.length > 0 || send.isPending} onClick={() => send.mutate()}>
+            disabled={reasons.length > 0 || send.isPending} onClick={() => (deadlinePassed ? setConfirmLate(true) : send.mutate())}>
             Send quote
           </Button>
         )}
       </DialogActions>
+      {/* Owner ruling 2026-09-26: a passed deadline informs, it never blocks. */}
+      <Dialog open={confirmLate} onClose={() => setConfirmLate(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 800 }}>The deadline has passed</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            This RFQ's deadline was {deadlineDay?.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}.
+            Do you really want to send the quote?
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmLate(false)}>Cancel</Button>
+          <Button variant="contained" onClick={() => { setConfirmLate(false); send.mutate(); }}>Send anyway</Button>
+        </DialogActions>
+      </Dialog>
     </Dialog>
   );
 }

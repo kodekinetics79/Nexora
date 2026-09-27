@@ -415,7 +415,10 @@ const ViewRFQPage: React.FC = () => {
   // Enabled unless we positively KNOW the decision is NO_QUOTE_REVIEW: the intelligence query
   // is advisory, and blocking a rep because advice failed to load is the same defect in a
   // different costume.
-  const canPrepareQuote = intelligence?.commercialDecision !== 'NO_QUOTE_REVIEW';
+  //
+  // A passed customer deadline alone does not block either (owner ruling 2026-09-26): the rep
+  // decides whether to quote late, and Send asks for confirmation. Same rule as the server.
+  const canPrepareQuote = !(intelligence?.commercialDecision === 'NO_QUOTE_REVIEW' && intelligence.slaRisk !== 'OVERDUE');
   const canOpenRecommendedAction = Boolean(intelligence?.nextBestAction?.userOverrideAllowed &&
     intelligence.nextBestAction?.overrideAction?.startsWith('/') && hasPermission('RFQ Management'));
   const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));
@@ -1324,7 +1327,7 @@ const ViewRFQPage: React.FC = () => {
         </Grid>
       </Grid>
 
-      <SendQuoteDialog open={sendQuoteOpen} rfqId={Number(id)} onSent={() => setSentAt(Date.now())} onClose={() => {
+      <SendQuoteDialog open={sendQuoteOpen} rfqId={Number(id)} deadline={rfq.bidClosingDate ?? null} onSent={() => setSentAt(Date.now())} onClose={() => {
         setSendQuoteOpen(false);
         queryClient.invalidateQueries({ queryKey: ['send-quote-id', Number(id)] });
       }} />

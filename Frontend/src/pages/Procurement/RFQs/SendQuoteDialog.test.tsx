@@ -43,13 +43,13 @@ const quote = (overrides = {}) => ({
   validUntil: null, quoteItems: [line()], ...overrides,
 });
 
-function renderDialog(onSent = vi.fn()) {
+function renderDialog(onSent = vi.fn(), deadline: string | null = null) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
       <SnackbarProvider>
         <MemoryRouter>
-          <SendQuoteDialog open rfqId={6} onClose={vi.fn()} onSent={onSent} />
+          <SendQuoteDialog open rfqId={6} onClose={vi.fn()} onSent={onSent} deadline={deadline} />
         </MemoryRouter>
       </SnackbarProvider>
     </QueryClientProvider>,
@@ -86,6 +86,24 @@ describe('Send quote', () => {
     expect(mocks.saveQuoteTerms).toHaveBeenCalledWith(7, expect.objectContaining({ currencyId: 1, validUntil: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) }));
     expect(mocks.confirmPriceAttestation).toHaveBeenCalledWith(7, 'SALES_MANAGER', 'Golden Manager');
     await waitFor(() => expect(onSent).toHaveBeenCalled());
+  });
+
+  it('after the customer deadline, Send asks first and sends only on Send anyway', async () => {
+    renderDialog(vi.fn(), '2026-01-15T00:00:00');
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(await within(dialog).findByLabelText('Customer email'), { target: { value: 'buyer@sec.example' } });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send quote' })).toBeEnabled());
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send quote' }));
+    expect(await screen.findByText('The deadline has passed')).toBeInTheDocument();
+    expect(screen.getByText(/Do you really want to send the quote\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel', hidden: false }));
+    await waitFor(() => expect(screen.queryByText('The deadline has passed')).not.toBeInTheDocument());
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send quote' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send anyway' }));
+    await waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledWith(7, 'buyer@sec.example', undefined));
   });
 
   it('an unpriced line and a Setup gap stop the send and say what to do', async () => {

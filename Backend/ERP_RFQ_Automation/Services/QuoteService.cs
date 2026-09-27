@@ -379,7 +379,11 @@ namespace ERP_RFQ_Automation.Services
                 //
                 // Identity integrity is not waived: customer, canonical Lead and Nexora Serial
                 // are each checked explicitly above and below this block.
-                if (intelligence.CommercialDecision == "NO_QUOTE_REVIEW")
+                //
+                // A passed customer deadline alone no longer blocks (owner ruling 2026-09-26): the
+                // rep decides whether to quote late, and Send asks "the deadline has passed, send
+                // anyway?". What still blocks is an RFQ with nothing to quote.
+                if (intelligence.CommercialDecision == "NO_QUOTE_REVIEW" && intelligence.SlaRisk != "OVERDUE")
                     throw new InvalidOperationException(
                         $"Customer Quote preparation is blocked: {intelligence.NextBestAction.Explanation}");
             }
