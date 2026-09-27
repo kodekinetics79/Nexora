@@ -1186,7 +1186,10 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
 /// <summary>28 → "4 weeks"; 10 → "10 days". What the customer reads under the line.</summary>
         internal static string DeliveryText(int days) =>
-            days % 7 == 0 ? $"{days / 7} week{(days == 7 ? "" : "s")}" : $"{days} day{(days == 1 ? "" : "s")}";
+            // A month is 30 days; the largest whole unit wins. Same rule as the screens (utils/delivery.ts).
+            days > 0 && days % 30 == 0 ? $"{days / 30} month{(days == 30 ? "" : "s")}"
+            : days % 7 == 0 ? $"{days / 7} week{(days == 7 ? "" : "s")}"
+            : $"{days} day{(days == 1 ? "" : "s")}";
 
                 internal static IReadOnlyList<QuoteItem> OrderQuoteLines(IEnumerable<QuoteItem> items) => items
             .OrderBy(i => string.IsNullOrWhiteSpace(i.CustomerLineRef) ? 1 : 0)

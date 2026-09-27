@@ -33,6 +33,7 @@ import currencyService from "../../../api/services/currencyService";
 import stockPriceService from "../../../api/services/stockPriceService";
 import { useAuth } from "../../../context/AuthContext";
 import { formatMoney } from "../../../utils/currency";
+import { deliveryText } from "../../../utils/delivery";
 
 const EMAIL = /^[^\s@;,]+@[^\s@;,]+\.[^\s@;,]+$/;
 const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -48,7 +49,7 @@ const HANDLED_HERE = new Set(["QUOTE_INCOMPLETE", "PRICE_ATTESTATION_REQUIRED"])
 
 const deliveryOf = (line: QuoteLineDTO) => {
   const days = line.deliveryLeadTime;
-  const when = !days ? "" : days % 7 === 0 ? `${days / 7} week${days === 7 ? "" : "s"}` : `${days} day${days === 1 ? "" : "s"}`;
+  const when = !days ? "" : deliveryText(days);
   if (line.exStockQuantity && line.exStockQuantity > 0) return `${qty(line.exStockQuantity)} ex stock, balance ${when ? `in ${when}` : "to follow"}`;
   if (days === 0) return "Ex stock";
   return when ? `Delivery ${when}` : "";

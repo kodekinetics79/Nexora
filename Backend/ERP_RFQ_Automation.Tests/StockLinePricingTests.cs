@@ -162,6 +162,9 @@ public sealed class StockLinePricingTests
     [InlineData(28, "4 weeks")]
     [InlineData(10, "10 days")]
     [InlineData(1, "1 day")]
+    [InlineData(30, "1 month")]
+    [InlineData(60, "2 months")]
+    [InlineData(210, "7 months")]
     public void Delivery_prints_in_weeks_when_it_divides(int days, string text) =>
         Assert.Equal(text, QuoteService.DeliveryText(days));
 

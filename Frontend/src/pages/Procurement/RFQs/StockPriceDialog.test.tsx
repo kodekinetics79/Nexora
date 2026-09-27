@@ -166,7 +166,9 @@ describe('Price from stock', () => {
     renderLine();
     fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
     const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText('Not set')).toBeInTheDocument();
+    // Owner 2026-09-27: a missing price still shows a figure, SAR 0.00, with the way to set it.
+    await within(dialog).findByText('Sale price per EA');
+    expect(within(dialog).getAllByText(/^SAR\s?0\.00$/).length).toBeGreaterThan(0);
     expect(within(dialog).getByRole('link', { name: 'pricing sheet' })).toHaveAttribute('href', '/inventory/pricing-sheet');
     expect(within(dialog).getByLabelText('Quote price')).toHaveValue(120);
   });
@@ -215,7 +217,9 @@ describe('Price from stock', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Price it' }));
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText(/\$30\.00|US\$30\.00|USD\s?30\.00/)).toBeInTheDocument();
-    expect(within(dialog).getByText('Not on file')).toBeInTheDocument();
+    // Cost shows SAR 0.00, and it is not treated as a real cost: nothing is worked out from it.
+    expect(within(dialog).getAllByText(/^SAR\s?0\.00$/).length).toBe(2);
+    expect(within(dialog).queryByText(/Profit|Below cost/)).not.toBeInTheDocument();
     expect(within(dialog).getByText(/The supplier price is not in SAR/)).toBeInTheDocument();
     expect(within(dialog).getByLabelText('Quote price')).toHaveValue(null);
   });

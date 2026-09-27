@@ -27,6 +27,7 @@ import stockPriceService, { type PriceReference, type StockLinePrice } from "../
 import currencyService from "../../../api/services/currencyService";
 import { useAuth } from "../../../context/AuthContext";
 import { formatMoney } from "../../../utils/currency";
+import { DAYS_PER, deliveryShortText, deliveryText, deliveryUnitFor, type DeliveryUnit } from "../../../utils/delivery";
 
 /** The calendar day the record carries ("2026-08-28T00:00:00" is 28 Aug everywhere). */
 const day = (value?: string | null) => {
@@ -128,7 +129,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
   // A line not covered by stock is priced from a supplier's price: which one, and its delivery time.
   const [chosenSupplier, setChosenSupplier] = React.useState<{ name: string; cost: number } | null>(null);
   const [leadValue, setLeadValue] = React.useState("");
-  const [leadUnit, setLeadUnit] = React.useState<"days" | "weeks">("weeks");
+  const [leadUnit, setLeadUnit] = React.useState<DeliveryUnit>("weeks");
   const [sendStockNow, setSendStockNow] = React.useState(true);
   const seeded = React.useRef<StockLinePrice | null>(null);
 
@@ -173,7 +174,9 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
 
   function setLead(days: number | null | undefined) {
     if (!days || days <= 0) { setLeadValue(""); setLeadUnit("weeks"); return; }
-    if (days % 7 === 0) { setLeadValue(String(days / 7)); setLeadUnit("weeks"); } else { setLeadValue(String(days)); setLeadUnit("days"); }
+    const unit = deliveryUnitFor(days);
+    setLeadValue(String(days / DAYS_PER[unit]));
+    setLeadUnit(unit);
   }
 
   const quoteHasCurrency = Boolean(view?.onQuote?.currencyCode);
@@ -245,8 +248,8 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
   const need = view?.requestedQuantity ?? 0;
   const covered = view?.coveredByStock ?? false;
   const leadNumber = Number(leadValue);
-  const leadOk = leadValue.trim() === "" || (Number.isInteger(leadNumber) && leadNumber > 0 && leadNumber * (leadUnit === "weeks" ? 7 : 1) <= 730);
-  const leadDays = leadValue.trim() !== "" && leadOk ? leadNumber * (leadUnit === "weeks" ? 7 : 1) : null;
+  const leadOk = leadValue.trim() === "" || (Number.isInteger(leadNumber) && leadNumber > 0 && leadNumber * DAYS_PER[leadUnit] <= 730);
+  const leadDays = leadValue.trim() !== "" && leadOk ? leadNumber * DAYS_PER[leadUnit] : null;
   const supplierPrices = view?.supplierPrices ?? [];
   const useSupplierPrice = (option: { supplierName: string; cost: number; leadTimeDays?: number | null }) => {
     setChosenSupplier({ name: option.supplierName, cost: option.cost });
@@ -393,7 +396,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                     ) : chosenSupplier ? (
                       ladderRow(`${chosenSupplier.name} price`, `${formatMoney(chosenSupplier.cost, currencyCode)} each`)
                     ) : null}
-                    {ladderRow(`Cost per ${unit || "unit"}`, cost != null && cost > 0 ? formatMoney(cost, currencyCode) : "Not on file", true)}
+                    {ladderRow(`Cost per ${unit || "unit"}`, formatMoney(cost != null && cost > 0 ? cost : 0, currencyCode), true)}
                     {!chosenSupplier && view.costSource === "PRICE_SHEET" && (
                       <Typography variant="caption" color="text.secondary">Landed cost from the pricing sheet.</Typography>
                     )}
@@ -408,7 +411,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                 <Box>
                   {sectionTitle("Sale price", "our list price")}
                   <Stack spacing={0.25} sx={{ mt: 0.5 }}>
-                    {ladderRow(`Sale price per ${unit || "unit"}`, sellingPrice != null ? formatMoney(sellingPrice, currencyCode) : "Not set", true)}
+                    {ladderRow(`Sale price per ${unit || "unit"}`, formatMoney(sellingPrice ?? 0, currencyCode), true)}
                     {sellingPrice == null && view.sheet && !view.sheet.usable && (view.sheet.salePrice ?? view.sheet.landedCost) != null ? (
                       <Typography variant="caption" color="warning.main">
                         The pricing sheet has this part in {view.sheet.currencyCode}
@@ -537,19 +540,20 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                         value={leadValue}
                         onChange={(event) => setLeadValue(event.target.value)}
                         error={!leadOk}
-                        helperText={!leadOk ? "Whole number, up to 2 years" : undefined}
+                        helperText={!leadOk ? "Whole number, up to 2 years (24 months)" : undefined}
                         slotProps={{ htmlInput: { min: 1, step: 1, "aria-label": "Delivery time" } }}
                         sx={{ width: 130 }}
                       />
-                      <TextField select size="small" value={leadUnit} onChange={(event) => setLeadUnit(event.target.value as "days" | "weeks")}
+                      <TextField select size="small" value={leadUnit} onChange={(event) => setLeadUnit(event.target.value as DeliveryUnit)}
                         slotProps={{ htmlInput: { "aria-label": "Delivery time unit" } }} sx={{ width: 110 }}>
                         <MenuItem value="days">days</MenuItem>
                         <MenuItem value="weeks">weeks</MenuItem>
+                        <MenuItem value="months">months</MenuItem>
                       </TextField>
                     </Stack>
                     <Typography variant="caption" color="text.secondary">
                       {(() => {
-                        const when = leadDays ? (leadUnit === "weeks" ? `${leadNumber} week${leadNumber === 1 ? "" : "s"}` : `${leadNumber} day${leadNumber === 1 ? "" : "s"}`) : null;
+                        const when = leadDays ? deliveryText(leadDays) : null;
                         if (partial && sendStockNow) return `Quote prints "Delivery: ${qty(partial.fromStock)} ex stock, balance ${when ? `in ${when}` : "to follow"}"`;
                         return when ? `Quote prints "Delivery: ${when}"` : "Leave empty to print no delivery time";
                       })()}
@@ -589,7 +593,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                             <Box sx={{ flex: 1, minWidth: 0 }}>
                               <Typography variant="body2" sx={{ fontWeight: 700 }} noWrap>{option.supplierName}</Typography>
                               <Typography variant="caption" color="text.secondary" sx={{ display: "block" }} noWrap>
-                                {option.leadTimeDays ? `Delivery ${option.leadTimeDays % 7 === 0 ? `${option.leadTimeDays / 7} wk` : `${option.leadTimeDays} days`} · ` : ""}
+                                {option.leadTimeDays ? `Delivery ${deliveryShortText(option.leadTimeDays)} · ` : ""}
                                 {option.valid ? (option.validUntil ? `valid to ${day(option.validUntil)}` : "no expiry given") : `expired ${day(option.validUntil)}`}
                                 {option.forThisRequest ? "" : " · earlier request"}
                               </Typography>
@@ -784,7 +788,7 @@ const recordHint = (view: StockLinePrice) => {
 };
 
 const deliveryShort = (days?: number | null, fromStock?: number | null) => {
-  const when = !days ? "" : days % 7 === 0 ? `${days / 7} week${days === 7 ? "" : "s"}` : `${days} day${days === 1 ? "" : "s"}`;
+  const when = !days ? "" : deliveryText(days);
   if (fromStock && fromStock > 0) return ` · ${qty(fromStock)} ex stock, balance ${when || "to follow"}`;
   return when ? ` · ${when}` : "";
 };
