@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ClosingBand, { CLOSING_COLUMNS } from './ClosingBand';
 import type { DeadlineBoardDTO } from '../../../api/services/dashboardService';
@@ -91,7 +91,7 @@ describe('ClosingBand — populated', () => {
     expect(screen.getByText('4–7 days')).toBeInTheDocument();
     // The tallest column is the scale, and it is not a tick.
     expect(barFor('days_8_30')).toHaveAttribute('data-zero', 'false');
-    expect(barFor('days_8_30')).toHaveStyle({ height: '148px' });
+    expect(barFor('days_8_30')).toHaveStyle({ height: '76px' });
   });
 
   // The acceptance test for the whole screen: a figure that cannot open the rows it counted does
@@ -150,7 +150,8 @@ describe('ClosingBand — empty', () => {
       expect(barFor(column.key)).toHaveStyle({ height: '3px' });
     }
     expect(screen.getByText('No closing date')).toBeInTheDocument();
-    expect(screen.getAllByRole('button')).toHaveLength(CLOSING_COLUMNS.length);
+    // The band's own "how to read this" key is a button too; the columns are the ones in the plot.
+    expect(within(screen.getByRole('group', { name: 'Open enquiries by time left' })).getAllByRole('button')).toHaveLength(CLOSING_COLUMNS.length);
   });
 
   // "All clear" would be the screen's first lie: on a pre-launch tenant an empty urgency board

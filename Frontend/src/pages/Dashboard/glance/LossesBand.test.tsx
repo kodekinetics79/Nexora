@@ -73,9 +73,9 @@ describe('LossesBand — the horizon', () => {
     expect(screen.getByTestId('loss-bar-UNRECORDED')).toHaveAttribute('data-side', 'below');
 
     // One ruler: the tallest count sets it, and every other bar is that fraction of it. 9 of 14
-    // over an 84px maximum is 54px, and 14 is the full 84 whichever side of the line it is on.
-    expect(screen.getByTestId('loss-bar-AUTO_EXPIRED')).toHaveStyle({ height: '84px' });
-    expect(screen.getByTestId('loss-bar-PRICE')).toHaveStyle({ height: '54px' });
+    // over a 54px maximum is 35px, and 14 is the full 54 whichever side of the line it is on.
+    expect(screen.getByTestId('loss-bar-AUTO_EXPIRED')).toHaveStyle({ height: '54px' });
+    expect(screen.getByTestId('loss-bar-PRICE')).toHaveStyle({ height: '35px' });
   });
 
   it('colours the two halves apart: graphite above, oxide below', async () => {

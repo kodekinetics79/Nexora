@@ -13,7 +13,6 @@ import {
   ListItemButton,
   ListItemText,
   Paper,
-  Stack,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -56,61 +55,63 @@ export default function KpiCard({ kpi, index = 0 }: { kpi: Release01KpiDTO; inde
   const drillDownRecords = kpi.drillDownIdentifiers;
   const canDrillDown = kpi.state === 'available' && drillDownRecords.length > 0;
 
+  const records = `${drillDownRecords.length} record${drillDownRecords.length === 1 ? '' : 's'}`;
+
+  /**
+   * A slim tile: the label, the figure, and — when the KPI can open its rows — the way to them.
+   * The definition sits behind the tile's tooltip rather than under the figure, because this row
+   * sits above the bands and has to cost one line of the screen, not a third of it.
+   */
   return (
     <Paper
       component="article"
       variant="outlined"
       className="nx-neu nx-enter"
       data-decorative-motion="true"
+      aria-label={`${kpi.label}: ${formatKpiValue(kpi)}. ${kpi.definition}`}
       style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
       sx={(theme) => ({
-        // The dashboard's clay (glance/neumorphic.ts): a raised key that rises further on hover.
-        ...neuSlab(theme.palette.mode, 12),
-        p: 2.5, minHeight: 170, borderRadius: 5, display: 'flex', flexDirection: 'column',
-        transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 180ms ease-out',
-        '&:hover': { transform: 'translateY(-2px)', boxShadow: neuRaised(theme.palette.mode, 16) },
-        '@media (prefers-reduced-motion: reduce)': { transition: 'none', '&:hover': { transform: 'none' } },
+        ...neuSlab(theme.palette.mode, 6),
+        px: 2, py: 1, borderRadius: 3.5, minWidth: 0,
+        display: 'flex', alignItems: 'center', gap: 1.5,
+        transition: 'box-shadow 180ms ease-out',
+        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 8) },
+        '@media (prefers-reduced-motion: reduce)': { transition: 'none' },
       })}
     >
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}>
-        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
-          {kpi.label}
-        </Typography>
-        <Chip
-          size="small"
-          label={kpi.state === 'available' ? 'Available' : 'Insufficient data'}
-          color={kpi.state === 'available' ? 'success' : 'default'}
-          variant="outlined"
-        />
-      </Stack>
-      <Typography
-        variant={kpi.state === 'available' ? 'h4' : 'h6'}
-        sx={{ mt: 1.5, fontWeight: 900, fontVariantNumeric: 'tabular-nums', color: kpi.state === 'available' ? 'text.primary' : 'text.secondary' }}
+      <Tooltip
+        title={kpi.state === 'insufficient_data' && kpi.insufficientDataReason
+          ? `${kpi.definition} ${kpi.insufficientDataReason}`
+          : kpi.definition}
+        placement="bottom-start"
       >
-        {formatKpiValue(kpi)}
-      </Typography>
-      <Tooltip title={kpi.definition} placement="top-start">
-        <Typography
-          variant="body2"
-          sx={{ mt: 1, color: 'text.secondary', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-        >
-          {kpi.definition}
-        </Typography>
+        <Box sx={{ minWidth: 0, flexGrow: 1 }}>
+          <Typography
+            variant="caption"
+            sx={{ display: 'block', fontWeight: 700, color: 'text.secondary', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >
+            {kpi.label}
+          </Typography>
+          <Typography
+            sx={{
+              fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontSize: kpi.state === 'available' ? 22 : 15,
+              fontWeight: 900, lineHeight: 1.15, fontVariantNumeric: 'tabular-nums',
+              color: kpi.state === 'available' ? 'text.primary' : 'text.secondary',
+            }}
+          >
+            {formatKpiValue(kpi)}
+          </Typography>
+        </Box>
       </Tooltip>
-      {kpi.state === 'insufficient_data' && kpi.insufficientDataReason && (
-        <Typography variant="caption" sx={{ mt: 1, color: 'text.secondary' }}>
-          {kpi.insufficientDataReason}
-        </Typography>
-      )}
-      <Box sx={{ flexGrow: 1 }} />
       {canDrillDown && (
         <Button
           size="small"
           endIcon={<DrillDownIcon />}
           onClick={() => setDrillDownOpen(true)}
-          sx={{ alignSelf: 'flex-start', mt: 1, px: 0 }}
+          aria-label={`View ${records} behind ${kpi.label}`}
+          sx={{ flexShrink: 0, px: 0.75, minWidth: 0, whiteSpace: 'nowrap' }}
         >
-          View {kpi.drillDownIdentifiers.length} record{kpi.drillDownIdentifiers.length === 1 ? '' : 's'}
+          {records}
         </Button>
       )}
       <Dialog open={drillDownOpen} onClose={() => setDrillDownOpen(false)} fullWidth maxWidth="sm">

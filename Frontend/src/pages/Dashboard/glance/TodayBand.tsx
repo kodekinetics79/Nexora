@@ -32,10 +32,10 @@ const MAX_ROWS = 5;
 /** How far from "now" each end of the shared axis reaches. Fixed, so rows are comparable. */
 export const AXIS_DAYS = 14;
 
-const AXIS_WIDTH = 120;
-const AXIS_HEIGHT = 26;
-const AXIS_PAD = 8;
-const ROW_HEIGHT = 64;
+const AXIS_WIDTH = 92;
+const AXIS_HEIGHT = 22;
+const AXIS_PAD = 6;
+const ROW_HEIGHT = 34;
 /** The list holds five rows' worth of height whether it has five rows, one, or none. */
 const LIST_MIN_HEIGHT = ROW_HEIGHT * MAX_ROWS;
 
@@ -162,11 +162,13 @@ function AxisHeader() {
         flexShrink: 0,
         display: 'grid',
         gridTemplateColumns: '1fr auto 1fr',
+        columnGap: '4px',
         alignItems: 'baseline',
         color: 'text.secondary',
-        fontSize: 10.5,
+        fontSize: 9,
         fontWeight: 700,
-        letterSpacing: '0.04em',
+        letterSpacing: '0.02em',
+        whiteSpace: 'nowrap',
         textTransform: 'uppercase',
       }}
     >
@@ -180,29 +182,29 @@ function AxisHeader() {
 function RowBody({ item, due }: { item: CommercialAttentionItem; due: DueReading | null }) {
   return (
     <>
-      <Stack spacing={0.25} sx={{ flexGrow: 1, minWidth: 0 }}>
+      <Stack spacing={0} sx={{ flexGrow: 1, minWidth: 0 }}>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', minWidth: 0 }}>
           <Typography
             component="span"
             sx={{
-              fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700, fontSize: 15,
+              fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700, fontSize: 13,
               fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
             }}
           >
             {item.nexoraSerial || item.reference}
           </Typography>
-          <Typography component="span" variant="body2" sx={{ color: 'text.primary', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <Typography component="span" sx={{ fontSize: 13, color: 'text.primary', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {item.reason}
           </Typography>
         </Stack>
-        <Typography variant="caption" sx={{ color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <Typography variant="caption" sx={{ fontSize: 11, lineHeight: 1.3, color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {item.customerName || 'Customer not recorded'} · {item.ownerName ? `Owner ${item.ownerName}` : 'No owner assigned'}
         </Typography>
       </Stack>
       <Typography
         component="span"
         sx={{
-          width: 96, flexShrink: 0, textAlign: 'right', fontSize: 13, fontWeight: 700,
+          width: 70, flexShrink: 0, textAlign: 'right', fontSize: 12, fontWeight: 700,
           fontVariantNumeric: 'tabular-nums', color: 'text.primary',
         }}
       >
@@ -250,7 +252,8 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
       step="5"
       title="What needs you today"
       index={index}
-      minHeight={468}
+      minHeight={240}
+      hint={`Left of the line is late, right of it is still to come. Each end of the line is ${AXIS_DAYS} days from now.`}
       loading={query.isLoading}
       error={presented && !forbidden && !hasData ? presented.message : null}
       refreshFailedAt={presented && !forbidden && hasData ? query.dataUpdatedAt : null}
@@ -266,10 +269,15 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
         governed: false,
       }}
     >
-      <Stack spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}>
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'baseline', px: 1.5 }}>
-          <Box sx={{ flexGrow: 1 }} />
-          <Box sx={{ width: 96, flexShrink: 0 }} />
+      <Stack spacing={0.5} sx={{ flexGrow: 1, minWidth: 0 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', px: 1 }}>
+          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+            {/* Deliberately a way through, never a count: see the note at the top of this file. */}
+            <Button size="small" endIcon={<GoIcon />} onClick={() => navigate('/sales/today')} sx={{ fontWeight: 700, px: 0.5, minHeight: 0, py: 0 }}>
+              See all in Sales today
+            </Button>
+          </Box>
+          <Box sx={{ width: 70, flexShrink: 0 }} />
           <AxisHeader />
         </Stack>
 
@@ -280,12 +288,12 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
               borderRadius: 3,
               display: 'grid',
               placeItems: 'center',
-              p: 3,
+              p: 1.5,
             }}
           >
-            <Stack spacing={1.5} sx={{ maxWidth: 460, alignItems: 'flex-start' }}>
+            <Stack spacing={1} sx={{ maxWidth: 420, alignItems: 'flex-start' }}>
               <NothingScheduledIcon sx={{ color: 'text.secondary' }} />
-              <Typography sx={{ lineHeight: 1.5 }}>{NOTHING_SCHEDULED_SENTENCE}</Typography>
+              <Typography variant="body2" sx={{ lineHeight: 1.45 }}>{NOTHING_SCHEDULED_SENTENCE}</Typography>
               <Button
                 variant="outlined"
                 size="small"
@@ -312,11 +320,12 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
               const surface = {
                 minHeight: ROW_HEIGHT,
                 // Each thing that needs you is a soft strip standing out of the band's tray.
-                borderRadius: 3,
+                borderRadius: 2.5,
                 boxShadow: 'var(--nx-neu-raised-sm)',
-                mb: 1.5,
-                px: 1.5,
-                gap: 1.5,
+                mb: 0.5,
+                px: 1,
+                py: 0,
+                gap: 1,
                 alignItems: 'center',
               } as const;
 
@@ -350,19 +359,6 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
           </List>
         )}
 
-        <Stack
-          direction={{ xs: 'column', sm: 'row' }}
-          spacing={1}
-          sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', px: 1.5, pt: 0.5 }}
-        >
-          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
-            Left of the line is late, right of it is still to come. Each end of the line is {AXIS_DAYS} days from now.
-          </Typography>
-          {/* Deliberately a way through, never a count: see the note at the top of this file. */}
-          <Button size="small" endIcon={<GoIcon />} onClick={() => navigate('/sales/today')} sx={{ fontWeight: 700, flexShrink: 0 }}>
-            See all in Sales today
-          </Button>
-        </Stack>
       </Stack>
     </BandShell>
   );

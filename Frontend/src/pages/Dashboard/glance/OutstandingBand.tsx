@@ -56,23 +56,25 @@ const FUNNEL_STAGES: readonly { key: PipelineStageDTO['key']; label: string }[] 
 ]);
 
 /** The sent book's geometry. Fixed, so the bar is the same object at 4 quotes and at 400. */
-const BOOK_W = 560;
-const BOOK_BAR_Y = 10;
-const BOOK_BAR_H = 46;
-const BOOK_H = 132;
+const BOOK_W = 440;
+const BOOK_BAR_Y = 8;
+const BOOK_BAR_H = 28;
+const BOOK_H = 76;
 /**
  * The shortest a segment carrying quotes may be drawn, and the space one direct label needs.
  * A single quote beside two hundred is a sub-pixel sliver, and an invisible segment next to the
  * numeral "1" reads as a rendering fault — the numeral is the value, the length is the comparison.
  */
 const MIN_SEGMENT = 5;
-const LABEL_GAP = 128;
+const LABEL_GAP = 108;
 
 /** The funnel's geometry, lifted from the executive FunnelPanel this band replaces. */
-const FUNNEL_W = 520;
-const FUNNEL_ROW = 38;
-const FUNNEL_GAP = 10;
+const FUNNEL_W = 440;
+const FUNNEL_ROW = 22;
+const FUNNEL_GAP = 4;
 const FUNNEL_LABEL_W = 118;
+/** The right-hand column each stage's money is printed in, clear of the longest bar and its count. */
+const FUNNEL_MONEY_W = 80;
 const FUNNEL_H = FUNNEL_STAGES.length * (FUNNEL_ROW + FUNNEL_GAP) - FUNNEL_GAP;
 /** A measured zero: a short tick of the bar's own colour sitting on the axis, never a blank row. */
 const ZERO_TICK = 3;
@@ -123,6 +125,21 @@ const segmentWidths = (counts: number[], width: number): number[] => {
   const slackTotal = slack.reduce((sum, w) => sum + w, 0);
   if (slackTotal <= 0) return floored;
   return floored.map((w, i) => w - (slack[i] / slackTotal) * overflow);
+};
+
+/**
+ * "SAR 2.14M" rather than "SAR 2,140,000.00": the figure sits in an 80px column beside its bar.
+ * Falls back to the full format for a currency code Intl does not know, as formatMoney does.
+ */
+const compactMoney = (value: number, currency: string | null | undefined): string => {
+  const code = currency?.trim();
+  try {
+    return new Intl.NumberFormat('en-US', code
+      ? { style: 'currency', currency: code, currencyDisplay: 'code', notation: 'compact', maximumFractionDigits: 2 }
+      : { notation: 'compact', maximumFractionDigits: 2 }).format(value).replace(/\u00a0/g, ' ');
+  } catch {
+    return formatMoney(value, currency);
+  }
 };
 
 export default function OutstandingBand({ from, to, index = 2 }: OutstandingBandProps) {
@@ -189,10 +206,9 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
       <svg
         viewBox={`0 0 ${BOOK_W} ${BOOK_H}`}
         width="100%"
-        height={BOOK_H}
         role="img"
         aria-label={bookDescription}
-        style={{ display: 'block', minWidth: 340, overflow: 'visible' }}
+        style={{ display: 'block', height: 'auto', minWidth: 300, maxWidth: BOOK_W, overflow: 'visible' }}
       >
         <HatchPattern id={hatchId} />
         {/* The rail. It is drawn in every state, empty included: it is the part of the band that
@@ -225,19 +241,19 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
         {segments.map((segment, i) => (
           <g key={segment.key}>
             <line
-              x1={anchors[i]} y1={BOOK_BAR_Y + BOOK_BAR_H} x2={labelX[i]} y2={BOOK_BAR_Y + BOOK_BAR_H + 12}
+              x1={anchors[i]} y1={BOOK_BAR_Y + BOOK_BAR_H} x2={labelX[i]} y2={BOOK_BAR_Y + BOOK_BAR_H + 10}
               stroke="currentColor" strokeOpacity={0.28} strokeWidth={1}
             />
             <text
-              x={labelX[i]} y={BOOK_BAR_Y + BOOK_BAR_H + 32} textAnchor="middle"
-              fontSize={17} fontWeight={700} fill="currentColor"
+              x={labelX[i]} y={BOOK_BAR_Y + BOOK_BAR_H + 25} textAnchor="middle"
+              fontSize={14} fontWeight={700} fill="currentColor"
               style={{ fontVariantNumeric: 'tabular-nums' }}
             >
               {segment.count.toLocaleString()}
             </text>
             <text
-              x={labelX[i]} y={BOOK_BAR_Y + BOOK_BAR_H + 47} textAnchor="middle"
-              fontSize={11} fill="currentColor" fillOpacity={0.72}
+              x={labelX[i]} y={BOOK_BAR_Y + BOOK_BAR_H + 38} textAnchor="middle"
+              fontSize={10} fill="currentColor" fillOpacity={0.72}
             >
               {segment.words}
             </text>
@@ -247,26 +263,28 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
     </Box>
   );
 
-  const funnelDescription = `The funnel on one count axis: ${stages.map((s) => `${s.label} ${s.count}`).join(', ')}.`;
+  const funnelDescription = `The funnel on one count axis: ${stages.map((s) => {
+    if (!s.stated || s.value === null) return `${s.label} ${s.count}`;
+    return `${s.label} ${s.count}, ${formatMoney(s.value, s.valueCurrency)}`;
+  }).join(', ')}.`;
 
   const funnelChart = (
     <Box sx={{ overflowX: 'auto' }}>
       <svg
         viewBox={`0 0 ${FUNNEL_W} ${FUNNEL_H}`}
         width="100%"
-        height={FUNNEL_H}
         role="img"
         aria-label={funnelDescription}
-        style={{ display: 'block', minWidth: 320, overflow: 'visible' }}
+        style={{ display: 'block', height: 'auto', minWidth: 300, maxWidth: FUNNEL_W, overflow: 'visible' }}
       >
         {stages.map((stage, i) => {
           const y = i * (FUNNEL_ROW + FUNNEL_GAP);
-          const track = FUNNEL_W - FUNNEL_LABEL_W - 64;
+          const track = FUNNEL_W - FUNNEL_LABEL_W - 48 - FUNNEL_MONEY_W;
           const width = stage.count === 0 ? ZERO_TICK : Math.max(8, (track * stage.count) / funnelTop);
           const won = stage.key === 'won';
           return (
             <g key={stage.key} transform={`translate(0 ${y})`}>
-              <text x={0} y={FUNNEL_ROW / 2 + 4} fontSize={12} fontWeight={700} fill="currentColor">
+              <text x={0} y={FUNNEL_ROW / 2 + 4} fontSize={11} fontWeight={700} fill="currentColor">
                 {stage.label}
               </text>
               <rect
@@ -281,11 +299,26 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
               )}
               <text
                 data-testid={`funnel-count-${stage.key}`}
-                x={FUNNEL_LABEL_W + width + 8} y={FUNNEL_ROW / 2 + 5} fontSize={14} fontWeight={700}
+                x={FUNNEL_LABEL_W + width + 8} y={FUNNEL_ROW / 2 + 5} fontSize={13} fontWeight={700}
                 fill="currentColor" style={{ fontVariantNumeric: 'tabular-nums' }}
               >
                 {stage.count.toLocaleString()}
               </text>
+              {/* The stage's money, beside its own bar rather than in a paragraph under the chart,
+                  so the band costs no extra lines. Compact here; the exact figure is in the
+                  chart's description. A value the server would not state is never drawn as a
+                  number: it says so, and its reason is printed in full beneath. */}
+              {stage.stated && (
+                <text
+                  data-testid={`funnel-money-${stage.key}`}
+                  x={FUNNEL_W} y={FUNNEL_ROW / 2 + 5} textAnchor="end" fontSize={11}
+                  fontWeight={stage.value !== null ? 700 : 400}
+                  fill="currentColor" fillOpacity={stage.value !== null ? 0.78 : 0.6}
+                  style={{ fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {stage.value !== null ? compactMoney(stage.value, stage.valueCurrency) : 'value n/a'}
+                </text>
+              )}
             </g>
           );
         })}
@@ -303,12 +336,10 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
   // not state in one currency prints ITS OWN reason in full — truncating a reason to fit beside a
   // bar leaves the reader with a figure they cannot place and half a sentence about why.
   const valueLines = stages
-    .filter((stage) => stage.stated)
+    .filter((stage) => stage.stated && stage.value === null)
     .map((stage) => ({
       key: stage.key,
-      text: stage.value !== null
-        ? `${stage.label}: ${formatMoney(stage.value, stage.valueCurrency)}`
-        : `${stage.label}: value not available — ${stage.valueUnavailableReason ?? 'the server stated no reason.'}`,
+      text: `${stage.label}: value not available — ${stage.valueUnavailableReason ?? 'the server stated no reason.'}`,
     }));
 
   return (
@@ -316,65 +347,51 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
       title="What's out with customers, and where it stops"
       step="2"
       index={index}
-      minHeight={400}
+      minHeight={240}
+      hint={`The sent book: every quote that has left the building, in counts. ${HATCH_MEANING} — that money is still in the air. Where it stops: four counts on one axis. The stages count different populations, so no share of one is stated against another.`}
       loading={analytics.isLoading}
       error={presented && !forbidden ? presented.message : null}
       forbidden={forbidden}
       onRetry={() => void analytics.refetch()}
       seal={pipelineSeal(data)}
     >
-      <Stack
-        direction={{ xs: 'column', lg: 'row' }}
-        spacing={{ xs: 2.5, lg: 3 }}
-        sx={{ flexGrow: 1, minWidth: 0 }}
-      >
-        <Stack spacing={1} sx={{ flex: { lg: 7 }, minWidth: 0 }}>
-          <Typography component="h3" sx={{ fontWeight: 800, fontSize: 13 }}>
+      <Stack spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}>
+        <Stack spacing={0.5} sx={{ minWidth: 0 }}>
+          <Typography component="h3" sx={{ fontWeight: 800, fontSize: 11, lineHeight: 1.2 }}>
             The sent book
-          </Typography>
-          <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.45 }}>
-            Every quote that has left the building, in counts. {HATCH_MEANING} — that money is still in the air.
           </Typography>
           {bookUnavailable ? <Unavailable reason={bookUnavailable}>{bookChart}</Unavailable> : bookChart}
           {bookTotal === 0 && !bookUnavailable && (
-            <Typography variant="body2" data-testid="book-empty" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+            <Typography variant="caption" data-testid="book-empty" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
               No quote has been sent to a customer in this window, so the book is empty rather than
               balanced. The four states fill in from the left as quotes go out.
             </Typography>
           )}
         </Stack>
 
-        <Stack spacing={1} sx={{ flex: { lg: 5 }, minWidth: 0 }}>
-          <Typography component="h3" sx={{ fontWeight: 800, fontSize: 13 }}>
+        <Stack spacing={0.5} sx={{ minWidth: 0 }}>
+          <Typography component="h3" sx={{ fontWeight: 800, fontSize: 11, lineHeight: 1.2 }}>
             Where it stops
           </Typography>
-          <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.45 }}>
-            Four counts on one axis. The stages count different populations, so no share of one is
-            stated against another.
-          </Typography>
           {funnelChart}
+          {/* Only a stage that could not be valued gets a line here, carrying its own reason. */}
           {valueLines.length > 0 && (
-            <Stack spacing={0.25}>
-              {valueLines.map((line) => (
-                <Typography
-                  key={line.key}
-                  variant="caption"
-                  data-testid={`funnel-value-${line.key}`}
-                  sx={{ color: 'text.secondary', lineHeight: 1.45 }}
-                >
-                  {line.text}
-                </Typography>
+            <Typography variant="caption" component="p" sx={{ color: 'text.secondary', lineHeight: 1.45 }}>
+              {valueLines.map((line, i) => (
+                <span key={line.key} data-testid={`funnel-value-${line.key}`}>
+                  {i > 0 ? ' · ' : ''}{line.text}
+                </span>
               ))}
-            </Stack>
+            </Typography>
           )}
           {(data?.unownedQuotesExcluded ?? 0) > 0 && (
-            <Typography variant="body2" data-testid="unowned-excluded" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+            <Typography variant="caption" data-testid="unowned-excluded" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
               {plural(data!.unownedQuotesExcluded, 'quote is', 'quotes are')} not in any figure on this band.{' '}
               {data!.unownedQuotesExcludedReason}
             </Typography>
           )}
           {unknownStages > 0 && (
-            <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+            <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
               The server also returned {plural(unknownStages, 'stage', 'stages')} this screen does not yet
               know how to draw. They are not in the bars above.
             </Typography>

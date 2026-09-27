@@ -122,7 +122,7 @@ describe('OutstandingBand — the sent book', () => {
     const widths = ['won', 'lost'].map((key) =>
       Number(band().querySelector(`[data-testid="book-segment-${key}"]`)!.getAttribute('data-width')));
     expect(widths[1]).toBeGreaterThanOrEqual(5);
-    expect(widths[0] + widths[1]).toBeCloseTo(560, 5);
+    expect(widths[0] + widths[1]).toBeCloseTo(440, 5);
   });
 
   it('keeps the frame and states the reason when the server sent no won stage at all', async () => {
@@ -161,7 +161,10 @@ describe('OutstandingBand — the funnel', () => {
     expect(quoted).toHaveTextContent('span three currencies with no approved rate between them');
     // Not a 0 and not a dash. The distinction is the whole product rule.
     expect(quoted.textContent).not.toMatch(/[—-]\s*$/);
-    expect(screen.getByTestId('funnel-value-won')).toHaveTextContent('380,000');
+    // A stated value sits beside its bar, compact, and never gets a reason line of its own.
+    expect(screen.getByTestId('funnel-money-won')).toHaveTextContent('380K');
+    expect(screen.getByTestId('funnel-money-quoted')).toHaveTextContent('value n/a');
+    expect(screen.queryByTestId('funnel-value-won')).toBeNull();
   });
 
   it('discloses the quotes deliberately left out of every figure, with the server\'s reason', async () => {

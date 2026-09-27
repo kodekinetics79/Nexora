@@ -201,7 +201,9 @@ export default function DashboardPage() {
         ...neuCssVariables(theme.palette.mode),
         // Theme inks were derived against white paper; the clay is darker, so re-derive them here.
         ...clayInkOverrides(theme.palette),
-        maxWidth: 1280, mx: 'auto', p: { xs: 1.5, sm: 2.5, md: 4 },
+        // Wide enough for three bands side by side; capped so a very wide monitor gets three
+        // generous columns rather than a fourth that would break the reading order.
+        maxWidth: 1560, mx: 'auto', p: { xs: 1.5, md: 2 },
         backgroundColor: NEU_SURFACE[theme.palette.mode],
         borderRadius: { xs: 3, md: 5 },
       })}
@@ -216,80 +218,64 @@ export default function DashboardPage() {
           body: { backgroundColor: `${NEU_SURFACE[theme.palette.mode]} !important`, backgroundImage: 'none !important' },
         })}
       />
-      <Typography
-        variant="h4"
-        component="h1"
-        sx={(theme) => ({
-          fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em',
-          textShadow: neuEmboss(theme.palette.mode),
-        })}
-      >
-        Dashboard
-      </Typography>
-
       {/*
-        0 · Whose numbers, and over what period.
+        0 · Whose numbers, and over what period — on the same line as the title.
 
         A strip, not a card: no glass, no rim, no elevation. Everything below it is a band, and if
         this looked like one it would read as a figure. The scope on the left is the server's own
         word in plain text — never a control, because the reader cannot choose their scope and a
         thing that looks pressable says they can. The period on the right is chips rather than two
         date inputs: picking "Last 90 days" is one press, and typing two ISO dates to see a quarter
-        was a day-one defect on the screen this replaces.
+        was a day-one defect on the screen this replaces. Title and strip share one line so the
+        six bands start high enough to fit one glance.
       */}
       <Box
         component="section"
         aria-label="Whose numbers, and over what period"
         sx={{
-          minHeight: 56,
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: 1.5,
-          py: 1,
+          columnGap: 3,
+          rowGap: 1,
+          mb: 1.5,
         }}
       >
-        <Box sx={{ minWidth: 0 }}>
-          <Typography data-testid="scope-sentence" variant="body2" sx={{ fontWeight: 700 }}>
-            {scopeSentence.words}
-            {scopeSentence.gloss && (
-              <Box component="span" sx={{ fontWeight: 400, color: 'text.secondary' }}>
-                {` — ${scopeSentence.gloss}`}
-              </Box>
-            )}
-          </Typography>
-          {/*
-            This word comes from ONE aggregate (/performance) and is not a fact about the whole
-            screen: the six-month history is company-wide for every reader, and the deadline board
-            publishes no scope word at all. Saying so here is the difference between a heading and
-            a claim, and it points at the seal that carries the truth band by band.
-          */}
-          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
-            Each band states its own scope and freshness on its seal.
-          </Typography>
-        </Box>
-
-        <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
-          {/*
-            Which bands these dates actually move. A period control that silently governs one band
-            out of four is the same lie as one that claims to govern all of them, so the strip names
-            the band by the title the reader can see, and the seals repeat it band by band.
-          */}
+        <Stack direction="row" spacing={2} sx={{ alignItems: 'baseline', minWidth: 0, flexWrap: 'wrap', rowGap: 0.5 }}>
           <Typography
-            variant="caption"
-            title="Steps 4, 5 and 6 have their own fixed windows, set by the server."
-            data-testid="dates-govern"
-            sx={{
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-              fontSize: 11,
-              fontWeight: 700,
-              color: 'text.secondary',
-            }}
+            variant="h5"
+            component="h1"
+            sx={(theme) => ({
+              fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em',
+              textShadow: neuEmboss(theme.palette.mode),
+            })}
           >
-            {`Dates govern · ${GOVERNED_BANDS.join(' · ')}`}
+            Dashboard
           </Typography>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography data-testid="scope-sentence" variant="body2" sx={{ fontWeight: 700 }}>
+              {scopeSentence.words}
+              {scopeSentence.gloss && (
+                <Box component="span" sx={{ fontWeight: 400, color: 'text.secondary' }}>
+                  {` — ${scopeSentence.gloss}`}
+                </Box>
+              )}
+            </Typography>
+            {/*
+              This word comes from ONE aggregate (/performance) and is not a fact about the whole
+              screen: the six-month history is company-wide for every reader, and the deadline board
+              publishes no scope word at all. Saying so here is the difference between a heading and
+              a claim, and it points at the seal that carries the truth band by band.
+            */}
+            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', lineHeight: 1.3 }}>
+              Each band states its own scope and freshness on its seal.
+            </Typography>
+          </Box>
+        </Stack>
+
+        {/* The period keys, with the bands they move named directly beneath them. */}
+        <Stack spacing={0.75} sx={{ alignItems: { xs: 'flex-start', md: 'flex-end' } }}>
           <Stack direction="row" spacing={0.75} role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
             {PERIOD_CHOICES.map((choice) => (
               <Chip
@@ -307,7 +293,7 @@ export default function DashboardPage() {
                   const chosen = period === choice.key;
                   return {
                     ...NEU_TRANSITION,
-                    height: 32, px: 0.75, fontWeight: 700,
+                    height: 28, px: 0.5, fontWeight: 700,
                     backgroundColor: NEU_SURFACE[mode],
                     border: '1px solid',
                     borderColor: chosen ? 'var(--nx-glance-seal-rim)' : 'transparent',
@@ -320,6 +306,25 @@ export default function DashboardPage() {
               />
             ))}
           </Stack>
+          {/*
+            Which bands these dates actually move. A period control that silently governs one band
+            out of four is the same lie as one that claims to govern all of them, so the strip names
+            the band by the title the reader can see, and the seals repeat it band by band.
+          */}
+          <Typography
+            variant="caption"
+            title="Steps 4, 5 and 6 have their own fixed windows, set by the server."
+            data-testid="dates-govern"
+            sx={{
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+              fontSize: 10,
+              fontWeight: 700,
+              color: 'text.secondary',
+            }}
+          >
+            {`Dates govern · ${GOVERNED_BANDS.join(' · ')}`}
+          </Typography>
         </Stack>
       </Box>
 
@@ -353,7 +358,92 @@ export default function DashboardPage() {
         </Alert>
       )}
 
-      <Stack spacing={4}>
+      {/*
+        The headline figures, one slim row above the bands.
+
+        The measured half of the Release 01 snapshot, and only that half. Fourteen of its eighteen
+        KPIs are hardcoded insufficient and can never become available — the win rate's own reason
+        says quote outcomes bypass the governed event spine — so rendering all eighteen is how a
+        screen becomes furniture by week three. But four CAN be measured, they are scoped per reader
+        and windowed by the period control above, and they are the figures a reader looks for first,
+        so they sit at the top rather than under the fold. The rest are counted in a sentence. This
+        shares VerdictBand's query key, so it costs no second request.
+
+        KpiCard rather than a plainer figure on purpose: it carries the drill-down to the exact records
+        a KPI counted, and the rule this whole screen is held to is that a figure which cannot open
+        its own rows does not ship.
+
+        The screens behind the bands share the row, each shown only when the reader's own module
+        grant would let the route open — a link that lands on "Access denied" is worse than no link.
+      */}
+      <Box
+        component="section"
+        aria-label="Verified performance"
+        sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 2, mb: 2.5 }}
+      >
+        {/* Named for assistive tech and for the section's landmark; the tiles say what they are. */}
+        {verified.length > 0 && (
+          <Typography
+            component="h2"
+            sx={{
+              position: 'absolute', width: 1, height: 1, p: 0, m: -1, overflow: 'hidden',
+              clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
+            }}
+          >
+            Verified performance
+          </Typography>
+        )}
+        {verified.length > 0 && (
+          <Box
+            sx={{
+              flex: '999 1 640px', minWidth: 0,
+              display: 'grid', gap: 2,
+              gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+            }}
+          >
+            {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
+          </Box>
+        )}
+        <Stack spacing={0.5} sx={{ flex: '1 1 auto', alignItems: { xs: 'flex-start', md: 'flex-end' } }}>
+          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { md: 'flex-end' } }}>
+            {hasPermission('Leads') && (
+              <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 1.5 })}>
+                Every deadline in full
+              </Button>
+            )}
+            {hasPermission('Dashboard') && (
+              <Button size="small" onClick={() => navigate('/sales/performance')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 1.5 })}>
+                Performance by rep
+              </Button>
+            )}
+            {hasPermission('Leads') && (
+              <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 1.5 })}>
+                Documents to check
+              </Button>
+            )}
+          </Stack>
+          {verified.length > 0 && notYetMeasurable > 0 && (
+            <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.3 }}>
+              {notYetMeasurable} further measures are defined but not yet reportable; the performance screen lists why.
+            </Typography>
+          )}
+        </Stack>
+      </Box>
+
+      {/*
+        The six bands as one grid, read left to right and then down — the same sentence as before,
+        1 → 6, laid out so the whole of it fits one glance on a laptop instead of a long scroll.
+        Columns are at least 380px so every band keeps a legible chart; below that the grid drops
+        to two columns, then one, and the order never changes.
+      */}
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 380px), 1fr))',
+          gap: { xs: 2, md: 2.5 },
+          alignItems: 'stretch',
+        }}
+      >
         <VerdictBand from={applied.from} to={applied.to} index={1} />
 
         {/*
@@ -381,7 +471,7 @@ export default function DashboardPage() {
           onRetry={canRequestSeries ? () => void series.refetch() : undefined}
           index={6}
         />
-      </Stack>
+      </Box>
 
       {/*
         The measured half of the Release 01 snapshot, and only that half.
@@ -398,44 +488,6 @@ export default function DashboardPage() {
         a KPI counted, and the rule this whole screen is held to is that a figure which cannot open
         its own rows does not ship.
       */}
-      {verified.length > 0 && (
-        <Box sx={{ mt: 3 }}>
-          <Typography variant="h6" component="h2" sx={{ fontWeight: 700, fontSize: 15 }}>
-            Verified performance
-          </Typography>
-          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 3, mt: 2 }}>
-            {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
-          </Stack>
-          {notYetMeasurable > 0 && (
-            <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 1 }}>
-              {notYetMeasurable} further measures are defined but not yet reportable. They are listed
-              on the performance screen with the server&apos;s reason for each.
-            </Typography>
-          )}
-        </Box>
-      )}
-
-      {/*
-        The screens behind the bands, each shown only when the reader's own module grant would let
-        the route open — a link that lands on "Access denied" is worse than no link.
-      */}
-      <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 2, mt: 4 }}>
-        {hasPermission('Leads') && (
-          <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
-            Every deadline in full
-          </Button>
-        )}
-        {hasPermission('Dashboard') && (
-          <Button size="small" onClick={() => navigate('/sales/performance')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
-            Performance by rep
-          </Button>
-        )}
-        {hasPermission('Leads') && (
-          <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
-            Documents to check
-          </Button>
-        )}
-      </Stack>
     </Box>
   );
 }

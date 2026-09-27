@@ -43,13 +43,13 @@ const STATED = 'customer_stated';
 const NEVER = 'never_established';
 
 /** Each half of the plot. Held in every state, empty included, so the horizon never moves. */
-const HALF_H = 124;
+const HALF_H = 84;
 /** The tallest a column may be drawn, leaving its count numeral room above or below it. */
-const MAX_BAR = 84;
+const MAX_BAR = 54;
 /** A reason with losses against it is never a sub-pixel sliver next to its own numeral. */
 const MIN_BAR = 6;
 /** The gutter carrying the two group headings, one on each side of the horizon. */
-const GUTTER = 176;
+const GUTTER = 118;
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 
@@ -126,7 +126,7 @@ const Column = ({ row, above, scale }: ColumnProps) => {
     <Tooltip title={valueSentence(row)} placement="top">
       <Box
         data-testid={`loss-column-${row.code}`}
-        sx={{ flex: '1 1 0', minWidth: 62, display: 'flex', flexDirection: 'column' }}
+        sx={{ flex: '1 1 0', minWidth: 48, display: 'flex', flexDirection: 'column' }}
       >
         <Box sx={{
           height: HALF_H, display: 'flex', flexDirection: 'column', alignItems: 'center',
@@ -177,36 +177,33 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
       title="Why we lost"
       step="3"
       index={index}
-      minHeight={400}
+      minHeight={240}
+      hint="Reasons the customer gave rise above the line. Losses we never found a reason for hang below it, on the same scale."
       loading={analytics.isLoading}
       error={presented && !forbidden ? presented.message : null}
       forbidden={forbidden}
       onRetry={() => void analytics.refetch()}
       seal={pipelineSeal(data)}
     >
-      <Stack spacing={1.5} sx={{ flexGrow: 1, minWidth: 0 }}>
-        <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.45 }}>
-          Reasons the customer gave rise above the line. Losses we never found a reason for hang
-          below it, on the same scale.
-        </Typography>
+      <Stack spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}>
 
         <Box sx={{ overflowX: 'auto' }}>
-          <Box sx={{ position: 'relative', display: 'flex', minWidth: 520 }}>
+          <Box sx={{ position: 'relative', display: 'flex', minWidth: 300 }}>
             {/* The gutter's two headings sit on the same sides of the horizon as the columns they
                 total, so neither needs a swatch to say which half it belongs to. */}
-            <Box sx={{ width: GUTTER, flexShrink: 0, pr: 2 }}>
+            <Box sx={{ width: GUTTER, flexShrink: 0, pr: 1.5 }}>
               <Box sx={{ height: HALF_H, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', pb: 0.5 }}>
                 <Typography
                   component="p"
                   data-testid="losses-stated-total"
                   sx={{
                     fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
-                    fontSize: 24, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums',
+                    fontSize: 20, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums',
                   }}
                 >
                   {statedTotal.toLocaleString()}
                 </Typography>
-                <Typography sx={{ fontSize: 12, fontWeight: 700, lineHeight: 1.3, color: 'text.secondary' }}>
+                <Typography sx={{ fontSize: 11, fontWeight: 700, lineHeight: 1.25, color: 'text.secondary' }}>
                   Reasons the customer gave
                 </Typography>
               </Box>
@@ -217,12 +214,12 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
                   data-testid="losses-never-total"
                   sx={{
                     fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
-                    fontSize: 36, lineHeight: 1.05, fontVariantNumeric: 'tabular-nums',
+                    fontSize: 28, lineHeight: 1.05, fontVariantNumeric: 'tabular-nums',
                   }}
                 >
                   {neverTotal.toLocaleString()}
                 </Typography>
-                <Typography sx={{ fontSize: 12, fontWeight: 700, lineHeight: 1.3, color: 'text.secondary' }}>
+                <Typography sx={{ fontSize: 11, fontWeight: 700, lineHeight: 1.25, color: 'text.secondary' }}>
                   We never found out
                 </Typography>
               </Box>
@@ -248,17 +245,17 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
         </Box>
 
         {isEmpty ? (
-          <Typography variant="body2" data-testid="losses-empty" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+          <Typography variant="caption" data-testid="losses-empty" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
             No quote has been marked lost or expired in this window, so there is nothing to explain
             yet. The line stays clean until one is — and a column below it will mean a loss nobody
             recorded a reason for.
           </Typography>
         ) : neverTotal === 0 ? (
-          <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
             Nothing hangs below the line: every loss in this window has a reason the customer gave.
           </Typography>
         ) : (
-          <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
             {plural(neverTotal, 'loss', 'losses')} below the line{' '}
             {neverTotal === 1 ? 'has' : 'have'} no reason from the customer behind{' '}
             {neverTotal === 1 ? 'it' : 'them'} — an expiry, a silence, or a reason nobody wrote down.
@@ -266,7 +263,7 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
         )}
 
         {ungrouped.length > 0 && (
-          <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
             The server also returned {plural(ungrouped.length, 'reason', 'reasons')} this screen cannot
             place on either side of the line. {plural(ungrouped.reduce((sum, r) => sum + r.count, 0), 'loss is', 'losses are')}{' '}
             not in the figures above.

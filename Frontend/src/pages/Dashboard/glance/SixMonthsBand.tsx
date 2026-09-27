@@ -70,12 +70,12 @@ const MONTHS_SHOWN = 6;
 // One geometry for both panels. The left gutter and the plot width have to be identical or the
 // columns stop lining up with the points below them, and the reader is silently comparing October
 // against November.
-const VIEW_W = 720;
-const AXIS_W = 52;
+const VIEW_W = 440;
+const AXIS_W = 44;
 const PAD_R = 16;
-const PAD_T = 12;
-const PLOT_H = 132;
-const LABELS_H = 24;
+const PAD_T = 10;
+const PLOT_H = 56;
+const LABELS_H = 22;
 const PANEL_H = PAD_T + PLOT_H;
 const PLOT_W = VIEW_W - AXIS_W - PAD_R;
 const BASELINE = PAD_T + PLOT_H;
@@ -219,7 +219,8 @@ export default function SixMonthsBand({
       title="The last six months"
       step="6"
       index={index}
-      minHeight={400}
+      minHeight={240}
+      hint="Background context. Everyone sees the same company-wide history here, whatever the other bands are scoped to."
       loading={loading}
       error={error}
       onRetry={onRetry}
@@ -233,19 +234,6 @@ export default function SixMonthsBand({
         governed: false,
       }}
     >
-      <Stack spacing={0.75} sx={{ mb: 1.5 }}>
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 0.75 }}>
-          <Chip
-            label="Background context"
-            size="small"
-            variant="outlined"
-            sx={{ height: 20, fontSize: 11, fontWeight: 700, color: 'text.secondary', borderColor: 'divider' }}
-          />
-          <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-            Everyone sees the same company-wide history here, whatever the bands above are scoped to.
-          </Typography>
-        </Stack>
-      </Stack>
 
       {empty ? (
         <Typography variant="body2" sx={{ color: 'text.secondary', mb: 1 }}>
@@ -257,9 +245,17 @@ export default function SixMonthsBand({
           the past, not something the reader can still act on. Named for what the server counts
           (Rfqs by CreatedDate month): "requests received" here read as the lead count the bands
           above call by that name, and disagreed with it. */}
-      <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: 'text.secondary' }}>
-        RFQs created{empty ? '' : ' · count'}
-      </Typography>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
+        <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: 'text.secondary' }}>
+          RFQs created{empty ? '' : ' · count'}
+        </Typography>
+        <Chip
+          label="Background context"
+          size="small"
+          variant="outlined"
+          sx={{ height: 20, fontSize: 11, fontWeight: 700, color: 'text.secondary', borderColor: 'divider' }}
+        />
+      </Stack>
       <Box
         component="svg"
         data-testid="six-months-requests"
@@ -303,7 +299,7 @@ export default function SixMonthsBand({
       </Box>
 
       {/* Order value — brass, and brass here means the newly won, not merely the large. */}
-      <Typography variant="caption" sx={{ display: 'block', mt: 1, fontWeight: 800, color: 'text.secondary' }}>
+      <Typography variant="caption" sx={{ display: 'block', mt: 0.5, fontWeight: 800, color: 'text.secondary' }}>
         Order value{currency ? ` · ${currency}` : empty || valueUnavailableReason ? '' : ' · currency not stated'}
       </Typography>
       {valueUnavailableReason ? (

@@ -63,7 +63,7 @@ export const CLOSING_COLUMNS: readonly BucketColumn[] = Object.freeze([
 ]);
 
 /** Plot height in px. Held in every state, so the band cannot change size when data arrives. */
-const PLOT_HEIGHT = 148;
+const PLOT_HEIGHT = 76;
 /** A measured zero. Three pixels of the column's own colour, sitting on the baseline. */
 const ZERO_TICK = 3;
 /**
@@ -146,7 +146,8 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
       title="What's closing on us"
       step={step}
       index={index}
-      minHeight={340}
+      minHeight={240}
+      hint="Open enquiries by how long is left to answer them. Press a column to open the ones it counted."
       loading={board.isLoading}
       error={failure && failure.status !== 403 ? failure.message : null}
       forbidden={failure && failure.status === 403 ? failure.message : null}
@@ -164,10 +165,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
         governed: false,
       }}
     >
-      <Stack spacing={1.5} sx={{ minWidth: 0 }}>
-        <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.45 }}>
-          Open enquiries by how long is left to answer them. Press a column to open the ones it counted.
-        </Typography>
+      <Stack spacing={1} sx={{ minWidth: 0 }}>
 
         <Box
           role="group"
@@ -175,7 +173,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
           sx={{
             display: 'grid',
             gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
-            gap: { xs: 1, sm: 2 },
+            gap: { xs: 0.5, sm: 0.75 },
             alignItems: 'end',
           }}
         >
@@ -194,12 +192,12 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                   flexDirection: 'column',
                   alignItems: 'stretch',
                   justifyContent: 'flex-end',
-                  borderRadius: 3,
-                  px: 0.75,
-                  pt: 1,
-                  pb: 1,
+                  borderRadius: 2.5,
+                  px: 0.5,
+                  pt: 0.75,
+                  pb: 0.75,
                   textAlign: 'center',
-                  boxShadow: neuRaised(theme.palette.mode, 4),
+                  boxShadow: neuRaised(theme.palette.mode, 3),
                   transition: 'transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 180ms ease-out',
                   '&:hover': { transform: 'translateY(-2px)', boxShadow: neuRaised(theme.palette.mode, 6) },
                   '&:active': { transform: 'translateY(1px)', boxShadow: neuInset(theme.palette.mode, 3) },
@@ -214,7 +212,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                   data-testid={`closing-value-${column.key}`}
                   sx={{
                     fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
-                    fontSize: { xs: 16, md: 20 }, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums',
+                    fontSize: { xs: 15, md: 17 }, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums',
                     color: 'text.primary',
                   }}
                 >
@@ -251,13 +249,13 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                 <Box aria-hidden sx={{ height: '1px', backgroundColor: 'divider', mt: '2px', mb: 0.75 }} />
                 <Typography
                   component="span"
-                  sx={{ fontSize: { xs: 10, sm: 11 }, fontWeight: 700, lineHeight: 1.25, color: 'text.primary' }}
+                  sx={{ fontSize: 10, fontWeight: 700, lineHeight: 1.2, color: 'text.primary' }}
                 >
                   {column.label}
                 </Typography>
                 <Typography
                   component="span"
-                  sx={{ fontSize: { xs: 10, sm: 11 }, lineHeight: 1.3, color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
+                  sx={{ fontSize: 10, lineHeight: 1.25, color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
                 >
                   {plural(column.lineItems, 'line', 'lines')}
                 </Typography>
@@ -270,25 +268,25 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
           /* Not "all clear". On a tenant with nothing in it an empty urgency board means no open
              enquiry has a deadline against it — that is an empty diary, not a quiet week, and
              telling a rep everything is under control would be the screen's first lie. */
-          <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
             Nothing is scheduled yet. No open enquiry is waiting on an answer, so there is no
             deadline to count down to — the columns fill in as enquiries arrive.
           </Typography>
         ) : (
-          <Stack spacing={0.5}>
-            <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+          <Stack spacing={0.25}>
+            <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
               {plural(board.data?.openLeads ?? 0, 'open enquiry', 'open enquiries')} carrying{' '}
               {plural(board.data?.openLineItems ?? 0, 'line', 'lines')}.
             </Typography>
             {(board.data?.lateIngestedExcludedLeads ?? 0) > 0 && (
-              <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+              <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
                 {board.data!.lateIngestedExcludedLeads.toLocaleString()} of them reached Nexora after their
                 own deadline had already passed. They sit under “Past deadline” because they are, but nobody
                 here answered late.
               </Typography>
             )}
             {model.unknownBuckets > 0 && (
-              <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+              <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
                 The server also returned {plural(model.unknownBuckets, 'group', 'groups')} of enquiries this
                 screen does not yet know how to show. They are not in the columns above.
               </Typography>

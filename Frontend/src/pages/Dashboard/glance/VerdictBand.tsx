@@ -63,8 +63,8 @@ const numeral = {
   fontVariantNumeric: 'tabular-nums',
 } as const;
 
-const COUNT_COLUMN = 64;
-const MAIN_BAR_HEIGHT = 34;
+const COUNT_COLUMN = 56;
+const MAIN_BAR_HEIGHT = 26;
 /** 40% of the main bar, so the prior window reads as an echo rather than as a second series. */
 const GHOST_BAR_HEIGHT = Math.round(MAIN_BAR_HEIGHT * 0.4);
 
@@ -358,7 +358,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
         won={current.won}
         scale={scale}
         height={MAIN_BAR_HEIGHT}
-        countSize={26}
+        countSize={22}
         lostLabel={current.lostLabel}
         wonLabel={current.wonLabel}
       />
@@ -377,7 +377,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
 
   const conversionSlot = publishedRate !== null ? (
     <Stack spacing={0.5} sx={{ minWidth: 0 }}>
-      <Typography component="p" sx={{ ...numeral, fontSize: 30, lineHeight: 1.05 }}>
+      <Typography component="p" sx={{ ...numeral, fontSize: 26, lineHeight: 1.05 }}>
         {`${publishedRate.toLocaleString()}%`}
       </Typography>
       <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
@@ -407,7 +407,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
       title="Did we win what we decided?"
       step="1"
       index={index}
-      minHeight={320}
+      minHeight={240}
       loading={performance.isLoading}
       error={performance.isError ? presentableErrorMessage(performance.error, undefined, 'list') : null}
       onRetry={() => {
@@ -422,21 +422,19 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
         governed: true,
       }}
     >
-      <Stack spacing={2} sx={{ flexGrow: 1 }}>
+      <Stack spacing={1.25} sx={{ flexGrow: 1 }}>
         <Typography
           component="p"
           data-testid="verdict-sentence"
-          sx={{ fontSize: { xs: 18, md: 20 }, fontWeight: 600, lineHeight: 1.4, color: 'text.primary', maxWidth: 720 }}
+          sx={{ fontSize: { xs: 15, md: 16 }, fontWeight: 600, lineHeight: 1.35, color: 'text.primary' }}
         >
           {sentence}
         </Typography>
 
-        <Stack
-          direction={{ xs: 'column', md: 'row' }}
-          spacing={{ xs: 2, md: 3 }}
-          sx={{ alignItems: { md: 'flex-start' }, flexGrow: 1 }}
-        >
-          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+        {/* Axis, then the win-rate slot beneath it: the band is a third of the screen wide, and
+            a side column would squeeze the two bars the reader is here to compare. */}
+        <Stack spacing={1.25} sx={{ flexGrow: 1 }}>
+          <Box sx={{ minWidth: 0 }}>
             {chartUnavailable ? (
               <Unavailable
                 reason={`The server did not state ${current.wonLabel.toLowerCase()} or ${current.lostLabel.toLowerCase()} counts for this window.`}
@@ -449,13 +447,13 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
             <Typography
               variant="caption"
               data-testid="verdict-ghost-note"
-              sx={{ display: 'block', mt: 1, color: 'text.secondary', lineHeight: 1.4 }}
+              sx={{ display: 'block', mt: 0.75, fontSize: 11, color: 'text.secondary', lineHeight: 1.35 }}
             >
               {ghostNote}
             </Typography>
           </Box>
 
-          <Stack spacing={1.5} sx={{ width: { xs: '100%', md: 260 }, flexShrink: 0 }}>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'flex-start', justifyContent: 'space-between', minWidth: 0 }}>
             {conversionSlot}
             {current.decided === 0 && (
               <Button
@@ -465,6 +463,8 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
                 size="small"
                 sx={{
                   alignSelf: 'flex-start',
+                  flexShrink: 0,
+                  whiteSpace: 'nowrap',
                   borderColor: seriesVar('brassBrand'),
                   color: 'var(--nx-glance-seal-ink)',
                   fontWeight: 700,
