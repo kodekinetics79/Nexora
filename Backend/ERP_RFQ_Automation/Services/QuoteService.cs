@@ -56,6 +56,8 @@ namespace ERP_RFQ_Automation.Services
         /// only) skips the check.
         /// </summary>
         Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
+        /// <summary>The rep downloaded the quote and uploaded it to the customer's own portal: record it as sent.</summary>
+        Task<PortalSubmissionResult> RecordPortalSubmissionAsync(long quoteId, long businessUnitId, string actor, long? actorUserId, string? portalReference, CancellationToken ct = default);
 
         /// <summary>
         /// The default covering e-mail for this quote — subject, plain-text body, attachment name
@@ -2497,6 +2499,82 @@ namespace ERP_RFQ_Automation.Services
                     throw;
                 }
                 return QuoteSendResult.Queued(false, false);
+            });
+        }
+
+        /// <summary>
+        /// Most customers (SEC, Aramco and alike) take quotes through their own procurement portal:
+        /// the rep downloads the PDF, uploads it there, and records it here. Without this the quote
+        /// would stay a draft forever: no follow-up, no revision rule, a wrong pipeline.
+        ///
+        /// The same gates as <see cref="SendQuoteEmailAsync"/>, in the same order, because what the
+        /// customer receives is the same document. The one difference is the below-floor gate: the
+        /// email path parks the send for a manager and sends it on approval, but a portal
+        /// submission has already happened outside Nexora, so it is refused with the reason instead.
+        /// </summary>
+        public async Task<PortalSubmissionResult> RecordPortalSubmissionAsync(
+            long quoteId, long businessUnitId, string actor, long? actorUserId, string? portalReference, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            if (string.IsNullOrWhiteSpace(actor)) throw new ArgumentException("Authenticated actor is required.", nameof(actor));
+            var reference = string.IsNullOrWhiteSpace(portalReference) ? null : portalReference.Trim();
+            if (reference is { Length: > 200 }) throw new InvalidOperationException("Keep the portal reference under 200 characters.");
+
+            if (!await _context.Quotes.AnyAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct))
+                throw new KeyNotFoundException("Quote not found");
+            if (await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                    .OpenQuoteImpacts(_context, businessUnitId, quoteId).AsNoTracking().AnyAsync(ct))
+                throw new InvalidOperationException(
+                    "This Quote Draft is stale because a customer revision was received. Review and resolve the revision impact before submitting it.");
+            var attestation = await new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(_context)
+                .EvaluateAsync(quoteId, businessUnitId, ct);
+            if (!attestation.Satisfied) return PortalSubmissionResult.Blocked("PRICE_ATTESTATION_REQUIRED", attestation.Reason!);
+            if (await EvaluateTaxDerivationAsync(quoteId, businessUnitId, ct) is { } taxBlocker)
+                return PortalSubmissionResult.Blocked("TAX_DERIVATION_REQUIRED", taxBlocker);
+            if (_belowFloorGuard is not null && (await _belowFloorGuard.CheckQuoteSendAsync(quoteId, businessUnitId, ct)).IsBelowFloor)
+                return PortalSubmissionResult.Blocked("BELOW_FLOOR",
+                    "A price is below your company's minimum. A manager must approve it, which the email send arranges; submit it by email or raise the price.");
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+                var quote = await _context.Quotes
+                    .Include(q => q.Status)
+                    .Include(q => q.Rfq).ThenInclude(r => r.Lead)
+                    .SingleAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct);
+                if (quote.SentOn.HasValue)
+                {
+                    await transaction.CommitAsync(ct);
+                    return PortalSubmissionResult.AlreadySent(quote.QuoteNo);
+                }
+                if (LifecyclePolicy.Canonicalize("Quote", quote.Status?.SetupCode, quote.Status?.SetupValue) != "DRAFT")
+                    throw new InvalidOperationException($"Quote '{quote.QuoteNo}' is not a draft, so it cannot be recorded as submitted.");
+
+                quote.SentOn = DateTime.UtcNow;
+                quote.ModifiedBy = actor;
+                quote.ModifiedDate = quote.SentOn;
+                var note = reference is null ? "Submitted on the customer's portal." : $"Submitted on the customer's portal. Portal reference: {reference}";
+                if (_lifecycle is not null)
+                {
+                    await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                        businessUnitId, quote.Id,
+                        new LifecycleActor(actor, "quote-portal-submission"),
+                        new LifecycleTransitionCommand(
+                            "SENT", quote.LifecycleVersion, null, note, "quote-submitted-on-portal",
+                            Guid.NewGuid().ToString("N"), $"quote:{quote.Id}:portal",
+                            $"quote-portal-submitted:{quote.Id}"),
+                        false, ct);
+                }
+                else
+                {
+                    quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", businessUnitId);
+                    await _context.SaveChangesAsync(ct);
+                }
+                await RecordQuoteSentWorkAsync(quote, new QuoteSendOptions { RequestedBy = actor, RequestedByUserId = actorUserId }, ct);
+                await transaction.CommitAsync(ct);
+                return PortalSubmissionResult.Submitted(quote.QuoteNo);
             });
         }
 

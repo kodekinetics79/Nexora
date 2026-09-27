@@ -22,8 +22,9 @@ import {
   TableRow,
   TextField,
   Typography,
+  Tooltip,
 } from "@mui/material";
-import { AttachFile, Send, WarningAmber } from "@mui/icons-material";
+import { AttachFile, Download, Send, WarningAmber } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { useSnackbar } from "notistack";
 import quoteService, { type PriceAttestationSource, type QuoteDTO, type QuoteLineDTO } from "../../../api/services/quoteService";
@@ -167,7 +168,11 @@ export interface SendQuoteDialogProps {
  * manager can fix in Setup is named in plain words with a link.
  */
 export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline }: SendQuoteDialogProps) {
-  const [confirmLate, setConfirmLate] = React.useState(false);
+  // Which action the passed-deadline question is for: sending by email, or recording a portal upload.
+  const [confirmLate, setConfirmLate] = React.useState<"email" | "portal" | null>(null);
+  // After the PDF is downloaded: the rep uploads it to the customer's portal, then records it here.
+  const [portalStep, setPortalStep] = React.useState(false);
+  const [portalReference, setPortalReference] = React.useState("");
   // The deadline is a calendar day at the customer's end; it has passed once that day is over.
   const deadlineDay = (() => {
     const match = deadline?.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -268,30 +273,74 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
   const validOk = validUntil !== "" && validUntil >= isoDay(new Date());
   const referenceOk = confirmed || reference.trim().length > 0;
   const currencyOk = !!quote?.currencyId || currencyId !== "";
-  const reasons = [
+  // What the quote itself needs, whichever way it goes out. The email address is needed only to
+  // email it: most customers take quotes through their own portal, from the downloaded PDF.
+  const readyReasons = [
     unpriced.length > 0 ? `${unpriced.length} ${unpriced.length === 1 ? "line has" : "lines have"} no price yet` : null,
     !currencyOk ? "Choose a currency" : null,
     !validOk ? "Choose how long the prices hold" : null,
     !referenceOk ? "Say where the prices came from" : null,
-    !toOk ? "Enter the customer's email" : null,
     setupBlockers.length > 0 ? "Setup needs finishing first" : null,
   ].filter(Boolean) as string[];
+  const reasons = [...readyReasons, ...(!toOk ? ["Enter the customer's email to send it by email"] : [])];
+
+  // Currency, validity and the price-source confirmation are saved the same way before either route.
+  const prepare = async () => {
+    const id = quoteId!;
+    const termsChanged = (!quote!.currencyId && currencyId !== "") || validUntil !== (quote!.validUntil ?? "").split("T")[0];
+    if (termsChanged) {
+      await rfqService.saveQuoteTerms(id, { currencyId: quote!.currencyId ? null : (currencyId as number), validUntil });
+    }
+    if (!confirmed) await quoteService.confirmPriceAttestation(id, source, reference.trim());
+    return id;
+  };
+  const refreshAfterSend = () => {
+    for (const key of ["send-quote", "send-quote-readiness", "send-quote-attestation", "send-quote-id", "send-quote-open", "stock-price", "rfq-detail"]) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+
+  const download = useMutation({
+    mutationFn: async () => {
+      const id = await prepare();
+      const blob = await quoteService.downloadPdf(id);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = draftQuery.data?.attachmentFileName || `${quote?.quoteNo ?? "Quote"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["send-quote-attestation"] });
+      setPortalStep(true);
+    },
+    onError: (error) => enqueueSnackbar(describeError(error, "The quote PDF could not be made."), { variant: "error" }),
+  });
+
+  const portal = useMutation({
+    mutationFn: () => quoteService.recordPortalSubmission(quoteId!, portalReference),
+    onSuccess: (result) => {
+      refreshAfterSend();
+      enqueueSnackbar(result.alreadySent ? `${result.quoteNo} was already recorded as sent.` : `${result.quoteNo} recorded as submitted on the customer's portal.`,
+        { variant: "success" });
+      onSent?.();
+      setPortalStep(false);
+      onClose();
+    },
+    onError: (error) => enqueueSnackbar(describeError(error, "The quote could not be recorded as submitted."), { variant: "error" }),
+  });
 
   const send = useMutation({
     mutationFn: async () => {
-      const id = quoteId!;
-      const termsChanged = (!quote!.currencyId && currencyId !== "") || validUntil !== (quote!.validUntil ?? "").split("T")[0];
-      if (termsChanged) {
-        await rfqService.saveQuoteTerms(id, { currencyId: quote!.currencyId ? null : (currencyId as number), validUntil });
-      }
-      if (!confirmed) await quoteService.confirmPriceAttestation(id, source, reference.trim());
+      const id = await prepare();
       const edited = draftQuery.data && (subject !== draftQuery.data.subject || body !== draftQuery.data.body);
       return quoteService.sendEmail(id, to.trim(), edited ? { subject, body } : undefined);
     },
     onSuccess: (outcome) => {
-      for (const key of ["send-quote", "send-quote-readiness", "send-quote-attestation", "send-quote-id", "send-quote-open", "stock-price", "rfq-detail"]) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+      refreshAfterSend();
       if (outcome.held) {
         enqueueSnackbar(outcome.message || "A price is below the allowed floor, so the quote is waiting for a manager's approval.", { variant: "warning" });
       } else if (outcome.priceAttestationRequired || outcome.taxDerivationRequired) {
@@ -485,26 +534,58 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
         <Typography variant="caption" color={reasons.length ? "warning.main" : "text.secondary"} sx={{ flex: 1 }}>
           {quote && !alreadySent ? (reasons.length ? reasons.join(" · ") : "The quote PDF is attached to the email.") : ""}
         </Typography>
-        <Button onClick={onClose} disabled={send.isPending}>Cancel</Button>
+        <Button onClick={onClose} disabled={send.isPending || download.isPending}>Cancel</Button>
+        {quote && !alreadySent && (
+          <Tooltip title="For a customer who takes quotes through their own portal: download the PDF, upload it there, then record it here." describeChild>
+            <span>
+              <Button variant="outlined" startIcon={download.isPending ? <CircularProgress size={16} color="inherit" /> : <Download />}
+                disabled={readyReasons.length > 0 || download.isPending || send.isPending} onClick={() => download.mutate()}>
+                Download PDF
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         {quote && !alreadySent && (
           <Button variant="contained" startIcon={send.isPending ? <CircularProgress size={16} color="inherit" /> : <Send />}
-            disabled={reasons.length > 0 || send.isPending} onClick={() => (deadlinePassed ? setConfirmLate(true) : send.mutate())}>
-            Send quote
+            disabled={reasons.length > 0 || send.isPending || download.isPending} onClick={() => (deadlinePassed ? setConfirmLate("email") : send.mutate())}>
+            Send by email
           </Button>
         )}
       </DialogActions>
+      {/* After the download: the rep uploads the PDF to the customer's portal, then records it here. */}
+      <Dialog open={portalStep} onClose={portal.isPending ? undefined : () => setPortalStep(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 800 }}>Submit it on the customer's portal</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Upload the downloaded PDF to the customer's portal. Then record it here, so {quote?.quoteNo} counts as sent and Nexora follows it up.
+          </Typography>
+          <TextField size="small" fullWidth label="Portal reference (optional)" value={portalReference}
+            onChange={(event) => setPortalReference(event.target.value)} placeholder="e.g. the bid or submission number"
+            slotProps={{ htmlInput: { maxLength: 200 } }} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPortalStep(false)} disabled={portal.isPending}>Not yet</Button>
+          <Button variant="contained" disabled={portal.isPending}
+            startIcon={portal.isPending ? <CircularProgress size={16} color="inherit" /> : undefined}
+            onClick={() => (deadlinePassed ? setConfirmLate("portal") : portal.mutate())}>
+            Mark as submitted
+          </Button>
+        </DialogActions>
+      </Dialog>
       {/* Owner ruling 2026-09-26: a passed deadline informs, it never blocks. */}
-      <Dialog open={confirmLate} onClose={() => setConfirmLate(false)} maxWidth="xs" fullWidth>
+      <Dialog open={confirmLate !== null} onClose={() => setConfirmLate(null)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontWeight: 800 }}>The deadline has passed</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
             This RFQ's deadline was {deadlineDay?.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}.
-            Do you really want to send the quote?
+            {confirmLate === "portal" ? "Do you really want to record the quote as submitted?" : "Do you really want to send the quote?"}
           </Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setConfirmLate(false)}>Cancel</Button>
-          <Button variant="contained" onClick={() => { setConfirmLate(false); send.mutate(); }}>Send anyway</Button>
+          <Button onClick={() => setConfirmLate(null)}>Cancel</Button>
+          <Button variant="contained" onClick={() => { const action = confirmLate; setConfirmLate(null); if (action === "portal") portal.mutate(); else send.mutate(); }}>
+            {confirmLate === "portal" ? "Record anyway" : "Send anyway"}
+          </Button>
         </DialogActions>
       </Dialog>
     </Dialog>

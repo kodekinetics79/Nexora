@@ -431,6 +431,22 @@ const quoteService = {
    * default subject and plain-text body, the attachment name and the address on record — so the
    * rep can review and edit it in the send dialog.
    */
+  /**
+   * The rep uploaded the PDF to the customer's own procurement portal: record the quote as sent.
+   * A 409 carries the reason in `message` (price source, tax, below the minimum, not a draft);
+   * it is moved to `detail`, where the screens read an API's reason from.
+   */
+  recordPortalSubmission: async (id: number, portalReference?: string | null): Promise<{ quoteNo: string; submitted: boolean; alreadySent: boolean }> => {
+    try {
+      const { data } = await axiosInstance.post(`/api/Quote/${id}/portal-submission`, { portalReference: portalReference?.trim() || null });
+      return data;
+    } catch (error: any) {
+      const data = error?.response?.data;
+      if (error?.response?.status === 409 && typeof data?.message === 'string') error.response.data = { ...data, detail: data.message };
+      throw error;
+    }
+  },
+
   getEmailDraft: async (id: number): Promise<QuoteEmailDraft> => {
     const { data } = await axiosInstance.get(`/api/Quote/${id}/email-draft`);
     return data;
