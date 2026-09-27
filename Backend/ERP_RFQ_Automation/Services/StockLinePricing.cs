@@ -248,8 +248,9 @@ public sealed class StockLinePricingService : IStockLinePricingService
         var lastWon = wins.FirstOrDefault();
         var track = new PartTrackRecord(lastQuoted, lastWon, quotes.Count, wins.Count);
 
-        var onQuoteRow = await _db.QuoteItems.AsNoTracking()
-            .Where(x => x.RfqitemId == rfqItemId && x.Quote.BusinessUnitId == businessUnitId)
+        var quoteLines = _db.QuoteItems.AsNoTracking().Where(x => x.Quote.BusinessUnitId == businessUnitId);
+        var onQuoteRow = await quoteLines
+            .Where(x => x.RfqitemId == rfqItemId)
             .OrderByDescending(x => x.Quote.RevisionNo).ThenByDescending(x => x.Quote.Id)
             .Select(x => new
             {
@@ -259,6 +260,30 @@ public sealed class StockLinePricingService : IStockLinePricingService
                 StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
             })
             .FirstOrDefaultAsync(ct);
+        // A quote typed by hand and attached to this RFQ has no link from its lines to the RFQ's
+        // lines, so the price the customer already has for this part would otherwise be invisible
+        // here (and this RFQ's own quotes are left out of the history below). Same rule as the save
+        // (QuoteService.HandBuiltLineForAsync): the latest quote's one unlinked line for this
+        // product, when this is the RFQ's only line for that product.
+        if (onQuoteRow is null && line.ProductId is long lineProduct
+            && await _db.Rfqitems.CountAsync(x => x.Rfqid == rfqId && x.ProductId == lineProduct, ct) == 1)
+        {
+            var latestQuoteId = await _db.Quotes.AsNoTracking()
+                .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId)
+                .OrderByDescending(x => x.RevisionNo).ThenByDescending(x => x.Id)
+                .Select(x => (long?)x.Id).FirstOrDefaultAsync(ct);
+            var handBuilt = latestQuoteId is null ? [] : await quoteLines
+                .Where(x => x.QuoteId == latestQuoteId && x.RfqitemId == null && x.ProductId == lineProduct)
+                .Select(x => new
+                {
+                    x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0, x.DeliveryLeadTime, x.ExStockQuantity,
+                    Currency = x.Quote.Currency != null ? x.Quote.Currency.Code : null,
+                    Status = x.Quote.Status != null ? x.Quote.Status.SetupCode : null,
+                    StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
+                })
+                .Take(2).ToListAsync(ct);
+            if (handBuilt.Count == 1) onQuoteRow = handBuilt[0];
+        }
         var onQuote = onQuoteRow is null ? null : new QuoteLineNow(onQuoteRow.QuoteId, onQuoteRow.QuoteNo, onQuoteRow.UnitPrice,
             onQuoteRow.ExStock, onQuoteRow.Currency, QuoteState(LifecyclePolicy.Canonicalize("Quote", onQuoteRow.Status, onQuoteRow.StatusValue)),
             onQuoteRow.DeliveryLeadTime, onQuoteRow.ExStockQuantity);

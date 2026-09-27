@@ -132,6 +132,61 @@ public sealed class PricingSheetTests
         Assert.Null(view.CostSource);
     }
 
+    private static async Task<long> SeedHandBuiltQuoteAsync(ProcurementScenario fixture, params (long? ProductId, decimal Price)[] lines)
+    {
+        await using var setup = fixture.Context();
+        var quote = new Quote
+        {
+            Id = 97_200, QuoteNo = "QT-HAND-1", Rfqid = fixture.RfqId, BusinessUnitId = fixture.BusinessUnitId,
+            QuoteDate = DateTime.UtcNow, RevisionNo = 1, LifecycleVersion = 1, CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+        };
+        // Typed by hand and attached to the RFQ: no quote line points at an RFQ line.
+        foreach (var (productId, price) in lines)
+            quote.QuoteItems.Add(new QuoteItem
+            {
+                ProductId = productId, ItemDescription = "Hand-typed line", Quantity = 10m, UnitOfMeasure = "EA", UnitPrice = price,
+                TaxCategory = ERP_RFQ_Automation.OrderToCash.QuoteLineTaxCategories.Standard, CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+            });
+        setup.Quotes.Add(quote);
+        await setup.SaveChangesAsync();
+        return quote.Id;
+    }
+
+    [Fact]
+    public async Task The_pricing_window_finds_a_hand_built_quotes_line_for_the_same_part()
+    {
+        using var fixture = new ProcurementScenario();
+        await SeedHandBuiltQuoteAsync(fixture, (ProcurementTestData.Product, 150m));
+
+        await using var db = fixture.Context();
+        var view = await new StockLinePricingService(db).GetAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None);
+
+        // Before, this line said "Starts the quote draft" while the customer already had SAR 150.
+        Assert.Equal(("QT-HAND-1", 150m), (view!.OnQuote!.QuoteNo, view.OnQuote.UnitPrice));
+    }
+
+    [Fact]
+    public async Task A_price_save_links_the_hand_built_line_for_the_part_and_never_guesses_between_two()
+    {
+        using var fixture = new ProcurementScenario();
+        var quoteId = await SeedHandBuiltQuoteAsync(fixture, (ProcurementTestData.Product, 150m), (null, 20m));
+
+        await using (var db = fixture.Context())
+        {
+            var quote = await db.Quotes.Include(q => q.QuoteItems).SingleAsync(q => q.Id == quoteId);
+            var rfqLine = await db.Rfqitems.SingleAsync(x => x.Id == fixture.RfqItemId);
+            var line = await QuoteService.HandBuiltLineForAsync(db, quote, rfqLine, CancellationToken.None);
+            Assert.Equal((150m, fixture.RfqItemId), (line!.UnitPrice, line.RfqitemId!.Value));
+        }
+
+        using var ambiguous = new ProcurementScenario();
+        var twoLinesId = await SeedHandBuiltQuoteAsync(ambiguous, (ProcurementTestData.Product, 150m), (ProcurementTestData.Product, 140m));
+        await using var check = ambiguous.Context();
+        var twoLines = await check.Quotes.Include(q => q.QuoteItems).SingleAsync(q => q.Id == twoLinesId);
+        var sameLine = await check.Rfqitems.SingleAsync(x => x.Id == ambiguous.RfqItemId);
+        Assert.Null(await QuoteService.HandBuiltLineForAsync(check, twoLines, sameLine, CancellationToken.None));
+    }
+
     private static string Detail(IActionResult result) =>
         Assert.IsType<ProblemDetails>(Assert.IsType<BadRequestObjectResult>(result).Value).Detail ?? "";
 }

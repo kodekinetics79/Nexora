@@ -745,8 +745,32 @@ namespace ERP_RFQ_Automation.Services
                 .SingleAsync(q => q.Id == draft.Id && q.BusinessUnitId == businessUnitId, ct);
             await EnsureQuoteEditableAsync(quote);
 
+            var rfqLine = await _context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == rfqItemId, ct);
             var line = quote.QuoteItems.FirstOrDefault(i => i.RfqitemId == rfqItemId)
-                ?? throw new InvalidOperationException("This line is not on the quote. Mark it to quote first.");
+                ?? await HandBuiltLineForAsync(_context, quote, rfqLine, ct);
+            if (line is null)
+            {
+                // Not on the quote at all: the line joins it now, exactly as preparing the draft
+                // would have added it, rather than refusing a price the rep has just chosen.
+                line = new QuoteItem
+                {
+                    RfqitemId = rfqLine.Id,
+                    ProductId = rfqLine.ProductId,
+                    ItemDescription = rfqLine.ProductShortDescription ?? rfqLine.ProductShortName ?? rfqLine.ItemText ?? rfqLine.ItemMaterialCode,
+                    Quantity = rfqLine.Quantity ?? 0m,
+                    UnitOfMeasure = rfqLine.UnitOfMeasure,
+                    CustomerLineRef = rfqLine.LineItemNo,
+                    UnitPrice = 0m,
+                    TotalAmount = 0m,
+                    TaxAmount = null,
+                    TaxCategory = QuoteLineTaxCategories.Standard,
+                    TaxRatePercentApplied = null,
+                    CreatedBy = actor,
+                    CreatedDate = DateTime.UtcNow
+                };
+                if (line.Quantity <= 0m) throw new InvalidOperationException("This RFQ line has no quantity to quote.");
+                quote.QuoteItems.Add(line);
+            }
             if (quote.CurrencyId is null && currencyId is not null)
             {
                 var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId, ct);
@@ -756,7 +780,6 @@ namespace ERP_RFQ_Automation.Services
 
             // Another maker the customer accepts, from our own stock: the quote line names what is
             // actually offered ("… — SIEMENS 3RT2046-1AN20"), so the customer is never surprised.
-            var rfqLine = await _context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == rfqItemId, ct);
             // What the customer is actually being offered when the part they asked for is obsolete.
             line.OfferedNote = OfferedPartKinds.Sentence(rfqLine.OfferedKind, rfqLine.OfferedMakerName, rfqLine.OfferedPartNumber,
                 rfqLine.ManufacturerPartNumber, rfqLine.OfferedNote);
@@ -791,6 +814,24 @@ namespace ERP_RFQ_Automation.Services
             await CalculateQuoteTotals(quote);
             await _context.SaveChangesAsync(ct);
             return await GetQuoteByIdAsync(quote.Id);
+        }
+
+        /// <summary>
+        /// A quote typed by hand and attached to the RFQ carries no link from its lines to the RFQ's
+        /// lines, so a price already given for the part cannot be found by that link. The quote line
+        /// for the same product is this line when there is exactly one such quote line and exactly
+        /// one RFQ line for that product; the link is then written so it is never lost again.
+        /// Anything less certain is left alone rather than guessed.
+        /// </summary>
+        internal static async Task<QuoteItem?> HandBuiltLineForAsync(ErpRfqAutomationContext context, Quote quote, Rfqitem rfqLine, CancellationToken ct)
+        {
+            if (rfqLine.ProductId is not long productId) return null;
+            var rfqLinesForPart = await context.Rfqitems.CountAsync(x => x.Rfqid == rfqLine.Rfqid && x.ProductId == productId, ct);
+            if (rfqLinesForPart != 1) return null;
+            var unlinked = quote.QuoteItems.Where(i => i.RfqitemId == null && i.ProductId == productId).ToList();
+            if (unlinked.Count != 1) return null;
+            unlinked[0].RfqitemId = rfqLine.Id;
+            return unlinked[0];
         }
 
         public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
