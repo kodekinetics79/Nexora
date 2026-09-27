@@ -46,13 +46,16 @@ export const stockPriceQueryKey = (rfqId: number, itemId: number, productId?: nu
 const KIND_LABEL: Record<PriceReference["kind"], string> = { SOLD: "Sold", WON: "Won", QUOTED: "Quoted" };
 
 /** A headline figure the rep can take with one click: last quoted, last won. */
-function PriceCard({ title, icon, reference, empty, onUse }: {
+function PriceCard({ title, icon, reference, empty, onUse, quoteCurrency }: {
   title: string;
   icon: React.ReactNode;
   reference?: PriceReference | null;
   empty: string;
   onUse: (price: number) => void;
+  /** A past price in another currency is shown, never copied: nothing here converts. */
+  quoteCurrency?: string | null;
 }) {
+  const foreign = Boolean(reference?.currencyCode && quoteCurrency && reference.currencyCode !== quoteCurrency);
   return (
     <Box sx={{ flex: 1, minWidth: 0, p: 1.5, borderRadius: 2, border: 1, borderColor: "divider", bgcolor: "background.paper" }}>
       <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", color: "text.secondary" }}>
@@ -66,7 +69,11 @@ function PriceCard({ title, icon, reference, empty, onUse }: {
               <Typography variant="h6" sx={{ fontWeight: 800 }}>{formatMoney(reference.unitPrice, reference.currencyCode)}</Typography>
               {title === "Last quoted" && reference.kind === "WON" && <Chip size="small" color="success" label="Won" />}
             </Stack>
-            <Button size="small" onClick={() => onUse(reference.unitPrice)} aria-label={`Use ${title.toLowerCase()} price`}>Use</Button>
+            {foreign ? (
+              <Typography variant="caption" color="text.secondary">in {reference.currencyCode}</Typography>
+            ) : (
+              <Button size="small" onClick={() => onUse(reference.unitPrice)} aria-label={`Use ${title.toLowerCase()} price`}>Use</Button>
+            )}
           </Stack>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block" }} noWrap>
             {reference.customer ?? "Customer"} · qty {qty(reference.quantity)}
@@ -138,12 +145,14 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     if (!open) { seeded.current = null; return; }
     if (!view || seeded.current === view) return;
     seeded.current = view;
-    // A draft line keeps the price already on it. A sent quote is being revised, so it starts from
-    // today's suggested price (the note below still says what was sent).
+    // A draft line keeps the price already on it, and a sent line starts from the price the customer
+    // was given: a rep who only changes the delivery time must not reprice the line without typing.
+    // Today's suggestion is offered beside it with a Use button.
     const priced = view.onQuote && view.onQuote.unitPrice > 0 && view.onQuote.state === "DRAFT" ? view.onQuote : null;
-    // With nothing better to suggest, a revision starts from what was sent, not from an empty box.
     const sentBefore = view.onQuote && view.onQuote.unitPrice > 0 && view.onQuote.state !== "DRAFT" ? view.onQuote : null;
-    const start = priced?.unitPrice || view.price.unitPrice || sentBefore?.unitPrice || null;
+    // A cost with no margin is not a price: offering it would quote the part at no profit on one click.
+    const suggested = view.price.source === "COST_ONLY" ? null : view.price.unitPrice;
+    const start = priced?.unitPrice || sentBefore?.unitPrice || suggested || null;
     setPrice(start != null ? String(start) : "");
     // A cost with no company margin starts with an empty margin box, not a "0%" nobody chose.
     const derived = start != null && (priced || view.price.source !== "COST_ONLY") ? marginFromPrice(start) : null;
@@ -152,7 +161,11 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     setExStock(priced ? priced.exStock : true);
     setSaveMargin(false);
     setCurrencyId(view.currency?.id ?? "");
-    const best = (view.supplierPrices ?? []).filter((x) => x.valid).sort((a, b) => a.cost - b.cost)[0];
+    // Only a price in the quote's currency can be the cost; nothing here converts.
+    const quoteCurrency = view.onQuote?.currencyCode ?? view.currency?.code ?? null;
+    const best = (view.supplierPrices ?? [])
+      .filter((x) => x.valid && Boolean(quoteCurrency) && x.currencyCode === quoteCurrency)
+      .sort((a, b) => a.cost - b.cost)[0];
     setChosenSupplier(!priced && (view.price.source === "SUPPLIER_PLUS_MARGIN" || view.price.source === "BLENDED_PLUS_MARGIN") && best ? { name: best.supplierName, cost: best.cost } : null);
     setSendStockNow(priced ? priced.exStockQuantity != null && priced.exStockQuantity > 0 : true);
     setLead(priced?.leadTimeDays && priced.leadTimeDays > 0 ? priced.leadTimeDays : best?.leadTimeDays ?? sentBefore?.leadTimeDays ?? null);
@@ -249,33 +262,46 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
   const earlier = view?.history ?? [];
   const track = view?.trackRecord;
 
-  // Says what the price in the box is made of right now, never a figure the rep has since changed.
-  const suggestion = (() => {
+  // The ladder shows cost, sale price and quote price as rows; this line only speaks when one of
+  // them cannot be worked out, and says what the rep can do about it.
+  const hint = (() => {
     if (!view) return "";
-    const p = view.price;
-    if (p.sellingPrice && priceOk && priceNumber === p.sellingPrice) return `Your selling price`;
-    if (chosenSupplier && priceOk && marginNumber != null && Number.isFinite(marginNumber)) {
-      if (partial?.stockUnitCost != null && cost != null) {
-        return `${qty(partial.fromStock)} from stock at ${formatMoney(partial.stockUnitCost, currencyCode)} + ${qty(partial.toOrder)} from ${chosenSupplier.name} at ${formatMoney(chosenSupplier.cost, currencyCode)} = ${formatMoney(round2(cost), currencyCode)} each, + ${marginNumber}% margin`;
+    if (cost == null || cost <= 0) {
+      if (supplierPrices.length > 0 && !supplierPrices.some((x) => x.valid)) {
+        return "The supplier price has expired. Ask them again, or type a quote price.";
       }
-      return `${chosenSupplier.name} price ${formatMoney(chosenSupplier.cost, currencyCode)} + ${marginNumber}% margin`;
+      if (supplierPrices.some((x) => x.valid) && !chosenSupplier) {
+        return `The supplier price is not in ${currencyCode ?? "the quote currency"}, so it cannot be the cost here. Type a quote price.`;
+      }
+      return "No cost on file. Type a quote price, or use a past price on the right.";
     }
-    if (cost && cost > 0 && priceOk && marginNumber != null && Number.isFinite(marginNumber)) {
-      return `Cost ${formatMoney(cost, currencyCode)} + ${marginNumber}% margin`;
-    }
-    if (cost && cost > 0) return `Cost ${formatMoney(cost, currencyCode)}. Type a margin or a price.`;
-    if (supplierPrices.length > 0 && !supplierPrices.some((x) => x.valid)) {
-      return "The supplier price has expired. Ask them again, or type a price.";
-    }
-    return "No selling price or cost on file. Type a price, or use one from your record.";
+    if (!priceOk) return "Type a margin on cost or a quote price.";
+    return "";
   })();
+  const sellingPrice = view?.price.sellingPrice != null && view.price.sellingPrice > 0 ? view.price.sellingPrice : null;
+  const profitEach = cost != null && cost > 0 && priceOk ? round2(priceNumber - cost) : null;
+  const sentPrice = view?.onQuote && view.onQuote.unitPrice > 0 && view.onQuote.state !== "DRAFT" ? view.onQuote : null;
+  const todaysSuggestion = view && view.price.source !== "COST_ONLY" ? view.price.unitPrice : null;
+  // One row of the ladder: a label on the left, a figure on the right.
+  const ladderRow = (label: React.ReactNode, value: React.ReactNode, strong = false) => (
+    <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "baseline", gap: 1 }}>
+      <Typography variant="body2" color={strong ? "text.primary" : "text.secondary"} sx={{ fontWeight: strong ? 700 : 400 }}>{label}</Typography>
+      <Typography variant="body2" className="tabular-nums" sx={{ fontWeight: strong ? 800 : 600, whiteSpace: "nowrap" }}>{value}</Typography>
+    </Stack>
+  );
+  const sectionTitle = (text: string, note?: string) => (
+    <Stack direction="row" spacing={1} sx={{ alignItems: "baseline" }}>
+      <Typography variant="caption" sx={{ fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5 }}>{text}</Typography>
+      {note && <Typography variant="caption" color="text.secondary">{note}</Typography>}
+    </Stack>
+  );
 
   return (
     <Dialog open={open} onClose={use.isPending ? undefined : onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ pb: 1 }}>
         <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
           <Box sx={{ minWidth: 0 }}>
-            <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>{!view || covered ? "Price from stock" : "Price this line"}</Typography>
+            <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>{view && covered ? "Price from stock" : "Price this line"}</Typography>
             {view && (
               <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }} noWrap>
                 <b>{view.description ?? "Item"}</b>
@@ -309,6 +335,13 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
 
         {view && stock && (
           <>
+            {view.onQuote && (sent || decided) && (
+              <Alert severity={decided ? "warning" : "info"} sx={{ borderRadius: 0 }}>
+                {decided
+                  ? `The customer has decided on ${view.onQuote.quoteNo} at ${formatMoney(view.onQuote.unitPrice, view.onQuote.currencyCode)}. This price is final.`
+                  : `Sent to the customer on ${view.onQuote.quoteNo} at ${formatMoney(view.onQuote.unitPrice, view.onQuote.currencyCode)}. Saving makes a new revision; the customer sees nothing until you send it.`}
+              </Alert>
+            )}
             {view.otherMaker && (
               <Alert severity="info" icon={<LocalOffer fontSize="small" />} sx={{ borderRadius: 0 }}>
                 Offering <b>{view.otherMaker.label}</b>, one of the makers the customer accepts. The quote line will name it.
@@ -347,57 +380,92 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
             </Stack>
 
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" } }}>
-              {/* ---- Your price ---- */}
-              <Stack spacing={1.75} sx={(theme) => ({ p: 2.5, [theme.breakpoints.up("md")]: { borderRight: `1px solid ${theme.palette.divider}` } })}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Your price</Typography>
-                <Stack direction="row" spacing={1}>
-                  <TextField
-                    label={`Unit price${unit ? ` per ${unit}` : ""}`}
-                    value={price}
-                    onChange={(event) => onPriceChange(event.target.value)}
-                    type="number"
-                    error={price.trim() !== "" && !priceOk}
-                    slotProps={{
-                      htmlInput: { min: 0, step: "any", "aria-label": "Unit price" },
-                      input: { sx: { fontSize: 22, fontWeight: 800 } },
-                    }}
-                    sx={{ flex: 1 }}
-                  />
-                  {quoteHasCurrency ? (
-                    <TextField label="Currency" value={view.onQuote?.currencyCode ?? ""} disabled sx={{ width: 104 }} />
-                  ) : (
+              {/* ---- Cost, sale price, quote price: what it costs us, what we list it at, what we quote ---- */}
+              <Stack spacing={1.5} sx={(theme) => ({ p: 2.5, [theme.breakpoints.up("md")]: { borderRight: `1px solid ${theme.palette.divider}` } })}>
+                <Box>
+                  {sectionTitle("Cost", "what it costs us")}
+                  <Stack spacing={0.25} sx={{ mt: 0.5 }}>
+                    {chosenSupplier && partial?.stockUnitCost != null ? (
+                      <>
+                        {ladderRow(`${qty(partial.fromStock)} from stock`, `${formatMoney(partial.stockUnitCost, currencyCode)} each`)}
+                        {ladderRow(`${qty(partial.toOrder)} from ${chosenSupplier.name}`, `${formatMoney(chosenSupplier.cost, currencyCode)} each`)}
+                      </>
+                    ) : chosenSupplier ? (
+                      ladderRow(`${chosenSupplier.name} price`, `${formatMoney(chosenSupplier.cost, currencyCode)} each`)
+                    ) : null}
+                    {ladderRow(`Cost per ${unit || "unit"}`, cost != null && cost > 0 ? formatMoney(cost, currencyCode) : "Not on file", true)}
+                  </Stack>
+                </Box>
+
+                <Box>
+                  {sectionTitle("Sale price", "our list price")}
+                  <Stack spacing={0.25} sx={{ mt: 0.5 }}>
+                    {ladderRow(`Sale price per ${unit || "unit"}`, sellingPrice != null ? formatMoney(sellingPrice, currencyCode) : "Not set", true)}
+                    {sellingPrice == null && (
+                      <Typography variant="caption" color="text.secondary">Set by a manager on the product's price.</Typography>
+                    )}
+                  </Stack>
+                </Box>
+
+                <Box>
+                  {sectionTitle("Quote price", "to this customer")}
+                  <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                     <TextField
-                      select
-                      label="Currency"
-                      value={currencyId}
-                      onChange={(event) => setCurrencyId(event.target.value === "" ? "" : Number(event.target.value))}
-                      sx={{ width: 104 }}
-                    >
-                      {view.currency && !currencies.some((c) => c.id === view.currency!.id) && (
-                        <MenuItem value={view.currency.id}>{view.currency.code}</MenuItem>
-                      )}
-                      {currencies.map((c) => <MenuItem key={c.id} value={c.id}>{c.code}</MenuItem>)}
-                    </TextField>
+                      label={`Quote price${unit ? ` per ${unit}` : ""}`}
+                      value={price}
+                      onChange={(event) => onPriceChange(event.target.value)}
+                      type="number"
+                      error={price.trim() !== "" && !priceOk}
+                      slotProps={{
+                        htmlInput: { min: 0, step: "any", "aria-label": "Quote price" },
+                        input: { sx: { fontSize: 22, fontWeight: 800 } },
+                      }}
+                      sx={{ flex: 1 }}
+                    />
+                    {quoteHasCurrency ? (
+                      <TextField label="Currency" value={view.onQuote?.currencyCode ?? ""} disabled sx={{ width: 104 }} />
+                    ) : (
+                      <TextField
+                        select
+                        label="Currency"
+                        value={currencyId}
+                        onChange={(event) => setCurrencyId(event.target.value === "" ? "" : Number(event.target.value))}
+                        sx={{ width: 104 }}
+                      >
+                        {view.currency && !currencies.some((c) => c.id === view.currency!.id) && (
+                          <MenuItem value={view.currency.id}>{view.currency.code}</MenuItem>
+                        )}
+                        {currencies.map((c) => <MenuItem key={c.id} value={c.id}>{c.code}</MenuItem>)}
+                      </TextField>
+                    )}
+                  </Stack>
+                  {hint && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>{hint}</Typography>}
+                  {sentPrice && todaysSuggestion != null && priceOk && todaysSuggestion !== priceNumber && (
+                    <Stack direction="row" spacing={1} sx={{ alignItems: "center", mt: 0.5 }}>
+                      <Typography variant="caption" color="text.secondary">
+                        Today's suggestion {formatMoney(todaysSuggestion, currencyCode)}
+                      </Typography>
+                      <Button size="small" onClick={() => usePrice(todaysSuggestion)} aria-label="Use today's suggestion">Use</Button>
+                    </Stack>
                   )}
-                </Stack>
-                <Typography variant="caption" color="text.secondary" sx={{ mt: "-6px !important" }}>{suggestion}</Typography>
+                </Box>
 
                 {cost != null && cost > 0 && (
                   <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
                     <TextField
-                      label="Margin"
+                      label="Margin on cost"
                       size="small"
                       type="number"
                       value={margin}
                       onChange={(event) => onMarginChange(event.target.value)}
                       slotProps={{
-                        htmlInput: { step: "any", "aria-label": "Margin percent" },
+                        htmlInput: { step: "any", "aria-label": "Margin on cost percent" },
                         input: { endAdornment: <InputAdornment position="end">%</InputAdornment> },
                       }}
-                      sx={{ width: 120 }}
+                      sx={{ width: 150 }}
                     />
                     {companyMargin != null && (
-                      <Typography variant="caption" color="text.secondary">Usual margin {companyMargin}%</Typography>
+                      <Typography variant="caption" color="text.secondary">Usual {companyMargin}%</Typography>
                     )}
                   </Stack>
                 )}
@@ -410,7 +478,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                       <Box>
                         <Typography variant="body2">Use {marginNumber}% {covered ? "for all stock items" : "as your usual margin"} from now on</Typography>
                         <Typography variant="caption" color="text.secondary">
-                          Items without a selling price will start at cost + {marginNumber}%
+                          Items without a sale price will start at cost + {marginNumber}%
                         </Typography>
                       </Box>
                     }
@@ -420,8 +488,15 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                 <Box sx={{ p: 1.25, borderRadius: 1.5, bgcolor: "action.hover" }}>
                   <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
                     <Typography variant="body2" color="text.secondary">{qty(need)} {unit} × {priceOk ? formatMoney(priceNumber, currencyCode) : "—"}</Typography>
-                    <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>{formatMoney(lineTotal, currencyCode)}</Typography>
+                    <Typography variant="subtitle1" className="tabular-nums" sx={{ fontWeight: 800 }}>{formatMoney(lineTotal, currencyCode)}</Typography>
                   </Stack>
+                  {profitEach != null && (
+                    <Typography variant="body2" className="tabular-nums" sx={{ mt: 0.5, fontWeight: 700, color: profitEach < 0 ? "error.main" : "success.main" }}>
+                      {profitEach < 0
+                        ? `Below cost: a loss of ${formatMoney(round2(-profitEach * need), currencyCode)} on this line`
+                        : `Profit ${formatMoney(profitEach, currencyCode)} per ${unit || "unit"} · ${formatMoney(round2(profitEach * need), currencyCode)} on this line`}
+                    </Typography>
+                  )}
                 </Box>
 
                 {!covered ? (
@@ -561,13 +636,6 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
         )}
       </DialogContent>
 
-      {view?.onQuote && (sent || decided) && (
-        <Alert severity={decided ? "warning" : "info"} sx={{ borderRadius: 0 }}>
-          {decided
-            ? `The customer has already decided on ${view.onQuote.quoteNo} (${formatMoney(view.onQuote.unitPrice, view.onQuote.currencyCode)}). This price can no longer change.`
-            : `${view.onQuote.quoteNo} was already sent to the customer at ${formatMoney(view.onQuote.unitPrice, view.onQuote.currencyCode)}. A new price makes a new revision. The customer sees nothing until you send it.`}
-        </Alert>
-      )}
       <DialogActions sx={{ px: 2.5 }}>
         <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
           {decided ? "" : sent ? "The sent quote stays as it is." : view?.onQuote ? `Updates this line on ${view.onQuote.quoteNo}. You can still change it on the quote.` : "Starts the quote draft with this line priced. You can still change it on the quote."}
@@ -579,7 +647,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
           disabled={!view || decided || !priceOk || !leadOk || use.isPending || (!quoteHasCurrency && currencyId === "")}
           startIcon={use.isPending ? <CircularProgress size={16} color="inherit" /> : <CheckCircle />}
         >
-          {sent ? "Make a revision with this price" : "Use this price"}
+          {sent ? "Save as new revision" : "Save quote price"}
         </Button>
       </DialogActions>
     </Dialog>
