@@ -160,6 +160,27 @@ describe('Send quote', () => {
     await waitFor(() => expect(mocks.saveLinePricing).toHaveBeenCalledWith(7, 4, { status: 'NOT_QUOTED', note: 'Discontinued by manufacturer' }));
   });
 
+  it("Not quoting offers Other, which opens a box for the rep's own reason", async () => {
+    mocks.saveLinePricing.mockResolvedValue({ quoteId: 7 });
+    mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', quoteItems: [
+      line(),
+      line({ id: 4, rfqItemId: 24, itemDescription: 'CABLE', unitPrice: 0, taxableBase: 0, taxAmount: null }),
+    ] }));
+    renderDialog();
+    const dialog = await screen.findByRole('dialog');
+    const row = await within(dialog).findByText('CABLE').then((el) => el.closest('tr')! as HTMLElement);
+
+    fireEvent.click(within(row).getByText('Not quoting'));
+    // No typing box until Other is chosen; the quick reasons are one click.
+    expect(within(row).queryByLabelText('Reason not quoted')).not.toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    fireEvent.click(within(row).getByText('Other'));
+    fireEvent.change(within(row).getByLabelText('Reason not quoted'), { target: { value: "Customer's drawing revision not received" } });
+    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(mocks.saveLinePricing).toHaveBeenCalledWith(7, 4, { status: 'NOT_QUOTED', note: "Customer's drawing revision not received" }));
+  });
+
   it('lines already set to follow or not quoted do not block the send', async () => {
     mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', validUntil: '2099-01-01T00:00:00', quoteItems: [
       line(),

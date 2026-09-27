@@ -67,6 +67,8 @@ function LineChoiceControl({ quoteId, rfqId, line, currencyCode, onSaved }: {
   const [mode, setMode] = React.useState<LineChoice | null>(null);
   const [estimate, setEstimate] = React.useState("");
   const [reason, setReason] = React.useState("");
+  // "Other" opens a box for the rep's own words; the four reasons above it are one click each.
+  const [other, setOther] = React.useState(false);
   const current = line.pricingStatus ?? null;
 
   // The estimate starts from what this part was last quoted or won at, or a supplier's last price.
@@ -124,17 +126,24 @@ function LineChoiceControl({ quoteId, rfqId, line, currencyCode, onSaved }: {
       )}
       {mode === "NOT_QUOTED" && (
         <Box sx={{ mt: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>Reason the customer sees:</Typography>
           <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap" }}>
             {NOT_QUOTED_REASONS.map((text) => (
-              <Chip key={text} size="small" label={text} variant={reason === text ? "filled" : "outlined"} onClick={() => setReason(text)} />
+              <Chip key={text} size="small" label={text} clickable color={!other && reason === text ? "primary" : "default"}
+                variant={!other && reason === text ? "filled" : "outlined"} onClick={() => { setOther(false); setReason(text); }} />
             ))}
+            <Chip size="small" label="Other" clickable color={other ? "primary" : "default"} variant={other ? "filled" : "outlined"}
+              onClick={() => { setOther(true); setReason(""); }} />
           </Stack>
+          {other && (
+            <TextField size="small" fullWidth label="Type the reason" value={reason} onChange={(event) => setReason(event.target.value)}
+              placeholder="e.g. Customer's drawing revision not received" sx={{ mt: 1 }}
+              slotProps={{ htmlInput: { maxLength: 300, "aria-label": "Reason not quoted" } }} />
+          )}
           <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
-            <TextField size="small" label="Reason the customer sees" value={reason} onChange={(event) => setReason(event.target.value)}
-              sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 300, "aria-label": "Reason not quoted" } }} />
             <Button size="small" variant="contained" disabled={!reason.trim() || save.isPending}
               onClick={() => save.mutate({ status: "NOT_QUOTED", note: reason.trim() })}>Save</Button>
-            <Button size="small" onClick={() => setMode(null)}>Cancel</Button>
+            <Button size="small" onClick={() => { setMode(null); setOther(false); setReason(""); }}>Cancel</Button>
           </Stack>
         </Box>
       )}
