@@ -214,9 +214,10 @@ describe('the rail exposes the complete commercial spine', () => {
     // Document Skills, Model & Rule Lifecycle, Quality Analytics, Test & Release) are Platform
     // Admin configuration and are no longer tenant destinations at all — see setupCatalog.tsx.
     // Supplier Email (2026-09-16) took it to 21: the wording of supplier RFQ emails.
+    // The Pricing sheet (2026-09-27) is a new destination, not a moved one: the directory holds 57.
     expect(railFor(false)).toHaveLength(8);
     expect(PRIMARY_VIEWS).toHaveLength(15);
-    expect(ADVANCED_ENTRIES).toHaveLength(56);
+    expect(ADVANCED_ENTRIES).toHaveLength(57);
     expect(ADVANCED_GROUPS).toHaveLength(10);
     expect(SETUP_ENTRIES).toHaveLength(21);
   });

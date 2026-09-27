@@ -167,8 +167,31 @@ describe('Price from stock', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText('Not set')).toBeInTheDocument();
-    expect(within(dialog).getByText("Set by a manager on the product's price.")).toBeInTheDocument();
+    expect(within(dialog).getByRole('link', { name: 'pricing sheet' })).toHaveAttribute('href', '/inventory/pricing-sheet');
     expect(within(dialog).getByLabelText('Quote price')).toHaveValue(120);
+  });
+
+  it('says where the cost came from: the pricing sheet, or the stock record copy when the sheet has none', async () => {
+    mocks.get.mockResolvedValue(view({
+      price: { source: 'COST_PLUS_MARGIN', sellingPrice: null, unitCost: 100, marginPercent: 20, unitPrice: 120 },
+      costSource: 'STOCK_RECORD',
+    }));
+    renderLine();
+    fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/From the stock record, copied when the stock was counted/)).toBeInTheDocument();
+  });
+
+  it('a sheet price in another currency is named, not converted and not used', async () => {
+    mocks.get.mockResolvedValue(view({
+      price: { source: 'NONE', sellingPrice: null, unitCost: null, marginPercent: 20, unitPrice: null },
+      sheet: { currencyCode: 'USD', landedCost: 30, salePrice: 50, usable: false, currencySet: true },
+    }));
+    renderLine();
+    fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/The pricing sheet has this part in USD .*not SAR\. Nothing is converted\./)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(null);
   });
 
   it('a supplier price in another currency is shown in its own currency and never becomes the cost', async () => {

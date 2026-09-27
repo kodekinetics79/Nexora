@@ -26,6 +26,8 @@ export interface ProductDTO {
   uomName?: string;
   unitCost?: number;
   sellingPrice?: number;
+  /** The currency the pricing sheet's landed cost and sale price are in; absent until priced there. */
+  priceCurrencyCode?: string | null;
   finalLandedCost?: number;
   finalSalesPrice?: number;
   warehouseId?: number;

@@ -39,6 +39,10 @@ export interface StockLinePrice {
   /** DRAFT: price changes here. SENT: a new price makes a draft revision. DECIDED: the customer already decided; final. */
   onQuote?: { quoteId: number; quoteNo: string; unitPrice: number; exStock: boolean; currencyCode?: string | null; state: 'DRAFT' | 'SENT' | 'DECIDED'; leadTimeDays?: number | null; exStockQuantity?: number | null } | null;
   currency?: { id: number; code: string } | null;
+  /** Where the cost came from: the Pricing sheet, or the stock record's copy when the sheet has none. */
+  costSource?: 'PRICE_SHEET' | 'STOCK_RECORD' | null;
+  /** The part's line on the Pricing sheet, in its own currency. usable = false when that is not the quote's currency. */
+  sheet?: { currencyCode?: string | null; landedCost?: number | null; salePrice?: number | null; usable: boolean; currencySet: boolean } | null;
   /** Set when pricing another maker the customer accepts, from our own stock. */
   otherMaker?: OtherMakerStock | null;
   /** Prices suppliers gave for this part, valid first and cheapest first. */

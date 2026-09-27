@@ -394,6 +394,14 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                       ladderRow(`${chosenSupplier.name} price`, `${formatMoney(chosenSupplier.cost, currencyCode)} each`)
                     ) : null}
                     {ladderRow(`Cost per ${unit || "unit"}`, cost != null && cost > 0 ? formatMoney(cost, currencyCode) : "Not on file", true)}
+                    {!chosenSupplier && view.costSource === "PRICE_SHEET" && (
+                      <Typography variant="caption" color="text.secondary">Landed cost from the pricing sheet.</Typography>
+                    )}
+                    {!chosenSupplier && view.costSource === "STOCK_RECORD" && (
+                      <Typography variant="caption" color="warning.main">
+                        From the stock record, copied when the stock was counted. The pricing sheet has no landed cost for this part.
+                      </Typography>
+                    )}
                   </Stack>
                 </Box>
 
@@ -401,8 +409,20 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                   {sectionTitle("Sale price", "our list price")}
                   <Stack spacing={0.25} sx={{ mt: 0.5 }}>
                     {ladderRow(`Sale price per ${unit || "unit"}`, sellingPrice != null ? formatMoney(sellingPrice, currencyCode) : "Not set", true)}
-                    {sellingPrice == null && (
-                      <Typography variant="caption" color="text.secondary">Set by a manager on the product's price.</Typography>
+                    {sellingPrice == null && view.sheet && !view.sheet.usable && (view.sheet.salePrice ?? view.sheet.landedCost) != null ? (
+                      <Typography variant="caption" color="warning.main">
+                        The pricing sheet has this part in {view.sheet.currencyCode}
+                        {view.sheet.salePrice != null ? ` (sale price ${formatMoney(view.sheet.salePrice, view.sheet.currencyCode)})` : ""}, not {currencyCode}. Nothing is converted.
+                      </Typography>
+                    ) : sellingPrice == null ? (
+                      <Typography variant="caption" color="text.secondary">
+                        Set by a manager on the{" "}
+                        <Box component="a" href="/inventory/pricing-sheet" target="_blank" rel="noopener" sx={{ color: "primary.main", fontWeight: 700 }}>
+                          pricing sheet
+                        </Box>.
+                      </Typography>
+                    ) : (
+                      <Typography variant="caption" color="text.secondary">From the pricing sheet.</Typography>
                     )}
                   </Stack>
                 </Box>

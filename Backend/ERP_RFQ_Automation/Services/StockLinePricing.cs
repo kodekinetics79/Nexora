@@ -45,7 +45,16 @@ public sealed record StockLinePriceView(
     AcceptedMakerStock? OtherMaker = null,
     IReadOnlyList<SupplierPriceOption>? SupplierPrices = null,
     bool CoveredByStock = false,
-    PartialStock? Partial = null);
+    PartialStock? Partial = null,
+    string? CostSource = null,
+    PriceSheetEntry? Sheet = null);
+
+/// <summary>
+/// The part's line on the Pricing sheet, in the currency it was entered in. Usable is false when
+/// that currency is not the quote's: the window shows the figures but never treats them as the
+/// quote's own. CurrencySet is false for a price entered before the sheet existed.
+/// </summary>
+public sealed record PriceSheetEntry(string? CurrencyCode, decimal? LandedCost, decimal? SalePrice, bool Usable, bool CurrencySet);
 
 /// <summary>
 /// Stock covers part of the quantity: FromStock at the stock cost, ToOrder at a supplier's price.
@@ -166,7 +175,11 @@ public sealed class StockLinePricingService : IStockLinePricingService
 
         var product = pricedProductId is null ? null : await _db.Products.AsNoTracking()
             .Where(x => x.Id == pricedProductId)
-            .Select(x => new { x.SellingPrice, x.UnitCost, x.FinalSalesPrice })
+            .Select(x => new
+            {
+                x.SellingPrice, x.UnitCost, x.FinalSalesPrice,
+                PriceCurrencyCode = x.PriceCurrency != null ? x.PriceCurrency.Code : null
+            })
             .SingleOrDefaultAsync(ct);
 
         var stock = await ShelfAsync(businessUnitId, pricedProductId, ct);
@@ -184,8 +197,26 @@ public sealed class StockLinePricingService : IStockLinePricingService
                 .Select(x => new StockCurrency(x.Id, x.Code))
                 .FirstOrDefaultAsync(ct);
 
-        var price = Suggest(product?.SellingPrice ?? product?.FinalSalesPrice ?? stock.SellingPrice,
-            stock.UnitCost ?? product?.UnitCost, margin);
+        // The Pricing sheet first: its landed cost and sale price are the figures a manager keeps,
+        // in the currency they chose. They count only in the quote's own currency, because nothing
+        // here converts. A price with no currency yet is from before the sheet existed and is read
+        // in the company's base currency, as it always was. The stock record's cost is a copy taken
+        // when the stock was first counted and never refreshed, so it is used only when the sheet
+        // has no cost, and the window says which one it used.
+        var baseCurrencyCode = await _db.Currencies.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive == true && x.IsBaseCurrency == true)
+            .Select(x => x.Code).FirstOrDefaultAsync(ct);
+        var sheetCurrency = product?.PriceCurrencyCode ?? baseCurrencyCode;
+        var sheetUsable = currency is not null && string.Equals(sheetCurrency, currency.Code, StringComparison.OrdinalIgnoreCase);
+        var sheetCost = Positive(product?.UnitCost);
+        var sheetSale = Positive(product?.SellingPrice) ?? Positive(product?.FinalSalesPrice);
+        var sheet = product is null || (sheetCost is null && sheetSale is null) ? null
+            : new PriceSheetEntry(sheetCurrency, sheetCost, sheetSale, sheetUsable, product.PriceCurrencyCode is not null);
+        var usableSheetCost = sheetUsable ? sheetCost : null;
+        var shelfCost = Positive(stock.UnitCost);
+        var cost = usableSheetCost ?? shelfCost;
+        var costSource = usableSheetCost is not null ? "PRICE_SHEET" : shelfCost is not null ? "STOCK_RECORD" : null;
+        var price = Suggest(sheetUsable ? sheetSale : null, cost, margin);
         // Not on the shelf: what a supplier will charge is the cost that matters, not an old stock cost.
         // Only a price in the quote's own currency can be the cost. Nothing here converts, so a USD
         // price ranked or blended against SAR figures by its bare number would be a SAR price nobody
@@ -195,16 +226,16 @@ public sealed class StockLinePricingService : IStockLinePricingService
             .OrderBy(x => x.Cost).FirstOrDefault();
         var need = line.Quantity ?? 0m;
         var partial = !covered && stock.Free > 0m && need > 0m
-            ? new PartialStock(Math.Min(stock.Free, need), need - Math.Min(stock.Free, need), stock.UnitCost ?? product?.UnitCost)
+            ? new PartialStock(Math.Min(stock.Free, need), need - Math.Min(stock.Free, need), cost)
             : null;
         if (!covered && price.Source != "SELLING_PRICE" && bestSupplier is not null)
         {
             // Part from the shelf at stock cost, the rest at the supplier's price: one blended cost.
-            var cost = partial?.StockUnitCost is decimal stockCost
+            var blendedCost = partial?.StockUnitCost is decimal stockCost
                 ? Math.Round((partial.FromStock * stockCost + partial.ToOrder * bestSupplier.Cost) / need, 4)
                 : bestSupplier.Cost;
             price = new StockPriceSuggestion(partial?.StockUnitCost is not null ? "BLENDED_PLUS_MARGIN" : "SUPPLIER_PLUS_MARGIN",
-                null, cost, margin, Math.Round(cost * (1m + (margin ?? 0m) / 100m), 2));
+                null, blendedCost, margin, Math.Round(blendedCost * (1m + (margin ?? 0m) / 100m), 2));
         }
 
         var history = pricedProductId is null
@@ -248,7 +279,9 @@ public sealed class StockLinePricingService : IStockLinePricingService
             otherMaker,
             supplierPrices,
             covered,
-            partial);
+            partial,
+            costSource,
+            sheet);
     }
 
     /// <summary>How many supplier prices the window lists: the valid ones first, cheapest first.</summary>
@@ -413,4 +446,5 @@ public sealed class StockLinePricingService : IStockLinePricingService
         config.ModifiedOn = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
     }
+    private static decimal? Positive(decimal? value) => value is > 0m ? value : null;
 }
