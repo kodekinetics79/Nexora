@@ -40,7 +40,7 @@ describe('Approved brands on an RFQ line', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit accepted brands' }));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('Brands the customer accepts for this part')).toBeInTheDocument();
+    expect(within(dialog).getByText('Brands / manufacturers the customer accepts')).toBeInTheDocument();
     expect(within(dialog).queryByText(/Separate makers with/)).not.toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByLabelText(/Remove SIEMENS/));

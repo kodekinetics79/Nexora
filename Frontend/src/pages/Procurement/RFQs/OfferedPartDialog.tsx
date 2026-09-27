@@ -132,7 +132,7 @@ export default function OfferedPartDialog({ open, rfqId, line, onClose }: {
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 1 }}>
           <TextField label="Part number offered" value={partNumber} onChange={(event) => setPartNumber(event.target.value)}
             sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 100, "aria-label": "Part number offered" } }} />
-          <TextField label="Brand" value={maker} onChange={(event) => setMaker(event.target.value)}
+          <TextField label="Brand / manufacturer" value={maker} onChange={(event) => setMaker(event.target.value)}
             sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 150, "aria-label": "Brand offered" } }} />
         </Stack>
 

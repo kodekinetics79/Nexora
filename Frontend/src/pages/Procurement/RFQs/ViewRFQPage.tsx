@@ -835,7 +835,7 @@ const ViewRFQPage: React.FC = () => {
                   <TableRow>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>#</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Product / Description</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Brand / part no.</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Brand / manufacturer · part no.</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="right">Qty</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Resolution</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Inventory</TableCell>

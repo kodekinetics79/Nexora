@@ -162,7 +162,7 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
 
       <Dialog open={open} onClose={save.isPending ? undefined : () => setOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ pb: 0.5 }}>
-          <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Brands the customer accepts for this part</Typography>
+          <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Brands / manufacturers the customer accepts</Typography>
           <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }} noWrap>
             {item.productShortDescription || item.productShortName || "This line"}
           </Typography>
@@ -185,7 +185,7 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
             <TextField
               fullWidth
               size="small"
-              label="Add a brand"
+              label="Add a brand / manufacturer"
               placeholder="e.g. Siemens, or Siemens 3RT2046-1AN20"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
