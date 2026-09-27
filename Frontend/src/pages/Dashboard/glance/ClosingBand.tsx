@@ -7,7 +7,7 @@ import { toPresentableError } from '../../../utils/apiErrors';
 import BandShell from './BandShell';
 import { scopeWords } from './scopeWords';
 import { seriesVar, type SeriesToken } from './tokens';
-import { neuBar, neuInset, neuRaised } from './neumorphic';
+import { neuBar, neuFocus, neuInset, neuRaised } from './neumorphic';
 
 /**
  * Band 4 — what is closing on us.
@@ -99,6 +99,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
     queryKey: ['glance', 'closing-band'],
     queryFn: () => dashboardService.getDeadlineBoard({ maxLeads: 1 }),
     staleTime: 60_000,
+    meta: { silenceGlobalError: true, errorLabel: 'the deadline board' },
   });
 
   // Failure copy comes from the product's error-presentation boundary, which renders the server's
@@ -173,8 +174,12 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
           sx={{
             display: 'grid',
             gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
-            gap: { xs: 0.5, sm: 0.75 },
-            alignItems: 'end',
+            // Five shared rows — count, plot, baseline, label, lines — that every column subgrids
+            // into. A label that wraps to three lines then grows its row for all seven columns,
+            // so every bar keeps the same baseline and the heights stay comparable.
+            gridTemplateRows: 'repeat(5, auto)',
+            columnGap: { xs: 0.5, sm: 0.75 },
+            rowGap: 0,
           }}
         >
           {model.columns.map((column, columnIndex) => {
@@ -189,10 +194,13 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                 sx={(theme) => ({
                   // Each column is a soft key on the clay: it stands proud, rises on hover and
                   // presses in when opened — the column is the button that opens its enquiries.
-                  flexDirection: 'column',
-                  alignItems: 'stretch',
-                  justifyContent: 'flex-end',
-                  borderRadius: 2.5,
+                  ...neuFocus,
+                  display: 'grid',
+                  gridRow: 'span 5',
+                  gridTemplateRows: 'subgrid',
+                  rowGap: 0,
+                  alignItems: 'start',
+                  borderRadius: '12px',
                   px: 0.5,
                   pt: 0.75,
                   pb: 0.75,
@@ -212,7 +220,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                   data-testid={`closing-value-${column.key}`}
                   sx={{
                     fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
-                    fontSize: { xs: 15, md: 17 }, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums',
+                    fontSize: 20, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums',
                     color: 'text.primary',
                   }}
                 >
@@ -249,13 +257,13 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
                 <Box aria-hidden sx={{ height: '1px', backgroundColor: 'divider', mt: '2px', mb: 0.75 }} />
                 <Typography
                   component="span"
-                  sx={{ fontSize: 10, fontWeight: 700, lineHeight: 1.2, color: 'text.primary' }}
+                  sx={{ fontSize: 10.5, fontWeight: 700, lineHeight: 1.2, color: 'text.primary' }}
                 >
                   {column.label}
                 </Typography>
                 <Typography
                   component="span"
-                  sx={{ fontSize: 10, lineHeight: 1.25, color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
+                  sx={{ fontSize: 10.5, lineHeight: 1.25, color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
                 >
                   {plural(column.lineItems, 'line', 'lines')}
                 </Typography>

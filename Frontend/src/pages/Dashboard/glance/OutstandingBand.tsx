@@ -7,6 +7,7 @@ import { toPresentableError } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
 import BandShell from './BandShell';
 import Unavailable from './Unavailable';
+import { useMeasuredWidth } from './useMeasuredWidth';
 import HatchPattern, { HATCH_MEANING, hatchFill, useHatchPatternId } from './hatchPattern';
 import { pipelineSeal, usePipelineAnalytics } from './pipelineAnalytics';
 import { seriesVar, type SeriesToken } from './tokens';
@@ -56,6 +57,7 @@ const FUNNEL_STAGES: readonly { key: PipelineStageDTO['key']; label: string }[] 
 ]);
 
 /** The sent book's geometry. Fixed, so the bar is the same object at 4 quotes and at 400. */
+/** The design width, used until the band has measured its own. */
 const BOOK_W = 440;
 const BOOK_BAR_Y = 8;
 const BOOK_BAR_H = 28;
@@ -69,7 +71,6 @@ const MIN_SEGMENT = 5;
 const LABEL_GAP = 108;
 
 /** The funnel's geometry, lifted from the executive FunnelPanel this band replaces. */
-const FUNNEL_W = 440;
 const FUNNEL_ROW = 22;
 const FUNNEL_GAP = 4;
 const FUNNEL_LABEL_W = 118;
@@ -144,6 +145,8 @@ const compactMoney = (value: number, currency: string | null | undefined): strin
 
 export default function OutstandingBand({ from, to, index = 2 }: OutstandingBandProps) {
   const hatchId = useHatchPatternId();
+  // Both charts draw at the band's own width, so their labels render at their stated size.
+  const [measureRef, bookW] = useMeasuredWidth<HTMLDivElement>(BOOK_W);
 
   const analytics = usePipelineAnalytics(from, to, 'the sent book and the funnel');
 
@@ -177,7 +180,7 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
   const segments: Segment[] = [
     { key: 'won', words: 'Won', count: wonStage?.count ?? 0, tone: 'brassMark' },
     { key: 'lost', words: 'Lost or expired', count: lostOrExpired, tone: 'oxide' },
-    { key: 'responded', words: 'Supplier responded', count: data?.respondedQuotes ?? 0, tone: 'graphite' },
+    { key: 'responded', words: 'Customer replied', count: data?.respondedQuotes ?? 0, tone: 'graphite' },
     { key: 'awaiting', words: 'Awaiting the customer', count: data?.awaitingResponseQuotes ?? 0, tone: 'brassBrand', open: true },
   ];
   const bookTotal = segments.reduce((sum, s) => sum + s.count, 0);
@@ -188,14 +191,14 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
     ? 'The server did not state a won stage for this window, so the sent book cannot be split into its four states.'
     : null;
 
-  const widths = segmentWidths(segments.map((s) => s.count), BOOK_W);
+  const widths = segmentWidths(segments.map((s) => s.count), bookW);
   const starts = widths.reduce<number[]>((acc, _, i) => [...acc, i === 0 ? 0 : acc[i - 1] + widths[i - 1]], []);
   const anchors = bookTotal > 0
     ? segments.map((_, i) => starts[i] + widths[i] / 2)
     // Nothing has been sent. The four labels space themselves evenly under an empty rail, so the
     // reader still learns the four states the band will fill in.
-    : segments.map((_, i) => ((i + 0.5) / segments.length) * BOOK_W);
-  const labelX = placeLabels(anchors, LABEL_GAP, BOOK_W);
+    : segments.map((_, i) => ((i + 0.5) / segments.length) * bookW);
+  const labelX = placeLabels(anchors, Math.min(LABEL_GAP, bookW / segments.length), bookW);
 
   const bookDescription = `The sent book, ${plural(bookTotal, 'quote', 'quotes')} in total: `
     + segments.map((s) => `${s.words.toLowerCase()} ${s.count.toLocaleString()}`).join(', ')
@@ -204,17 +207,17 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
   const bookChart = (
     <Box sx={{ overflowX: 'auto' }}>
       <svg
-        viewBox={`0 0 ${BOOK_W} ${BOOK_H}`}
+        viewBox={`0 0 ${bookW} ${BOOK_H}`}
         width="100%"
         role="img"
         aria-label={bookDescription}
-        style={{ display: 'block', height: 'auto', minWidth: 300, maxWidth: BOOK_W, overflow: 'visible' }}
+        style={{ display: 'block', height: 'auto', overflow: 'visible' }}
       >
         <HatchPattern id={hatchId} />
         {/* The rail. It is drawn in every state, empty included: it is the part of the band that
             must not move when the first quote is sent. */}
         <rect
-          x={0} y={BOOK_BAR_Y} width={BOOK_W} height={BOOK_BAR_H} rx={6}
+          x={0} y={BOOK_BAR_Y} width={bookW} height={BOOK_BAR_H} rx={6}
           fill="none" stroke="currentColor" strokeOpacity={0.18}
         />
         {segments.map((segment, i) => {
@@ -227,7 +230,7 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
               <rect
                 x={starts[i]} y={BOOK_BAR_Y} width={widths[i]} height={BOOK_BAR_H}
                 fill={segment.open ? hatchFill(hatchId) : seriesVar(segment.tone)}
-                stroke={segment.open ? seriesVar('brassBrand') : 'none'}
+                stroke={segment.open ? seriesVar('brassMark') : 'none'}
                 strokeWidth={segment.open ? 1.5 : 0}
               />
               {/* Depth from lighting only: a lit top edge on the solid states. The hollow one gets
@@ -271,15 +274,15 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
   const funnelChart = (
     <Box sx={{ overflowX: 'auto' }}>
       <svg
-        viewBox={`0 0 ${FUNNEL_W} ${FUNNEL_H}`}
+        viewBox={`0 0 ${bookW} ${FUNNEL_H}`}
         width="100%"
         role="img"
         aria-label={funnelDescription}
-        style={{ display: 'block', height: 'auto', minWidth: 300, maxWidth: FUNNEL_W, overflow: 'visible' }}
+        style={{ display: 'block', height: 'auto', overflow: 'visible' }}
       >
         {stages.map((stage, i) => {
           const y = i * (FUNNEL_ROW + FUNNEL_GAP);
-          const track = FUNNEL_W - FUNNEL_LABEL_W - 48 - FUNNEL_MONEY_W;
+          const track = Math.max(40, bookW - FUNNEL_LABEL_W - 48 - FUNNEL_MONEY_W);
           const width = stage.count === 0 ? ZERO_TICK : Math.max(8, (track * stage.count) / funnelTop);
           const won = stage.key === 'won';
           return (
@@ -311,12 +314,12 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
               {stage.stated && (
                 <text
                   data-testid={`funnel-money-${stage.key}`}
-                  x={FUNNEL_W} y={FUNNEL_ROW / 2 + 5} textAnchor="end" fontSize={11}
+                  x={bookW} y={FUNNEL_ROW / 2 + 5} textAnchor="end" fontSize={11}
                   fontWeight={stage.value !== null ? 700 : 400}
-                  fill="currentColor" fillOpacity={stage.value !== null ? 0.78 : 0.6}
+                  fill="currentColor" fillOpacity={0.78}
                   style={{ fontVariantNumeric: 'tabular-nums' }}
                 >
-                  {stage.value !== null ? compactMoney(stage.value, stage.valueCurrency) : 'value n/a'}
+                  {stage.value !== null ? compactMoney(stage.value, stage.valueCurrency) : 'value not stated'}
                 </text>
               )}
             </g>
@@ -355,7 +358,7 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
       onRetry={() => void analytics.refetch()}
       seal={pipelineSeal(data)}
     >
-      <Stack spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}>
+      <Stack ref={measureRef} spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}>
         <Stack spacing={0.5} sx={{ minWidth: 0 }}>
           <Typography component="h3" sx={{ fontWeight: 800, fontSize: 11, lineHeight: 1.2 }}>
             The sent book

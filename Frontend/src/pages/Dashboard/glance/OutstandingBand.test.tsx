@@ -86,7 +86,7 @@ describe('OutstandingBand — the sent book', () => {
     for (const [words, count] of [
       ['Won', '12'],
       ['Lost or expired', '16'],
-      ['Supplier responded', '3'],
+      ['Customer replied', '3'],
       ['Awaiting the customer', '15'],
     ] as const) {
       expect(screen.getAllByText(words).length).toBeGreaterThan(0);
@@ -163,7 +163,7 @@ describe('OutstandingBand — the funnel', () => {
     expect(quoted.textContent).not.toMatch(/[—-]\s*$/);
     // A stated value sits beside its bar, compact, and never gets a reason line of its own.
     expect(screen.getByTestId('funnel-money-won')).toHaveTextContent('380K');
-    expect(screen.getByTestId('funnel-money-quoted')).toHaveTextContent('value n/a');
+    expect(screen.getByTestId('funnel-money-quoted')).toHaveTextContent('value not stated');
     expect(screen.queryByTestId('funnel-value-won')).toBeNull();
   });
 
@@ -228,7 +228,7 @@ describe('OutstandingBand — the empty book a new tenant opens', () => {
     render(<OutstandingBand from={FROM} to={TO} />, { wrapper });
 
     expect(await screen.findByTestId('book-empty')).toHaveTextContent(/the book is empty rather than balanced/);
-    for (const words of ['Won', 'Lost or expired', 'Supplier responded', 'Awaiting the customer']) {
+    for (const words of ['Won', 'Lost or expired', 'Customer replied', 'Awaiting the customer']) {
       expect(screen.getAllByText(words).length).toBeGreaterThan(0);
     }
     for (const key of ['leads', 'accepted', 'quoted', 'won']) {

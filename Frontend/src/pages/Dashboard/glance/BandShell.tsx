@@ -3,7 +3,7 @@ import { Alert, AlertTitle, Box, Button, Paper, Stack, Tooltip, Typography } fro
 import { InfoOutlined as HintIcon, LockOutlined as ForbiddenIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { glanceCssVariables } from './tokens';
-import { NEU_TRANSITION, neuCssVariables, neuEmboss, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
+import { NEU_TRANSITION, neuCssVariables, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
 import RefreshFailedNotice from '../../../components/common/RefreshFailedNotice';
 import { SCOPE_UNRESOLVED } from './scopeWords';
 
@@ -60,6 +60,11 @@ export interface BandShellProps {
    * every time they look.
    */
   hint?: string;
+  /**
+   * The band that asks the reader to act. It wears the brass rim the chosen period key wears, so
+   * the one band with work in it is the one the eye finds among six slabs of the same material.
+   */
+  emphasis?: boolean;
   /** The band's reserved height. It is held in every state, empty included. */
   minHeight?: number;
   index?: number;
@@ -72,7 +77,7 @@ const sealFreshness = (generatedAt?: string | null): string => {
 };
 
 export default function BandShell({
-  title, seal, children, step, hint, loading = false, error = null, forbidden = null, onRetry, refreshFailedAt = null, minHeight = 240, index = 0,
+  title, seal, children, step, hint, emphasis = false, loading = false, error = null, forbidden = null, onRetry, refreshFailedAt = null, minHeight = 240, index = 0,
 }: BandShellProps) {
   const scopeText = seal.scope ?? SCOPE_UNRESOLVED;
   const sealText = `${scopeText} · ${seal.window} · ${sealFreshness(seal.generatedAt)}`;
@@ -134,13 +139,18 @@ export default function BandShell({
         // does not mount the whole screen — still paints in the validated palette.
         ...glanceCssVariables(theme.palette.mode),
         ...neuCssVariables(theme.palette.mode),
-        ...neuSlab(theme.palette.mode, 12),
+        ...neuSlab(theme.palette.mode, 8),
+        ...(emphasis ? { boxShadow: `0 0 0 1.5px color-mix(in srgb, var(--nx-glance-seal-ink) 70%, transparent), ${neuRaised(theme.palette.mode, 8)}` } : {}),
         ...NEU_TRANSITION,
         p: 1.5,
-        borderRadius: { xs: 4, md: 5 },
+        // Pixel radii on purpose (the theme multiplies sx numbers by 12): the tray inside is
+        // 28 − 12 padding = 16px, so the two corners stay concentric instead of pinching.
+        borderRadius: '28px',
         // Bands sit in a grid on the dashboard; filling the cell keeps a row's slabs one height.
         height: '100%',
-        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 16) },
+        // The band reads its own width, not the window's, so its insides adapt to the cell.
+        containerType: 'inline-size',
+        // No hover lift: a band is not a button, and lifting it said it was.
         minHeight,
         display: 'flex',
         flexDirection: 'column',
@@ -172,7 +182,7 @@ export default function BandShell({
           )}
           <Typography
             component="h2"
-            sx={(theme) => ({ fontWeight: 800, fontSize: { xs: 15, md: 16 }, lineHeight: 1.25, textShadow: neuEmboss(theme.palette.mode) })}
+            sx={{ fontWeight: 700, fontSize: 16, lineHeight: 1.25, textWrap: 'balance' }}
           >
             {title}
           </Typography>
@@ -182,6 +192,7 @@ export default function BandShell({
           <Box
             data-testid="band-seal"
             data-governed={seal.governed ? 'true' : 'false'}
+            role="note"
             aria-label={`${sealText}. ${sealExplanation}`}
             sx={(theme) => ({
               flexShrink: 0,
@@ -190,9 +201,9 @@ export default function BandShell({
               border: '1px solid',
               borderColor: 'var(--nx-glance-seal-rim)',
               backgroundColor: seal.governed ? 'var(--nx-glance-seal-ground)' : 'transparent',
-              // Governed = pressed in, like the period key that governs it; fixed windows stand
-              // proud. Filled-vs-outlined still carries the fact on its own; depth only repeats it.
-              boxShadow: seal.governed ? neuInset(theme.palette.mode, 3) : neuRaised(theme.palette.mode, 3),
+              // Governed = pressed in, like the period key that governs it. A fixed window is a
+              // flat outline: raised, it read as a button, and it is not one.
+              boxShadow: seal.governed ? neuInset(theme.palette.mode, 3) : 'none',
               color: 'var(--nx-glance-seal-ink)',
               fontSize: 11,
               fontWeight: seal.governed ? 700 : 600,
@@ -202,6 +213,8 @@ export default function BandShell({
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               maxWidth: '100%',
+              // In a narrow cell the seal wraps rather than hiding its window behind an ellipsis.
+              '@container (max-width: 360px)': { whiteSpace: 'normal' },
             })}
           >
             {sealText}
@@ -215,9 +228,9 @@ export default function BandShell({
                 aria-label={`How to read this: ${hint}`}
                 sx={{
                   display: 'inline-grid', placeItems: 'center', flexShrink: 0,
-                  width: 22, height: 22, p: 0, border: 0, borderRadius: '50%',
+                  width: 24, height: 24, p: 0, border: 0, borderRadius: '50%',
                   background: 'none', color: 'text.secondary', cursor: 'help',
-                  '&:focus-visible': { outline: '2px solid', outlineColor: 'var(--nx-glance-seal-rim)' },
+                  '&:focus-visible': { outline: '2px solid', outlineColor: 'var(--nx-glance-seal-ink)' },
                 }}
               >
                 <HintIcon sx={{ fontSize: 16 }} />
@@ -233,7 +246,7 @@ export default function BandShell({
       <Box
         sx={(theme) => ({
           ...neuWell(theme.palette.mode, 4),
-          borderRadius: 2.5,
+          borderRadius: '16px',
           px: 1.5, py: 1,
           flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
         })}

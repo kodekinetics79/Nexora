@@ -18,7 +18,7 @@ import {
 } from '@mui/material';
 import { ArrowForward as DrillDownIcon, Close as CloseIcon } from '@mui/icons-material';
 import type { Release01KpiDTO, Release01KpiUnit } from '../../../api/services/dashboardService';
-import { neuRaised, neuSlab } from '../glance/neumorphic';
+
 
 /**
  * One verified Release 01 KPI with its definition, its "insufficient data" honesty and the
@@ -70,14 +70,11 @@ export default function KpiCard({ kpi, index = 0 }: { kpi: Release01KpiDTO; inde
       data-decorative-motion="true"
       aria-label={`${kpi.label}: ${formatKpiValue(kpi)}. ${kpi.definition}`}
       style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
-      sx={(theme) => ({
-        ...neuSlab(theme.palette.mode, 6),
-        px: 2, py: 1, borderRadius: 3.5, minWidth: 0,
+      sx={{
+        // A flat cell of the tray the dashboard lays these in; the tray carries the depth.
+        px: 2, py: 1, minWidth: 0, backgroundColor: 'transparent', border: 0, borderRadius: 0,
         display: 'flex', alignItems: 'center', gap: 1.5,
-        transition: 'box-shadow 180ms ease-out',
-        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 8) },
-        '@media (prefers-reduced-motion: reduce)': { transition: 'none' },
-      })}
+      }}
     >
       <Tooltip
         title={kpi.state === 'insufficient_data' && kpi.insufficientDataReason
@@ -91,11 +88,13 @@ export default function KpiCard({ kpi, index = 0 }: { kpi: Release01KpiDTO; inde
             sx={{ display: 'block', fontWeight: 700, color: 'text.secondary', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
           >
             {kpi.label}
+            {/* The snapshot states no currency for money KPIs; a bare 486,200 would pass for one. */}
+            {kpi.unit === 'currency' && kpi.state === 'available' && ' · no currency'}
           </Typography>
           <Typography
             sx={{
               fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontSize: kpi.state === 'available' ? 22 : 15,
-              fontWeight: 900, lineHeight: 1.15, fontVariantNumeric: 'tabular-nums',
+              fontWeight: 700, lineHeight: 1.15, fontVariantNumeric: 'tabular-nums',
               color: kpi.state === 'available' ? 'text.primary' : 'text.secondary',
             }}
           >

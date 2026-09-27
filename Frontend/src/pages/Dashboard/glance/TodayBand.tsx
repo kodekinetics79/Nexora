@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
 import commercialIntelligenceService, { type CommercialAttentionItem } from '../../../api/services/commercialIntelligenceService';
+import { neuFocus } from './neumorphic';
 import { useAuth } from '../../../context/AuthContext';
 import { toPresentableError } from '../../../utils/apiErrors';
 import { parseDateSafe } from '../../../utils/dates';
@@ -165,9 +166,9 @@ function AxisHeader() {
         columnGap: '4px',
         alignItems: 'baseline',
         color: 'text.secondary',
-        fontSize: 9,
+        fontSize: 10,
         fontWeight: 700,
-        letterSpacing: '0.02em',
+        letterSpacing: 0,
         whiteSpace: 'nowrap',
         textTransform: 'uppercase',
       }}
@@ -253,6 +254,7 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
       title="What needs you today"
       index={index}
       minHeight={240}
+      emphasis
       hint={`Left of the line is late, right of it is still to come. Each end of the line is ${AXIS_DAYS} days from now.`}
       loading={query.isLoading}
       error={presented && !forbidden && !hasData ? presented.message : null}
@@ -294,14 +296,17 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
             <Stack spacing={1} sx={{ maxWidth: 420, alignItems: 'flex-start' }}>
               <NothingScheduledIcon sx={{ color: 'text.secondary' }} />
               <Typography variant="body2" sx={{ lineHeight: 1.45 }}>{NOTHING_SCHEDULED_SENTENCE}</Typography>
-              <Button
-                variant="outlined"
-                size="small"
-                endIcon={<GoIcon />}
-                onClick={() => navigate('/sales/routing')}
-              >
-                See unassigned enquiries
-              </Button>
+              {/* /sales/routing needs Leads; a button that lands on Access denied is worse than none. */}
+              {hasPermission('Leads') && (
+                <Button
+                  variant="outlined"
+                  size="small"
+                  endIcon={<GoIcon />}
+                  onClick={() => navigate('/sales/routing')}
+                >
+                  See unassigned enquiries
+                </Button>
+              )}
             </Stack>
           </Box>
         ) : (
@@ -320,7 +325,7 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
               const surface = {
                 minHeight: ROW_HEIGHT,
                 // Each thing that needs you is a soft strip standing out of the band's tray.
-                borderRadius: 2.5,
+                borderRadius: '12px',
                 boxShadow: 'var(--nx-neu-raised-sm)',
                 mb: 0.5,
                 px: 1,
@@ -333,9 +338,11 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
                 return (
                   <ListItem key={`${item.recordType}-${item.id}`} disableGutters sx={surface}>
                     <RowBody item={item} due={due} />
-                    <Typography variant="caption" sx={{ color: 'text.secondary', flexShrink: 0 }}>
-                      {permitted ? 'No link' : 'Permission required'}
-                    </Typography>
+                    {!permitted && (
+                      <Typography variant="caption" sx={{ color: 'text.secondary', flexShrink: 0 }}>
+                        Permission required
+                      </Typography>
+                    )}
                   </ListItem>
                 );
               }
@@ -346,6 +353,7 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
                   aria-label={`${label}. Open`}
                   sx={{
                     ...surface,
+                    ...neuFocus,
                     transition: 'transform 160ms cubic-bezier(0.2, 0.7, 0.2, 1), background-color 160ms ease-out',
                     '&:hover': { transform: 'translateY(-1px)' },
                     '&:active': { transform: 'translateY(1px)' },

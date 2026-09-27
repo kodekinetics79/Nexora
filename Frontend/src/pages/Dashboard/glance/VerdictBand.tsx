@@ -21,7 +21,7 @@ import { priorWindow, scopeWords, type GlanceScopeWords } from './scopeWords';
  * The screen's second sentence, after "whose numbers": of the quotes that reached a decision in
  * this window, how many went our way. It opens with one line of plain English assembled only from
  * figures the server stated, and then draws those same figures as two opposed lengths on one count
- * axis — won to the right in brass, lost to the left in graphite.
+ * axis — won to the right in brass, lost to the left in oxide, the screen's one colour for lost.
  *
  * Directly beneath, at 40% height, the immediately-prior equal-length window is repeated on the
  * SAME axis and the SAME origin. That ghost row is the whole reason this band exists in this
@@ -180,7 +180,7 @@ const barWidth = (value: number | null, scale: number): string => {
 };
 
 const wonFill = `linear-gradient(90deg, color-mix(in srgb, ${seriesVar('brassMark')} 45%, transparent) 0%, ${seriesVar('brassMark')} 100%)`;
-const lostFill = `linear-gradient(270deg, color-mix(in srgb, ${seriesVar('graphite')} 45%, transparent) 0%, ${seriesVar('graphite')} 100%)`;
+const lostFill = `linear-gradient(270deg, color-mix(in srgb, ${seriesVar('oxide')} 45%, transparent) 0%, ${seriesVar('oxide')} 100%)`;
 
 interface AxisRowProps {
   lost: number | null;
@@ -377,7 +377,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
 
   const conversionSlot = publishedRate !== null ? (
     <Stack spacing={0.5} sx={{ minWidth: 0 }}>
-      <Typography component="p" sx={{ ...numeral, fontSize: 26, lineHeight: 1.05 }}>
+      <Typography component="p" sx={{ ...numeral, fontSize: 28, lineHeight: 1.05 }}>
         {`${publishedRate.toLocaleString()}%`}
       </Typography>
       <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
@@ -426,7 +426,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
         <Typography
           component="p"
           data-testid="verdict-sentence"
-          sx={{ fontSize: { xs: 15, md: 16 }, fontWeight: 600, lineHeight: 1.35, color: 'text.primary' }}
+          sx={{ fontSize: 16, fontWeight: 600, lineHeight: 1.35, color: 'text.primary', textWrap: 'balance' }}
         >
           {sentence}
         </Typography>

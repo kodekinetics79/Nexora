@@ -169,8 +169,10 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
 
   const plotDescription = isEmpty
     ? 'No lost quote has a reason against it in this window.'
-    : `Above the line, reasons the customer gave: ${stated.map((r) => `${r.reason} ${r.count}`).join(', ') || 'none'}. `
-      + `Below the line, losses we never established a reason for: ${never.map((r) => `${r.reason} ${r.count}`).join(', ') || 'none'}.`;
+    // Each reason's money is spoken too: on screen it is a hover tooltip, which a keyboard or
+    // screen-reader user never reaches.
+    : `Above the line, reasons the customer gave: ${stated.map((r) => `${r.reason} ${r.count} (${valueSentence(r)})`).join(', ') || 'none'}. `
+      + `Below the line, losses we never established a reason for: ${never.map((r) => `${r.reason} ${r.count} (${valueSentence(r)})`).join(', ') || 'none'}.`;
 
   return (
     <BandShell

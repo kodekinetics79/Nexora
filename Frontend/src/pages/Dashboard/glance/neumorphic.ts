@@ -148,3 +148,16 @@ export const clayInkOverrides = (palette: {
   }
   return rules;
 };
+
+/**
+ * The keyboard focus ring for anything pressable on the clay. Soft shadows cannot carry focus —
+ * a raised key and a focused key look the same — so focus is a solid ring in the body ink, offset
+ * clear of the shadow, and it only shows for keyboard focus.
+ */
+export const neuFocus = {
+  '&.Mui-focusVisible, &:focus-visible': {
+    outline: '2px solid',
+    outlineColor: 'text.primary',
+    outlineOffset: 3,
+  },
+} as const;

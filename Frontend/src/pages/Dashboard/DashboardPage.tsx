@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Alert, Box, Button, Chip, GlobalStyles, Stack, TextField, Typography } from '@mui/material';
+import { visuallyHidden } from '@mui/utils';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -15,7 +16,7 @@ import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
-import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuInset, neuKey, neuRaised } from './glance/neumorphic';
+import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuFocus, neuInset, neuKey, neuRaised, neuWell } from './glance/neumorphic';
 import { glanceCssVariables } from './glance/tokens';
 
 /**
@@ -247,7 +248,7 @@ export default function DashboardPage() {
             variant="h5"
             component="h1"
             sx={(theme) => ({
-              fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em',
+              fontWeight: 700, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em',
               textShadow: neuEmboss(theme.palette.mode),
             })}
           >
@@ -262,21 +263,12 @@ export default function DashboardPage() {
                 </Box>
               )}
             </Typography>
-            {/*
-              This word comes from ONE aggregate (/performance) and is not a fact about the whole
-              screen: the six-month history is company-wide for every reader, and the deadline board
-              publishes no scope word at all. Saying so here is the difference between a heading and
-              a claim, and it points at the seal that carries the truth band by band.
-            */}
-            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', lineHeight: 1.3 }}>
-              Each band states its own scope and freshness on its seal.
-            </Typography>
           </Box>
         </Stack>
 
         {/* The period keys, with the bands they move named directly beneath them. */}
-        <Stack spacing={0.75} sx={{ alignItems: { xs: 'flex-start', md: 'flex-end' } }}>
-          <Stack direction="row" spacing={0.75} role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
+        <Stack spacing={0.75} sx={{ alignItems: { xs: 'flex-start', lg: 'flex-end' } }}>
+          <Stack direction="row" role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
             {PERIOD_CHOICES.map((choice) => (
               <Chip
                 key={choice.key}
@@ -293,6 +285,7 @@ export default function DashboardPage() {
                   const chosen = period === choice.key;
                   return {
                     ...NEU_TRANSITION,
+                    ...neuFocus,
                     height: 28, px: 0.5, fontWeight: 700,
                     backgroundColor: NEU_SURFACE[mode],
                     border: '1px solid',
@@ -316,10 +309,8 @@ export default function DashboardPage() {
             title="Steps 4, 5 and 6 have their own fixed windows, set by the server."
             data-testid="dates-govern"
             sx={{
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-              fontSize: 10,
-              fontWeight: 700,
+              fontSize: 11,
+              fontWeight: 600,
               color: 'text.secondary',
             }}
           >
@@ -383,23 +374,22 @@ export default function DashboardPage() {
       >
         {/* Named for assistive tech and for the section's landmark; the tiles say what they are. */}
         {verified.length > 0 && (
-          <Typography
-            component="h2"
-            sx={{
-              position: 'absolute', width: 1, height: 1, p: 0, m: -1, overflow: 'hidden',
-              clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
-            }}
-          >
+          <Typography component="h2" sx={visuallyHidden}>
             Verified performance
           </Typography>
         )}
         {verified.length > 0 && (
+          // One pressed tray split by hairlines, not four raised pills: raised pills beside the
+          // raised link keys read as four more buttons, and a figure is not a button.
           <Box
-            sx={{
+            sx={(theme) => ({
+              ...neuWell(theme.palette.mode, 4),
               flex: '999 1 640px', minWidth: 0,
-              display: 'grid', gap: 2,
-              gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
-            }}
+              borderRadius: '16px',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+              '& > * + *': { borderLeft: '1px solid', borderColor: 'divider' },
+            })}
           >
             {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
           </Box>
@@ -407,24 +397,24 @@ export default function DashboardPage() {
         <Stack spacing={0.5} sx={{ flex: '1 1 auto', alignItems: { xs: 'flex-start', md: 'flex-end' } }}>
           <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { md: 'flex-end' } }}>
             {hasPermission('Leads') && (
-              <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 1.5 })}>
+              <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={(theme) => ({ ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5 })}>
                 Every deadline in full
               </Button>
             )}
             {hasPermission('Dashboard') && (
-              <Button size="small" onClick={() => navigate('/sales/performance')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 1.5 })}>
+              <Button size="small" onClick={() => navigate('/sales/performance')} sx={(theme) => ({ ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5 })}>
                 Performance by rep
               </Button>
             )}
             {hasPermission('Leads') && (
-              <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 1.5 })}>
+              <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={(theme) => ({ ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5 })}>
                 Documents to check
               </Button>
             )}
           </Stack>
           {verified.length > 0 && notYetMeasurable > 0 && (
             <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.3 }}>
-              {notYetMeasurable} further measures are defined but not yet reportable; the performance screen lists why.
+              {notYetMeasurable === 1 ? '1 further measure is' : `${notYetMeasurable} further measures are`} defined but not yet reportable; the performance screen lists why.
             </Typography>
           )}
         </Stack>
@@ -440,7 +430,7 @@ export default function DashboardPage() {
         sx={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 380px), 1fr))',
-          gap: { xs: 2, md: 2.5 },
+          gap: 2.5,
           alignItems: 'stretch',
         }}
       >

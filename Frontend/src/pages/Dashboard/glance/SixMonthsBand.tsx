@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { Box, Chip, Stack, Tooltip, Typography, useTheme } from '@mui/material';
+import { visuallyHidden } from '@mui/utils';
+import { useMeasuredWidth } from './useMeasuredWidth';
 import dayjs from 'dayjs';
 import BandShell from './BandShell';
 import Unavailable from './Unavailable';
@@ -70,6 +72,7 @@ const MONTHS_SHOWN = 6;
 // One geometry for both panels. The left gutter and the plot width have to be identical or the
 // columns stop lining up with the points below them, and the reader is silently comparing October
 // against November.
+/** The design width, used until the band has measured its own (see useMeasuredWidth). */
 const VIEW_W = 440;
 const AXIS_W = 44;
 const PAD_R = 16;
@@ -77,13 +80,8 @@ const PAD_T = 10;
 const PLOT_H = 56;
 const LABELS_H = 22;
 const PANEL_H = PAD_T + PLOT_H;
-const PLOT_W = VIEW_W - AXIS_W - PAD_R;
 const BASELINE = PAD_T + PLOT_H;
 
-const srOnly = {
-  position: 'absolute', width: 1, height: 1, p: 0, m: -1,
-  overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
-} as const;
 
 const compact = (n: number) =>
   new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
@@ -136,6 +134,8 @@ export default function SixMonthsBand({
   points, generatedAt = null, loading = false, error = null, onRetry, index = 6,
 }: SixMonthsBandProps) {
   const theme = useTheme();
+  // The panels draw at the band's own width, so an 11px tick label renders at 11px.
+  const [measureRef, viewW] = useMeasuredWidth<SVGSVGElement>(VIEW_W);
   // Literals rather than the CSS custom properties: these values are interpolated into gradient
   // stops and shadow colours, which cannot be derived from a var() the browser has not resolved.
   const series = useSeriesColors();
@@ -173,7 +173,7 @@ export default function SixMonthsBand({
   const countMax = niceCeil(Math.max(...rows.map((r) => r.count), 0));
   const valueMax = niceCeil(Math.max(...statedValues.map((r) => r.value as number), 0));
 
-  const band = PLOT_W / slots;
+  const band = (viewW - AXIS_W - PAD_R) / slots;
   const barW = Math.min(40, band * 0.5);
   const centre = (i: number) => AXIS_W + band * (i + 0.5);
   const countY = (v: number) => BASELINE - (v / countMax) * PLOT_H;
@@ -201,7 +201,7 @@ export default function SixMonthsBand({
 
   const gridLines = (max: number, y: (v: number) => number) =>
     axisTicks(max).map((t) => (
-      <line key={t} x1={AXIS_W} x2={VIEW_W - PAD_R} y1={y(t)} y2={y(t)} stroke={gridInk} strokeWidth={1} />
+      <line key={t} x1={AXIS_W} x2={viewW - PAD_R} y1={y(t)} y2={y(t)} stroke={gridInk} strokeWidth={1} />
     ));
   const tickLabels = (max: number, y: (v: number) => number, format: (v: number) => string) =>
     axisTicks(max).map((t) => (
@@ -259,7 +259,8 @@ export default function SixMonthsBand({
       <Box
         component="svg"
         data-testid="six-months-requests"
-        viewBox={`0 0 ${VIEW_W} ${PANEL_H}`}
+        ref={measureRef}
+        viewBox={`0 0 ${viewW} ${PANEL_H}`}
         role="img"
         aria-label={`RFQs created, ${countSummary}`}
         sx={{ display: 'block', width: '100%', height: 'auto', overflow: 'visible' }}
@@ -272,7 +273,7 @@ export default function SixMonthsBand({
         </defs>
         {gridLines(countMax, countY)}
         {tickLabels(countMax, countY, (t) => t.toLocaleString('en-US'))}
-        <line x1={AXIS_W} x2={VIEW_W - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
+        <line x1={AXIS_W} x2={viewW - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
         {labels.map((label, i) => {
           const row = rows[i];
           const x = centre(i) - barW / 2;
@@ -305,6 +306,7 @@ export default function SixMonthsBand({
       {valueUnavailableReason ? (
         <Unavailable reason={valueUnavailableReason}>
           <ValueFrame
+          viewW={viewW}
             labels={labels} gridLines={gridLines} tickLabels={tickLabels} valueMax={valueMax}
             valueY={valueY} axisInk={axisInk} outlineInk={outlineInk} centre={centre} barW={barW}
             segments={[]} lastPoint={null} lastRow={null} currency={currency} series={series}
@@ -313,6 +315,7 @@ export default function SixMonthsBand({
         </Unavailable>
       ) : (
         <ValueFrame
+          viewW={viewW}
           labels={labels} gridLines={gridLines} tickLabels={tickLabels} valueMax={valueMax}
           valueY={valueY} axisInk={axisInk} outlineInk={outlineInk} centre={centre} barW={barW}
           segments={drawnSegments} lastPoint={lastPoint} lastRow={lastRow} currency={currency}
@@ -328,7 +331,7 @@ export default function SixMonthsBand({
         </Typography>
       )}
 
-      <Box component="table" sx={srOnly}>
+      <Box component="table" sx={visuallyHidden}>
         <caption>The last six months, company-wide</caption>
         <thead>
           <tr><th scope="col">Month</th><th scope="col">RFQs created</th><th scope="col">Order value</th></tr>
@@ -348,6 +351,7 @@ export default function SixMonthsBand({
 }
 
 interface ValueFrameProps {
+  viewW: number;
   labels: string[];
   gridLines: (max: number, y: (v: number) => number) => ReactNode;
   tickLabels: (max: number, y: (v: number) => number, format: (v: number) => string) => ReactNode;
@@ -373,6 +377,7 @@ interface ValueFrameProps {
  * and the month labels are all present underneath.
  */
 function ValueFrame({
+  viewW,
   labels, gridLines, tickLabels, valueMax, valueY, axisInk, outlineInk,
   centre, barW, segments, lastPoint, lastRow, currency, series, summary, gapIndexes,
 }: ValueFrameProps) {
@@ -380,7 +385,7 @@ function ValueFrame({
     <Box
       component="svg"
       data-testid="six-months-value"
-      viewBox={`0 0 ${VIEW_W} ${PANEL_H + LABELS_H}`}
+      viewBox={`0 0 ${viewW} ${PANEL_H + LABELS_H}`}
       role="img"
       aria-label={`Order value, ${summary}`}
       sx={{ display: 'block', width: '100%', height: 'auto', overflow: 'visible' }}
@@ -393,7 +398,7 @@ function ValueFrame({
       </defs>
       {gridLines(valueMax, valueY)}
       {tickLabels(valueMax, valueY, compact)}
-      <line x1={AXIS_W} x2={VIEW_W - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
+      <line x1={AXIS_W} x2={viewW - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
 
       {segments.length === 0 && labels.map((label, i) => (
         // No stated value anywhere: the same calm outline the column panel uses, so "nothing yet"
@@ -440,7 +445,7 @@ function ValueFrame({
           <circle cx={lastPoint.x} cy={lastPoint.y} r={9} fill={series.brassBrand} opacity={0.18} />
           <circle cx={lastPoint.x} cy={lastPoint.y} r={5} fill={series.brassMark} stroke="#fff" strokeWidth={2} />
           <text
-            x={Math.min(lastPoint.x, VIEW_W - PAD_R)} y={Math.max(lastPoint.y - 14, 12)}
+            x={Math.min(lastPoint.x, viewW - PAD_R)} y={Math.max(lastPoint.y - 14, 12)}
             textAnchor="end" fill={axisInk} fontSize={12} fontWeight={700}
             fontFamily='"Cambay", "Source Sans 3", sans-serif' style={{ fontVariantNumeric: 'tabular-nums' }}
           >
