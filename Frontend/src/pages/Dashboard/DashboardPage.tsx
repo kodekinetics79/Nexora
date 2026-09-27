@@ -15,6 +15,7 @@ import ClosingBand from './glance/ClosingBand';
 import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
+import RepDesk from './RepDesk';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
 import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuFocus, neuInset, neuKey, neuRaised, neuWell } from './glance/neumorphic';
 import { glanceCssVariables } from './glance/tokens';
@@ -98,7 +99,17 @@ const day = (value: string): string => {
   return parsed.isValid() ? parsed.format('D MMM YYYY') : value;
 };
 
+/**
+ * One address, a view per role. A sales rep gets their own desk; a manager, admin or owner gets
+ * the team/company screen below, which the server already scopes to their team or the company.
+ */
 export default function DashboardPage() {
+  const { userData } = useAuth();
+  const leadsOthers = userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank;
+  return leadsOthers ? <TeamDashboard /> : <RepDesk />;
+}
+
+function TeamDashboard() {
   const { hasPermission, userData } = useAuth();
   const navigate = useNavigate();
   const today = useMemo(() => dayjs().startOf('day'), []);

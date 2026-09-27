@@ -219,9 +219,11 @@ function RowBody({ item, due }: { item: CommercialAttentionItem; due: DueReading
 export interface TodayBandProps {
   /** Position in the screen's entrance stagger. */
   index?: number;
+  /** The band's numeral on a numbered screen; empty on a screen that does not number its bands. */
+  step?: string;
 }
 
-export default function TodayBand({ index = 0 }: TodayBandProps) {
+export default function TodayBand({ index = 0, step = '5' }: TodayBandProps) {
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   // Its own query, its own failure. A band that cannot load must not blank its neighbours, so
@@ -250,7 +252,7 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
 
   return (
     <BandShell
-      step="5"
+      step={step}
       title="What needs you today"
       index={index}
       minHeight={240}

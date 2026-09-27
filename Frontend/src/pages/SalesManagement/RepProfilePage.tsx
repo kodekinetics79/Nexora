@@ -6,10 +6,15 @@ import commercialIntelligenceService from '../../api/services/commercialIntellig
 import { CurrencyAmounts, MetricGrid, PageShell, PipelineGroups, QueryState, ResponsiveTable, formatDateTime } from './CommercialPagePrimitives';
 import { useAuth } from '../../context/AuthContext';
 
-export default function RepProfilePage() {
-  const userId = Number(useParams<{ userId: string }>().userId);
+/**
+ * One rep's numbers and recent work. With `self`, it is the signed-in rep's own page ("My
+ * performance"), reached from their dashboard; the server lets a rep read only themselves.
+ */
+export default function RepProfilePage({ self = false }: { self?: boolean } = {}) {
+  const routeUserId = Number(useParams<{ userId: string }>().userId);
   const navigate = useNavigate();
-  const { hasPermission } = useAuth();
+  const { hasPermission, userData } = useAuth();
+  const userId = self ? Number(userData.id) : routeUserId;
   const [searchParams] = useSearchParams();
   const from = searchParams.get('from') || undefined;
   const to = searchParams.get('to') || undefined;
@@ -26,7 +31,7 @@ export default function RepProfilePage() {
     { key: 'draft-quotes', label: 'Draft quotes', value: rep.draftQuotes, unit: 'count' },
   ] : [];
   return (
-    <PageShell title={rep?.name || 'Rep profile'} subtitle={rep?.email || 'Representative commercial workload.'}>
+    <PageShell title={self ? 'My performance' : rep?.name || 'Rep profile'} subtitle={self ? 'Your numbers and your recent work.' : rep?.email || 'Representative commercial workload.'}>
       <MetricGrid metrics={metrics} />
       {rep && <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, 1fr)' }, gap: 2, mb: 2.5 }}><Box><Typography variant="caption" color="text.secondary">Weighted active pipeline</Typography><PipelineGroups groups={rep.pipelineGroups} /></Box><Box><Typography variant="caption" color="text.secondary">Won value, contribution weighted</Typography><CurrencyAmounts groups={rep.wonValueGroups} /></Box><Box><Typography variant="caption" color="text.secondary">Decided-outcome conversion</Typography><Typography>{rep.conversionEligible && rep.conversionRate != null ? `${rep.conversionRate.toFixed(1)}%` : `Insufficient data (${rep.decidedQuotes}/5)`}</Typography></Box></Box>}
       <QueryState loading={query.isLoading} error={query.isError} empty={!!rep && !activity.length} onRetry={() => void query.refetch()} emptyText="No recent commercial activity is recorded for this representative.">

@@ -50,8 +50,8 @@ namespace ERP_RFQ_Automation.Controllers
 
         /// <summary>
         /// GET /api/dashboard/workload — per-rep open/overdue leads and
-        /// sent/stale quotes for the caller's BU, plus one unassigned bucket
-        /// row. Managers/admins only.
+        /// sent/stale quotes for the reps the caller manages (the whole BU for an
+        /// admin), plus one unassigned bucket row. Managers/admins only.
         /// </summary>
         [HttpGet("workload")]
         [RequireManagerRole]
@@ -59,9 +59,15 @@ namespace ERP_RFQ_Automation.Controllers
         public async Task<ActionResult<TeamWorkloadDTO>> GetWorkload(CancellationToken ct)
         {
             var businessUnitId = GetBusinessUnitId();
-            if (businessUnitId <= 0) return Forbid();
+            var roleId = ClaimId("roleId");
+            var userId = ClaimId(ClaimTypes.NameIdentifier);
+            if (userId <= 0) userId = ClaimId("sub");
+            if (businessUnitId <= 0 || roleId <= 0 || userId <= 0) return Forbid();
 
-            var data = await _repository.GetTeamWorkloadAsync(businessUnitId);
+            // The manager's own team tree, not the whole business unit.
+            var scope = await _accountScope.ResolveAsync(userId, roleId, businessUnitId, DateTime.UtcNow, ct);
+            var data = await _repository.GetTeamWorkloadAsync(
+                businessUnitId, scope.IsTenantWide ? null : scope.UserIds);
             return Ok(data);
         }
 
