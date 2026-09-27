@@ -124,16 +124,16 @@ export default function OfferedPartDialog({ open, rfqId, line, onClose }: {
       <DialogContent>
         <RadioGroup value={kind} onChange={(event) => setKind(event.target.value as OfferedKind)}>
           <FormControlLabel value="REPLACEMENT" control={<Radio size="small" />}
-            label={<Typography variant="body2">The maker replaced it with a new part</Typography>} />
+            label={<Typography variant="body2">Same brand, new part number <Typography component="span" variant="caption" color="text.secondary">(old number obsolete)</Typography></Typography>} />
           <FormControlLabel value="EQUIVALENT" control={<Radio size="small" />}
-            label={<Typography variant="body2">Discontinued: offering an equivalent</Typography>} />
+            label={<Typography variant="body2">Different brand, similar part <Typography component="span" variant="caption" color="text.secondary">(customer must check it)</Typography></Typography>} />
         </RadioGroup>
 
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 1 }}>
           <TextField label="Part number offered" value={partNumber} onChange={(event) => setPartNumber(event.target.value)}
             sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 100, "aria-label": "Part number offered" } }} />
-          <TextField label="Maker" value={maker} onChange={(event) => setMaker(event.target.value)}
-            sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 150, "aria-label": "Maker offered" } }} />
+          <TextField label="Brand" value={maker} onChange={(event) => setMaker(event.target.value)}
+            sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 150, "aria-label": "Brand offered" } }} />
         </Stack>
 
         {products.length > 0 && (
@@ -192,14 +192,14 @@ export function OfferedPartCell({ rfqId, line, canEdit }: { rfqId: number; line:
           <Chip size="small" color="info" variant="outlined" icon={<SwapHoriz sx={{ fontSize: 14 }} />}
             label={`${line.offeredMakerName ? `${line.offeredMakerName} ` : ""}${line.offeredPartNumber}`} />
           <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-            {line.offeredKind === "EQUIVALENT" ? "equivalent offered" : "replaces the part asked for"}
+            {line.offeredKind === "EQUIVALENT" ? "offered instead: similar part, customer to check" : "offered instead: new part number"}
           </Typography>
         </Box>
       )}
       {canEdit && (
         <Button size="small" variant="text" startIcon={<SwapHoriz sx={{ fontSize: 14 }} />} sx={{ mt: 0.25, px: 0.5, minWidth: 0 }}
           onClick={() => setOpen(true)} aria-label="Offer a different part">
-          {sentence ? "Change part offered" : "Part replaced?"}
+          {sentence ? "Change part offered" : "Offer a different part"}
         </Button>
       )}
       {open && <OfferedPartDialog open rfqId={rfqId} line={line} onClose={() => setOpen(false)} />}

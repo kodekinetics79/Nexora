@@ -155,7 +155,7 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
         <Tooltip title="Change the brands the customer accepts for this part, as their RFQ or a later message says. Find supplier asks suppliers for each one." describeChild>
           <Button size="small" variant="text" startIcon={<Edit sx={{ fontSize: 14 }} />} sx={{ mt: 0.5, px: 0.5, minWidth: 0 }}
             onClick={() => { setBrands(accepted); setDraft(""); setOpen(true); }}>
-            Change brands
+            Edit accepted brands
           </Button>
         </Tooltip>
       )}

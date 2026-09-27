@@ -38,7 +38,7 @@ describe('Approved brands on an RFQ line', () => {
     renderCell();
     expect(screen.getByText('Customer accepts any of')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Change brands' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit accepted brands' }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Brands the customer accepts for this part')).toBeInTheDocument();
     expect(within(dialog).queryByText(/Separate makers with/)).not.toBeInTheDocument();
