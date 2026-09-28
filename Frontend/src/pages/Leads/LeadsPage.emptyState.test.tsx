@@ -45,7 +45,7 @@ vi.mock('../../hooks/useColumnPreferences', () => ({
 vi.mock('../../components/common/ColumnPreferences', () => ({ default: () => null }));
 
 vi.mock('../../context/AuthContext', () => ({
-  useAuth: () => ({ hasPermission }),
+  useAuth: () => ({ hasEntitlement: () => true, hasPermission }),
 }));
 
 const navigate = vi.fn();

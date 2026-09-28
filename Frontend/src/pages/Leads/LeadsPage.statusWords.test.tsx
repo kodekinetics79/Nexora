@@ -52,7 +52,7 @@ vi.mock('../../hooks/useColumnPreferences', () => ({
 vi.mock('../../components/common/ColumnPreferences', () => ({ default: () => null }));
 
 vi.mock('../../context/AuthContext', () => ({
-  useAuth: () => ({ hasPermission: () => true, userData: { id: 2, roleName: 'Sales Rep', isManager: false } }),
+  useAuth: () => ({ hasEntitlement: () => true, hasPermission: () => true, userData: { id: 2, roleName: 'Sales Rep', isManager: false } }),
 }));
 
 vi.mock('react-router-dom', async (importOriginal) => {

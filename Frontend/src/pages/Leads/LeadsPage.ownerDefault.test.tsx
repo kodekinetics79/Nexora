@@ -33,7 +33,7 @@ vi.mock('../../hooks/useColumnPreferences', () => ({
 }));
 vi.mock('../../components/common/ColumnPreferences', () => ({ default: () => null }));
 vi.mock('../../context/AuthContext', () => ({
-  useAuth: () => ({ hasPermission: () => true, userData: authUser }),
+  useAuth: () => ({ hasEntitlement: () => true, hasPermission: () => true, userData: authUser }),
 }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 

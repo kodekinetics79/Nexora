@@ -33,6 +33,7 @@ import LateIngestedBadge from './LateIngestedBadge';
 import ClientCell from './ClientCell';
 import ResolveClientDialog from './ResolveClientDialog';
 import SearchField from '../../components/common/SearchField';
+import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../components/common/ExportExcelButton';
 import gridEmptyOverlay from '../../components/common/gridOverlays';
 import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
@@ -168,6 +169,19 @@ const leadStatus = (row: LeadResponseDTO): StatusMeta => {
   if (row.headerRemarks?.startsWith('[NEEDS REVIEW]')) return { label: 'Needs review', color: 'warning', variant: 'filled' };
   return { label: 'New', color: 'primary', variant: 'outlined' };
 };
+
+const LEAD_EXPORT_COLUMNS: ExportColumn<LeadResponseDTO>[] = [
+  { header: 'Nexora Serial', value: (r) => r.nexoraSerial || r.commercialCaseReference },
+  { header: 'RFQ #', value: (r) => r.rfqno },
+  { header: 'Client', value: (r) => r.customerName },
+  { header: 'Buyer contact', value: (r) => r.buyersName },
+  { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
+  { header: 'Deadline', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Items', value: (r) => r.itemCount ?? 0 },
+  { header: 'Source', value: (r) => r.leadSource },
+  { header: 'Status', value: (r) => leadStatus(r).label },
+  { header: 'Owner', value: (r) => r.assignedToFullName || 'Unassigned' },
+];
 
 // NOTE: this grid used to carry a "Confidence" column driven by
 // Lead.Aiconfidence, rendered High/Medium/Low in green/amber/red. That score is
@@ -1280,6 +1294,18 @@ const LeadsPage: React.FC = () => {
               </Button>
             </span>
           </Tooltip>
+          <ExportExcelButton
+            name="Leads"
+            columns={LEAD_EXPORT_COLUMNS}
+            loadRows={() => loadAllPages((pageNumber, pageSize) => leadService.getAll({
+              pageNumber,
+              pageSize,
+              rfqno: search || undefined,
+              search: search || undefined,
+              leadSource: leadSource === 'all' ? undefined : leadSource,
+              view: requestedView,
+            }))}
+          />
           <Tooltip title="Refresh">
             <IconButton aria-label="Refresh" onClick={() => refetch()} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
               <RefreshIcon />

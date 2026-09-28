@@ -18,6 +18,7 @@ import {
   EmojiEvents as OutcomeIcon,
   ContentCopy as ReviseIcon,
 } from '@mui/icons-material';
+import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../../components/common/ExportExcelButton';
 import quoteService, { describeQuoteSendOutcome, type QuoteDTO, type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import PriceConfirmationDialog from './PriceConfirmationDialog';
@@ -111,6 +112,19 @@ const QUOTE_FILTERS: Record<string, { label: string; description: string }> = {
     description: 'Showing closed quotes only — won, lost or expired. This is not the whole pipeline.',
   },
 };
+
+const QUOTE_EXPORT_COLUMNS: ExportColumn<QuoteDTO>[] = [
+  { header: 'Nexora Serial', value: (q) => q.nexoraSerial },
+  { header: 'Quote #', value: (q) => q.quoteNo },
+  { header: 'RFQ #', value: (q) => q.rfqNo },
+  { header: 'Customer', value: (q) => q.customerName },
+  { header: 'Customer email', value: (q) => q.customerEmail },
+  { header: 'Date', value: (q) => (q.quoteDate ? dayjs(q.quoteDate).format('DD MMM YYYY') : '') },
+  { header: 'Valid until', value: (q) => (q.validUntil ? dayjs(q.validUntil).format('DD MMM YYYY') : '') },
+  { header: 'Currency', value: (q) => q.currencyCode },
+  { header: 'Total', value: (q) => q.totalAmount },
+  { header: 'Status', value: (q) => q.statusValue },
+];
 
 const QuotesPage: React.FC = () => {
   const { t: _t } = useTranslation();
@@ -460,6 +474,17 @@ const QuotesPage: React.FC = () => {
           >
             Create Quote
           </Button>}
+          <ExportExcelButton
+            name="Quotes"
+            columns={QUOTE_EXPORT_COLUMNS}
+            loadRows={() => loadAllPages((pageNumber, pageSize) => quoteService.getAll({
+              pageNumber,
+              pageSize,
+              search: search || undefined,
+              state,
+              businessUnitId: userData?.businessUnitId || undefined,
+            }))}
+          />
           <Tooltip title="Refresh Data">
             <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
               <RefreshIcon />

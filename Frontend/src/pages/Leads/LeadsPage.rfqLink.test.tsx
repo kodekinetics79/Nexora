@@ -31,7 +31,7 @@ vi.mock('../../hooks/useColumnPreferences', () => ({
 }));
 vi.mock('../../components/common/ColumnPreferences', () => ({ default: () => null }));
 vi.mock('../../context/AuthContext', () => ({
-  useAuth: () => ({ hasPermission: () => true, userData: { id: 2, isManager: true } }),
+  useAuth: () => ({ hasEntitlement: () => true, hasPermission: () => true, userData: { id: 2, isManager: true } }),
 }));
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>();

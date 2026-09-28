@@ -28,6 +28,7 @@ vi.mock('../../../api/axiosInstance', () => ({
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
+    hasEntitlement: () => true,
     userData: { businessUnitId: 1 },
     token: 'synthetic-test-token',
     hasPermission: () => true,

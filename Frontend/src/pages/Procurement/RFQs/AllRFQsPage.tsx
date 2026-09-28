@@ -15,7 +15,8 @@ import {
   Layers as ItemsIcon,
   CloudUpload as UploadIcon,
 } from '@mui/icons-material';
-import rfqService from '../../../api/services/rfqService';
+import rfqService, { type RfqResponseDTO } from '../../../api/services/rfqService';
+import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../../components/common/ExportExcelButton';
 import SearchField from '../../../components/common/SearchField';
 import gridEmptyOverlay from '../../../components/common/gridOverlays';
 import ViewTabs from '../../../components/layout/ViewTabs';
@@ -37,6 +38,17 @@ const RFQ_FILTERS: Record<string, { label: string; description: string }> = {
     description: 'Showing only RFQs with a customer, a lead and complete line items. This is not every RFQ.',
   },
 };
+
+const RFQ_EXPORT_COLUMNS: ExportColumn<RfqResponseDTO>[] = [
+  { header: 'Nexora Serial', value: (r) => r.nexoraSerial },
+  { header: 'RFQ #', value: (r) => r.rfqno },
+  { header: 'Customer', value: (r) => r.customerName },
+  { header: 'Buyer', value: (r) => r.buyersName },
+  { header: 'Lines', value: (r) => r.noOfLineItems ?? 0 },
+  { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
+  { header: 'Closing date', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Status', value: (r) => r.rfqstatusValue },
+];
 
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -262,6 +274,17 @@ const AllRFQsPage: React.FC = () => {
               </Button>
             </Tooltip>
           )}
+          <ExportExcelButton
+            name="RFQs"
+            columns={RFQ_EXPORT_COLUMNS}
+            loadRows={() => loadAllPages((pageNumber, pageSize) => rfqService.getAll({
+              pageNumber,
+              pageSize,
+              search: search || undefined,
+              businessUnitId: userData?.businessUnitId || undefined,
+              readiness,
+            }))}
+          />
           <Tooltip title="Refresh Data">
             <IconButton onClick={() => refetch()} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
               <RefreshIcon />

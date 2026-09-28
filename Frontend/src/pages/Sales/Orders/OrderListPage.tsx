@@ -15,12 +15,24 @@ import {
   Receipt as InvoiceIcon
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
-import orderService from '../../../api/services/orderService';
+import orderService, { type OrderDTO } from '../../../api/services/orderService';
+import ExportExcelButton, { type ExportColumn } from '../../../components/common/ExportExcelButton';
 import dayjs from 'dayjs';
 
 import PermissionGuard from '../../../components/common/PermissionGuard';
 import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
 import { formatMoney } from '../../../utils/currency';
+
+const ORDER_EXPORT_COLUMNS: ExportColumn<OrderDTO>[] = [
+  { header: 'Order #', value: (o) => o.orderNo || o.orderNumber },
+  { header: 'Date', value: (o) => (o.orderDate ? dayjs(o.orderDate).format('DD MMM YYYY') : '') },
+  { header: 'Customer', value: (o) => o.customerName },
+  { header: 'Quote #', value: (o) => o.quoteNo },
+  { header: 'Currency', value: (o) => o.currencyCode },
+  { header: 'Amount', value: (o) => o.totalAmount },
+  { header: 'Status', value: (o) => o.status },
+  { header: 'Payment', value: (o) => o.paymentStatus || 'UNPAID' },
+];
 
 const OrderListPage: React.FC = () => {
   const navigate = useNavigate();
@@ -87,15 +99,18 @@ const OrderListPage: React.FC = () => {
           </Typography>
           <Typography variant="body2" color="text.secondary">Manage customer orders and conversions</Typography>
         </Box>
-        {canConfirmOrders ? (
-          <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>
-            Open Client PO Inbox
-          </Button>
-        ) : (
-          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 320, textAlign: 'right' }}>
-            {askForAwardsAccess}
-          </Typography>
-        )}
+        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
+          <ExportExcelButton name="Sales-Orders" columns={ORDER_EXPORT_COLUMNS} loadRows={async () => orders} />
+          {canConfirmOrders ? (
+            <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>
+              Open Client PO Inbox
+            </Button>
+          ) : (
+            <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 320, textAlign: 'right' }}>
+              {askForAwardsAccess}
+            </Typography>
+          )}
+        </Stack>
       </Stack>
 
       <Paper sx={{ p: 2, mb: 3, borderRadius: 2, boxShadow: 'none', border: '1px solid', borderColor: 'divider' }}>
