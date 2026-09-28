@@ -62,6 +62,7 @@ import LinesTable from './LinesTable';
 import BuyerTermsPanel from './BuyerTermsPanel';
 import CheckDocumentDialog, { type ConfirmedLine } from './CheckDocumentDialog';
 import CreateRfqConfirmDialog, { type QualificationOutlook } from './CreateRfqConfirmDialog';
+import PartialReadNotice from './PartialReadNotice';
 import { decisionLabel } from '../decisionRead';
 import {
   applyUnitToUnitless,
@@ -1012,6 +1013,8 @@ const DecidePage: React.FC = () => {
           {new Date(workbenchQuery.dataUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.
         </Alert>
       ) : null}
+
+      <PartialReadNotice leadId={leadId} />
 
       {/* The next step, first. While the request can be decided, the same sentence repeats beside
           the one button in the sticky bar under the lines, and that copy is the one named "Next

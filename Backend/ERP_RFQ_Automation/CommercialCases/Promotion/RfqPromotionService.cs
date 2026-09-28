@@ -305,7 +305,11 @@ public sealed class RfqPromotionService : IRfqPromotionService
                         CustomerAccountPortalId = frozenLine.CustomerAccountPortalId,
                         CustomerRfqno = frozenLine.CustomerRfqno,
                         ItemMaterialCode = frozenLine.ItemMaterialCode ?? part,
-                        LineItemNo = frozenLine.LineItemNo ?? revisionLine.LineNumber.ToString(),
+                        // The BUYER's line number, or nothing. The revision's position used to stand in
+                        // for a missing one, so the buyer's lines 8, 9 and 35 went into the RFQ — and
+                        // from there onto the quote — as lines 1, 2 and 3. The position is still on the
+                        // RFQ line's lineage (SourceLeadItemRevisionId) for anything that needs it.
+                        LineItemNo = frozenLine.LineItemNo,
                         ProductId = approved.ProductId,
                         CommodityProduct = frozenLine.CommodityProduct,
                         ProductShortName = frozenLine.ProductShortName ?? description,

@@ -1,0 +1,57 @@
+[[page 1]]
+_______________________________________________________________________
+SPECIAL NOTE TO VENDOR:
+-This RFQ requires Seperate Technical/Financial BID in sealed envelopes: YES[ ]/NO[X]_______________________________________________________________________
+ALL QUOTATIONS WHICH ARE NOT REQUIRING SEALED BID, SHALL BE SENT BY EMAIL TO
+procurement@marafiq.com.sa.ALL FAX QUOTATIONS ARE NOT ACCEPTABLE. _______________________________________________________________________
+Item Material Description
+RFQ Quantity   Unit _______________________________________________________________________
+-----------------------------------------------------------------------
+00010 201140757 ASSY CNTRL;LMT-TRQU SWTCH,15-30NM,AUMA
+2     Assembley
+Manufacturer part number
+559 0204MD 98683
+ASSEMBLY CONTROL
+APPLICATION:FOR SAR07.1-F10
+MODEL: COM.NO. 789074
+TORGUE: 15-30 NM
+PART NO: 559 0204MD 98683
+MNFR: AUMA
+FFT:USED IN RO1 PLANT ERT MOV'S
+PHOTO ATTACHED
+_______________________________________________________________________
+TO:
+###### ### ### ####### ###### #######
+.
+32233 .
+Bid Closing Date:06.09.2026Time: 2:00PM
+Page 1 /  15
+RFQ
+RFQ Coll. No: HFE-26-204
+RFQ Date    : 01.09.2026
+______________________________
+Delivery Location
+MARAFIQ Yanbu Warehouse
+Power & Desalination Plant
+Yanbu Al-Sinaiyah, KSA
+Attn: Recieving Section
+Phone: 04-396 6052, 396 6239
+Your vendor number with us:
+1495
+Vendor Contact Person:
+M. Nawaz Khan, Br. Mgr.
+Tel.No : [phone]
+Fax.No : 0126745161
+[[page 2]]
+_______________________________________________________________________
+A submission of a Quotation shall be deemed to indicate acceptance of
+our Conditions of Quotation.
+_______________________________________________________________________
+For questions regarding this RFQ,     |  Approved
+Please Contact:    |
+Buyer :[buyer name] ________________ | __________________________
+Phone :  | Supervisor Procurement
+Email :buyer@example.com |_______________________________________________________________________
+Page 2 /  15
+RFQ Coll. No:
+HFE-26-204

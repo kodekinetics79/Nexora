@@ -22,8 +22,8 @@ namespace ERP_RFQ_Automation.Services
 
             // Reuse the extraction preprocessor (whitespace normalization + intelligent
             // truncation) — service scopes are prose-heavy, the same limits apply.
-            var processedText = PrepareProviderInput(scopeText);
             var instructions = BuildBoqInstructions();
+            var processedText = PrepareProviderInput(scopeText, instructions);
             var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
             var governedContext = context with { ProviderClass = _providerClass };
             var reservation = await _governance.ReserveAsync(
@@ -162,7 +162,8 @@ namespace ERP_RFQ_Automation.Services
                 // path above: disable hidden thinking so reasoning models spend the output
                 // budget on JSON content. Non-reasoning models ignore the field.
                 Think: false,
-                Options: new OllamaOptions(Temperature: TEMPERATURE, NumPredict: _maximumOutputTokens)
+                Options: RequestOptions(),
+                KeepAlive: _keepAlive
             );
 
             using var response = await _http.PostAsJsonAsync("api/chat", payload, _jsonOptions, ct);

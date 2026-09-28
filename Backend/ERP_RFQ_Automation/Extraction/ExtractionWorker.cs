@@ -1528,6 +1528,10 @@ public sealed class LeadPersister : ILeadPersister
         var items = results[0].Items;
         if (items is not { Count: > 0 }) return AutoVerification.None;
         if (!items.All(item => item.Quantity is > 0)) return AutoVerification.None;
+        // A model-read line whose values were found on the page is checkable, not checked: its
+        // evidence came from the document check, and a model-read commercial fact always goes
+        // to a person (Extraction/Anchoring/AiItemAnchoring).
+        if (items.Any(item => item.EvidenceFromDocumentCheck)) return AutoVerification.None;
         if (!items.All(item => HasCompleteCriticalEvidence(item, jobId))) return AutoVerification.None;
         if (IsDeterministicRead(outcome)) return AutoVerification.DeterministicRead;
         if (minConfidence is null) return AutoVerification.None;
@@ -2114,6 +2118,7 @@ public sealed class LeadPersister : ILeadPersister
             .MaxAsync(ct) ?? 0) + 1;
 
         var pending = new List<(LeadItemData Item, CanonicalLineItem Line, int Ordinal)>();
+        var partialReadFindings = 0;
         for (var groupIndex = 0; hasCanonicalOutput && groupIndex < groups.Count; groupIndex++)
         {
             var result = groups[groupIndex];
@@ -2127,6 +2132,17 @@ public sealed class LeadPersister : ILeadPersister
             inquiry.RequireReview();
             _context.Add(inquiry);
             await _context.SaveChangesAsync(ct);
+            // "Read 3 of about 42 lines": kept as a finding on the run, where the decision screen
+            // reads it. It used to live only in a free-text remark nothing displayed.
+            if (ERP_RFQ_Automation.Extraction.Anchoring.PartialReadFact.TryParse(outcome.ReviewReason, out var partialRead)
+                && runs.TryGetValue(job.Id, out var anchorRun))
+            {
+                _context.Add(ValidationFinding.ForInquiry(job.BusinessUnitId, anchorRun.Id, inquiry.Id,
+                    ERP_RFQ_Automation.Extraction.Anchoring.PartialReadFact.FindingCode,
+                    ERP_RFQ_Automation.DocumentIntelligence.Persistence.ValidationSeverity.Warning,
+                    partialRead.Describe()));
+                partialReadFindings++;
+            }
 
             var leadItemIds = await ResolveEvidenceLeadItemIdsAsync(
                 job, lead, reconciliation.Count == groups.Count ? reconciliation[groupIndex] : null,
@@ -2265,7 +2281,7 @@ public sealed class LeadPersister : ILeadPersister
             runs[sourceJob.Id].Complete(1, regionCounts[sourceJob.Id],
                 isAnchor && hasCanonicalOutput ? groups.Count : 0,
                 isAnchor && hasCanonicalOutput ? groups.Sum(x => x.Items.Count) : 0,
-                evidenceCounts[sourceJob.Id], 0);
+                evidenceCounts[sourceJob.Id], isAnchor ? partialReadFindings : 0);
         }
         await _context.SaveChangesAsync(ct);
     }

@@ -413,7 +413,7 @@ public sealed class DashboardOwnerFilterTests
         }
 
         public Task<DashboardDataDTO> GetDashboardDataAsync(long businessUnitId) => throw new NotSupportedException();
-        public Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId, IReadOnlyCollection<long>? visibleUserIds = null) => throw new NotSupportedException();
+        public Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId) => throw new NotSupportedException();
         public Task<DocumentYieldDTO> GetDocumentYieldAsync(
             long businessUnitId, DateTime from, DateTime to, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
