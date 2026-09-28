@@ -431,6 +431,48 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             return new(canonical.Id, canonical.CommercialCaseReference, duplicate.Id, matchingRevision.Id, canonical.CurrentRevisionNumber,
                 duplicate.Classification, duplicate.Confidence, duplicate.DecisionReasons(), false);
         }
+        // A poorer reading of the same RFQ must never silently become the current revision
+        // (XS-16: the .doc print of RFP 6000000003 read no makers and replaced the .docx reading
+        // of 870). See PoorerCopyGuard for the rule.
+        var poorer = PoorerCopyGuard.Assess(
+            canonical.LeadItems.Where(x => x.IsCurrentRevisionProjection).ToList(), incoming.LeadItems.ToList());
+        if (poorer.IsPoorer && !poorer.LostLinesOnly && SameHeaderTerms(canonical, incoming))
+        {
+            var kept = NewOccurrence(canonical.BusinessUnitId, intake, fingerprint, scope, LeadOccurrenceClassification.ExactDuplicate, 1m,
+                [$"Same RFQ and lines as revision {canonical.CurrentRevisionNumber}, but this copy has fewer makers or part numbers ({poorer.LinesThatLostMakerFacts} line(s)). Revision {canonical.CurrentRevisionNumber} stays current."],
+                canonical.Id, canonical.CurrentRevisionId);
+            await EnsureBatchAsync(canonical.BusinessUnitId, intake, ct); _db.Add(kept);
+            await _db.SaveChangesAsync(ct);
+            AddAudit(kept, canonical.Id, "INGESTION_POORER_COPY_KEPT_CURRENT", intake,
+                new { currentRevision = canonical.CurrentRevisionNumber, linesWithFewerMakerFacts = poorer.LinesThatLostMakerFacts });
+            await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
+            return new(canonical.Id, canonical.CommercialCaseReference, kept.Id, canonical.CurrentRevisionId, canonical.CurrentRevisionNumber,
+                kept.Classification, kept.Confidence, kept.DecisionReasons(), false);
+        }
+        if (poorer.LostLinesOnly)
+        {
+            var held = NewOccurrence(canonical.BusinessUnitId, intake, fingerprint, scope, LeadOccurrenceClassification.PossibleMatchReviewRequired, .98m,
+                [$"This copy has {poorer.IncomingLines} of the {poorer.CurrentLines} lines of revision {canonical.CurrentRevisionNumber} and nothing new. A person decides before it replaces revision {canonical.CurrentRevisionNumber}."],
+                null, null);
+            await EnsureBatchAsync(canonical.BusinessUnitId, intake, ct); _db.Add(held);
+            await _db.SaveChangesAsync(ct);
+            _db.Add(new LeadMatchCandidate { BusinessUnitId = canonical.BusinessUnitId, Occurrence = held,
+                CandidateLeadId = canonical.Id, Confidence = .98m, ReviewState = LeadMatchReviewState.Pending,
+                MatchEvidenceJson = JsonSerializer.Serialize(new { policy = PolicyVersion, poorerCopy = true,
+                    currentLines = poorer.CurrentLines, incomingLines = poorer.IncomingLines,
+                    linesWithFewerMakerFacts = poorer.LinesThatLostMakerFacts }),
+                DifferencesJson = Diff(IdentitySnapshot(canonical), IdentitySnapshot(incoming)),
+                ProposedLeadSnapshotJson = VerbatimSnapshotJson(incoming),
+                DownstreamImpactJson = await DownstreamImpactJsonAsync(canonical, ct) });
+            AddAudit(held, null, "POSSIBLE_MATCH_RAISED", intake, new { candidateLeadId = canonical.Id, poorerCopy = true,
+                currentLines = poorer.CurrentLines, incomingLines = poorer.IncomingLines });
+            await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
+            return new(0, string.Empty, held.Id, null, 0, held.Classification, held.Confidence, held.DecisionReasons(), false);
+        }
+        var carried = PoorerCopyGuard.CarryForward(poorer);
+        if (carried > 0)
+            reasons = [.. reasons, $"Kept makers and part numbers from revision {canonical.CurrentRevisionNumber} on {carried} line(s) this copy did not state."];
+
         await EnsureBatchAsync(canonical.BusinessUnitId, intake, ct);
         var occurrence = NewOccurrence(canonical.BusinessUnitId, intake, fingerprint, scope, LeadOccurrenceClassification.Revision, .98m, reasons, canonical.Id, null);
         _db.Add(occurrence); await _db.SaveChangesAsync(ct);
@@ -449,7 +491,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         occurrence.LeadRevisionId = revision.Id; canonical.CurrentRevisionId = revision.Id; canonical.CurrentRevisionNumber = next;
         canonical.CurrentInquiryFingerprint = fingerprint; canonical.CurrentOccurrenceClassification = LeadOccurrenceClassification.Revision.ToString();
         canonical.IngestedAtUtc = intake.IngestedAtUtc;
-        await AddImpactsAsync(canonical, revision, ct); AddAudit(occurrence, canonical.Id, "LEAD_REVISION_CREATED", intake, new { revision = next });
+        await AddImpactsAsync(canonical, revision, ct); AddAudit(occurrence, canonical.Id, "LEAD_REVISION_CREATED", intake, new { revision = next, makerFactsCarriedForwardOnLines = carried });
         await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
         return new(canonical.Id, canonical.CommercialCaseReference, occurrence.Id, revision.Id, next, occurrence.Classification, occurrence.Confidence, occurrence.DecisionReasons(), false);
     }
@@ -1685,6 +1727,31 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             target.LeadItems.Add(clone);
         }
     }
+    /// <summary>
+    /// The buyer's header terms that make a copy a different version of the RFQ. The remarks are
+    /// left out: they carry this system's own processing notes and envelope text.
+    /// </summary>
+    private static bool SameHeaderTerms(Lead a, Lead b)
+    {
+        // The stored lead reads back from a timestamp-without-time-zone column as Unspecified
+        // (it holds UTC); the incoming one is Utc. Both are compared as the UTC instant.
+        static string? Instant(DateTime? value) => value is not { } v ? null
+            : (v.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(v, DateTimeKind.Utc) : v.ToUniversalTime()).ToString("O");
+        static object Terms(Lead x) => new
+        {
+            rfq = Normalize(x.Rfqno), buyer = Normalize(x.BuyersName),
+            closing = Instant(x.BidClosingDate),
+            acknowledgmentDate = Instant(x.AcknowledgmentDate),
+            submissionDate = Instant(x.SubDate),
+            opportunityNo = Normalize(x.OpportunityNo), rfqType = Normalize(x.Rfqtype),
+            durationAgreement = Normalize(x.DurationAgreement),
+            requiredDeliveryDate = Instant(x.RequiredDeliveryDate),
+            deliveryLocation = Normalize(x.DeliveryLocation), agreementReference = Normalize(x.AgreementReference),
+            bidClosingDateHijri = Normalize(x.BidClosingDateHijri), inquiryType = Normalize(x.InquiryType)
+        };
+        return JsonSerializer.Serialize(Terms(a)) == JsonSerializer.Serialize(Terms(b));
+    }
+
     public static string Fingerprint(Lead lead) => Hash(JsonSerializer.Serialize(IdentitySnapshot(lead)));
     private static string Fingerprint(Lead lead, string? sender, string? subject) =>
         Hash(JsonSerializer.Serialize(IdentitySnapshot(lead, sender, subject)));

@@ -38,6 +38,50 @@ public static class BuyerTerms
 
     private const int MaxQuoteChars = 400;
 
+    /// <summary>
+    /// True when a retained document is one this reader can reach: a Word file, or the HTML page
+    /// an Ariba event print is when saved as .doc (every SEC print). SEC leads used to show no
+    /// "Buyer requires" strip at all although the print states "Local vendors MUST bid in SAR only",
+    /// "Quotation Validity (minimum 90 days)" and "without VAT" — only .docx was ever read.
+    /// </summary>
+    public static bool CanRead(string? fileName, string? mediaType)
+    {
+        var name = fileName ?? string.Empty;
+        var type = mediaType ?? string.Empty;
+        return name.EndsWith(".docx", StringComparison.OrdinalIgnoreCase)
+               || name.EndsWith(".doc", StringComparison.OrdinalIgnoreCase)
+               || name.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
+               || name.EndsWith(".htm", StringComparison.OrdinalIgnoreCase)
+               || type.Contains("wordprocessingml", StringComparison.OrdinalIgnoreCase)
+               || type.Contains("text/html", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The terms a retained document states, from its bytes: an HTML page (an Ariba print named
+    /// .doc) is read through its tables exactly as the line reader reads it; a Word file through
+    /// its leading table rows. A file neither reader can open (a Word 97 binary) states none.
+    /// </summary>
+    public static IReadOnlyList<Term> ReadDocument(byte[] bytes, string? fileName)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        if (HtmlDocumentTextExtractor.HasHtmlSignature(bytes))
+        {
+            var grids = HtmlTableGrids.Read(bytes).Grids
+                .Select(grid => (IReadOnlyList<IReadOnlyList<string?>>)grid.Take(LeadingRows).ToList())
+                .ToList();
+            return Read(grids, fileName);
+        }
+        try
+        {
+            return Read(DocxTableParser.ReadLeadingGrids(bytes, LeadingRows), fileName);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Not a Word package (a Word 97 binary, a damaged file): no terms this reader can reach.
+            return [];
+        }
+    }
+
     /// <param name="grids">The document's tables, leading rows are enough (terms sit above the items).</param>
     /// <param name="fileName">The document's file name, for a split package ("1 of 3").</param>
     public static IReadOnlyList<Term> Read(IReadOnlyList<IReadOnlyList<IReadOnlyList<string?>>> grids, string? fileName)
@@ -91,8 +135,19 @@ public static class BuyerTerms
                     Add("warranty", "Warranty", value, $"{label}: {value}"); break;
                 case "deliveryto" or "deliverypoint" or "shipto" or "placeofdelivery":
                     Add("deliver_to", "Deliver to", value, $"{label}: {value}"); break;
+                default:
+                    // A clause printed as "label | text" — the SEC print's "5 Header Text | Important
+                    // points …: 1. … 6. Quotation must be valid for 90 days …" — is still the buyer's
+                    // wording, and its clauses are read like any other.
+                    sentences.Add($"{label} {value}");
+                    break;
             }
         }
+
+        // A numbered list run together in one cell ("… without VAT.5.Any change …") is one clause
+        // per row, so a quoted sentence ends where the buyer's clause does.
+        for (var i = 0; i < sentences.Count; i++)
+            sentences[i] = Regex.Replace(sentences[i], @"(?<=[\w):]\.|:)(?=\d{1,2}\.\s?[A-Z])", "\n");
 
         // ---- the buyer's clauses, in the buyer's words
         // One row per line, so a quoted sentence never runs into the next clause row.
@@ -121,6 +176,9 @@ public static class BuyerTerms
 
         if (Find(text, @"delivery\s+of\s+Goods\s+to\s+([^.]{3,160}?)\s*\.") is { } to)
             Add("deliver_to", "Deliver to", to.Value, Sentence(text, to.Index));
+        // SEC: "For local vendor, the delivery of material must be deliver to SaudiEnergy warehouse or user location."
+        if (Find(text, @"delivery\s+of\s+material\s+must\s+be\s+deliver(?:ed)?\s+to\s+([^.]{3,160}?)\s*\.") is { } material)
+            Add("deliver_to", "Deliver to", material.Value, Sentence(text, material.Index));
 
         if (Find(text, @"Option\s*1\s*:\s*offer\s+for\s+(?:a\s+)?([\w-]+?)[\s-]+year\s+agreement") is { } years)
         {
@@ -133,6 +191,10 @@ public static class BuyerTerms
         else if (Find(text, @"\bPurchase\s+Agreement\s*\(PA\)") is { } pa)
             Add("agreement", "Agreement", "Purchase agreement (length not stated)", Sentence(text, pa.Index));
 
+        // SEC: "Local vendors MUST bid in SAR only" — decides the currency for a Saudi seller,
+        // whatever the event allows participants to choose.
+        if (Find(text, @"must\s+bid\s+in\s+([A-Z]{3})\s+only") is { } only)
+            Add("quote_currency", "Quote in", $"{only.Value.ToUpperInvariant()} only (local vendors)", Sentence(text, only.Index));
         if (Find(text, @"submitted\s+in\s+either\s+([A-Z]{3}\s+or\s+[A-Z]{3})") is { } either)
             Add("quote_currency", "Quote in", either.Value, Sentence(text, either.Index));
         else if (currencyChoice is not null && currencyChoice.StartsWith("y", StringComparison.OrdinalIgnoreCase))
@@ -153,8 +215,13 @@ public static class BuyerTerms
 
         if (Find(text, @"validity\s+of\s+at\s+least\s+(?:[a-z-]+\s+)?\(?(\d{1,3})\)?\s+days\s+from\s+the\s+bid\s+closing\s+date") is { } validity)
             Add("validity", "Quote valid for", $"At least {validity.Value} days after closing", Sentence(text, validity.Index));
+        // SEC: "Quotation must be valid for 90 days from bid due date", "Quotation Validity (minimum 90 days)".
+        if (Find(text, @"valid\s+for\s+(\d{1,3})\s+days\s+from\s+(?:the\s+)?bid\s+(?:due|closing)\s+date") is { } validFor)
+            Add("validity", "Quote valid for", $"{validFor.Value} days after closing", Sentence(text, validFor.Index));
+        if (Find(text, @"validity\s*\(\s*minimum\s+(\d{1,3})\s+days\s*\)") is { } minimum)
+            Add("validity", "Quote valid for", $"At least {minimum.Value} days", Sentence(text, minimum.Index));
 
-        if (Find(text, @"(?:do\s+not\s+include|exclusive\s+of)\s+(VAT)") is { } vat)
+        if (Find(text, @"(?:do\s+not\s+include|exclusive\s+of|without)\s+(VAT)") is { } vat)
             Add("vat", "VAT",
                 Regex.IsMatch(text, @"separately\s+identify[^.]*VAT", RegexOptions.IgnoreCase)
                     ? "Prices without VAT; show VAT separately"

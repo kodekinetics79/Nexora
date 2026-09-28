@@ -86,7 +86,8 @@ public sealed class EfManufacturerKnowledge : IManufacturerKnowledge
         // turn every "UNIVERSAL JOINT" into a Universal product.
         var known = patterns
             .GroupBy(p => p.Manufacturer.Trim(), StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Key.Length > 0 && group.Sum(p => p.ObservationCount) >= ManufacturerInference.MinimumObservations)
+            .Where(group => group.Key.Length > 0 && group.Sum(p => p.ObservationCount) >= ManufacturerInference.MinimumObservations
+                            && !ERP_RFQ_Automation.Extraction.Templates.ManufacturingPartText.CarriesStatusFlag(group.Key))
             .Select(group => group.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -163,7 +164,11 @@ public sealed class ManufacturerPatternLearner : IManufacturerPatternLearner
 
             var display = line.ManufacturerName!.Trim();
             var normalized = ProductIdentityNormalizer.NormalizeManufacturer(display);
-            if (normalized is null || display.Length > MaxManufacturerLength || normalized.Length > MaxManufacturerLength)
+            // A name still carrying an export status flag ("$$ SIEMENS AG", "** GE OIL AND GAS")
+            // is a reading defect, not a maker a person confirmed; learning it taught the store
+            // "3RH -> $$ SIEMENS AG" and spread the flag onto other documents.
+            if (normalized is null || display.Length > MaxManufacturerLength || normalized.Length > MaxManufacturerLength
+                || ERP_RFQ_Automation.Extraction.Templates.ManufacturingPartText.CarriesStatusFlag(display))
             {
                 skips.Add(SkipManufacturerUnusable);
                 continue;

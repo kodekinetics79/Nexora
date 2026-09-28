@@ -26,6 +26,7 @@ import {
   explainStoragePause,
   isRecoverableIntakeErrorCode,
 } from '../../utils/intakeErrors';
+import { ACCEPTED_FILE_TYPES, describeUnsupported, isSupportedFile } from './uploadFileTypes';
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_BATCH_BYTES = 200 * 1024 * 1024;
@@ -38,16 +39,6 @@ const MAX_FILES = 50;
  * owner's documents — used to look like a clean success and navigate the tray away.
  */
 const STOPPED_OUTCOMES = ['Skipped', 'Rejected', 'Quarantined', 'Error', 'AwaitingSecurityScan'];
-const SUPPORTED_EXTENSIONS = [
-  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.csv', '.txt',
-  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp',
-];
-const ACCEPTED_FILE_TYPES = SUPPORTED_EXTENSIONS.join(',');
-
-const extensionOf = (name: string): string => {
-  const separator = name.lastIndexOf('.');
-  return separator >= 0 ? name.slice(separator).toLowerCase() : '';
-};
 
 const ManualUploadLeadsPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
@@ -157,12 +148,12 @@ const ManualUploadLeadsPage: React.FC = () => {
   const addFiles = (incoming: File[]) => {
     if (uploading || !canCreateLeads) return;
     const combined = [...files, ...incoming];
-    const unsupported = incoming.filter((file) => !SUPPORTED_EXTENSIONS.includes(extensionOf(file.name)));
+    const unsupported = incoming.filter((file) => !isSupportedFile(file.name));
     const oversized = incoming.filter((file) => file.size > MAX_FILE_BYTES);
     const batchTooLarge = combined.reduce((total, file) => total + file.size, 0) > MAX_BATCH_BYTES;
     if (unsupported.length > 0 || oversized.length > 0 || combined.length > MAX_FILES || batchTooLarge) {
       const reasons = [
-        unsupported.length > 0 ? `${unsupported.length} unsupported format${unsupported.length === 1 ? '' : 's'}` : null,
+        describeUnsupported(unsupported.map((file) => file.name)),
         oversized.length > 0 ? `${oversized.length} file${oversized.length === 1 ? '' : 's'} over 25 MB` : null,
         combined.length > MAX_FILES ? `a maximum of ${MAX_FILES} files per batch` : null,
         batchTooLarge ? 'the batch is over 200 MB' : null,
@@ -198,7 +189,7 @@ const ManualUploadLeadsPage: React.FC = () => {
   };
 
   return (
-    <InboxFrame summary="PDF, Word, Excel, CSV, text or images · up to 25 MB each">
+    <InboxFrame summary="PDF, Word, Excel, CSV, email (.msg, .eml), web pages or images · up to 25 MB each">
       <Paper variant="outlined" sx={INBOX_CARD_SX}>
         <Box sx={{ p: { xs: 2, sm: 3 } }}>
           {/* Upload Area */}

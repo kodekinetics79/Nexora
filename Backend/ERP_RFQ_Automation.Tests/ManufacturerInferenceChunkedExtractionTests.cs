@@ -157,6 +157,40 @@ public sealed class ManufacturerInferenceChunkedExtractionTests
         Assert.Contains("Manufacturer inferred on 2 line(s) from the tenant's own history.", outcome.Diagnostics);
     }
 
+    [Fact]
+    public async Task A_line_where_the_buyer_approved_several_makers_is_not_given_one_from_history()
+    {
+        // XS-03, lines 683 / 902 of Aramco 6000000031: the buyer approves ABB BV and ABB SERVICE,
+        // both naming part GHG9601; the tenant's history had learned GHG9601 -> COOPER CROUSE HINDS.
+        // The maker must stay blank (the list travels with the line), not become a maker the buyer
+        // never approved.
+        var knowledge = new FakeKnowledge(new ManufacturerKnowledgeSnapshot(Tenant,
+            [
+                new ManufacturerPartPattern
+                {
+                    Id = 1, BusinessUnitId = Tenant, Pattern = "GHG9601", Manufacturer = "COOPER CROUSE HINDS GMBH",
+                    NormalizedManufacturer = "COOPER CROUSE HINDS GMBH", ObservationCount = 8
+                }
+            ],
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "COOPER CROUSE HINDS GMBH" }));
+        var approved = Row(2, "GLAND, CABLE", part: null!);
+        approved.ManufacturerPartNumber = null;
+        approved.UnmappedColumns["Manufacturing Part Text"] =
+            "4000000001 - 0060000001 - ABB BV - NL\n000000005000000001 - 10000001 - ABB BV - NL\nPART_NUMBER - GHG9601\n\n" +
+            "4000000002 - 0060000002 - ABB SERVICE - SA\n000000005000000002 - 10000002 - ABB SERVICE - SA\nPART_NUMBER - GHG9601";
+        var plain = Row(3, "GLAND, CABLE", "GHG9601");
+
+        var outcome = await Service(knowledge).ExtractStructuredAsync([approved, plain], Tenant, "bidlist.xlsx");
+
+        var lines = Assert.Single(outcome.CanonicalImport!.Documents).LineItems;
+        Assert.Equal("GHG9601", lines[0].ManufacturerPartNumber.Value);          // both approved vendors state it
+        Assert.Null(lines[0].ManufacturerName.Value);
+        Assert.Contains("ABB BV", lines[0].ExtraFields!["Approved manufacturers"]);
+        Assert.Null(outcome.Result!.Items![0].ManufacturerName);
+        // The same number on a line with no buyer list is still inferred: the list is what refused.
+        Assert.Equal("COOPER CROUSE HINDS GMBH", lines[1].ManufacturerName.Value);
+    }
+
     private sealed class FakeKnowledge(ManufacturerKnowledgeSnapshot snapshot) : IManufacturerKnowledge
     {
         public int Loads { get; private set; }

@@ -384,12 +384,12 @@ namespace ERP_RFQ_Automation.Controllers
         private const int BuyerTermsCacheCap = 500;
 
         /// <summary>
-        /// What the buyer requires, read from the retained Word document the lead came from: delivery
+        /// What the buyer requires, read from the retained Word document (or Ariba print) the lead came from: delivery
         /// terms, where to deliver, the agreement length, the currencies a quote may use, the exchange
         /// rates, how long the price must hold, VAT, and what must be accepted or attached. Each term
         /// carries the buyer's own sentence. Read on demand from the same verified bytes the download
         /// serves, so every lead already on file shows its terms too. Same authorization as the
-        /// download; an empty list when the document states none or is not a Word file.
+        /// download; an empty list when the document states none or is neither a Word file nor an HTML print.
         /// </summary>
         [HttpGet("source-document/{sourceDocumentId:long}/buyer-terms")]
         [RequireModulePermission("Leads", PermissionAction.View)]
@@ -399,9 +399,9 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var (refusal, document, job) = await ResolveReadableSourceDocumentAsync(sourceDocumentId, ct);
                 if (refusal is not null) return refusal;
-                var isWord = (document!.OriginalFileName ?? string.Empty).EndsWith(".docx", StringComparison.OrdinalIgnoreCase)
-                    || (document.DetectedMimeType ?? string.Empty).Contains("wordprocessingml", StringComparison.OrdinalIgnoreCase);
-                if (!isWord) return Ok(new { terms = Array.Empty<object>() });
+                // A Word file, or an Ariba print saved as .doc (an HTML page) — every SEC print.
+                if (!ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.CanRead(document!.OriginalFileName, document.DetectedMimeType))
+                    return Ok(new { terms = Array.Empty<object>() });
 
                 if (!BuyerTermsByContent.TryGetValue(document.ContentHash, out var terms))
                 {
@@ -412,8 +412,7 @@ namespace ERP_RFQ_Automation.Controllers
                         await stream.CopyToAsync(buffer, ct);
                         bytes = buffer.ToArray();
                     }
-                    terms = ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.Read(
-                        DocxTableParser.ReadLeadingGrids(bytes, ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.LeadingRows), document.OriginalFileName);
+                    terms = ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.ReadDocument(bytes, document.OriginalFileName);
                     if (BuyerTermsByContent.Count >= BuyerTermsCacheCap) BuyerTermsByContent.Clear();
                     BuyerTermsByContent[document.ContentHash] = terms;
                 }

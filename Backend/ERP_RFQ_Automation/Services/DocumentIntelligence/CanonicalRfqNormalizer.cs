@@ -422,12 +422,28 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                && numbers.Distinct(StringComparer.Ordinal).Count() == numbers.Count;
     }
 
-    /// <summary>"US Dollar" → "USD", recorded as a transformation; an unknown word is kept as written.</summary>
+    /// <summary>
+    /// "US Dollar" → "USD", recorded as a transformation. A word that is not a currency Nexora
+    /// knows is NOT kept as the line's currency: it becomes no currency, the line is held for a
+    /// person, and the word stays in the evidence and the note. Keeping it verbatim used to kill
+    /// the whole document — the evidence ledger only accepts a three-letter code, so the word
+    /// "Currency" on the help row of Aramco's own Ariba bid sheet dead-lettered all 1,383 lines
+    /// after five attempts. One unreadable cell is a question for the reviewer, never a reason
+    /// to lose the document.
+    /// </summary>
     private static void CanonicaliseCurrency(CanonicalValue<string> currency)
     {
         if (currency.Value is null) return;
         var code = CurrencyNames.ToIsoCode(currency.Value);
-        if (code is null || string.Equals(code, currency.Value, StringComparison.Ordinal)) return;
+        if (code is null)
+        {
+            currency.Transformations.Add($"currency_unrecognised: \"{currency.Value}\" is not a currency code; left blank for review");
+            currency.Value = null;
+            currency.Confidence = 0.2m;
+            currency.ValidationStatus = ValidationStatus.NeedsReview;
+            return;
+        }
+        if (string.Equals(code, currency.Value, StringComparison.Ordinal)) return;
         currency.Transformations.Add($"currency_name_to_iso: \"{currency.Value}\" read as {code}");
         currency.Value = code;
     }
@@ -549,7 +565,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         // from 45 and 50 lines. The full text stays in the retained document.
         var ordered = new Dictionary<string, string>(StringComparer.Ordinal);
         if (reading.Manufacturers.Count > 1)
-            ordered["Approved manufacturers"] = reading.Vendors.Count > 0
+            ordered[ManufacturingPartText.ApprovedManufacturersField] = reading.Vendors.Count > 0
                 ? string.Join("; ", reading.Vendors.Select(DescribeVendor))
                 : string.Join("; ", reading.Manufacturers);
         if (reading.PartNumbers.Count > 0)

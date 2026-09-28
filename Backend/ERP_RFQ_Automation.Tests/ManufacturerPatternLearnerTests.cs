@@ -26,12 +26,14 @@ public sealed class ManufacturerPatternLearnerTests
         var result = await new ManufacturerPatternLearner(context).LearnFromReviewAsync(Tenant, lead, 77);
         await context.SaveChangesAsync();
 
-        Assert.Equal(5, result.Learned);
+        Assert.Equal(3, result.Learned);
         Assert.Equal(0, result.Reinforced);
         Assert.Equal(ManufacturerPatternLearner.SkipUnusablePartNumber, result.SkippedReason);
 
+        // Two- and three-character prefixes ("X7", "3RT") are no longer patterns: too short to
+        // name a maker rather than a product category (see ManufacturerInference.MinimumPatternLength).
         var rows = await context.Set<ManufacturerPartPattern>().OrderBy(p => p.Id).ToListAsync();
-        Assert.Equal(["X7M5", "X7", "3RT20151BB41", "3RT2015", "3RT"], rows.Select(r => r.Pattern));
+        Assert.Equal(["X7M5", "3RT20151BB41", "3RT2015"], rows.Select(r => r.Pattern));
         Assert.All(rows, r =>
         {
             Assert.Equal(Tenant, r.BusinessUnitId);
@@ -39,7 +41,7 @@ public sealed class ManufacturerPatternLearnerTests
             Assert.Equal(9401, r.LearnedFromLeadId);
             Assert.Equal(77, r.LearnedFromReviewAuditId);
         });
-        Assert.Equal("SIEMENS", rows.Single(r => r.Pattern == "3RT").NormalizedManufacturer);
+        Assert.Equal("SIEMENS", rows.Single(r => r.Pattern == "3RT2015").NormalizedManufacturer);
     }
 
     [Fact]
@@ -65,13 +67,13 @@ public sealed class ManufacturerPatternLearnerTests
             await second.SaveChangesAsync();
 
             Assert.Equal(0, result.Learned);
-            Assert.Equal(2, result.Reinforced);
+            Assert.Equal(1, result.Reinforced);
         }
 
         await using (var reader = db.ContextFor(Tenant))
         {
             var rows = await reader.Set<ManufacturerPartPattern>().ToListAsync();
-            Assert.Equal(2, rows.Count);
+            Assert.Single(rows);
             Assert.All(rows, r => Assert.Equal(2, r.ObservationCount));
             Assert.All(rows, r => Assert.Equal(9401, r.LearnedFromLeadId));
 
@@ -114,6 +116,23 @@ public sealed class ManufacturerPatternLearnerTests
 
         Assert.Equal(0, result.Learned);
         Assert.Equal(ManufacturerPatternLearner.SkipNoEvidence, result.SkippedReason);
+        Assert.Empty(await context.Set<ManufacturerPartPattern>().ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_maker_name_still_carrying_an_export_status_flag_is_never_learned()
+    {
+        // XS-12: "3RH -> $$ SIEMENS AG" was learned from a name the reader failed to clean, and
+        // then written onto other documents' lines.
+        using var db = new TestDb();
+        await SeedAsync(db, 9401, ("$$ SIEMENS AG", "3RH1122-1AP00"), ("** GE OIL AND GAS", "3500/33-02-02"));
+        await using var context = db.ContextFor(Tenant);
+
+        var result = await new ManufacturerPatternLearner(context).LearnFromReviewAsync(Tenant, await LoadLeadAsync(context, 9401), null);
+        await context.SaveChangesAsync();
+
+        Assert.Equal(0, result.Learned);
+        Assert.Equal(ManufacturerPatternLearner.SkipManufacturerUnusable, result.SkippedReason);
         Assert.Empty(await context.Set<ManufacturerPartPattern>().ToListAsync());
     }
 
