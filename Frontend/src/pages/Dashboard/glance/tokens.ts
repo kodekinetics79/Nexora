@@ -89,3 +89,21 @@ export const useSeriesColors = (): Record<SeriesToken, string> => {
     return acc;
   }, {} as Record<SeriesToken, string>);
 };
+
+/**
+ * Six categorical slots for part-to-whole breakdowns (doughnuts): WHO or WHAT, not a verdict.
+ *
+ * Kept apart from the five series tokens above, which each carry a meaning (brass = yours to act
+ * on, oxide = lost). A breakdown's slices carry identity only, so they draw from this set in this
+ * fixed order and never from the meaning-bearing tokens. Validated with the dataviz skill's
+ * validate_palette.js against the dashboard clay (NEU_SURFACE): light on #EEECE7, dark on #1A1D23,
+ * every check passing on the adjacent pairlist (a doughnut's neighbours are its adjacent pairs).
+ * Past six, a breakdown folds into "Other", drawn in CATEGORY_OTHER, never a generated seventh hue.
+ */
+export const CATEGORY_PALETTE: Readonly<Record<PaletteMode, readonly string[]>> = Object.freeze({
+  light: Object.freeze(['#9A6F12', '#3D6CC4', '#C0601E', '#00907A', '#8E3F86', '#4F8A1F']),
+  dark: Object.freeze(['#B38A2E', '#5A84D4', '#CC6A33', '#1AA891', '#9C5698', '#6CA23A']),
+});
+
+/** "Other" is a neutral, not a seventh category. */
+export const CATEGORY_OTHER: Readonly<Record<PaletteMode, string>> = Object.freeze({ light: '#A39E94', dark: '#5E646D' });

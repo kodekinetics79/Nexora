@@ -377,6 +377,73 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
+        /// Terms read per stored object. The evidence is immutable and addressed by its content hash,
+        /// so a reading never goes stale; the cap only bounds memory.
+        /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyList<ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.Term>> BuyerTermsByContent = new();
+        private const int BuyerTermsCacheCap = 500;
+
+        /// <summary>
+        /// What the buyer requires, read from the retained Word document the lead came from: delivery
+        /// terms, where to deliver, the agreement length, the currencies a quote may use, the exchange
+        /// rates, how long the price must hold, VAT, and what must be accepted or attached. Each term
+        /// carries the buyer's own sentence. Read on demand from the same verified bytes the download
+        /// serves, so every lead already on file shows its terms too. Same authorization as the
+        /// download; an empty list when the document states none or is not a Word file.
+        /// </summary>
+        [HttpGet("source-document/{sourceDocumentId:long}/buyer-terms")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
+        public async Task<IActionResult> SourceDocumentBuyerTerms(long sourceDocumentId, CancellationToken ct)
+        {
+            try
+            {
+                var (refusal, document, job) = await ResolveReadableSourceDocumentAsync(sourceDocumentId, ct);
+                if (refusal is not null) return refusal;
+                var isWord = (document!.OriginalFileName ?? string.Empty).EndsWith(".docx", StringComparison.OrdinalIgnoreCase)
+                    || (document.DetectedMimeType ?? string.Empty).Contains("wordprocessingml", StringComparison.OrdinalIgnoreCase);
+                if (!isWord) return Ok(new { terms = Array.Empty<object>() });
+
+                if (!BuyerTermsByContent.TryGetValue(document.ContentHash, out var terms))
+                {
+                    byte[] bytes;
+                    await using (var stream = await _evidenceStorage.OpenVerifiedReadAsync(job!.StoragePath!, document.ContentHash, ct))
+                    {
+                        using var buffer = new MemoryStream();
+                        await stream.CopyToAsync(buffer, ct);
+                        bytes = buffer.ToArray();
+                    }
+                    terms = ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.Read(
+                        DocxTableParser.ReadLeadingGrids(bytes, ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.LeadingRows), document.OriginalFileName);
+                    if (BuyerTermsByContent.Count >= BuyerTermsCacheCap) BuyerTermsByContent.Clear();
+                    BuyerTermsByContent[document.ContentHash] = terms;
+                }
+                Response.Headers[IntegrityHeader] = IntegrityVerified;
+                return Ok(new { terms });
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound("The requested source document was not found in evidence storage.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Rejected unsafe storage identity for source document {SourceDocumentId}.", sourceDocumentId);
+                return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Evidence integrity verification failed for source document {SourceDocumentId}.", sourceDocumentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The evidence object failed integrity verification.");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A Word file the library cannot open shows no terms; the document itself is still one click away.
+                _logger.LogWarning(ex, "Buyer terms could not be read from source document {SourceDocumentId}.", sourceDocumentId);
+                return Ok(new { terms = Array.Empty<object>() });
+            }
+        }
+
+        /// <summary>
         /// The one authorization path for a retained source document's bytes: the caller's tenant
         /// must own a lead the document is still linked to, the caller must be allowed that lead,
         /// and the document must be present, cleared and bound to the exact stored object. The

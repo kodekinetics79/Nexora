@@ -21,6 +21,7 @@ const previewSupplierRfqEmail = vi.fn();
 const adoptDiscoveredSuppliers = vi.fn();
 const getSourcingCase = vi.fn();
 const prepareSupplierRfqs = vi.fn();
+const downloadLinesExcel = vi.fn();
 const testAccess = vi.hoisted(() => ({
   navigate: vi.fn(),
   denied: new Set<string>(),
@@ -36,6 +37,7 @@ vi.mock('../../../api/services/rfqService', () => ({
     approve: vi.fn(),
     prepareQuoteDraft: vi.fn(),
     resolveLineProduct: (...args: unknown[]) => resolveLineProduct(...args),
+    downloadLinesExcel: (...args: unknown[]) => downloadLinesExcel(...args),
   },
 }));
 vi.mock('../../../api/services/productService', () => ({
@@ -212,6 +214,17 @@ beforeEach(() => {
     pageNumber: 1,
     pageSize: 20,
     totalPages: 1,
+  });
+});
+
+describe('ViewRFQPage — Download Excel', () => {
+  it('downloads this RFQ\'s lines in one click', async () => {
+    downloadLinesExcel.mockResolvedValue(undefined);
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Download Excel' }));
+
+    await waitFor(() => expect(downloadLinesExcel).toHaveBeenCalledWith(9001, 'RFQ-9001'));
   });
 });
 

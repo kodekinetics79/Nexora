@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import LossesBand from './LossesBand';
 import type { PipelineAnalyticsDTO, PipelineLossReasonDTO } from '../../../api/services/dashboardService';
@@ -8,6 +8,15 @@ import type { PipelineAnalyticsDTO, PipelineLossReasonDTO } from '../../../api/s
 const getPipelineAnalytics = vi.fn();
 vi.mock('../../../api/services/dashboardService', () => ({
   default: { getPipelineAnalytics: (...args: unknown[]) => getPipelineAnalytics(...args) },
+}));
+
+const getColumns = vi.fn();
+const saveColumns = vi.fn();
+vi.mock('../../../api/services/listViewService', () => ({
+  default: {
+    getColumns: (...args: unknown[]) => getColumns(...args),
+    saveColumns: (...args: unknown[]) => saveColumns(...args),
+  },
 }));
 
 const wrapper = ({ children }: { children: ReactNode }) => {
@@ -59,6 +68,11 @@ const band = () => screen.getByLabelText('Why we lost');
 beforeEach(() => {
   vi.clearAllMocks();
   getPipelineAnalytics.mockResolvedValue(analytics());
+  getColumns.mockResolvedValue({ viewKey: 'dashboard.charts', columns: [], isCustomised: false, supportsCustomFields: false });
+  saveColumns.mockImplementation((viewKey: string, columns: { key: string; visible: boolean }[]) => Promise.resolve({
+    viewKey, isCustomised: true, supportsCustomFields: false,
+    columns: columns.map((c) => ({ ...c, label: c.key, locked: false, source: 'catalog' })),
+  }));
 });
 
 describe('LossesBand — the horizon', () => {
@@ -73,9 +87,9 @@ describe('LossesBand — the horizon', () => {
     expect(screen.getByTestId('loss-bar-UNRECORDED')).toHaveAttribute('data-side', 'below');
 
     // One ruler: the tallest count sets it, and every other bar is that fraction of it. 9 of 14
-    // over an 84px maximum is 54px, and 14 is the full 84 whichever side of the line it is on.
-    expect(screen.getByTestId('loss-bar-AUTO_EXPIRED')).toHaveStyle({ height: '84px' });
-    expect(screen.getByTestId('loss-bar-PRICE')).toHaveStyle({ height: '54px' });
+    // over a 54px maximum is 35px, and 14 is the full 54 whichever side of the line it is on.
+    expect(screen.getByTestId('loss-bar-AUTO_EXPIRED')).toHaveStyle({ height: '54px' });
+    expect(screen.getByTestId('loss-bar-PRICE')).toHaveStyle({ height: '35px' });
   });
 
   it('colours the two halves apart: graphite above, oxide below', async () => {
@@ -196,5 +210,79 @@ describe('LossesBand — when the aggregate cannot be loaded', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(within(band()).queryByTestId('losses-never-total')).toBeNull();
     expect(within(band()).queryByTestId('losses-empty')).toBeNull();
+  });
+});
+
+describe('LossesBand — what the columns measure', () => {
+  const chooseValue = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: /Columns show: Number lost/ }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Value lost' }));
+  };
+
+  it('switches the columns from count to value and saves the choice', async () => {
+    getPipelineAnalytics.mockResolvedValue(analytics({ lossReasons: REASONS }));
+    render(<LossesBand from={FROM} to={TO} />, { wrapper });
+
+    await waitFor(() => expect(screen.getByTestId('loss-bar-PRICE')).toHaveStyle({ height: '35px' }));
+    await chooseValue();
+
+    await waitFor(() => expect(saveColumns).toHaveBeenCalledWith('dashboard.charts', expect.arrayContaining([
+      { key: 'losses.value', visible: true },
+      { key: 'losses.count', visible: false },
+    ])));
+    // Price is now the largest priced reason, so it takes the full ruler; Lead time is 51/210 of it.
+    await waitFor(() => expect(screen.getByTestId('loss-bar-PRICE')).toHaveStyle({ height: '54px' }));
+    expect(screen.getByTestId('loss-bar-LEAD_TIME')).toHaveStyle({ height: '13px' });
+    expect(screen.getByTestId('loss-count-PRICE')).toHaveTextContent('SAR');
+    expect(screen.getByTestId('loss-count-PRICE')).toHaveTextContent('210');
+  });
+
+  it('draws an unpriced reason as an empty outline under Value, never as zero', async () => {
+    getPipelineAnalytics.mockResolvedValue(analytics({ lossReasons: REASONS }));
+    render(<LossesBand from={FROM} to={TO} />, { wrapper });
+    await chooseValue();
+
+    const bar = await screen.findByTestId('loss-bar-AUTO_EXPIRED');
+    await waitFor(() => expect(bar).toHaveAttribute('data-unpriced', 'true'));
+    expect(bar).not.toHaveStyle({ height: '0px' });
+    expect(screen.getByTestId('loss-count-AUTO_EXPIRED')).toHaveTextContent('No value');
+    expect(screen.getByTestId('loss-count-AUTO_EXPIRED')).not.toHaveTextContent(/\b0\b/);
+    expect(screen.getByTestId('losses-unpriced-note')).toHaveTextContent('not zero');
+    expect(screen.getByRole('button', { name: /Expired without an answer.*Value not available/ })).toBeInTheDocument();
+    // The group holding it cannot be summed honestly, so its subtotal is withheld.
+    expect(screen.getByTestId('losses-never-total')).toHaveTextContent('Not stated');
+  });
+});
+
+describe('LossesBand — opening a reason', () => {
+  it('shows the reason\'s share and side under the chart, and closes on a second press or Escape', async () => {
+    getPipelineAnalytics.mockResolvedValue(analytics({ lossReasons: REASONS }));
+    render(<LossesBand from={FROM} to={TO} />, { wrapper });
+
+    const price = await screen.findByTestId('loss-column-PRICE');
+    expect(price).toHaveAttribute('role', 'button');
+    expect(price).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(price);
+    expect(price).toHaveAttribute('aria-pressed', 'true');
+    const drill = screen.getByTestId('losses-drill');
+    expect(drill).toHaveTextContent(/^Price: 9 of 33 losses \(27%\), SAR\s?210,000/);
+    expect(drill).toHaveTextContent('A reason the customer gave.');
+
+    fireEvent.click(price);
+    expect(screen.queryByTestId('losses-drill')).toBeNull();
+
+    const expired = screen.getByTestId('loss-column-AUTO_EXPIRED');
+    fireEvent.keyDown(expired, { key: 'Enter' });
+    expect(screen.getByTestId('losses-drill')).toHaveTextContent('We never found out why.');
+    expect(screen.getByTestId('losses-drill')).toHaveTextContent('14 of 33 losses (42%), value not available');
+
+    expired.focus();
+    fireEvent.keyDown(expired, { key: 'Escape' });
+    expect(screen.queryByTestId('losses-drill')).toBeNull();
+    expect(expired).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.keyDown(expired, { key: ' ' });
+    expect(expired).toHaveAttribute('aria-pressed', 'true');
   });
 });

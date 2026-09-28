@@ -30,7 +30,8 @@ namespace ERP_RFQ_Automation.Controllers
         public async Task<ActionResult<DashboardRelease01DTO>> GetRelease01(
             [FromQuery] DateTime? from,
             [FromQuery] DateTime? to,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            [FromQuery] long? ownerUserId = null)
         {
             var businessUnitId = ClaimId("businessUnitId");
             var roleId = ClaimId("roleId");
@@ -56,6 +57,13 @@ namespace ERP_RFQ_Automation.Controllers
             // tenant. The resolver returns the middle tier as a first-class answer.
             var scope = await _accountScope.ResolveAsync(
                 userId, roleId, businessUnitId, generatedAt, cancellationToken);
+            if (ownerUserId.HasValue)
+            {
+                // One-rep filter: a rep's leads are those whose AssignTo is that rep.
+                if (ownerUserId.Value <= 0) return BadRequest("ownerUserId must be a positive user id.");
+                if (!scope.TryNarrowToRep(ownerUserId.Value, out var narrowed)) return Forbid();
+                scope = narrowed;
+            }
 
             var data = await _repository.GetRelease01Async(
                 businessUnitId,
@@ -75,7 +83,8 @@ namespace ERP_RFQ_Automation.Controllers
         [HttpGet("deadline-board")]
         [RequireModulePermission("Dashboard", PermissionAction.View)]
         public async Task<ActionResult<DeadlineBoardDTO>> GetDeadlineBoard(
-            [FromQuery] int maxLeads = 200, CancellationToken cancellationToken = default)
+            [FromQuery] int maxLeads = 200, CancellationToken cancellationToken = default,
+            [FromQuery] long? ownerUserId = null)
         {
             var businessUnitId = ClaimId("businessUnitId");
             var roleId = ClaimId("roleId");
@@ -84,8 +93,16 @@ namespace ERP_RFQ_Automation.Controllers
             if (businessUnitId <= 0 || roleId <= 0 || userId <= 0) return Forbid();
             var scope = await _accountScope.ResolveAsync(
                 userId, roleId, businessUnitId, DateTime.UtcNow, cancellationToken);
-            return Ok(await _repository.GetDeadlineBoardAsync(
-                businessUnitId, maxLeads, cancellationToken, scope));
+            if (!ownerUserId.HasValue)
+                return Ok(await _repository.GetDeadlineBoardAsync(
+                    businessUnitId, maxLeads, cancellationToken, scope));
+
+            // One-rep filter: a rep's open enquiries are the leads whose AssignTo is that rep.
+            if (ownerUserId.Value <= 0) return BadRequest("ownerUserId must be a positive user id.");
+            if (!scope.TryNarrowToRep(ownerUserId.Value, out var narrowed)) return Forbid();
+            var board = await _repository.GetDeadlineBoardAsync(
+                businessUnitId, maxLeads, cancellationToken, narrowed);
+            return Ok(board with { Scope = narrowed.ScopeName, OwnerUserId = narrowed.UserId });
         }
 
         /// <summary>

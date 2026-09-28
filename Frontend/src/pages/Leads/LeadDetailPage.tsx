@@ -113,6 +113,10 @@ const LeadDetailPage: React.FC = () => {
     queryFn: () => leadService.getById(Number(id)),
     enabled: !!id,
   });
+  const downloadLinesMutation = useMutation({
+    mutationFn: () => leadService.downloadLinesExcel(Number(id), lead?.rfqno),
+    onError: () => toast.error("We couldn't make the Excel file. Please try again."),
+  });
 
   // Second entry point to client resolution, from the Customer field in General
   // Information. Shares the query cache with ClientIdentityPanel's own dialog.
@@ -247,6 +251,16 @@ const LeadDetailPage: React.FC = () => {
             reviewVersion={lead.reviewVersion ?? 1}
             canEdit={commercialAccess.canEditLeadDecision}
           />
+          <Button
+            variant="outlined"
+            startIcon={downloadLinesMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
+            size="small"
+            onClick={() => downloadLinesMutation.mutate()}
+            disabled={downloadLinesMutation.isPending}
+            sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+          >
+            {downloadLinesMutation.isPending ? 'Downloading…' : 'Download Excel'}
+          </Button>
           {lead.commercialCaseId && (
             <Button
               variant="outlined"

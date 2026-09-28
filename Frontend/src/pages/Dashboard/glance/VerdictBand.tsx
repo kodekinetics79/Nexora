@@ -21,7 +21,7 @@ import { priorWindow, scopeWords, type GlanceScopeWords } from './scopeWords';
  * The screen's second sentence, after "whose numbers": of the quotes that reached a decision in
  * this window, how many went our way. It opens with one line of plain English assembled only from
  * figures the server stated, and then draws those same figures as two opposed lengths on one count
- * axis — won to the right in brass, lost to the left in graphite.
+ * axis — won to the right in brass, lost to the left in oxide, the screen's one colour for lost.
  *
  * Directly beneath, at 40% height, the immediately-prior equal-length window is repeated on the
  * SAME axis and the SAME origin. That ghost row is the whole reason this band exists in this
@@ -36,6 +36,10 @@ import { priorWindow, scopeWords, type GlanceScopeWords } from './scopeWords';
  * would be a fabricated figure with no scope and no freshness of its own.
  */
 export interface VerdictBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
+  /** A manager's rep filter: only this rep's own work. Absent = everyone the reader can see. */
+  ownerUserId?: number;
   /** Inclusive first day of the selected window, YYYY-MM-DD. */
   from: string;
   /** Inclusive last day of the selected window, YYYY-MM-DD. */
@@ -55,6 +59,7 @@ const SENTENCE_SUBJECTS: Readonly<Record<GlanceScopeWords, { subject: string; po
   'Company-wide': { subject: 'The company', possessive: 'our' },
   'Your managed scope': { subject: 'Your teams', possessive: 'your' },
   'Your assigned accounts': { subject: 'Your accounts', possessive: 'your' },
+  'One rep': { subject: 'This rep', possessive: 'their' },
 });
 
 const numeral = {
@@ -63,8 +68,8 @@ const numeral = {
   fontVariantNumeric: 'tabular-nums',
 } as const;
 
-const COUNT_COLUMN = 64;
-const MAIN_BAR_HEIGHT = 34;
+const COUNT_COLUMN = 56;
+const MAIN_BAR_HEIGHT = 26;
 /** 40% of the main bar, so the prior window reads as an echo rather than as a second series. */
 const GHOST_BAR_HEIGHT = Math.round(MAIN_BAR_HEIGHT * 0.4);
 
@@ -180,7 +185,7 @@ const barWidth = (value: number | null, scale: number): string => {
 };
 
 const wonFill = `linear-gradient(90deg, color-mix(in srgb, ${seriesVar('brassMark')} 45%, transparent) 0%, ${seriesVar('brassMark')} 100%)`;
-const lostFill = `linear-gradient(270deg, color-mix(in srgb, ${seriesVar('graphite')} 45%, transparent) 0%, ${seriesVar('graphite')} 100%)`;
+const lostFill = `linear-gradient(270deg, color-mix(in srgb, ${seriesVar('oxide')} 45%, transparent) 0%, ${seriesVar('oxide')} 100%)`;
 
 interface AxisRowProps {
   lost: number | null;
@@ -258,27 +263,27 @@ const AxisRow = ({ lost, won, scale, height, ghost = false, countSize, lostLabel
   );
 };
 
-export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
+export default function VerdictBand({ from, to, index = 1, detailsTo, ownerUserId }: VerdictBandProps) {
   const prior = priorWindow(from, to);
 
   // Three independent reads. The prior window and the leads count are each allowed to fail on
   // their own: a ghost row we could not fetch costs the reader a comparison, not the band.
   const performance = useQuery({
-    queryKey: ['glance', 'performance', from, to],
-    queryFn: () => commercialIntelligenceService.getPerformance(from, to),
+    queryKey: ['glance', 'performance', from, to, ownerUserId ?? 'all'],
+    queryFn: () => commercialIntelligenceService.getPerformance(from, to, ownerUserId),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the win and loss counts' },
   });
   const priorPerformance = useQuery({
-    queryKey: ['glance', 'performance', prior?.from, prior?.to],
-    queryFn: () => commercialIntelligenceService.getPerformance(prior!.from, prior!.to),
+    queryKey: ['glance', 'performance', prior?.from, prior?.to, ownerUserId ?? 'all'],
+    queryFn: () => commercialIntelligenceService.getPerformance(prior!.from, prior!.to, ownerUserId),
     enabled: prior !== null,
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the previous period' },
   });
   const release = useQuery({
-    queryKey: ['glance', 'release-01', from, to],
-    queryFn: () => dashboardService.getRelease01({ from, to }),
+    queryKey: ['glance', 'release-01', from, to, ownerUserId ?? 'all'],
+    queryFn: () => dashboardService.getRelease01({ from, to, ownerUserId }),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the requests received' },
   });
@@ -358,7 +363,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
         won={current.won}
         scale={scale}
         height={MAIN_BAR_HEIGHT}
-        countSize={26}
+        countSize={22}
         lostLabel={current.lostLabel}
         wonLabel={current.wonLabel}
       />
@@ -377,7 +382,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
 
   const conversionSlot = publishedRate !== null ? (
     <Stack spacing={0.5} sx={{ minWidth: 0 }}>
-      <Typography component="p" sx={{ ...numeral, fontSize: 30, lineHeight: 1.05 }}>
+      <Typography component="p" sx={{ ...numeral, fontSize: 28, lineHeight: 1.05 }}>
         {`${publishedRate.toLocaleString()}%`}
       </Typography>
       <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
@@ -404,10 +409,11 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       title="Did we win what we decided?"
       step="1"
       index={index}
-      minHeight={320}
+      minHeight={240}
       loading={performance.isLoading}
       error={performance.isError ? presentableErrorMessage(performance.error, undefined, 'list') : null}
       onRetry={() => {
@@ -422,21 +428,19 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
         governed: true,
       }}
     >
-      <Stack spacing={2} sx={{ flexGrow: 1 }}>
+      <Stack spacing={1.25} sx={{ flexGrow: 1 }}>
         <Typography
           component="p"
           data-testid="verdict-sentence"
-          sx={{ fontSize: { xs: 18, md: 20 }, fontWeight: 600, lineHeight: 1.4, color: 'text.primary', maxWidth: 720 }}
+          sx={{ fontSize: 16, fontWeight: 600, lineHeight: 1.35, color: 'text.primary', textWrap: 'balance' }}
         >
           {sentence}
         </Typography>
 
-        <Stack
-          direction={{ xs: 'column', md: 'row' }}
-          spacing={{ xs: 2, md: 3 }}
-          sx={{ alignItems: { md: 'flex-start' }, flexGrow: 1 }}
-        >
-          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+        {/* Axis, then the win-rate slot beneath it: the band is a third of the screen wide, and
+            a side column would squeeze the two bars the reader is here to compare. */}
+        <Stack spacing={1.25} sx={{ flexGrow: 1 }}>
+          <Box sx={{ minWidth: 0 }}>
             {chartUnavailable ? (
               <Unavailable
                 reason={`The server did not state ${current.wonLabel.toLowerCase()} or ${current.lostLabel.toLowerCase()} counts for this window.`}
@@ -449,13 +453,13 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
             <Typography
               variant="caption"
               data-testid="verdict-ghost-note"
-              sx={{ display: 'block', mt: 1, color: 'text.secondary', lineHeight: 1.4 }}
+              sx={{ display: 'block', mt: 0.75, fontSize: 11, color: 'text.secondary', lineHeight: 1.35 }}
             >
               {ghostNote}
             </Typography>
           </Box>
 
-          <Stack spacing={1.5} sx={{ width: { xs: '100%', md: 260 }, flexShrink: 0 }}>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'flex-start', justifyContent: 'space-between', minWidth: 0 }}>
             {conversionSlot}
             {current.decided === 0 && (
               <Button
@@ -465,6 +469,8 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
                 size="small"
                 sx={{
                   alignSelf: 'flex-start',
+                  flexShrink: 0,
+                  whiteSpace: 'nowrap',
                   borderColor: seriesVar('brassBrand'),
                   color: 'var(--nx-glance-seal-ink)',
                   fontWeight: 700,

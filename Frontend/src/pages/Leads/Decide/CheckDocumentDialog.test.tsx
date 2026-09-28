@@ -13,6 +13,8 @@ const snack = vi.fn();
 vi.mock('notistack', () => ({ useSnackbar: () => ({ enqueueSnackbar: snack }) }));
 
 const api = { getById: vi.fn(), submitReview: vi.fn(), fetchObjectUrl: vi.fn(), getSourceGrid: vi.fn() };
+const renderDocx = vi.fn();
+vi.mock('docx-preview', () => ({ renderAsync: (...args: unknown[]) => renderDocx(...args) }));
 vi.mock('../../../api/services/leadService', () => ({
   default: { getById: (...args: unknown[]) => api.getById(...args) },
 }));
@@ -169,6 +171,30 @@ describe('CheckDocumentDialog', () => {
     expect(screen.getAllByText('inquiry.txt')).toHaveLength(1);
   });
 
+  describe('a Word source', () => {
+    const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+    it('draws a .docx in the window instead of sending it to a new tab', async () => {
+      renderDocx.mockImplementation(async (_blob: Blob, body: HTMLElement) => { body.innerHTML = '<table><tr><td>MODULE, 16 CHANNEL FAILSAFE RELAY OUTPUT</td></tr></table>'; });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ blob: async () => new Blob(['docx']) }));
+      api.fetchObjectUrl.mockResolvedValue({ url: 'blob:docx', contentType: DOCX, blob: new Blob(['docx']) });
+      const evidence = workbench().evidence[0];
+      renderDialog({ workbench: workbench({ evidence: [{ ...evidence, name: 'RFP Switchgear.docx', mediaType: DOCX }] }) });
+
+      expect(await screen.findByText('MODULE, 16 CHANNEL FAILSAFE RELAY OUTPUT')).toBeVisible();
+      expect(screen.queryByRole('button', { name: 'Open in a new tab' })).toBeNull();
+      expect(screen.queryByText(/cannot be shown here/)).not.toBeInTheDocument();
+      vi.unstubAllGlobals();
+    });
+
+    it('offers only the download for an old .doc, which no browser can draw', async () => {
+      const evidence = workbench().evidence[0];
+      renderDialog({ workbench: workbench({ evidence: [{ ...evidence, name: 'SE RFP.doc', mediaType: 'application/msword' }] }) });
+      expect(await screen.findByRole('button', { name: 'Download' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Open in a new tab' })).toBeNull();
+    });
+  });
+
   describe('a spreadsheet source', () => {
     const sheetEvidence = { ...workbench().evidence[0], name: 'bid-list.xlsx', mediaType: XLSX, downloadUrl: '/api/File/source-document/9' };
     const sheetLines = [
@@ -191,7 +217,7 @@ describe('CheckDocumentDialog', () => {
       expect(screen.getByText('Row 3 is the line you are checking.')).toBeInTheDocument();
       // Nothing was downloaded to the browser, and nobody was told the file cannot be shown.
       expect(api.fetchObjectUrl).not.toHaveBeenCalled();
-      expect(screen.queryByText(/cannot show here/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/cannot be shown here/)).not.toBeInTheDocument();
     });
 
     it('follows the line the rep works on to its row', async () => {
@@ -203,11 +229,13 @@ describe('CheckDocumentDialog', () => {
       expect(within(table).getByRole('row', { selected: true })).toHaveTextContent('Cable gland kit');
     });
 
-    it('offers to open or download the file when its cells cannot be read, without downloading it first', async () => {
+    it('offers the download when its cells cannot be read, without downloading it first', async () => {
       api.getSourceGrid.mockRejectedValue(new Error('Unsupported'));
       renderDialog({ workbench: workbench({ evidence: [sheetEvidence] }) });
-      expect(await screen.findByRole('button', { name: 'Open in a new tab' })).toBeInTheDocument();
-      expect(screen.getByText(/is a file the browser cannot show here/)).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: 'Download' })).toBeInTheDocument();
+      // A new tab would only download it too, so it is not offered as "open".
+      expect(screen.queryByRole('button', { name: 'Open in a new tab' })).toBeNull();
+      expect(screen.getByText(/cannot be shown here/)).toBeInTheDocument();
       expect(api.fetchObjectUrl).not.toHaveBeenCalled();
     });
 

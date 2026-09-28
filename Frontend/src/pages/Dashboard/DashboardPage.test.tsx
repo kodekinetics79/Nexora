@@ -22,10 +22,28 @@ import type {
  * The empty case is the primary case (Nexora is pre-launch), so every band's empty state is
  * asserted together, on one screen, in the state a new tenant actually opens.
  */
-const auth = vi.hoisted(() => ({ businessUnitId: 3 as number | undefined, grants: null as Set<string> | null }));
+const auth = vi.hoisted(() => ({ businessUnitId: 3 as number | undefined, grants: null as Set<string> | null, isManager: true }));
+// Bands 7 and 8 read their own sources. An empty answer from each keeps this file about the page:
+// they render their empty states, and none of them turns into an error the page tests would count.
+vi.mock('../../api/services/commercialLearningService', () => ({
+  default: { getCustomers: vi.fn(async () => []) },
+}));
+vi.mock('../../api/axiosInstance', () => ({
+  default: {
+    get: vi.fn(async (url: string) => {
+      if (url.includes('brand-demand')) {
+        return { data: { generatedAt: '2026-09-17T08:00:00Z', from: null, to: null, totalLines: 0, linesWithManufacturer: 0,
+          linesWithoutManufacturer: 0, distinctManufacturers: 0, distinctRawSpellings: 0, topFiveLineSharePercent: 0, rows: [], quantityCaveat: null } };
+      }
+      throw new Error('offline in this test');
+    }),
+    put: vi.fn(async () => { throw new Error('offline in this test'); }),
+    delete: vi.fn(async () => { throw new Error('offline in this test'); }),
+  },
+}));
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
-    userData: { businessUnitId: auth.businessUnitId, isManager: false },
+    userData: { id: 41, businessUnitId: auth.businessUnitId, isManager: auth.isManager },
     hasPermission: (moduleName: string) => auth.grants === null || auth.grants.has(moduleName),
     hasEntitlement: () => false,
   }),
@@ -187,6 +205,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   auth.businessUnitId = 3;
   auth.grants = null;
+  auth.isManager = true;
   getPerformance.mockResolvedValue(performance());
   getRelease01.mockResolvedValue(release());
   getDeadlineBoard.mockResolvedValue(board());
@@ -196,7 +215,7 @@ beforeEach(() => {
 });
 
 describe('the dashboard reads as one sentence', () => {
-  it('puts all six bands in the story order', async () => {
+  it('puts all eight bands in the story order', async () => {
     renderPage();
 
     await waitFor(() => expect(bandTitles()).toEqual([
@@ -206,6 +225,8 @@ describe('the dashboard reads as one sentence', () => {
       "What's closing on us",
       'What needs you today',
       'The last six months',
+      'What customers ask for',
+      'Who we quote',
     ]));
     expect(screen.queryByText(/coming soon|not yet available|placeholder/i)).toBeNull();
   });
@@ -271,7 +292,7 @@ describe('the period control', () => {
     await waitFor(() => expect(getPerformance).toHaveBeenCalled());
     getPerformance.mockClear();
 
-    fireEvent.click(screen.getByRole('button', { name: /Custom/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Custom…' }));
     fireEvent.change(screen.getByLabelText('To'), { target: { value: iso(TODAY.subtract(400, 'day')) } });
 
     expect(await screen.findByText(/start date must be on or before the end date/)).toBeInTheDocument();
@@ -293,8 +314,8 @@ describe('one band failing leaves the rest of the screen standing', () => {
     // Exactly one band failed, so exactly one band says so.
     expect(screen.getAllByText('We could not load this')).toHaveLength(1);
 
-    // The six bands are all still on the screen, and the ones that loaded still show their data.
-    expect(bandTitles()).toHaveLength(6);
+    // The eight bands are all still on the screen, and the ones that loaded still show their data.
+    expect(bandTitles()).toHaveLength(8);
     expect(await screen.findByText(/3 went our way/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Past deadline/)).toBeInTheDocument();
   });
@@ -324,7 +345,7 @@ describe('the empty screen a new tenant opens', () => {
     expect(screen.getByText('No requests or orders were recorded in the last six months.')).toBeInTheDocument();
 
     // Empty is not an error anywhere on the screen: no Alert, nothing to retry.
-    expect(bandTitles()).toHaveLength(6);
+    expect(bandTitles()).toHaveLength(8);
     expect(screen.queryByText('We could not load this')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
@@ -379,8 +400,59 @@ describe('the figures this screen refuses to show', () => {
     renderPage();
     await waitFor(() => expect(getPerformance).toHaveBeenCalled());
 
-    expect(screen.getByRole('button', { name: 'Performance by rep' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Every deadline in full' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Documents to check' })).toBeNull();
+    const tabs = within(screen.getByRole('navigation', { name: 'Dashboard sections' }));
+    expect(tabs.getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-current', 'page');
+    expect(tabs.getByRole('button', { name: 'Reps' })).toBeInTheDocument();
+    expect(tabs.queryByRole('button', { name: 'Deadlines' })).toBeNull();
+    expect(tabs.queryByRole('button', { name: 'Documents to check' })).toBeNull();
+  });
+});
+
+describe('a sales rep', () => {
+  const myRow = {
+    userId: 41, name: 'Sara Ali', activeLeads: 7, overdueLeads: 2, openRfqs: 4, draftQuotes: 1,
+    followUpsDue: 3, pipelineGroups: [], wonQuotes: 3, lostQuotes: 1, decidedQuotes: 4,
+    conversionEligible: false, conversionRate: null, activityCount: 12, opportunities: 7, quoteSent: 9,
+    customerResponses: 5, averageResponseHours: null, followUpsCreated: 5, completedFollowUps: 2,
+    followUpsCompletedOnTime: 2, openFollowUps: 3, overdueFollowUps: 1, revenueByCurrency: [],
+  };
+
+  it('gets their own desk: six plain tiles from their own row, not the team screen', async () => {
+    auth.isManager = false;
+    getPerformance.mockResolvedValue(performance({ scope: 'assigned_to_me', representatives: [myRow] }));
+    renderPage();
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'My desk' })).toBeInTheDocument();
+    const tiles = within(screen.getByRole('region', { name: 'My numbers' }));
+    await waitFor(() => expect(tiles.getByRole('button', { name: /Enquiries I'm working: 7, 2 past deadline/ })).toBeInTheDocument());
+    expect(tiles.getByRole('button', { name: /My open RFQs: 4/ })).toBeInTheDocument();
+    expect(tiles.getByRole('button', { name: /Quotes I sent: 9, 1 still in draft/ })).toBeInTheDocument();
+    expect(tiles.getByRole('button', { name: /Won: 3, 1 lost/ })).toBeInTheDocument();
+    // Four decided is under the minimum of five: no ratio is invented.
+    expect(tiles.getByRole('button', { name: /My win ratio: Not yet, Shows after 5 decided quotes · you have 4/ })).toBeInTheDocument();
+    expect(tiles.getByRole('button', { name: /Follow-ups: 3, 1 late/ })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Why we lost' })).toBeNull();
+  });
+
+  it('lets a manager switch between the team screen and their own desk', async () => {
+    getPerformance.mockResolvedValue(performance({ scope: 'managed_scope', representatives: [myRow] }));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'My desk' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'My desk' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Team' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
+  });
+
+  it('shows a tile as a figure, not a link, when the rep may not open its list', async () => {
+    auth.isManager = false;
+    auth.grants = new Set(['Dashboard', 'Leads']);
+    getPerformance.mockResolvedValue(performance({ scope: 'assigned_to_me', representatives: [myRow] }));
+    renderPage();
+
+    const tiles = within(await screen.findByRole('region', { name: 'My numbers' }));
+    await waitFor(() => expect(tiles.getByRole('button', { name: /Enquiries I'm working/ })).toBeInTheDocument());
+    expect(tiles.queryByRole('button', { name: /Quotes I sent/ })).toBeNull();
+    expect(tiles.getByText('Quotes I sent')).toBeInTheDocument();
   });
 });

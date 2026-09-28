@@ -15,12 +15,39 @@ import {
   Receipt as InvoiceIcon
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
-import orderService from '../../../api/services/orderService';
+import orderService, { type OrderDTO } from '../../../api/services/orderService';
+import ExportExcelButton, { type ExportColumn } from '../../../components/common/ExportExcelButton';
 import dayjs from 'dayjs';
 
 import PermissionGuard from '../../../components/common/PermissionGuard';
 import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
 import { formatMoney } from '../../../utils/currency';
+
+const day = (value?: string | null) => (value ? dayjs(value).format('DD MMM YYYY') : '');
+
+const ORDER_EXPORT_COLUMNS: ExportColumn<OrderDTO>[] = [
+  { header: 'Order #', value: (o) => o.orderNo || o.orderNumber },
+  { header: 'Nexora Serial', value: (o) => o.nexoraSerial },
+  { header: 'Date', value: (o) => day(o.orderDate) },
+  { header: 'Delivery date', value: (o) => day(o.deliveryDate) },
+  { header: 'Customer', value: (o) => o.customerName },
+  { header: 'Quote #', value: (o) => o.quoteNo },
+  { header: 'RFQ #', value: (o) => o.rfqNo },
+  { header: 'Lead #', value: (o) => o.leadNo },
+  { header: 'Status', value: (o) => o.status },
+  { header: 'Payment', value: (o) => o.paymentStatus || 'UNPAID' },
+  { header: 'Payment reference', value: (o) => o.paymentReference },
+  { header: 'Currency', value: (o) => o.currencyCode },
+  { header: 'Subtotal', value: (o) => o.subTotal },
+  { header: 'Discount', value: (o) => o.discountAmount },
+  { header: 'Tax', value: (o) => o.taxAmount },
+  { header: 'Total', value: (o) => o.totalAmount },
+  { header: 'Paid', value: (o) => o.paidAmount },
+  { header: 'Balance', value: (o) => o.balanceAmount },
+  { header: 'Shipped', value: (o) => (o.hasShipments ? 'Yes' : 'No') },
+  { header: 'Notes', value: (o) => o.notes },
+  { header: 'Terms and conditions', value: (o) => o.termsAndConditions },
+];
 
 const OrderListPage: React.FC = () => {
   const navigate = useNavigate();
@@ -87,15 +114,18 @@ const OrderListPage: React.FC = () => {
           </Typography>
           <Typography variant="body2" color="text.secondary">Manage customer orders and conversions</Typography>
         </Box>
-        {canConfirmOrders ? (
-          <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>
-            Open Client PO Inbox
-          </Button>
-        ) : (
-          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 320, textAlign: 'right' }}>
-            {askForAwardsAccess}
-          </Typography>
-        )}
+        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
+          <ExportExcelButton name="Sales-Orders" columns={ORDER_EXPORT_COLUMNS} loadRows={async () => orders} />
+          {canConfirmOrders ? (
+            <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>
+              Open Client PO Inbox
+            </Button>
+          ) : (
+            <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 320, textAlign: 'right' }}>
+              {askForAwardsAccess}
+            </Typography>
+          )}
+        </Stack>
       </Stack>
 
       <Paper sx={{ p: 2, mb: 3, borderRadius: 2, boxShadow: 'none', border: '1px solid', borderColor: 'divider' }}>

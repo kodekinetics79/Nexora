@@ -234,6 +234,14 @@ export interface SourceGridSheetDTO {
 }
 
 /** The cells of a retained spreadsheet source, as the parser read them. */
+/** One commercial term the buyer states in the document, with the sentence it came from. */
+export interface BuyerTermDTO {
+  key: string;
+  label: string;
+  value: string;
+  quote: string;
+}
+
 export interface SourceGridDTO {
   sheets: SourceGridSheetDTO[];
 }
@@ -251,6 +259,12 @@ const leadDecisionService = {
   getSourceGrid: async (documentPath: string): Promise<SourceGridDTO> => {
     const response = await axiosInstance.get<SourceGridDTO>(`${documentPath}/grid`);
     return response.data;
+  },
+
+  /** What the buyer requires (delivery terms, currency, validity, agreement, …), read from the retained document. */
+  getBuyerTerms: async (sourceDocumentId: number): Promise<BuyerTermDTO[]> => {
+    const response = await axiosInstance.get<{ terms?: BuyerTermDTO[] }>(`/api/File/source-document/${sourceDocumentId}/buyer-terms`);
+    return response.data?.terms ?? [];
   },
 
   saveFitAssessment: async (

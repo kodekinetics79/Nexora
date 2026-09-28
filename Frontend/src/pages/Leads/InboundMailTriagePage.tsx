@@ -42,7 +42,7 @@ import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import RefreshFailedNotice from '../../components/common/RefreshFailedNotice';
 import { EmptyState, LoadingState } from '../../platform/components/States';
 import { useAuth } from '../../context/AuthContext';
-import ViewTabs from '../../components/layout/ViewTabs';
+import InboxFrame from '../Inbox/InboxFrame';
 import { presentableServerText } from '../../utils/apiErrors';
 import emailTriageService, {
   describeAssemblyState,
@@ -684,18 +684,41 @@ export default function InboundMailTriagePage() {
   };
 
   return (
-    <Box sx={{ p: { xs: 1, sm: 2 } }}>
-      <Stack
-        direction={{ xs: 'column', sm: 'row' }}
-        spacing={1.5}
-        sx={{ mb: 1, justifyContent: 'space-between', alignItems: { sm: 'center' } }}
-      >
-        {/* The Inbox tabs sit under this header like every other Inbox screen; this screen's own
-            decision tabs sit beneath them as small pills, so the two rows never look alike. */}
-        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em' }}>
-          Inbound mail
-        </Typography>
-        <Stack direction="row" spacing={1.5} sx={{ flexShrink: 0 }}>
+    <InboxFrame
+      tools={(
+        <Tabs
+          value={tabIndex}
+          onChange={(_event, next: number) => changeTab(next)}
+          aria-label="Triage decision"
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
+          sx={{
+            minHeight: 32,
+            minWidth: 0,
+            maxWidth: '100%',
+            '& .MuiTabs-indicator': { display: 'none' },
+            '& .MuiTab-root': {
+              minHeight: 32, py: 0.5, px: 1.5, mr: 0.75, borderRadius: 999, textTransform: 'none',
+              fontSize: '0.8rem', fontWeight: 700, border: '1px solid', borderColor: 'divider', color: 'text.secondary',
+            },
+            '& .MuiTab-root.Mui-selected': { color: 'text.primary', bgcolor: 'action.selected', borderColor: 'text.secondary' },
+          }}
+        >
+          {TABS.map((tab, index) => (
+            <Tab
+              key={tab.key}
+              id={`triage-tab-${tab.key}`}
+              aria-controls="triage-panel"
+              // The number is part of the accessible name, not a decoration beside it: a count
+              // announced separately from its tab is a number with nothing attached to it.
+              label={tabCounts[index] === null ? tab.label : `${tab.label} (${tabCounts[index]})`}
+            />
+          ))}
+        </Tabs>
+      )}
+      actions={(
+        <>
           <Button
             variant="contained"
             startIcon={pollMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <PollIcon />}
@@ -712,10 +735,9 @@ export default function InboundMailTriagePage() {
               </IconButton>
             </span>
           </Tooltip>
-        </Stack>
-      </Stack>
-
-      <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
+        </>
+      )}
+    >
 
       {!canPoll && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
@@ -811,35 +833,6 @@ export default function InboundMailTriagePage() {
         />
       )}
 
-      <Tabs
-        value={tabIndex}
-        onChange={(_event, next: number) => changeTab(next)}
-        aria-label="Triage decision"
-        variant="scrollable"
-        scrollButtons="auto"
-        allowScrollButtonsMobile
-        sx={{
-          mb: 1.5,
-          minHeight: 32,
-          '& .MuiTabs-indicator': { display: 'none' },
-          '& .MuiTab-root': {
-            minHeight: 32, py: 0.5, px: 1.5, mr: 0.75, borderRadius: 999, textTransform: 'none',
-            fontSize: '0.8rem', fontWeight: 700, border: '1px solid', borderColor: 'divider', color: 'text.secondary',
-          },
-          '& .MuiTab-root.Mui-selected': { color: 'text.primary', bgcolor: 'action.selected', borderColor: 'text.secondary' },
-        }}
-      >
-        {TABS.map((tab, index) => (
-          <Tab
-            key={tab.key}
-            id={`triage-tab-${tab.key}`}
-            aria-controls="triage-panel"
-            // The number is part of the accessible name, not a decoration beside it: a count
-            // announced separately from its tab is a number with nothing attached to it.
-            label={tabCounts[index] === null ? tab.label : `${tab.label} (${tabCounts[index]})`}
-          />
-        ))}
-      </Tabs>
 
       <Box role="tabpanel" id="triage-panel" aria-labelledby={`triage-tab-${activeTab.key}`}>
 
@@ -939,7 +932,7 @@ export default function InboundMailTriagePage() {
 
         {!unavailable && rows.length > 0 && (
           <>
-            <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
+            <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto', borderRadius: 3 }}>
               <Table size="small" aria-label={`Messages ${activeTab.label.toLowerCase()}`} sx={{ minWidth: 1260 }}>
                 <TableHead>
                   <TableRow>
@@ -1564,6 +1557,6 @@ export default function InboundMailTriagePage() {
           </Button>
         </DialogActions>
       </Dialog>
-    </Box>
+    </InboxFrame>
   );
 }

@@ -50,8 +50,12 @@ vi.mock('../../../api/services/leadDecisionService', () => ({
   },
 }));
 const getLead = vi.fn();
+const downloadLinesExcel = vi.fn();
 vi.mock('../../../api/services/leadService', () => ({
-  default: { getById: (...args: unknown[]) => getLead(...args) },
+  default: {
+    getById: (...args: unknown[]) => getLead(...args),
+    downloadLinesExcel: (...args: unknown[]) => downloadLinesExcel(...args),
+  },
 }));
 vi.mock('../LeadOwnerControl', () => ({
   default: ({ lockedReason }: { lockedReason?: string | null }) => (
@@ -501,6 +505,27 @@ describe('one decision for the whole request', () => {
     const note = screen.getByRole('textbox', { name: 'How you handled it (line 00002)' });
     expect(note).toHaveValue('Quoted as read; no catalogue match yet, sourcing will resolve it.');
     expect(screen.queryByRole('textbox', { name: 'How you handled it (line 00001)' })).toBeNull();
+  });
+
+  it('Currency for all puts one currency on every line in one pick', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quote all' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Currency for all…' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'SAR' }));
+
+    for (const label of ['00001', '00002', '00003']) {
+      expect(screen.getByRole('combobox', { name: `Currency for line ${label}` })).toHaveTextContent('SAR');
+    }
+  });
+
+  it('Download Excel saves the lines of this request', async () => {
+    getLead.mockResolvedValue({ id: 501, rfqno: 'SEC-RFQ-4471182', assignedToId: 7, assignedToFullName: 'Rep', assignmentVersion: 1 });
+    downloadLinesExcel.mockResolvedValue(undefined);
+    renderPage();
+    await waitFor(() => expect(getLead).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: 'Download Excel' }));
+
+    await waitFor(() => expect(downloadLinesExcel).toHaveBeenCalledWith(407, 'SEC-RFQ-4471182'));
   });
 
   it('a line skipped after Quote all keeps its own decision', async () => {

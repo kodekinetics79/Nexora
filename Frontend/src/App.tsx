@@ -210,6 +210,7 @@ function App() {
       <Route path="/sales/accounts" element={<TenantShell><PermissionGuard moduleName="Customers"><AccountOwnershipPage /></PermissionGuard></TenantShell>} />
       <Route path="/sales/routing" element={<TenantShell><PermissionGuard moduleName="Leads"><RoutingQueuePage /></PermissionGuard></TenantShell>} />
       <Route path="/sales/follow-ups" element={<TenantShell><PermissionGuard moduleName="Quotations"><FollowUpsPage /></PermissionGuard></TenantShell>} />
+      <Route path="/sales/me" element={<TenantShell><PermissionGuard moduleName="Dashboard"><RepProfilePage self /></PermissionGuard></TenantShell>} />
       <Route path="/sales/performance" element={<TenantShell><PermissionGuard moduleName="Dashboard"><PerformancePage /></PermissionGuard></TenantShell>} />
       <Route path="/sales/exceptions" element={<TenantShell><PermissionGuard moduleName="Leads"><CommercialExceptionCenterPage /></PermissionGuard></TenantShell>} />
       <Route path="/sales/quotes" element={<TenantShell><PermissionGuard moduleName="Quotations"><QuotesPage /></PermissionGuard></TenantShell>} />

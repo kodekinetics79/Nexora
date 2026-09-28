@@ -1,6 +1,10 @@
-import type { ReactNode } from 'react';
-import { Box, Chip, Stack, Tooltip, Typography, useTheme } from '@mui/material';
+import { useRef, useState } from 'react';
+import type { KeyboardEvent, PointerEvent, ReactNode } from 'react';
+import { Box, Chip, Stack, Typography, useTheme } from '@mui/material';
+import { visuallyHidden } from '@mui/utils';
+import { useMeasuredWidth } from './useMeasuredWidth';
 import dayjs from 'dayjs';
+import type { Dayjs } from 'dayjs';
 import BandShell from './BandShell';
 import Unavailable from './Unavailable';
 import { useSeriesColors } from './tokens';
@@ -55,6 +59,8 @@ export interface SixMonthPoint {
 }
 
 export interface SixMonthsBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
   points?: SixMonthPoint[] | null;
   /** The server's freshness. This endpoint states none today, so it is honestly absent. */
   generatedAt?: string | null;
@@ -63,6 +69,14 @@ export interface SixMonthsBandProps {
   error?: string | null;
   onRetry?: () => void;
   index?: number;
+  /**
+   * The reader picked a month (click, Enter) or a run of months (drag). Both dates are YYYY-MM-DD
+   * and INCLUSIVE, the page's GlanceWindow shape: `from` is the first day of the earliest month,
+   * `to` the last day of the latest. Absent, the months still show their readout but pick nothing.
+   */
+  onPickPeriod?: (from: string, to: string) => void;
+  /** The window the dashboard is showing (inclusive, YYYY-MM-DD); months it touches stay in focus. */
+  picked?: { from: string; to: string } | null;
 }
 
 const MONTHS_SHOWN = 6;
@@ -70,20 +84,19 @@ const MONTHS_SHOWN = 6;
 // One geometry for both panels. The left gutter and the plot width have to be identical or the
 // columns stop lining up with the points below them, and the reader is silently comparing October
 // against November.
-const VIEW_W = 720;
-const AXIS_W = 52;
+/** The design width, used until the band has measured its own (see useMeasuredWidth). */
+const VIEW_W = 440;
+const AXIS_W = 44;
 const PAD_R = 16;
-const PAD_T = 12;
-const PLOT_H = 132;
-const LABELS_H = 24;
+const PAD_T = 10;
+const PLOT_H = 56;
+const LABELS_H = 22;
 const PANEL_H = PAD_T + PLOT_H;
-const PLOT_W = VIEW_W - AXIS_W - PAD_R;
 const BASELINE = PAD_T + PLOT_H;
 
-const srOnly = {
-  position: 'absolute', width: 1, height: 1, p: 0, m: -1,
-  overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
-} as const;
+
+/** Subtle fades for the crosshair and the picked window; none at all under reduced motion. */
+const QUIET = { transition: 'opacity 160ms ease', '@media (prefers-reduced-motion: reduce)': { transition: 'none' } };
 
 const compact = (n: number) =>
   new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
@@ -105,6 +118,18 @@ const monthLabel = (raw: string): string => {
  */
 const fallbackMonths = (): string[] =>
   Array.from({ length: MONTHS_SHOWN }, (_, i) => dayjs().subtract(MONTHS_SHOWN - 1 - i, 'month').format('MMM'));
+
+/**
+ * The calendar month each slot stands for. An ISO label states it; a bare "Aug" does not, so it is
+ * counted back from the current month — the server's last row is always this month.
+ */
+const slotMonth = (raw: string | undefined, i: number, slots: number): Dayjs => {
+  if (raw && /^\d{4}-\d{2}/.test(raw)) {
+    const parsed = dayjs(`${raw.slice(0, 7)}-01`);
+    if (parsed.isValid()) return parsed.startOf('month');
+  }
+  return dayjs().startOf('month').subtract(slots - 1 - i, 'month');
+};
 
 /** A round number at or above `v`, so the top tick is readable rather than exact. */
 const niceCeil = (v: number): number => {
@@ -133,9 +158,11 @@ const columnPath = (x: number, w: number, top: number, r = 4): string => {
 };
 
 export default function SixMonthsBand({
-  points, generatedAt = null, loading = false, error = null, onRetry, index = 6,
+  points, generatedAt = null, loading = false, error = null, onRetry, index = 6, onPickPeriod, picked = null, detailsTo,
 }: SixMonthsBandProps) {
   const theme = useTheme();
+  // The panels draw at the band's own width, so an 11px tick label renders at 11px.
+  const [measureRef, viewW] = useMeasuredWidth<SVGSVGElement>(VIEW_W);
   // Literals rather than the CSS custom properties: these values are interpolated into gradient
   // stops and shadow colours, which cannot be derived from a var() the browser has not resolved.
   const series = useSeriesColors();
@@ -173,7 +200,7 @@ export default function SixMonthsBand({
   const countMax = niceCeil(Math.max(...rows.map((r) => r.count), 0));
   const valueMax = niceCeil(Math.max(...statedValues.map((r) => r.value as number), 0));
 
-  const band = PLOT_W / slots;
+  const band = (viewW - AXIS_W - PAD_R) / slots;
   const barW = Math.min(40, band * 0.5);
   const centre = (i: number) => AXIS_W + band * (i + 0.5);
   const countY = (v: number) => BASELINE - (v / countMax) * PLOT_H;
@@ -182,7 +209,7 @@ export default function SixMonthsBand({
   const linePoints = rows.map((r, i) => (typeof r.value === 'number' ? { x: centre(i), y: valueY(r.value), i } : null));
   // Contiguous runs only. Joining across a month whose value the server refused to state would
   // draw a slope nobody measured.
-  const segments: { x: number; y: number }[][] = [];
+  const segments: { x: number; y: number; i: number }[][] = [];
   for (const p of linePoints) {
     if (!p) { segments.push([]); continue; }
     if (!segments.length) segments.push([]);
@@ -192,6 +219,27 @@ export default function SixMonthsBand({
   const lastPoint = linePoints.filter((p) => p !== null).slice(-1)[0] ?? null;
   const lastRow = lastPoint ? rows[lastPoint.i] : null;
 
+  // ── The headline figures. The value total follows the same null rule as the chart: a total
+  // over a month the server would not state is a partial sum wearing a whole-period label, so one
+  // null month makes the total "Not stated" rather than quietly smaller. No rows at all is not a
+  // measured zero either.
+  const totalCount = rows.reduce((sum, r) => sum + r.count, 0);
+  const valueTotalStated = rows.length > 0 && rows.every((r) => typeof r.value === 'number');
+  const totalValue = valueTotalStated ? rows.reduce((sum, r) => sum + (r.value as number), 0) : null;
+  const totalValueReason = valueTotalStated
+    ? null
+    : (rows.find((r) => typeof r.value !== 'number' && r.valueUnavailableReason)?.valueUnavailableReason
+      ?? 'The server did not state order value for every month.');
+  // This month against last, in words. A count difference is a fact; a percentage or an arrow
+  // would be a verdict (the screen bans CalculateTrend-style "100%" claims).
+  const thisMonth = rows.length ? rows[rows.length - 1].count : 0;
+  const previous = rows.length > 1 ? { count: rows[rows.length - 2].count, label: labels[rows.length - 2] } : null;
+  const comparison = previous
+    ? thisMonth > previous.count ? `${(thisMonth - previous.count).toLocaleString('en-US')} more than ${previous.label}`
+      : thisMonth < previous.count ? `${(previous.count - thisMonth).toLocaleString('en-US')} fewer than ${previous.label}`
+        : `same as ${previous.label}`
+    : null;
+
   const countSummary = rows.length
     ? rows.map((r, i) => `${labels[i]} ${r.count}`).join(', ')
     : `no requests recorded, ${labels.join(', ')}`;
@@ -199,9 +247,107 @@ export default function SixMonthsBand({
     ? rows.map((r, i) => `${labels[i]} ${typeof r.value === 'number' ? formatMoney(r.value, currency) : 'not stated'}`).join(', ')
     : `no order value recorded, ${labels.join(', ')}`;
 
+  // ── The crosshair. One index drives both panels, so the column and the point it is read against
+  // light together; pointer, focus and a drag in progress all resolve to that one index.
+  const months = labels.map((_, i) => slotMonth(rows[i]?.month, i, slots));
+  const [hover, setHover] = useState<number | null>(null);
+  const [focused, setFocused] = useState<number | null>(null);
+  const [roving, setRoving] = useState<number | null>(null);
+  const [drag, setDrag] = useState<{ start: number; end: number } | null>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const monthRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // A drag ends in pointerup; the click the browser may send after it must not re-pick one month.
+  const swallowClick = useRef(false);
+
+  const clampIndex = (i: number) => Math.max(0, Math.min(slots - 1, i));
+  const tabStop = roving === null ? slots - 1 : clampIndex(roving);
+  const active = drag ? drag.end : (hover ?? focused);
+
+  const pick = (a: number, b: number) => {
+    if (!onPickPeriod) return;
+    const first = months[Math.min(a, b)];
+    const last = months[Math.max(a, b)];
+    onPickPeriod(first.format('YYYY-MM-DD'), last.endOf('month').format('YYYY-MM-DD'));
+  };
+
+  // Months the picked window touches. A 30-day window across a month end lights both months,
+  // because both hold days the dashboard is counting.
+  const inPicked = months.map((m) => !!picked
+    && m.format('YYYY-MM-DD') <= picked.to && m.endOf('month').format('YYYY-MM-DD') >= picked.from);
+  const anyPicked = inPicked.some(Boolean);
+  const dimmed = inPicked.map((inside) => anyPicked && !inside);
+
+  /** Which month a pointer is over. Geometry when the overlay has a size; jsdom has none, so the target. */
+  const indexAt = (e: PointerEvent<HTMLElement>): number | null => {
+    const rect = overlayRef.current?.getBoundingClientRect();
+    if (rect && rect.width > 0) {
+      const x = ((e.clientX - rect.left) / rect.width) * viewW;
+      return clampIndex(Math.floor((x - AXIS_W) / band));
+    }
+    const raw = (e.target as HTMLElement).closest?.('[data-month-index]')?.getAttribute('data-month-index');
+    return raw == null ? null : Number(raw);
+  };
+
+  const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    swallowClick.current = false;
+    if (!onPickPeriod || e.button !== 0) return;
+    const i = indexAt(e);
+    if (i === null) return;
+    setDrag({ start: i, end: i });
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
+    const i = indexAt(e);
+    if (i === null) return;
+    setHover(i);
+    if (drag && drag.end !== i) setDrag({ ...drag, end: i });
+  };
+  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
+    if (!drag) return;
+    const end = indexAt(e) ?? drag.end;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    setDrag(null);
+    // The pick happens here for a single month too: with the pointer captured by the overlay, a
+    // real browser delivers the click to the overlay, not to the month button, so the button's own
+    // onClick never runs for a pointer. It stays for the keyboard, and swallows any click that
+    // does arrive after this so nothing is picked twice.
+    swallowClick.current = true;
+    // Any click the browser sends for this release arrives before the timer; the keyboard's never is.
+    setTimeout(() => { swallowClick.current = false; }, 0);
+    pick(Math.min(drag.start, end), Math.max(drag.start, end));
+  };
+
+  const onMonthKey = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
+    const next = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? i + 1
+      : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? i - 1
+        : e.key === 'Home' ? 0
+          : e.key === 'End' ? slots - 1
+            : null;
+    if (next === null) return;
+    e.preventDefault();
+    const target = clampIndex(next);
+    setRoving(target);
+    monthRefs.current[target]?.focus();
+  };
+
+  const moneyFor = (row: SixMonthPoint | undefined): string => {
+    if (!row || typeof row.value !== 'number') {
+      return row?.valueUnavailableReason ?? (valueUnavailableReason ?? 'order value not stated');
+    }
+    return formatMoney(row.value, currency);
+  };
+  const readoutFor = (i: number): string => {
+    const count = rows[i]?.count ?? 0;
+    return `${labels[i]} · ${count.toLocaleString('en-US')} RFQ${count === 1 ? '' : 's'} · ${moneyFor(rows[i])}`;
+  };
+  const pct = (x: number) => `${(x / viewW) * 100}%`;
+  const brush = drag && drag.start !== drag.end
+    ? { from: Math.min(drag.start, drag.end), to: Math.max(drag.start, drag.end) }
+    : null;
+
   const gridLines = (max: number, y: (v: number) => number) =>
     axisTicks(max).map((t) => (
-      <line key={t} x1={AXIS_W} x2={VIEW_W - PAD_R} y1={y(t)} y2={y(t)} stroke={gridInk} strokeWidth={1} />
+      <line key={t} x1={AXIS_W} x2={viewW - PAD_R} y1={y(t)} y2={y(t)} stroke={gridInk} strokeWidth={1} />
     ));
   const tickLabels = (max: number, y: (v: number) => number, format: (v: number) => string) =>
     axisTicks(max).map((t) => (
@@ -216,10 +362,12 @@ export default function SixMonthsBand({
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       title="The last six months"
       step="6"
       index={index}
-      minHeight={400}
+      minHeight={240}
+      hint="Background context. Everyone sees the same company-wide history here, whatever the other bands are scoped to."
       loading={loading}
       error={error}
       onRetry={onRetry}
@@ -233,19 +381,30 @@ export default function SixMonthsBand({
         governed: false,
       }}
     >
-      <Stack spacing={0.75} sx={{ mb: 1.5 }}>
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 0.75 }}>
-          <Chip
-            label="Background context"
-            size="small"
-            variant="outlined"
-            sx={{ height: 20, fontSize: 11, fontWeight: 700, color: 'text.secondary', borderColor: 'divider' }}
-          />
-          <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-            Everyone sees the same company-wide history here, whatever the bands above are scoped to.
-          </Typography>
-        </Stack>
-      </Stack>
+
+      {/* The headline: three stat tiles, grey label over a large ink figure. Ink, not series
+          colour — the figures are read, the marks below are what carry the brass and graphite. */}
+      <Box
+        component="dl"
+        data-testid="six-months-headline"
+        sx={{ display: 'flex', flexWrap: 'wrap', columnGap: 3, rowGap: 0.5, m: 0, mb: 0.75 }}
+      >
+        <HeadlineStat label="RFQs created" testId="six-months-total-count">
+          {totalCount.toLocaleString('en-US')}
+        </HeadlineStat>
+        <HeadlineStat
+          label="Order value" testId="six-months-total-value"
+          title={totalValueReason ?? undefined}
+        >
+          {totalValue === null ? 'Not stated' : formatMoney(totalValue, currency)}
+        </HeadlineStat>
+        <HeadlineStat
+          label="This month" testId="six-months-this-month"
+          aside={comparison ? <Box component="span" data-testid="six-months-this-month-comparison">{` · ${comparison}`}</Box> : null}
+        >
+          {thisMonth.toLocaleString('en-US')}
+        </HeadlineStat>
+      </Box>
 
       {empty ? (
         <Typography variant="body2" sx={{ color: 'text.secondary', mb: 1 }}>
@@ -257,13 +416,24 @@ export default function SixMonthsBand({
           the past, not something the reader can still act on. Named for what the server counts
           (Rfqs by CreatedDate month): "requests received" here read as the lead count the bands
           above call by that name, and disagreed with it. */}
-      <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: 'text.secondary' }}>
-        RFQs created{empty ? '' : ' · count'}
-      </Typography>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
+        <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: 'text.secondary' }}>
+          RFQs created{empty ? '' : ' · count'}
+        </Typography>
+        <Chip
+          label="Background context"
+          size="small"
+          variant="outlined"
+          sx={{ height: 20, fontSize: 11, fontWeight: 700, color: 'text.secondary', borderColor: 'divider' }}
+        />
+      </Stack>
+      {/* Both panels share one positioned frame so the month overlay spans them as one column. */}
+      <Box sx={{ position: 'relative' }}>
       <Box
         component="svg"
         data-testid="six-months-requests"
-        viewBox={`0 0 ${VIEW_W} ${PANEL_H}`}
+        ref={measureRef}
+        viewBox={`0 0 ${viewW} ${PANEL_H}`}
         role="img"
         aria-label={`RFQs created, ${countSummary}`}
         sx={{ display: 'block', width: '100%', height: 'auto', overflow: 'visible' }}
@@ -276,7 +446,13 @@ export default function SixMonthsBand({
         </defs>
         {gridLines(countMax, countY)}
         {tickLabels(countMax, countY, (t) => t.toLocaleString('en-US'))}
-        <line x1={AXIS_W} x2={VIEW_W - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
+        {active !== null && (
+          <rect
+            data-testid="six-months-crosshair" x={centre(active) - band / 2 + 2} y={0}
+            width={Math.max(0, band - 4)} height={PANEL_H} rx={6} fill={axisInk} opacity={0.08}
+          />
+        )}
+        <line x1={AXIS_W} x2={viewW - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
         {labels.map((label, i) => {
           const row = rows[i];
           const x = centre(i) - barW / 2;
@@ -291,38 +467,121 @@ export default function SixMonthsBand({
               />
             );
           }
+          // The month overlay names each column now (see below), so the mark itself stays unnamed.
           return (
-            <Tooltip key={label + i} title={`${label}: ${row.count.toLocaleString('en-US')} RFQ${row.count === 1 ? '' : 's'} created`}>
-              {/* The Tooltip names its child with aria-label, and a bare <path> has no role that may
-                  carry a name (axe: aria-prohibited-attr). role="img" makes each column a named
-                  graphic, which is what it is. */}
-              <path role="img" d={columnPath(x, barW, countY(row.count))} fill="url(#nx-six-months-column)" style={{ filter: 'var(--nx-neu-drop)' }} />
-            </Tooltip>
+            <Box
+              component="path" key={label + i} d={columnPath(x, barW, countY(row.count))}
+              fill="url(#nx-six-months-column)"
+              sx={{ filter: 'var(--nx-neu-drop)', opacity: dimmed[i] ? 0.4 : 1, ...QUIET }}
+            />
           );
         })}
       </Box>
 
       {/* Order value — brass, and brass here means the newly won, not merely the large. */}
-      <Typography variant="caption" sx={{ display: 'block', mt: 1, fontWeight: 800, color: 'text.secondary' }}>
+      <Typography variant="caption" sx={{ display: 'block', mt: 0.5, fontWeight: 800, color: 'text.secondary' }}>
         Order value{currency ? ` · ${currency}` : empty || valueUnavailableReason ? '' : ' · currency not stated'}
       </Typography>
       {valueUnavailableReason ? (
         <Unavailable reason={valueUnavailableReason}>
           <ValueFrame
+          viewW={viewW}
             labels={labels} gridLines={gridLines} tickLabels={tickLabels} valueMax={valueMax}
             valueY={valueY} axisInk={axisInk} outlineInk={outlineInk} centre={centre} barW={barW}
             segments={[]} lastPoint={null} lastRow={null} currency={currency} series={series}
-            summary={valueSummary} gapIndexes={[]}
+            summary={valueSummary} gapIndexes={[]} band={band} active={null} dimmed={dimmed}
           />
         </Unavailable>
       ) : (
         <ValueFrame
+          viewW={viewW}
           labels={labels} gridLines={gridLines} tickLabels={tickLabels} valueMax={valueMax}
           valueY={valueY} axisInk={axisInk} outlineInk={outlineInk} centre={centre} barW={barW}
           segments={drawnSegments} lastPoint={lastPoint} lastRow={lastRow} currency={currency}
           series={series} summary={valueSummary}
           gapIndexes={linePoints.map((p, i) => (p === null ? i : -1)).filter((i) => i >= 0)}
+          band={band} active={active} dimmed={dimmed}
         />
+      )}
+
+      {/* The month overlay: one transparent button per slot, full height across both panels. It is
+          what the reader hovers, tabs through, clicks and drags; the marks underneath only answer. */}
+      <Box
+        ref={overlayRef}
+        data-testid="six-months-overlay"
+        role="group"
+        aria-label="Months"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={() => setDrag(null)}
+        onPointerLeave={() => { if (!drag) setHover(null); }}
+        sx={{ position: 'absolute', inset: 0, touchAction: 'pan-y', userSelect: 'none' }}
+      >
+        {brush && (
+          <Box
+            data-testid="six-months-brush" aria-hidden
+            sx={{
+              position: 'absolute', top: 0, bottom: 0, pointerEvents: 'none', borderRadius: 1.5,
+              left: pct(centre(brush.from) - band / 2 + 1),
+              width: pct(band * (brush.to - brush.from + 1) - 2),
+              bgcolor: `${series.brassBrand}22`, border: `1px solid ${series.brassBrand}88`,
+            }}
+          />
+        )}
+        {labels.map((label, i) => (
+          // A native <button> rendered through Box for sx; the rule cannot see through `component`.
+          // eslint-disable-next-line jsx-a11y/no-static-element-interactions
+          <Box
+            component="button"
+            type="button"
+            key={label + i}
+            ref={(el: HTMLButtonElement | null) => { monthRefs.current[i] = el; }}
+            data-month-index={i}
+            data-testid="six-months-month"
+            tabIndex={i === tabStop ? 0 : -1}
+            aria-label={readoutFor(i)}
+            aria-pressed={picked ? inPicked[i] : undefined}
+            onFocus={() => { setFocused(i); setRoving(i); }}
+            onBlur={() => setFocused(null)}
+            onKeyDown={(e: KeyboardEvent<HTMLButtonElement>) => onMonthKey(e, i)}
+            onClick={() => {
+              if (swallowClick.current) { swallowClick.current = false; return; }
+              pick(i, i);
+            }}
+            sx={{
+              position: 'absolute', top: 0, bottom: 0, p: 0, m: 0, border: 0, borderRadius: 1.5,
+              left: pct(centre(i) - band / 2), width: pct(band),
+              background: 'transparent', cursor: onPickPeriod ? 'pointer' : 'default',
+              '&:focus-visible': { outline: `2px solid ${series.brassMark}`, outlineOffset: -2 },
+            }}
+          />
+        ))}
+        {active !== null && (
+          // The readout floats above the frame at the month's column, clamped at the two ends so
+          // the first and last month never push it off the band.
+          <Box
+            data-testid="six-months-readout" aria-hidden
+            sx={{
+              position: 'absolute', top: 0, pointerEvents: 'none', whiteSpace: 'nowrap', zIndex: 1,
+              left: pct(centre(active)),
+              transform: `translate(${active === 0 ? '-20%' : active === slots - 1 ? '-80%' : '-50%'}, calc(-100% - 4px))`,
+              px: 1, py: 0.25, borderRadius: 1, fontSize: 12, fontWeight: 700,
+              fontVariantNumeric: 'tabular-nums',
+              bgcolor: 'background.paper', color: 'text.primary',
+              border: 1, borderColor: 'divider', boxShadow: 2,
+            }}
+          >
+            {readoutFor(active)}
+          </Box>
+        )}
+      </Box>
+      </Box>
+
+      {onPickPeriod && (
+        <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+          Click a month to see the whole dashboard for it · drag across months for a range
+        </Typography>
       )}
 
       {gapMonths.length > 0 && (
@@ -332,7 +591,7 @@ export default function SixMonthsBand({
         </Typography>
       )}
 
-      <Box component="table" sx={srOnly}>
+      <Box component="table" sx={visuallyHidden}>
         <caption>The last six months, company-wide</caption>
         <thead>
           <tr><th scope="col">Month</th><th scope="col">RFQs created</th><th scope="col">Order value</th></tr>
@@ -351,7 +610,56 @@ export default function SixMonthsBand({
   );
 }
 
+interface HeadlineStatProps {
+  label: string;
+  testId: string;
+  children: ReactNode;
+  /** Small secondary words after the figure, on the same line. */
+  aside?: ReactNode;
+  /** Why the figure is not stated; the same sentence is on screen below the panels. */
+  title?: string;
+}
+
+/**
+ * One headline figure. Kept to two short lines (an 11px label, a 30px figure at 1.1 line height)
+ * so the three together add roughly 55px to the band and the dashboard still fits one glance.
+ */
+function HeadlineStat({ label, testId, children, aside = null, title }: HeadlineStatProps) {
+  return (
+    <Box sx={{ minWidth: 0 }}>
+      <Box
+        component="dt"
+        sx={{ fontSize: 11, lineHeight: 1.4, fontWeight: 700, color: 'text.secondary', letterSpacing: 0.2 }}
+      >
+        {label}
+      </Box>
+      <Box component="dd" sx={{ m: 0, display: 'flex', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+        <Box
+          component="span"
+          data-testid={testId}
+          title={title}
+          sx={{
+            fontSize: 30, lineHeight: 1.1, fontWeight: 800, color: 'text.primary',
+            fontVariantNumeric: 'tabular-nums', letterSpacing: -0.5,
+          }}
+        >
+          {children}
+        </Box>
+        {aside && (
+          <Box
+            component="span"
+            sx={{ ml: 0.5, fontSize: 12, fontWeight: 600, color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
+          >
+            {aside}
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
 interface ValueFrameProps {
+  viewW: number;
   labels: string[];
   gridLines: (max: number, y: (v: number) => number) => ReactNode;
   tickLabels: (max: number, y: (v: number) => number, format: (v: number) => string) => ReactNode;
@@ -361,13 +669,18 @@ interface ValueFrameProps {
   outlineInk: string;
   centre: (i: number) => number;
   barW: number;
-  segments: { x: number; y: number }[][];
+  segments: { x: number; y: number; i: number }[][];
   lastPoint: { x: number; y: number; i: number } | null;
   lastRow: SixMonthPoint | null;
   currency: string | null;
   series: Record<SeriesToken, string>;
   summary: string;
   gapIndexes: number[];
+  band: number;
+  /** The crosshair month, or null. */
+  active: number | null;
+  /** Months outside the picked window, drawn faded. */
+  dimmed: boolean[];
 }
 
 /**
@@ -377,14 +690,16 @@ interface ValueFrameProps {
  * and the month labels are all present underneath.
  */
 function ValueFrame({
+  viewW,
   labels, gridLines, tickLabels, valueMax, valueY, axisInk, outlineInk,
   centre, barW, segments, lastPoint, lastRow, currency, series, summary, gapIndexes,
+  band, active, dimmed,
 }: ValueFrameProps) {
   return (
     <Box
       component="svg"
       data-testid="six-months-value"
-      viewBox={`0 0 ${VIEW_W} ${PANEL_H + LABELS_H}`}
+      viewBox={`0 0 ${viewW} ${PANEL_H + LABELS_H}`}
       role="img"
       aria-label={`Order value, ${summary}`}
       sx={{ display: 'block', width: '100%', height: 'auto', overflow: 'visible' }}
@@ -395,9 +710,15 @@ function ValueFrame({
           <stop offset="1" stopColor={series.brassMark} stopOpacity={0} />
         </linearGradient>
       </defs>
+      {active !== null && (
+        <rect
+          x={centre(active) - band / 2 + 2} y={0} width={Math.max(0, band - 4)} height={PANEL_H}
+          rx={6} fill={axisInk} opacity={0.08}
+        />
+      )}
       {gridLines(valueMax, valueY)}
       {tickLabels(valueMax, valueY, compact)}
-      <line x1={AXIS_W} x2={VIEW_W - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
+      <line x1={AXIS_W} x2={viewW - PAD_R} y1={BASELINE} y2={BASELINE} stroke={axisInk} strokeWidth={1} opacity={0.5} />
 
       {segments.length === 0 && labels.map((label, i) => (
         // No stated value anywhere: the same calm outline the column panel uses, so "nothing yet"
@@ -429,8 +750,21 @@ function ValueFrame({
               d={line} fill="none" stroke={series.brassMark} strokeWidth={2}
               strokeLinejoin="round" strokeLinecap="round"
             />
-            {segment.map((p) => (
-              <circle key={`${s}-${p.x}`} cx={p.x} cy={p.y} r={4} fill={series.brassMark} />
+            {segment.length === 1 && segment.map((p) => (
+              // A month stranded between two gaps has no line to sit on, so it keeps its dot at
+              // rest; without one it would vanish rather than read as a stated value.
+              <Box
+                component="circle" key={`${s}-${p.x}`} cx={p.x} cy={p.y} r={4} fill={series.brassMark}
+                sx={{ opacity: dimmed[p.i] ? 0.4 : 1, ...QUIET }}
+              />
+            ))}
+            {segment.filter((p) => p.i === active).map((p) => (
+              // The crosshair's point: a dot and a ring, so the column above and this point read as
+              // one month. Markers appear at hover only; the latest point carries its own below.
+              <g key={`active-${p.i}`} data-testid="six-months-active-point">
+                <circle cx={p.x} cy={p.y} r={4} fill={series.brassMark} />
+                <circle cx={p.x} cy={p.y} r={7} fill="none" stroke={series.brassMark} strokeWidth={2} />
+              </g>
             ))}
           </g>
         );
@@ -444,7 +778,7 @@ function ValueFrame({
           <circle cx={lastPoint.x} cy={lastPoint.y} r={9} fill={series.brassBrand} opacity={0.18} />
           <circle cx={lastPoint.x} cy={lastPoint.y} r={5} fill={series.brassMark} stroke="#fff" strokeWidth={2} />
           <text
-            x={Math.min(lastPoint.x, VIEW_W - PAD_R)} y={Math.max(lastPoint.y - 14, 12)}
+            x={Math.min(lastPoint.x, viewW - PAD_R)} y={Math.max(lastPoint.y - 14, 12)}
             textAnchor="end" fill={axisInk} fontSize={12} fontWeight={700}
             fontFamily='"Cambay", "Source Sans 3", sans-serif' style={{ fontVariantNumeric: 'tabular-nums' }}
           >
@@ -457,6 +791,7 @@ function ValueFrame({
         <text
           key={label + i} x={centre(i)} y={BASELINE + 17} textAnchor="middle"
           fill={axisInk} fontSize={11} fontFamily='"Cambay", "Source Sans 3", sans-serif'
+          fontWeight={i === active ? 800 : 400} opacity={dimmed[i] ? 0.5 : 1}
         >
           {label}
         </text>

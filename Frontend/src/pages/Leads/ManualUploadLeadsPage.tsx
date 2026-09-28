@@ -1,6 +1,5 @@
 import React, { useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Typography, Paper, Button, Stack,
@@ -8,20 +7,18 @@ import {
   ListItem, ListItemIcon, ListItemText,
 } from '@mui/material';
 import {
-  AutoAwesome as AIIcon,
   CloudOff as OfflineIcon,
   Delete as DeleteIcon,
   Description as DocIcon,
-  Info as InfoIcon,
-  Inbox as InboxIcon,
   OpenInNew as OpenIcon,
+  UploadFileOutlined as UploadIcon,
 } from '@mui/icons-material';
 import leadService, {
   readUploadPausedProblem,
   type GovernedUploadJobDTO,
 } from '../../api/services/leadService';
 import { useAuth } from '../../context/AuthContext';
-import ViewTabs from '../../components/layout/ViewTabs';
+import InboxFrame, { INBOX_CARD_SX } from '../Inbox/InboxFrame';
 import { useSnackbar } from 'notistack';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import {
@@ -53,7 +50,6 @@ const extensionOf = (name: string): string => {
 };
 
 const ManualUploadLeadsPage: React.FC = () => {
-  const { t } = useTranslation();
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission } = useAuth();
   const navigate = useNavigate();
@@ -202,40 +198,9 @@ const ManualUploadLeadsPage: React.FC = () => {
   };
 
   return (
-    <Box sx={{ maxWidth: 1000, mx: 'auto', py: 3, px: 3 }}>
-      {/* Header */}
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Typography variant="h5" sx={{ fontWeight: 800 }}>
-          {t('manual_upload') || 'Manual Lead Upload'}
-        </Typography>
-      </Stack>
-
-      {/* This is one of the four intake doors, not a place of its own — the tab strip says so and
-          gets the reader back to the queue without a trip through the sidebar. */}
-      <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
-
-      <Paper sx={{ p: 0, borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-        {/* Banner Section */}
-        <Box sx={{ px: 4, pt: 4 }}>
-          <Alert
-            icon={<InfoIcon fontSize="inherit" />}
-            severity="info"
-            sx={{
-              mb: 4,
-              borderRadius: 2,
-              bgcolor: '#eff6ff',
-              color: '#1e40af',
-              border: '1px solid #bfdbfe',
-              '& .MuiAlert-icon': { color: '#3b82f6' }
-            }}
-          >
-            <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Lead ingestion and reconciliation</Typography>
-            <Typography variant="caption">
-              Upload RFQ documents, spreadsheets, or images. Nexora preserves each source, extracts
-              its commercial facts, and checks whether it is new, duplicated, revised, or needs review.
-            </Typography>
-          </Alert>
-
+    <InboxFrame summary="PDF, Word, Excel, CSV, text or images · up to 25 MB each">
+      <Paper variant="outlined" sx={INBOX_CARD_SX}>
+        <Box sx={{ p: { xs: 2, sm: 3 } }}>
           {/* Upload Area */}
           <Paper
             role="button"
@@ -257,29 +222,28 @@ const ManualUploadLeadsPage: React.FC = () => {
               if (!uploading && canCreateLeads) addFiles(Array.from(event.dataTransfer.files));
             }}
             sx={{
-              p: 8,
+              py: 6,
+              px: 3,
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
               justifyContent: 'center',
-              border: '1px dashed',
-              borderColor: '#94a3b8',
-              borderRadius: 2,
-              bgcolor: 'white',
+              border: '1.5px dashed',
+              borderColor: 'divider',
+              borderRadius: 3,
+              bgcolor: 'action.hover',
+              boxShadow: 'none',
               cursor: uploading || !canCreateLeads ? 'not-allowed' : 'pointer',
               opacity: uploading || !canCreateLeads ? 0.65 : 1,
-              transition: 'all 0.2s',
-              '&:hover': { borderColor: 'primary.main', bgcolor: '#f8fafc' },
-              mb: 4
+              transition: 'border-color 150ms ease, background-color 150ms ease',
+              '&:hover': { borderColor: 'primary.main' },
+              mb: 3
             }}
           >
             <input ref={inputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={handleFileChange} disabled={uploading || !canCreateLeads} />
-            <InboxIcon sx={{ fontSize: 56, color: '#1e293b', mb: 2 }} />
-            <Typography variant="h6" sx={{ fontWeight: 700, color: '#1e293b' }}>
-              Click or drag files to this area to select
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, and common images. Maximum 25 MB per file.
+            <UploadIcon sx={{ fontSize: 40, color: 'text.secondary', mb: 1.5 }} />
+            <Typography sx={{ fontWeight: 700, fontSize: '1.05rem' }}>
+              Drop files here or click to choose
             </Typography>
           </Paper>
 
@@ -336,7 +300,7 @@ const ManualUploadLeadsPage: React.FC = () => {
           )}
 
           {/*
-            All-failed upload. The files stay in the tray below, so "Queue for reconciliation"
+            All-failed upload. The files stay in the tray below, so the Upload button
             retries the exact same selection in one click — no re-picking.
           */}
           {failedJobs.length > 0 && (
@@ -370,7 +334,7 @@ const ManualUploadLeadsPage: React.FC = () => {
               </AlertTitle>
               <Typography variant="body2" sx={{ mb: 1 }}>
                 {heldByScanner
-                  ? 'Your files are held safely and will process automatically when scanning recovers. They are still selected below — press Queue for reconciliation to retry now.'
+                  ? 'Your files are held safely and will process automatically when scanning recovers. They are still selected below — press Retry to send them again now.'
                   : storagePaused
                     ? 'These files were stopped on their own merits, not by the storage outage above.'
                     : 'Your files are still selected below, so you can fix and retry without choosing them again.'}
@@ -406,7 +370,7 @@ const ManualUploadLeadsPage: React.FC = () => {
 
           {/* File Queue Preview */}
           {files.length > 0 && (
-            <List sx={{ mb: 4, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+            <List sx={{ mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
               {files.map((file, i) => (
                 <ListItem
                   key={i}
@@ -433,10 +397,8 @@ const ManualUploadLeadsPage: React.FC = () => {
             </List>
           )}
 
-          {/* Footer Action */}
-          <Box sx={{ pb: 4 }}>
+          <Stack direction="row" sx={{ justifyContent: 'flex-end' }}>
             <Button
-              fullWidth
               variant="contained"
               // Disabled only for a MISCONFIGURED store, and then deliberately rather than
               // relabelled: the banner above says retrying cannot work, and an enabled "Retry 4
@@ -445,31 +407,23 @@ const ManualUploadLeadsPage: React.FC = () => {
               // waiting out a blip is the user's call, not ours to forbid.
               disabled={files.length === 0 || uploading || !canCreateLeads || storagePausedBlocksRetry}
               onClick={handleUpload}
-              sx={{
-                height: 52,
-                fontWeight: 700,
-                borderRadius: 2,
-                textTransform: 'none',
-                bgcolor: files.length > 0 ? 'primary.main' : '#f1f5f9',
-                color: files.length > 0 ? 'white' : '#94a3b8',
-                boxShadow: files.length > 0 ? '0 4px 12px rgba(25, 118, 210, 0.2)' : 'none',
-                '&:hover': { bgcolor: files.length > 0 ? 'primary.dark' : '#f1f5f9' },
-                '&.Mui-disabled': { bgcolor: '#f1f5f9', color: '#cbd5e1', cursor: 'not-allowed' }
-              }}
-              startIcon={uploading ? <CircularProgress size={20} color="inherit" /> : <AIIcon />}
+              sx={{ fontWeight: 700, minWidth: 160 }}
+              startIcon={uploading ? <CircularProgress size={18} color="inherit" /> : undefined}
             >
               {uploading
-                ? 'Queueing documents...'
+                ? 'Uploading…'
                 : storagePausedBlocksRetry
                   ? 'Uploads paused — document storage is unavailable'
                   : failedJobs.length > 0 || storagePaused
                     ? `Retry ${files.length} file${files.length === 1 ? '' : 's'}`
-                    : 'Queue for reconciliation'}
+                    : files.length > 0
+                      ? `Upload ${files.length} file${files.length === 1 ? '' : 's'}`
+                      : 'Upload'}
             </Button>
-          </Box>
+          </Stack>
         </Box>
       </Paper>
-    </Box>
+    </InboxFrame>
   );
 };
 

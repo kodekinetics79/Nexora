@@ -17,15 +17,18 @@ export type GlanceScopeWire =
   | 'tenant'
   | 'managed_scope'
   | 'assigned_accounts'
-  | 'assigned_to_me';
+  | 'assigned_to_me'
+  | 'single_rep';
 
-export type GlanceScopeWords = 'Company-wide' | 'Your managed scope' | 'Your assigned accounts';
+export type GlanceScopeWords = 'Company-wide' | 'Your managed scope' | 'Your assigned accounts' | 'One rep';
 
 const SCOPE_WORDS: Readonly<Record<GlanceScopeWire, GlanceScopeWords>> = Object.freeze({
   tenant: 'Company-wide',
   managed_scope: 'Your managed scope',
   assigned_accounts: 'Your assigned accounts',
   assigned_to_me: 'Your assigned accounts',
+  // A manager's rep filter: the server narrowed these figures to the one rep picked above.
+  single_rep: 'One rep',
 });
 
 /** What every band prints when the server's scope word is missing or unrecognised. */

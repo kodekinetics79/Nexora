@@ -21,12 +21,20 @@ public sealed class CommercialIntelligenceController(
 {
     [HttpGet("sales-today")]
     [RequireModulePermission("Leads", PermissionAction.View)]
-    public async Task<ActionResult> SalesToday(CancellationToken ct)
+    public async Task<ActionResult> SalesToday(CancellationToken ct, [FromQuery] long? ownerUserId = null)
     {
         var tenant = TenantId();
         var userId = UserId();
         var scope = await ResolveAccountScopeAsync(tenant, ct);
         if (!userId.HasValue || scope is null) return Forbid();
+        // One-rep filter: a rep's follow-ups are those whose AssignedToUserId is that rep. The
+        // narrowed scope is a per-rep tier, so the unassigned-leads count below reads 0.
+        if (ownerUserId.HasValue)
+        {
+            if (ownerUserId.Value <= 0) return BadRequest(new { error = "ownerUserId must be a positive user id." });
+            if (!scope.TryNarrowToRep(ownerUserId.Value, out var narrowed)) return Forbid();
+            scope = narrowed;
+        }
         var now = DateTime.UtcNow;
         var followUpQuery = db.FollowUpTasks.AsNoTracking()
             .Where(x => x.BusinessUnitId == tenant && x.Status != FollowUpStatus.Completed && x.Status != FollowUpStatus.Cancelled);
@@ -676,11 +684,20 @@ public sealed class CommercialIntelligenceController(
 
     [HttpGet("performance")]
     [RequireModulePermission("Dashboard", PermissionAction.View)]
-    public async Task<ActionResult> Performance([FromQuery] DateTime from, [FromQuery] DateTime to, CancellationToken ct)
+    public async Task<ActionResult> Performance([FromQuery] DateTime from, [FromQuery] DateTime to, CancellationToken ct,
+        [FromQuery] long? ownerUserId = null)
     {
         var tenant = TenantId();
         var scope = await ResolveAccountScopeAsync(tenant, ct);
         if (scope is null) return Forbid();
+        // One-rep filter: performance is attributed per SalesRepUserId (outcome activities) and the
+        // rep summary reads LeadAssignment.ToUserId / FollowUpTask.AssignedToUserId — all = that rep.
+        if (ownerUserId.HasValue)
+        {
+            if (ownerUserId.Value <= 0) return BadRequest(new { error = "ownerUserId must be a positive user id." });
+            if (!scope.TryNarrowToRep(ownerUserId.Value, out var narrowed)) return Forbid();
+            scope = narrowed;
+        }
         var tenantWide = scope.IsTenantWide;
         var actorUserId = UserId();
         var fromUtc = NormalizeUtc(from);
@@ -885,7 +902,9 @@ public sealed class CommercialIntelligenceController(
             ? AccountTeamScope.TenantWide(userId.Value)
             : new AccountTeamScope(AccountScopeTier.AssignedAccounts, userId.Value, [], [userId.Value]);
     }
-    private static string ScopeWireName(AccountTeamScope scope) => scope.Tier switch
+    private static string ScopeWireName(AccountTeamScope scope) => scope.IsSingleRep
+        ? AccountTeamScope.SingleRepScopeName
+        : scope.Tier switch
     {
         AccountScopeTier.Tenant => "tenant",
         AccountScopeTier.ManagedScope => "managed_scope",

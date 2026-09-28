@@ -114,6 +114,35 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
+        /// GET /api/Rfq/{id}/lines.xlsx — the RFQ's lines as an Excel sheet. Loaded through the
+        /// same account scope as <see cref="GetById"/>, so a rep exports only what they can open.
+        /// </summary>
+        [HttpGet("{id}/lines.xlsx")]
+        [RequireModulePermission("RFQ Management", PermissionAction.View)]
+        public async Task<IActionResult> ExportLines(long id)
+        {
+            try
+            {
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return Unauthorized();
+
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != businessUnitId) return NotFound();
+                var rfq = await _repository.GetByIdAsync(id, businessUnitId, actor.AccountScope);
+                return File(Services.LinesWorkbook.ForRfq(rfq), Services.LinesWorkbook.ContentType,
+                    Services.LinesWorkbook.RfqFileName(rfq));
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (Exception ex)
+            {
+                return InternalError(ex, "RFQ lines export failed.");
+            }
+        }
+
+        /// <summary>
         /// Records whether Nexora will quote one RFQ line.
         ///
         /// <para>A partial bid is the normal case: an 84-line SEC bid list routinely yields 12

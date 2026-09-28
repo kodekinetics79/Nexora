@@ -22,6 +22,11 @@ interface Props {
   canEdit: boolean;
   /** Why the owner cannot be changed here, said under the owner when the control is locked. */
   lockedReason?: string | null;
+  /**
+   * One row: no "Owner" caption (the page labels it) and the history opens over the page instead
+   * of pushing it down. For a screen whose lines must start near the top: Decide, owner 2026-09-28.
+   */
+  compact?: boolean;
 }
 
 /**
@@ -50,7 +55,7 @@ const mutationIdentity = (leadId: number): string =>
   `lead-owner-${leadId}-${Date.now()}-${crypto.randomUUID()}`;
 
 const LeadOwnerControl: React.FC<Props> = ({
-  leadId, assignedToId, assignedToName, assignmentMethod = 'AUTOMATIC', assignmentVersion, canEdit, lockedReason,
+  leadId, assignedToId, assignedToName, assignmentMethod = 'AUTOMATIC', assignmentVersion, canEdit, lockedReason, compact = false,
 }) => {
   const queryClient = useQueryClient();
   const { userData } = useAuth();
@@ -123,9 +128,11 @@ const LeadOwnerControl: React.FC<Props> = ({
   const ownerLabel = assignedToName?.trim() || 'Unassigned';
   return (
     <Box>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontWeight: 800, mb: 0.5 }}>
-        Owner
-      </Typography>
+      {compact ? null : (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontWeight: 800, mb: 0.5 }}>
+          Owner
+        </Typography>
+      )}
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
         <Button
           size="small"
@@ -133,7 +140,7 @@ const LeadOwnerControl: React.FC<Props> = ({
           endIcon={mutation.isPending ? <CircularProgress size={14} /> : <ExpandMoreIcon />}
           disabled={!canEdit || mutation.isPending}
           onClick={(event) => setAnchorEl(event.currentTarget)}
-          sx={{ borderRadius: 2, fontWeight: 800, textTransform: 'none' }}
+          sx={{ borderRadius: 2, fontWeight: 800, textTransform: 'none', ...(compact ? { minHeight: 30, height: 30, py: 0 } : {}) }}
         >
           {ownerLabel}
         </Button>
@@ -155,6 +162,7 @@ const LeadOwnerControl: React.FC<Props> = ({
             />
           </Tooltip>
         ) : null}
+        {compact ? <LeadOwnerHistory leadId={leadId} popover /> : null}
       </Stack>
       {lockedReason ? (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
@@ -253,7 +261,7 @@ const LeadOwnerControl: React.FC<Props> = ({
       />
 
       {/* Nothing here is derived: it is the trail the server has been recording all along. */}
-      <LeadOwnerHistory leadId={leadId} />
+      {compact ? null : <LeadOwnerHistory leadId={leadId} />}
 
       {canEdit && owners.isError && (menuOpen || Boolean(pickerAnchor)) && (
         <Alert severity="error" sx={{ mt: 1, borderRadius: 2, maxWidth: 420 }}>

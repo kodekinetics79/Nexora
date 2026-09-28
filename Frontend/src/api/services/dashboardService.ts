@@ -128,7 +128,7 @@ export interface Release01DashboardDTO {
    * `scope`, never by the length of the list.
    */
   roleScope: {
-    scope: 'tenant' | 'managed_scope' | 'assigned_accounts' | string;
+    scope: 'tenant' | 'managed_scope' | 'assigned_accounts' | 'single_rep' | string;
     ownerUserId?: number | null;
     accountTeamIds?: number[];
     scopedUserIds?: number[];
@@ -139,6 +139,12 @@ export interface Release01DashboardDTO {
 export interface Release01DashboardParams {
   from: string;
   to: string;
+  /**
+   * Optional one-rep filter. Must be the caller or someone in their resolved scope (any user for a
+   * tenant-wide caller), otherwise the endpoint answers 403. When set, `roleScope.scope` comes back
+   * as 'single_rep' and `roleScope.ownerUserId` is that rep.
+   */
+  ownerUserId?: number;
 }
 
 // ─── Per-module stat endpoints (verified against backend DTOs) ──────────────
@@ -270,7 +276,7 @@ export interface PipelineAnalyticsDTO {
   windowTo: string | null;
   /** Same three tiers, same shape, as `Release01DashboardDTO.roleScope`. */
   roleScope: {
-    scope: 'tenant' | 'managed_scope' | 'assigned_accounts' | string;
+    scope: 'tenant' | 'managed_scope' | 'assigned_accounts' | 'single_rep' | string;
     ownerUserId?: number | null;
     accountTeamIds?: number[];
     scopedUserIds?: number[];
@@ -290,6 +296,8 @@ export interface PipelineAnalyticsParams {
   /** ISO-8601 UTC. Both or neither: one alone is a 400 from the endpoint. */
   from?: string;
   to?: string;
+  /** Optional one-rep filter (403 when the rep is outside the caller's scope). */
+  ownerUserId?: number;
 }
 
 // ─── GET /api/dashboard/gross-margin ────────────────────────────────────────
@@ -409,6 +417,10 @@ export interface DeadlineLeadDTO {
 
 export interface DeadlineBoardDTO {
   generatedAt: string;
+  /** Present only when the board was narrowed with ownerUserId: 'single_rep'. */
+  scope?: 'single_rep';
+  /** The rep the board was narrowed to; absent when unfiltered. */
+  ownerUserId?: number;
   openLeads: number;
   openLineItems: number;
   /** Open leads carrying no usable closing date — a data gap, not a comfortable deadline. */
@@ -427,7 +439,9 @@ export interface DeadlineBoardDTO {
 
 const dashboardService = {
   getRelease01: async (params: Release01DashboardParams): Promise<Release01DashboardDTO> => {
-    const r = await axiosInstance.get<Release01DashboardDTO>('/api/dashboard/release-01', { params });
+    const { ownerUserId, ...window } = params;
+    const query = ownerUserId !== undefined ? { ...window, ownerUserId } : window;
+    const r = await axiosInstance.get<Release01DashboardDTO>('/api/dashboard/release-01', { params: query });
     return r.data;
   },
 
@@ -480,7 +494,8 @@ const dashboardService = {
    */
   getPipelineAnalytics: async (params: PipelineAnalyticsParams = {}): Promise<PipelineAnalyticsDTO> => {
     const windowed = params.from && params.to ? { from: params.from, to: params.to } : undefined;
-    const r = await axiosInstance.get<PipelineAnalyticsDTO>('/api/dashboard/pipeline-analytics', { params: windowed });
+    const query = params.ownerUserId !== undefined ? { ...windowed, ownerUserId: params.ownerUserId } : windowed;
+    const r = await axiosInstance.get<PipelineAnalyticsDTO>('/api/dashboard/pipeline-analytics', { params: query });
     return { ...r.data, funnel: r.data.funnel ?? [], lossReasons: r.data.lossReasons ?? [] };
   },
 
@@ -525,8 +540,10 @@ const dashboardService = {
    * over every open enquiry in scope, so a caller drawing only the buckets can ask for the
    * smallest page and still receive complete figures.
    */
-  getDeadlineBoard: async (params: { maxLeads?: number } = {}): Promise<DeadlineBoardDTO> => {
-    const r = await axiosInstance.get<DeadlineBoardDTO>('/api/dashboard/deadline-board', { params });
+  getDeadlineBoard: async (params: { maxLeads?: number; ownerUserId?: number } = {}): Promise<DeadlineBoardDTO> => {
+    const { ownerUserId, ...rest } = params;
+    const query = ownerUserId !== undefined ? { ...rest, ownerUserId } : rest;
+    const r = await axiosInstance.get<DeadlineBoardDTO>('/api/dashboard/deadline-board', { params: query });
     return { ...r.data, buckets: r.data.buckets ?? [], leads: r.data.leads ?? [] };
   },
 };

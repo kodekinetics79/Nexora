@@ -263,10 +263,10 @@ describe('TodayBand axis maths', () => {
   });
 
   it('clamps beyond the axis instead of claiming a position it does not have', () => {
-    expect(axisPlacement(0)).toEqual({ x: 60, clamped: false });
-    expect(axisPlacement(-14).x).toBeCloseTo(8);
-    expect(axisPlacement(14).x).toBeCloseTo(112);
-    expect(axisPlacement(40)).toEqual({ x: 112, clamped: true });
-    expect(axisPlacement(-40)).toEqual({ x: 8, clamped: true });
+    expect(axisPlacement(0)).toEqual({ x: 46, clamped: false });
+    expect(axisPlacement(-14).x).toBeCloseTo(6);
+    expect(axisPlacement(14).x).toBeCloseTo(86);
+    expect(axisPlacement(40)).toEqual({ x: 86, clamped: true });
+    expect(axisPlacement(-40)).toEqual({ x: 6, clamped: true });
   });
 });

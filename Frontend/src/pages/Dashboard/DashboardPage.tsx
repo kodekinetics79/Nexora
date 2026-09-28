@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Alert, Box, Button, Chip, GlobalStyles, Stack, TextField, Typography } from '@mui/material';
+import { visuallyHidden } from '@mui/utils';
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
 import dashboardService from '../../api/services/dashboardService';
@@ -14,8 +14,14 @@ import ClosingBand from './glance/ClosingBand';
 import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
+import RepDesk from './RepDesk';
+import CustomisableGrid from './glance/CustomisableGrid';
+import ChartMenu from './glance/ChartMenu';
+import DashboardTabs from './glance/DashboardTabs';
+import BrandsBand from './glance/BrandsBand';
+import CustomersBand from './glance/CustomersBand';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
-import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuInset, neuKey, neuRaised } from './glance/neumorphic';
+import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuFocus, neuInset, neuKey, neuRaised, neuWell } from './glance/neumorphic';
 import { glanceCssVariables } from './glance/tokens';
 
 /**
@@ -90,6 +96,7 @@ const SCOPE_GLOSS: Readonly<Record<GlanceScopeWords, string>> = Object.freeze({
   'Company-wide': 'every account in this workspace',
   'Your managed scope': 'the accounts your teams own',
   'Your assigned accounts': 'only the accounts assigned to you',
+  'One rep': 'only the work assigned to the rep picked above',
 });
 
 const day = (value: string): string => {
@@ -97,12 +104,71 @@ const day = (value: string): string => {
   return parsed.isValid() ? parsed.format('D MMM YYYY') : value;
 };
 
+/**
+ * One address, a view per role. A sales rep gets their own desk; a manager, admin or owner gets
+ * the team/company screen below, which the server already scopes to their team or the company.
+ */
+type DeskView = 'team' | 'mine';
+const VIEW_KEY = 'nx.dashboard.view';
+
 export default function DashboardPage() {
+  const { userData } = useAuth();
+  const leadsOthers = userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank;
+  const [view, setView] = useState<DeskView>(() => {
+    try { return window.localStorage.getItem(VIEW_KEY) === 'mine' ? 'mine' : 'team'; } catch { return 'team'; }
+  });
+  if (!leadsOthers) return <RepDesk />;
+
+  // A manager also sells, so they can look at their own desk as well as the team's.
+  const choose = (next: DeskView) => {
+    setView(next);
+    try { window.localStorage.setItem(VIEW_KEY, next); } catch { /* remembered only when storage allows */ }
+  };
+  const switcher = <ViewSwitch view={view} onChange={choose} />;
+  return view === 'mine' ? <RepDesk switcher={switcher} /> : <TeamDashboard switcher={switcher} />;
+}
+
+function ViewSwitch({ view, onChange }: { view: DeskView; onChange: (next: DeskView) => void }) {
+  return (
+    <Stack direction="row" role="group" aria-label="Whose dashboard" sx={{ gap: 0.5 }}>
+      {([['mine', 'My desk'], ['team', 'Team']] as const).map(([key, label]) => {
+        const chosen = view === key;
+        return (
+          <Chip
+            key={key}
+            label={label}
+            size="small"
+            clickable
+            aria-pressed={chosen}
+            variant="outlined"
+            onClick={() => onChange(key)}
+            sx={(theme) => ({
+              ...NEU_TRANSITION,
+              ...neuFocus,
+              height: 28, px: 0.5, fontWeight: 700,
+              backgroundColor: NEU_SURFACE[theme.palette.mode],
+              border: '1px solid',
+              borderColor: chosen ? 'var(--nx-glance-seal-rim)' : 'transparent',
+              color: chosen ? 'var(--nx-glance-seal-ink)' : 'text.primary',
+              boxShadow: chosen ? neuInset(theme.palette.mode, 2) : neuRaised(theme.palette.mode, 2),
+              '&&:hover': { backgroundColor: NEU_SURFACE[theme.palette.mode] },
+            })}
+          />
+        );
+      })}
+    </Stack>
+  );
+}
+
+function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
   const { hasPermission, userData } = useAuth();
-  const navigate = useNavigate();
+  // "details →" on a band only when the reader may open the page it points at.
+  const detailsIf = (module: string, to: string) => (hasPermission(module) ? to : undefined);
   const today = useMemo(() => dayjs().startOf('day'), []);
 
   const [period, setPeriod] = useState<PeriodKey>('30d');
+  // Arranging the bands: move, resize, hide. Saved per reader as they go (see CustomisableGrid).
+  const [customising, setCustomising] = useState(false);
   const [applied, setApplied] = useState<GlanceWindow>(() => presetRange('30d', today));
   const [customFrom, setCustomFrom] = useState(applied.from);
   const [customTo, setCustomTo] = useState(applied.to);
@@ -118,6 +184,22 @@ export default function DashboardPage() {
     setCustomFrom(range.from);
     setCustomTo(range.to);
   };
+
+  // A month clicked (or a run of months dragged) on the six-month chart becomes the period for the
+  // whole screen. The current month stops at today, as the presets do.
+  const pickMonths = (from: string, to: string) => {
+    const end = dayjs(to).isAfter(today) ? today.format('YYYY-MM-DD') : to;
+    setPeriod('custom');
+    setApplied({ from, to: end });
+    setCustomFrom(from);
+    setCustomTo(end);
+  };
+
+  // The rep filter: one rep's own work on every band that can be narrowed to one person. The list
+  // is the reps the server already placed in this reader's scope, so no one outside it is offered.
+  const [rep, setRep] = useState<number | null>(null);
+  const filtered = rep !== null || period !== '30d';
+  const clearFilters = () => { setRep(null); choosePeriod('30d'); };
 
   // A half-typed date is not a window. The bands keep the last window that was actually valid, and
   // the strip says so, rather than being sent to refetch on every keystroke of "2026-0…".
@@ -136,12 +218,13 @@ export default function DashboardPage() {
    * band 1 shows its own Alert — no other band notices.
    */
   const scope = useQuery({
-    queryKey: ['glance', 'performance', applied.from, applied.to],
+    queryKey: ['glance', 'performance', applied.from, applied.to, 'all'],
     queryFn: () => commercialIntelligenceService.getPerformance(applied.from, applied.to),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'whose numbers these are' },
   });
   const words = scopeWords(scope.data?.scope);
+  const repOptions = (scope.data?.representatives ?? []).map(r => ({ value: String(r.userId), label: r.name }));
 
   /**
    * Band 6's series. It is fetched here because `SixMonthsBand` is presentational — it draws the
@@ -175,8 +258,8 @@ export default function DashboardPage() {
    * a KPI that can never become available is not a pending figure, it is a definition.
    */
   const release = useQuery({
-    queryKey: ['glance', 'release-01', applied.from, applied.to],
-    queryFn: () => dashboardService.getRelease01({ from: applied.from, to: applied.to }),
+    queryKey: ['glance', 'release-01', applied.from, applied.to, rep ?? 'all'],
+    queryFn: () => dashboardService.getRelease01({ from: applied.from, to: applied.to, ownerUserId: rep ?? undefined }),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the verified snapshot' },
   });
@@ -184,6 +267,9 @@ export default function DashboardPage() {
   const notYetMeasurable = (release.data?.kpis ?? []).length - verified.length;
 
   const scopeSentence = (() => {
+    // A picked rep outranks the reader's own scope: the bands that can narrow now show that rep.
+    const picked = rep === null ? null : repOptions.find(o => o.value === String(rep));
+    if (picked) return { words: picked.label, gloss: 'only their own work, where a band can be narrowed to one person' };
     if (words) return { words, gloss: SCOPE_GLOSS[words] };
     if (scope.isLoading) return { words: 'Working out whose numbers these are…', gloss: null };
     if (scope.isError) return { words: SCOPE_UNRESOLVED, gloss: presentableErrorMessage(scope.error, undefined, 'list') };
@@ -201,7 +287,9 @@ export default function DashboardPage() {
         ...neuCssVariables(theme.palette.mode),
         // Theme inks were derived against white paper; the clay is darker, so re-derive them here.
         ...clayInkOverrides(theme.palette),
-        maxWidth: 1280, mx: 'auto', p: { xs: 1.5, sm: 2.5, md: 4 },
+        // Wide enough for three bands side by side; capped so a very wide monitor gets three
+        // generous columns rather than a fourth that would break the reading order.
+        maxWidth: 1560, mx: 'auto', p: { xs: 1.5, md: 2 },
         backgroundColor: NEU_SURFACE[theme.palette.mode],
         borderRadius: { xs: 3, md: 5 },
       })}
@@ -216,81 +304,57 @@ export default function DashboardPage() {
           body: { backgroundColor: `${NEU_SURFACE[theme.palette.mode]} !important`, backgroundImage: 'none !important' },
         })}
       />
-      <Typography
-        variant="h4"
-        component="h1"
-        sx={(theme) => ({
-          fontWeight: 900, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em',
-          textShadow: neuEmboss(theme.palette.mode),
-        })}
-      >
-        Dashboard
-      </Typography>
-
       {/*
-        0 · Whose numbers, and over what period.
+        0 · Whose numbers, and over what period — on the same line as the title.
 
         A strip, not a card: no glass, no rim, no elevation. Everything below it is a band, and if
         this looked like one it would read as a figure. The scope on the left is the server's own
         word in plain text — never a control, because the reader cannot choose their scope and a
         thing that looks pressable says they can. The period on the right is chips rather than two
         date inputs: picking "Last 90 days" is one press, and typing two ISO dates to see a quarter
-        was a day-one defect on the screen this replaces.
+        was a day-one defect on the screen this replaces. Title and strip share one line so the
+        six bands start high enough to fit one glance.
       */}
       <Box
         component="section"
         aria-label="Whose numbers, and over what period"
         sx={{
-          minHeight: 56,
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: 1.5,
-          py: 1,
+          columnGap: 3,
+          rowGap: 1,
+          mb: 1.5,
         }}
       >
-        <Box sx={{ minWidth: 0 }}>
-          <Typography data-testid="scope-sentence" variant="body2" sx={{ fontWeight: 700 }}>
-            {scopeSentence.words}
-            {scopeSentence.gloss && (
-              <Box component="span" sx={{ fontWeight: 400, color: 'text.secondary' }}>
-                {` — ${scopeSentence.gloss}`}
-              </Box>
-            )}
-          </Typography>
-          {/*
-            This word comes from ONE aggregate (/performance) and is not a fact about the whole
-            screen: the six-month history is company-wide for every reader, and the deadline board
-            publishes no scope word at all. Saying so here is the difference between a heading and
-            a claim, and it points at the seal that carries the truth band by band.
-          */}
-          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
-            Each band states its own scope and freshness on its seal.
-          </Typography>
-        </Box>
-
-        <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
-          {/*
-            Which bands these dates actually move. A period control that silently governs one band
-            out of four is the same lie as one that claims to govern all of them, so the strip names
-            the band by the title the reader can see, and the seals repeat it band by band.
-          */}
+        <Stack direction="row" spacing={2} sx={{ alignItems: 'center', minWidth: 0, flexWrap: 'wrap', rowGap: 0.5 }}>
           <Typography
-            variant="caption"
-            title="Steps 4, 5 and 6 have their own fixed windows, set by the server."
-            data-testid="dates-govern"
-            sx={{
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-              fontSize: 11,
-              fontWeight: 700,
-              color: 'text.secondary',
-            }}
+            variant="h5"
+            component="h1"
+            sx={(theme) => ({
+              fontWeight: 700, fontFamily: '"Cambay", "Source Sans 3", sans-serif', letterSpacing: '-0.02em',
+              textShadow: neuEmboss(theme.palette.mode),
+            })}
           >
-            {`Dates govern · ${GOVERNED_BANDS.join(' · ')}`}
+            Dashboard
           </Typography>
-          <Stack direction="row" spacing={0.75} role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
+          {switcher}
+          <Box sx={{ minWidth: 0 }}>
+            <Typography data-testid="scope-sentence" variant="body2" sx={{ fontWeight: 700 }}>
+              {scopeSentence.words}
+              {scopeSentence.gloss && (
+                <Box component="span" sx={{ fontWeight: 400, color: 'text.secondary' }}>
+                  {` — ${scopeSentence.gloss}`}
+                </Box>
+              )}
+            </Typography>
+          </Box>
+        </Stack>
+
+        {/* The period keys, with the bands they move named directly beneath them. */}
+        <Stack spacing={0.75} sx={{ alignItems: { xs: 'flex-start', lg: 'flex-end' } }}>
+          <Stack direction="row" role="group" aria-label="Period" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
             {PERIOD_CHOICES.map((choice) => (
               <Chip
                 key={choice.key}
@@ -307,7 +371,8 @@ export default function DashboardPage() {
                   const chosen = period === choice.key;
                   return {
                     ...NEU_TRANSITION,
-                    height: 32, px: 0.75, fontWeight: 700,
+                    ...neuFocus,
+                    height: 28, px: 0.5, fontWeight: 700,
                     backgroundColor: NEU_SURFACE[mode],
                     border: '1px solid',
                     borderColor: chosen ? 'var(--nx-glance-seal-rim)' : 'transparent',
@@ -319,9 +384,46 @@ export default function DashboardPage() {
                 }}
               />
             ))}
+            {/* One rep, or everyone the reader can see. Only offered when there is more than one. */}
+            {repOptions.length > 1 && (
+              <ChartMenu
+                label="Rep"
+                value={rep === null ? 'all' : String(rep)}
+                options={[{ value: 'all', label: 'All reps' }, ...repOptions]}
+                onChange={(next) => setRep(next === 'all' ? null : Number(next))}
+              />
+            )}
+            {filtered && (
+              <Chip
+                label="Clear"
+                size="small"
+                clickable
+                onClick={clearFilters}
+                sx={(theme) => ({ ...neuFocus, height: 28, fontWeight: 700, backgroundColor: 'transparent', color: 'var(--nx-glance-seal-ink)', '&&:hover': { backgroundColor: NEU_SURFACE[theme.palette.mode] } })}
+              />
+            )}
           </Stack>
+          {/*
+            Which bands these dates actually move. A period control that silently governs one band
+            out of four is the same lie as one that claims to govern all of them, so the strip names
+            the band by the title the reader can see, and the seals repeat it band by band.
+          */}
+          <Typography
+            variant="caption"
+            title="Steps 4, 5 and 6 have their own fixed windows, set by the server."
+            data-testid="dates-govern"
+            sx={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: 'text.secondary',
+            }}
+          >
+            {`Dates govern · ${GOVERNED_BANDS.join(' · ')}`}
+          </Typography>
         </Stack>
       </Box>
+
+      <DashboardTabs />
 
       {period === 'custom' && (
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5, alignItems: { sm: 'center' } }}>
@@ -353,35 +455,103 @@ export default function DashboardPage() {
         </Alert>
       )}
 
-      <Stack spacing={4}>
-        <VerdictBand from={applied.from} to={applied.to} index={1} />
+      {/*
+        The headline figures, one slim row above the bands.
 
-        {/*
-          Bands 2 and 3 read ONE aggregate between them — /pipeline-analytics, under a single
-          react-query key — because they are two readings of the same figures over the same scope
-          and the same freshness. They still hold their own states and print their own failure, so
-          the pair behaves like every other band on the screen from the reader's side.
+        The measured half of the Release 01 snapshot, and only that half. Fourteen of its eighteen
+        KPIs are hardcoded insufficient and can never become available — the win rate's own reason
+        says quote outcomes bypass the governed event spine — so rendering all eighteen is how a
+        screen becomes furniture by week three. But four CAN be measured, they are scoped per reader
+        and windowed by the period control above, and they are the figures a reader looks for first,
+        so they sit at the top rather than under the fold. The rest are counted in a sentence. This
+        shares VerdictBand's query key, so it costs no second request.
 
-          What that endpoint publishes and this screen still refuses to draw is `weightedForecast`:
-          an unmeasured 0.3/0.5 probability heuristic presented as an instruction. It was removed
-          from the product rather than relabelled, and neither band reads it.
-        */}
-        <OutstandingBand from={applied.from} to={applied.to} index={2} />
+        KpiCard rather than a plainer figure on purpose: it carries the drill-down to the exact records
+        a KPI counted, and the rule this whole screen is held to is that a figure which cannot open
+        its own rows does not ship.
 
-        <LossesBand from={applied.from} to={applied.to} index={3} />
+        The screens behind the bands share the row, each shown only when the reader's own module
+        grant would let the route open — a link that lands on "Access denied" is worse than no link.
+      */}
+      <Box
+        component="section"
+        aria-label="Verified performance"
+        sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 2, mb: 2.5 }}
+      >
+        {/* Named for assistive tech and for the section's landmark; the tiles say what they are. */}
+        {verified.length > 0 && (
+          <Typography component="h2" sx={visuallyHidden}>
+            Verified performance
+          </Typography>
+        )}
+        {verified.length > 0 && (
+          // One pressed tray split by hairlines, not four raised pills: raised pills beside the
+          // raised link keys read as four more buttons, and a figure is not a button.
+          <Box
+            sx={(theme) => ({
+              ...neuWell(theme.palette.mode, 4),
+              flex: '999 1 640px', minWidth: 0,
+              borderRadius: '16px',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+              '& > * + *': { borderLeft: '1px solid', borderColor: 'divider' },
+            })}
+          >
+            {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
+          </Box>
+        )}
+        <Stack spacing={0.5} sx={{ flex: '1 1 auto', alignItems: { xs: 'flex-start', md: 'flex-end' } }}>
+          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { md: 'flex-end' } }}>
+            <Button
+              size="small"
+              aria-pressed={customising}
+              onClick={() => setCustomising(c => !c)}
+              sx={(theme) => ({
+                ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5,
+                ...(customising ? { boxShadow: neuInset(theme.palette.mode, 2), color: 'var(--nx-glance-seal-ink)' } : {}),
+              })}
+            >
+              {customising ? 'Done' : 'Edit layout'}
+            </Button>
+          </Stack>
+          {verified.length > 0 && notYetMeasurable > 0 && (
+            <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.3 }}>
+              {notYetMeasurable === 1 ? '1 further measure is' : `${notYetMeasurable} further measures are`} defined but not yet reportable; the performance screen lists why.
+            </Typography>
+          )}
+        </Stack>
+      </Box>
 
-        <ClosingBand step="4" index={4} />
-
-        <TodayBand index={5} />
-
-        <SixMonthsBand
-          points={points}
-          loading={canRequestSeries && series.isLoading}
-          error={seriesError}
-          onRetry={canRequestSeries ? () => void series.refetch() : undefined}
-          index={6}
-        />
-      </Stack>
+      {/*
+        The six bands as one grid, read left to right and then down, 1 → 6 until the reader
+        rearranges them. Edit layout lets each reader move, widen or hide bands; the arrangement is
+        theirs and follows them to any browser. Columns are at least 380px so every band keeps a
+        legible chart; below that the grid drops to two columns, then one.
+      */}
+      <CustomisableGrid
+        editing={customising}
+        bands={{
+          verdict: <VerdictBand from={applied.from} to={applied.to} index={1} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Quotations', '/sales/quotes?state=outcomes')} />,
+          outstanding: <OutstandingBand from={applied.from} to={applied.to} index={2} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Quotations', '/sales/quotes')} />,
+          losses: <LossesBand from={applied.from} to={applied.to} index={3} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Quotations', '/sales/quotes?state=outcomes')} />,
+          closing: <ClosingBand step="4" index={4} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Leads', '/analytics/deadlines')} />,
+          today: <TodayBand index={5} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Leads', '/sales/today')} />,
+          sixmonths: (
+            <SixMonthsBand
+              points={points}
+              loading={canRequestSeries && series.isLoading}
+              error={seriesError}
+              onRetry={canRequestSeries ? () => void series.refetch() : undefined}
+              index={6}
+              picked={applied}
+              onPickPeriod={pickMonths}
+              detailsTo={detailsIf('RFQ Management', '/procurement/rfqs/all')}
+            />
+          ),
+          brands: <BrandsBand from={applied.from} to={applied.to} step="7" index={7} />,
+          customers: <CustomersBand step="8" index={8} />,
+        }}
+      />
 
       {/*
         The measured half of the Release 01 snapshot, and only that half.
@@ -398,44 +568,6 @@ export default function DashboardPage() {
         a KPI counted, and the rule this whole screen is held to is that a figure which cannot open
         its own rows does not ship.
       */}
-      {verified.length > 0 && (
-        <Box sx={{ mt: 3 }}>
-          <Typography variant="h6" component="h2" sx={{ fontWeight: 700, fontSize: 15 }}>
-            Verified performance
-          </Typography>
-          <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 3, mt: 2 }}>
-            {verified.map((kpi, i) => <KpiCard key={kpi.key} kpi={kpi} index={i} />)}
-          </Stack>
-          {notYetMeasurable > 0 && (
-            <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 1 }}>
-              {notYetMeasurable} further measures are defined but not yet reportable. They are listed
-              on the performance screen with the server&apos;s reason for each.
-            </Typography>
-          )}
-        </Box>
-      )}
-
-      {/*
-        The screens behind the bands, each shown only when the reader's own module grant would let
-        the route open — a link that lands on "Access denied" is worse than no link.
-      */}
-      <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 2, mt: 4 }}>
-        {hasPermission('Leads') && (
-          <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
-            Every deadline in full
-          </Button>
-        )}
-        {hasPermission('Dashboard') && (
-          <Button size="small" onClick={() => navigate('/sales/performance')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
-            Performance by rep
-          </Button>
-        )}
-        {hasPermission('Leads') && (
-          <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={(theme) => ({ ...neuKey(theme.palette.mode), fontWeight: 700, px: 2 })}>
-            Documents to check
-          </Button>
-        )}
-      </Stack>
     </Box>
   );
 }
