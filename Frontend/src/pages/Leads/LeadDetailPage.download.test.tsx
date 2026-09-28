@@ -6,7 +6,6 @@ import LeadDetailPage from './LeadDetailPage';
 
 const getById = vi.fn();
 const downloadLinesExcel = vi.fn();
-const access = vi.hoisted(() => ({ entitlements: new Set<string>(['capability.exports']) }));
 
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>();
@@ -21,7 +20,6 @@ vi.mock('../../api/services/leadService', () => ({
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
     hasPermission: () => true,
-    hasEntitlement: (key: string) => access.entitlements.has(key),
     userData: { businessUnitId: 7, userName: 'qa', id: 1 },
   }),
 }));
@@ -42,7 +40,6 @@ const wrapper = ({ children }: { children: ReactNode }) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  access.entitlements = new Set(['capability.exports']);
   getById.mockResolvedValue({
     id: 77,
     rfqno: '7000999',
@@ -61,13 +58,5 @@ describe('LeadDetailPage — Download Excel', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Download Excel' }));
 
     await waitFor(() => expect(downloadLinesExcel).toHaveBeenCalledWith(77, '7000999'));
-  });
-
-  it('is not offered when the plan has no exports', async () => {
-    access.entitlements = new Set();
-    render(<LeadDetailPage />, { wrapper });
-
-    await screen.findAllByText('CABLE');
-    expect(screen.queryByRole('button', { name: 'Download Excel' })).not.toBeInTheDocument();
   });
 });

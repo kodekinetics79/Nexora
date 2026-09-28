@@ -30,7 +30,6 @@ vi.mock('../../../api/services/quoteService', () => ({
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    hasEntitlement: () => true,
     userData: { businessUnitId: 1 },
     hasPermission: () => true,
   }),

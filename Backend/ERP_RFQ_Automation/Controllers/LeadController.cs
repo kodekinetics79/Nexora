@@ -477,8 +477,6 @@ public class LeadController : ControllerBase
     /// </summary>
     [HttpGet("{id}/lines.xlsx")]
     [RequireModulePermission("Leads", PermissionAction.View)]
-    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(
-        ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Exports)]
     public async Task<IActionResult> ExportLines(long id)
     {
         try

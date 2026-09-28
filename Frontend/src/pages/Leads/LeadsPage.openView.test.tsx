@@ -32,7 +32,7 @@ vi.mock('../../hooks/useColumnPreferences', () => ({
 vi.mock('../../components/common/ColumnPreferences', () => ({ default: () => null }));
 vi.mock('../../context/AuthContext', () => ({
   // No identity: the owner filter opens on Everyone, so the queue token is the whole view.
-  useAuth: () => ({ hasEntitlement: () => true, hasPermission: () => true, userData: {} }),
+  useAuth: () => ({ hasPermission: () => true, userData: {} }),
 }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 

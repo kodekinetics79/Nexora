@@ -3,12 +3,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import * as XLSX from 'xlsx';
 import ExportExcelButton, { loadAllPages, type ExportColumn } from './ExportExcelButton';
 
-const access = vi.hoisted(() => ({ entitlements: new Set<string>(['capability.exports']) }));
 const written = vi.hoisted(() => ({ book: null as unknown, fileName: '' }));
 
-vi.mock('../../context/AuthContext', () => ({
-  useAuth: () => ({ hasEntitlement: (key: string) => access.entitlements.has(key) }),
-}));
 vi.mock('react-hot-toast', () => ({ toast: Object.assign(vi.fn(), { error: vi.fn() }) }));
 vi.mock('xlsx', async (importOriginal) => {
   const actual = await importOriginal<typeof import('xlsx')>();
@@ -26,7 +22,6 @@ const columns: ExportColumn<Row>[] = [
 ];
 
 beforeEach(() => {
-  access.entitlements = new Set(['capability.exports']);
   written.book = null;
   written.fileName = '';
 });
@@ -60,11 +55,5 @@ describe('ExportExcelButton', () => {
       ['QT-1', 'SEC', 1250.5],
       ['QT-2', '', 0],
     ]);
-  });
-
-  it('is not offered when the plan has no exports', () => {
-    access.entitlements = new Set();
-    render(<ExportExcelButton name="Quotes" columns={columns} loadRows={async () => []} />);
-    expect(screen.queryByRole('button', { name: 'Export to Excel' })).not.toBeInTheDocument();
   });
 });

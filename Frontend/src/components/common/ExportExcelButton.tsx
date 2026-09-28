@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { Button, CircularProgress } from '@mui/material';
 import { FileDownloadOutlined as DownloadIcon } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
-import { useAuth } from '../../context/AuthContext';
 
 export interface ExportColumn<T> {
   header: string;
@@ -36,12 +35,10 @@ interface Props<T> {
 
 /**
  * One button that saves what the list shows as an Excel file: every row that matches the
- * current search and filters, not just the page on screen. Hidden when the plan has no exports.
+ * current search and filters, not just the page on screen. Offered to everyone who can open the list.
  */
 function ExportExcelButton<T>({ name, columns, loadRows }: Props<T>) {
-  const { hasEntitlement } = useAuth();
   const [busy, setBusy] = useState(false);
-  if (!hasEntitlement('capability.exports')) return null;
 
   const run = async () => {
     setBusy(true);

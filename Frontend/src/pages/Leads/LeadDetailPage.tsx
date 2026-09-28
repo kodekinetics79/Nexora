@@ -93,7 +93,7 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
 );
 
 const LeadDetailPage: React.FC = () => {
-  const { hasPermission, hasEntitlement } = useAuth();
+  const { hasPermission } = useAuth();
   const commercialAccess = commercialActionPermissions(hasPermission);
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
@@ -251,18 +251,16 @@ const LeadDetailPage: React.FC = () => {
             reviewVersion={lead.reviewVersion ?? 1}
             canEdit={commercialAccess.canEditLeadDecision}
           />
-          {hasEntitlement('capability.exports') && (
-            <Button
-              variant="outlined"
-              startIcon={downloadLinesMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
-              size="small"
-              onClick={() => downloadLinesMutation.mutate()}
-              disabled={downloadLinesMutation.isPending}
-              sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-            >
-              {downloadLinesMutation.isPending ? 'Downloading…' : 'Download Excel'}
-            </Button>
-          )}
+          <Button
+            variant="outlined"
+            startIcon={downloadLinesMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
+            size="small"
+            onClick={() => downloadLinesMutation.mutate()}
+            disabled={downloadLinesMutation.isPending}
+            sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+          >
+            {downloadLinesMutation.isPending ? 'Downloading…' : 'Download Excel'}
+          </Button>
           {lead.commercialCaseId && (
             <Button
               variant="outlined"

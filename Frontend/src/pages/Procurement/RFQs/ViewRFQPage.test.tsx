@@ -25,7 +25,6 @@ const downloadLinesExcel = vi.fn();
 const testAccess = vi.hoisted(() => ({
   navigate: vi.fn(),
   denied: new Set<string>(),
-  entitlements: new Set<string>(['capability.exports']),
 }));
 
 vi.mock('react-router-dom', async (importOriginal) => {
@@ -79,7 +78,6 @@ vi.mock('../../../api/services/commercialLifecycleService', () => ({
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
     hasPermission: (moduleName: string, action = 'view') => !testAccess.denied.has(`${moduleName}:${action}`),
-    hasEntitlement: (key: string) => testAccess.entitlements.has(key),
     userData: { businessUnitId: 7, userName: 'qa', id: 1 },
   }),
 }));
@@ -185,7 +183,6 @@ const wrapper = ({ children }: { children: ReactNode }) => {
 beforeEach(() => {
   vi.clearAllMocks();
   testAccess.denied.clear();
-  testAccess.entitlements = new Set(['capability.exports']);
   window.localStorage.clear();
   getRfq.mockResolvedValue(rfq());
   getWorkbench.mockResolvedValue(workbench(rfq().rfqitems));
@@ -228,14 +225,6 @@ describe('ViewRFQPage — Download Excel', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Download Excel' }));
 
     await waitFor(() => expect(downloadLinesExcel).toHaveBeenCalledWith(9001, 'RFQ-9001'));
-  });
-
-  it('is not offered when the plan has no exports', async () => {
-    testAccess.entitlements = new Set();
-    render(<ViewRFQPage />, { wrapper });
-
-    await screen.findAllByText('RFQ-9001');
-    expect(screen.queryByRole('button', { name: 'Download Excel' })).not.toBeInTheDocument();
   });
 });
 

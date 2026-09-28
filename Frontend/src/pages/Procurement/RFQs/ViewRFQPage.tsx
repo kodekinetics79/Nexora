@@ -156,7 +156,7 @@ const ViewRFQPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { userData, hasPermission, hasEntitlement } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const commercialAccess = commercialActionPermissions(hasPermission);
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
@@ -714,17 +714,15 @@ const ViewRFQPage: React.FC = () => {
                 </Button>
               </Tooltip>
             )}
-            {hasEntitlement('capability.exports') && (
-              <Button
-                variant="outlined"
-                startIcon={downloadLinesMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
-                onClick={() => downloadLinesMutation.mutate()}
-                disabled={downloadLinesMutation.isPending}
-                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-              >
-                {downloadLinesMutation.isPending ? 'Downloading…' : 'Download Excel'}
-              </Button>
-            )}
+            <Button
+              variant="outlined"
+              startIcon={downloadLinesMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
+              onClick={() => downloadLinesMutation.mutate()}
+              disabled={downloadLinesMutation.isPending}
+              sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+            >
+              {downloadLinesMutation.isPending ? 'Downloading…' : 'Download Excel'}
+            </Button>
             {hasPermission('RFQ Management', 'edit') && <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />}
             {hasPermission('Quotations', 'create') && (
               // A disabled button wrapped in a Tooltip needs a focusable element between them,

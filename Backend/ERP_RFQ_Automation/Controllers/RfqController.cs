@@ -119,8 +119,6 @@ namespace ERP_RFQ_Automation.Controllers
         /// </summary>
         [HttpGet("{id}/lines.xlsx")]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
-        [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(
-            ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Exports)]
         public async Task<IActionResult> ExportLines(long id)
         {
             try
