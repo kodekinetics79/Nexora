@@ -47,6 +47,45 @@ public sealed class LeadConversionCatalogueRoundTripTests
         Assert.Equal(Golden, actual);
     }
 
+    /// <summary>
+    /// The same pin for the path production takes: current leads resolve every line through
+    /// <see cref="ERP_RFQ_Automation.ProductIntelligence.DeterministicProductItemResolver"/> first,
+    /// which now normalises its catalogue snapshot once instead of once per line. Golden captured
+    /// from the per-line implementation at base commit 6d8bf4c0.
+    /// </summary>
+    [Fact]
+    public async Task Resolver_matches_are_identical_to_the_per_line_normalising_implementation()
+    {
+        using var db = new TestDb();
+        await SeedCatalogueAsync(db);
+        var leadId = await ReconciledLeadAsync(db, 6_950,
+        [
+            Line(itemMaterialCode: "A2A50006470", description: "GASKET:SPIRAL WOUND,2 IN,CL300"),
+            Line(itemMaterialCode: "A2A-50006470", description: "GASKET SPIRAL WOUND"),
+            Line(mpn: "BV100-SS", description: "Ball valve stainless 1in"),
+            Line(mpn: "bv100ss", description: "valve"),
+            Line(alternate: "VLV-100", description: "Ball valve"),
+            Line(description: "Hex bolt M12 galvanised"),
+            Line(description: "Pressure gauge 0-10 bar glycerine"),
+            Line(description: "Cable tie black 300mm"),
+            Line(description: "Relay"),
+            Line(description: "Something nobody sells"),
+            Line(mpn: "BOLT-045", description: "Hex bolt M45 galvanised"),
+        ]);
+
+        await using var context = db.ContextFor(Tenant);
+        var resolver = new ERP_RFQ_Automation.ProductIntelligence.DeterministicProductItemResolver(
+            new ERP_RFQ_Automation.ProductIntelligence.EfProductResolutionCatalog(context),
+            new ERP_RFQ_Automation.ProductIntelligence.EfApprovedProductReferenceSource(context));
+        var preview = await new LeadConversionIntelligence(context, resolver).PreviewAsync(leadId, Tenant, default);
+        var partNoById = await context.Products.IgnoreQueryFilters().AsNoTracking()
+            .ToDictionaryAsync(p => p.Id, p => p.PartNo);
+
+        var actual = preview.Items.Select((item, index) => Describe(index, item, partNoById)).ToArray();
+
+        Assert.Equal(ResolverGolden, actual);
+    }
+
     [Fact]
     public async Task Database_round_trips_do_not_grow_with_the_number_of_lines()
     {
@@ -111,6 +150,21 @@ public sealed class LeadConversionCatalogueRoundTripTests
         "17 | 0.85 | True | Quantity missing; Unit of measure missing; Low-confidence match (85%) | best=BOLT-001 | BOLT-001@0.85:Name similarity 100%; BOLT-002@0.85:Name similarity 100%; BOLT-003@0.85:Name similarity 100%",
         "18 | 0.76 | True | Low-confidence match (76%); Unit of measure \"PACK\" needs review — packaging unit — confirm how many items it contains before quoting | best=WID-1 | WID-1@0.76:Name similarity 80%",
         "19 | 0.74 | True | Low-confidence match (74%) | best=BOLT-001 | BOLT-001@0.74:Name similarity 75%; BOLT-002@0.74:Name similarity 75%; BOLT-003@0.74:Name similarity 75%",
+    ];
+
+    private static readonly string[] ResolverGolden =
+    [
+        "1 | 1.00 | False |  | best=A2A50006470 | A2A50006470@1.00:Exact normalized catalog identity",
+        "2 | 0.98 | False |  | best=A2A50006470 | A2A50006470@0.98:Unique canonical compact catalog identity",
+        "3 | 0.99 | False |  | best=VLV-100 | VLV-100@0.99:Exact normalized catalog identity",
+        "4 | 0.98 | False |  | best=VLV-100 | VLV-100@0.98:Unique canonical compact catalog identity",
+        "5 | 0.46 | True | Low-confidence match (46%) | best=VLV-100 | VLV-100@0.46:Local token similarity 25.0%",
+        "6 | 0.71 | True | Low-confidence match (71%) | best=BOLT-012 | BOLT-012@0.71:Local token similarity 80.0%; BOLT-001@0.58:Local token similarity 50.0%; BOLT-002@0.58:Local token similarity 50.0%",
+        "7 | 0.63 | True | Low-confidence match (63%) | best=GAUGE-10 | GAUGE-10@0.63:Local token similarity 62.5%",
+        "8 | 0.71 | True | Low-confidence match (71%) | best=TIE-NULL | TIE-NULL@0.71:Local token similarity 80.0%",
+        "9 | 0.58 | True | Low-confidence match (58%) | best=RLY-1 | RLY-1@0.58:Local token similarity 50.0%",
+        "10 | 0.00 | True | No catalog match found | best=- | ",
+        "11 | 1.00 | False |  | best=BOLT-045 | BOLT-045@1.00:Exact normalized catalog identity",
     ];
 
     private static string Describe(int index, ConversionPreviewItem item, IReadOnlyDictionary<long, string> partNoById)
@@ -248,7 +302,16 @@ public sealed class LeadConversionCatalogueRoundTripTests
         return counter.Commands;
     }
 
-    private static async Task<long> ReconciledLeadAsync(TestDb db, long ingestId, int lines)
+    private static Task<long> ReconciledLeadAsync(TestDb db, long ingestId, int lines) =>
+        ReconciledLeadAsync(db, ingestId, Enumerable.Range(1, lines).Select(i => new LeadItem
+        {
+            LineItemNo = i.ToString(CultureInfo.InvariantCulture),
+            ProductShortDescription = $"Line {Words(i)} spare part {i}",
+            Quantity = 1,
+            UnitOfMeasure = "EA",
+        }).ToList());
+
+    private static async Task<long> ReconciledLeadAsync(TestDb db, long ingestId, IReadOnlyList<LeadItem> items)
     {
         await using var context = db.ContextFor(Tenant);
         Seed.EmailConfig(context, ingestId + 50_000, Tenant);
@@ -260,14 +323,11 @@ public sealed class LeadConversionCatalogueRoundTripTests
             CreatedBy = "test", CreatedDate = DateTime.UtcNow, BusinessUnitId = Tenant, EmailIngestsId = ingestId,
             Clientemail = $"buyer{ingestId}@example.test", RequiresCommercialReview = true
         };
-        for (var i = 1; i <= lines; i++)
-            lead.LeadItems.Add(new LeadItem
-            {
-                LineItemNo = i.ToString(CultureInfo.InvariantCulture),
-                ProductShortDescription = $"Line {Words(i)} spare part {i}",
-                Quantity = 1,
-                UnitOfMeasure = "EA",
-            });
+        for (var i = 0; i < items.Count; i++)
+        {
+            items[i].LineItemNo ??= (i + 1).ToString(CultureInfo.InvariantCulture);
+            lead.LeadItems.Add(items[i]);
+        }
         var created = await new LeadIdentityApplicationService(context).ReconcileAsync(lead, new LeadIntakeDescriptor(
             Guid.NewGuid(), "ManualUpload", $"perf-{ingestId}", null, null, "test", $"buyer{ingestId}@example.test",
             "RFQ", $"perf-{ingestId}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 100,
