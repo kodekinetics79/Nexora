@@ -1,5 +1,6 @@
 
 import axiosInstance from '../axiosInstance';
+import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 
 export interface RfqResponseDTO {
     id: number;
@@ -248,6 +249,9 @@ const rfqService = {
         const response = await axiosInstance.get<RfqResponseDTO>(`/api/Rfq/${id}`, { params: { businessUnitId } });
         return response.data;
     },
+    /** Downloads the RFQ's lines as an Excel sheet. */
+    downloadLinesExcel: (id: number, rfqNo?: string): Promise<void> =>
+        downloadAuthenticatedFile(`/api/Rfq/${id}/lines.xlsx`, `${(rfqNo || `RFQ-${id}`).replace(/[^\w.-]+/g, '-')}-lines.xlsx`),
     approve: async (id: number, approvedBy: string, recipientEmail?: string, emailSubject?: string, emailBody?: string, customerId?: number) => {
         void approvedBy;
         const response = await axiosInstance.post(`/api/Rfq/${id}/approve`, {

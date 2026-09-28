@@ -16,11 +16,12 @@ import {
   CloudUpload as UploadIcon,
 } from '@mui/icons-material';
 import rfqService, { type RfqResponseDTO } from '../../../api/services/rfqService';
+import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../../components/common/ExportExcelButton';
 import SearchField from '../../../components/common/SearchField';
 import gridEmptyOverlay from '../../../components/common/gridOverlays';
 import ViewTabs from '../../../components/layout/ViewTabs';
 import { useAuth } from '../../../context/AuthContext';
-import { formatDateSafe } from '../../../utils/dates';
+import { formatDateSafe, formatDateTimeSafe } from '../../../utils/dates';
 import { DEADLINE_COLOR, deadlineWords } from '../../../utils/deadline';
 
 /**
@@ -35,6 +36,43 @@ import { DEADLINE_COLOR, deadlineWords } from '../../../utils/deadline';
 const RFQ_FILTERS: Record<string, { label: string }> = {
   'ready-for-quote': { label: 'Ready for Quote' },
 };
+
+const RFQ_EXPORT_COLUMNS: ExportColumn<RfqResponseDTO>[] = [
+  { header: 'Nexora Serial', value: (r) => r.nexoraSerial || r.commercialCaseReference },
+  { header: 'RFQ #', value: (r) => r.rfqno },
+  { header: 'Customer RFQ reference', value: (r) => r.customerRfqReference },
+  { header: 'Customer', value: (r) => r.customerName },
+  { header: 'Customer email', value: (r) => r.customerEmail || r.leadEmail },
+  { header: 'Buyer', value: (r) => r.buyersName },
+  { header: 'Contact', value: (r) => r.contactName },
+  { header: 'Account owner', value: (r) => r.accountOwnerName },
+  { header: 'Opportunity owner', value: (r) => r.opportunityOwnerName },
+  { header: 'Lines', value: (r) => r.noOfLineItems ?? 0 },
+  { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
+  { header: 'Closing date', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Closing date (Hijri)', value: (r) => r.bidClosingDateHijri },
+  { header: 'Required delivery', value: (r) => formatDateSafe(r.requiredDeliveryDate, '') },
+  { header: 'Delivery location', value: (r) => r.deliveryLocation },
+  { header: 'Agreement reference', value: (r) => r.agreementReference },
+  { header: 'Opportunity #', value: (r) => r.opportunityNo },
+  { header: 'RFQ type', value: (r) => r.rfqtype },
+  { header: 'Inquiry type', value: (r) => r.inquiryType },
+  { header: 'Agreement duration', value: (r) => r.durationAgreement },
+  { header: 'Bidding decision', value: (r) => r.biddingDecision },
+  { header: 'Acknowledged', value: (r) => formatDateSafe(r.acknowledgmentDate, '') },
+  { header: 'Submitted', value: (r) => formatDateSafe(r.subDate, '') },
+  { header: 'Status', value: (r) => r.rfqstatusValue },
+  { header: 'Readiness', value: (r) => r.readiness },
+  { header: 'Lead revision', value: (r) => r.sourceLeadRevisionNumber },
+  { header: 'Made from lead by', value: (r) => r.promotedBy },
+  { header: 'Made from lead on', value: (r) => formatDateTimeSafe(r.promotedAtUtc, '') },
+  { header: 'Remarks', value: (r) => r.headerRemarks },
+  { header: 'Business unit', value: (r) => r.businessUnitName },
+  { header: 'Created by', value: (r) => r.createdBy },
+  { header: 'Created', value: (r) => formatDateTimeSafe(r.createdDate, '') },
+  { header: 'Modified by', value: (r) => r.modifiedBy },
+  { header: 'Modified', value: (r) => formatDateTimeSafe(r.modifiedDate, '') },
+];
 
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -231,6 +269,17 @@ const AllRFQsPage: React.FC = () => {
             </Button>
           </Tooltip>
         )}
+        <ExportExcelButton
+          name="RFQs"
+          columns={RFQ_EXPORT_COLUMNS}
+          loadRows={() => loadAllPages((pageNumber, pageSize) => rfqService.getAll({
+            pageNumber,
+            pageSize,
+            search: search || undefined,
+            businessUnitId: userData?.businessUnitId || undefined,
+            readiness,
+          }))}
+        />
         <Tooltip title="Refresh">
           <IconButton aria-label="Refresh" onClick={() => refetch()} sx={{ width: 36, height: 36 }}>
             <RefreshIcon fontSize="small" />
