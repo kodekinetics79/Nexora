@@ -217,6 +217,8 @@ public sealed class ImpersonationHardeningTests
     [InlineData("/api/processing-evidence/leads/5")]
     [InlineData("/api/CustomerUploader/export")]
     [InlineData("/api/Boq/12/export.csv")]
+    [InlineData("/api/Rfq/12/lines.xlsx")]
+    [InlineData("/api/Lead/12/lines.xlsx")]
     [InlineData("/api/LeadUploader/download-template")]
     public async Task Impersonated_get_on_download_or_export_routes_is_denied(string path)
     {

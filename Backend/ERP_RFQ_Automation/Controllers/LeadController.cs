@@ -470,4 +470,34 @@ public class LeadController : ControllerBase
             return Unexpected(ex, "detail");
         }
     }
+
+    /// <summary>
+    /// GET /api/Lead/{id}/lines.xlsx — the lead's lines as an Excel sheet, behind the same
+    /// access check as <see cref="GetLeadById"/>.
+    /// </summary>
+    [HttpGet("{id}/lines.xlsx")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(
+        ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Exports)]
+    public async Task<IActionResult> ExportLines(long id)
+    {
+        try
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            if (!await CanAccessLeadAsync(id)) return NotFound();
+
+            var lead = await _repository.GetLeadByIdAsync(id, businessUnitId);
+            if (lead == null) return NotFound($"Lead with ID {id} not found.");
+
+            return File(ERP_RFQ_Automation.Services.LinesWorkbook.ForLead(lead),
+                ERP_RFQ_Automation.Services.LinesWorkbook.ContentType,
+                ERP_RFQ_Automation.Services.LinesWorkbook.LeadFileName(lead));
+        }
+        catch (Exception ex)
+        {
+            return Unexpected(ex, "lines-export");
+        }
+    }
 }

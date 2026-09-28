@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services;
@@ -6,7 +7,7 @@ using Xunit;
 
 namespace ERP_RFQ_Automation.Tests;
 
-public class RfqLinesWorkbookTests
+public class LinesWorkbookTests
 {
     private static RfqResponseDTO Rfq(int lines)
     {
@@ -58,11 +59,11 @@ public class RfqLinesWorkbookTests
     [Fact]
     public void Every_line_is_one_row_in_the_on_screen_columns()
     {
-        var sheet = Read(RfqLinesWorkbook.Build(Rfq(100)));
+        var sheet = Read(LinesWorkbook.ForRfq(Rfq(100)));
         var header = HeaderRow(sheet);
 
-        for (var c = 0; c < RfqLinesWorkbook.Columns.Length; c++)
-            Assert.Equal(RfqLinesWorkbook.Columns[c], sheet.Cells[header, c + 1].Text);
+        for (var c = 0; c < LinesWorkbook.RfqColumns.Length; c++)
+            Assert.Equal(LinesWorkbook.RfqColumns[c], sheet.Cells[header, c + 1].Text);
         Assert.Equal(header + 100, sheet.Dimension.End.Row);
 
         var first = header + 1;
@@ -84,7 +85,7 @@ public class RfqLinesWorkbookTests
     [Fact]
     public void The_top_of_the_sheet_says_which_RFQ_and_customer_it_is()
     {
-        var sheet = Read(RfqLinesWorkbook.Build(Rfq(3)));
+        var sheet = Read(LinesWorkbook.ForRfq(Rfq(3)));
 
         Assert.Equal("RFQ RFQ/2026 0042", sheet.Cells[1, 1].Text);
         var labels = Enumerable.Range(1, HeaderRow(sheet)).ToDictionary(r => sheet.Cells[r, 1].Text, r => sheet.Cells[r, 2].Text);
@@ -97,7 +98,7 @@ public class RfqLinesWorkbookTests
     [Fact]
     public void An_RFQ_with_no_lines_still_opens()
     {
-        var sheet = Read(RfqLinesWorkbook.Build(Rfq(0)));
+        var sheet = Read(LinesWorkbook.ForRfq(Rfq(0)));
         Assert.Equal(HeaderRow(sheet), sheet.Dimension.End.Row);
     }
 
@@ -106,7 +107,7 @@ public class RfqLinesWorkbookTests
     {
         var rfq = Rfq(1);
         rfq.Rfqitems[0].ProductShortDescription = "=HYPERLINK(\"http://x\",\"click\")";
-        var sheet = Read(RfqLinesWorkbook.Build(rfq));
+        var sheet = Read(LinesWorkbook.ForRfq(rfq));
         var cell = sheet.Cells[HeaderRow(sheet) + 1, 3];
 
         Assert.True(string.IsNullOrEmpty(cell.Formula));
@@ -116,6 +117,33 @@ public class RfqLinesWorkbookTests
     [Fact]
     public void The_file_is_named_after_the_RFQ()
     {
-        Assert.Equal("RFQ-2026-0042-lines.xlsx", RfqLinesWorkbook.FileName(Rfq(0)));
+        Assert.Equal("RFQ-2026-0042-lines.xlsx", LinesWorkbook.RfqFileName(Rfq(0)));
+        Assert.Equal("Lead-77-lines.xlsx", LinesWorkbook.LeadFileName(new LeadResponseDTO { Id = 77 }));
+    }
+
+    [Fact]
+    public void A_lead_exports_the_same_columns_without_the_quote_decision()
+    {
+        var lead = new LeadResponseDTO { Id = 77, Rfqno = "7000999", CustomerName = "SEC", BidClosingDate = new DateTime(2026, 10, 1) };
+        lead.LeadItems.Add(new LeadItemResponseDTO { Id = 1, LineItemNo = "10", ProductShortName = "CABLE", ProductShortDescription = "Cu 4c 16mm", ManufacturerName = "ELSEWEDY", ManufacturerPartNumber = "C-16", Quantity = 500, UnitOfMeasure = "M" });
+        lead.LeadItems.Add(new LeadItemResponseDTO { Id = 2, ProductShortName = "GLAND", Quantity = 0 });
+
+        var sheet = Read(LinesWorkbook.ForLead(lead));
+        var header = HeaderRow(sheet);
+
+        Assert.Equal("Lead 77 · 7000999", sheet.Cells[1, 1].Text);
+        for (var c = 0; c < LinesWorkbook.LeadColumns.Length; c++)
+            Assert.Equal(LinesWorkbook.LeadColumns[c], sheet.Cells[header, c + 1].Text);
+        Assert.Equal("", sheet.Cells[header, LinesWorkbook.LeadColumns.Length + 1].Text);
+
+        Assert.Equal("10", sheet.Cells[header + 1, 1].Text);
+        Assert.Equal("CABLE", sheet.Cells[header + 1, 2].Text);
+        Assert.Equal(500m, Convert.ToDecimal(sheet.Cells[header + 1, 6].Value));
+        Assert.Equal("M", sheet.Cells[header + 1, 7].Text);
+
+        // No line number on the document: position. Quantity never stated: blank, not 0.
+        Assert.Equal("2", sheet.Cells[header + 2, 1].Text);
+        Assert.Null(sheet.Cells[header + 2, 6].Value);
+        Assert.Equal("EA", sheet.Cells[header + 2, 7].Text);
     }
 }

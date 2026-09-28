@@ -131,8 +131,8 @@ namespace ERP_RFQ_Automation.Controllers
                 var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
                 if (actor == null || actor.BusinessUnitId != businessUnitId) return NotFound();
                 var rfq = await _repository.GetByIdAsync(id, businessUnitId, actor.AccountScope);
-                return File(Services.RfqLinesWorkbook.Build(rfq), Services.RfqLinesWorkbook.ContentType,
-                    Services.RfqLinesWorkbook.FileName(rfq));
+                return File(Services.LinesWorkbook.ForRfq(rfq), Services.LinesWorkbook.ContentType,
+                    Services.LinesWorkbook.RfqFileName(rfq));
             }
             catch (KeyNotFoundException)
             {

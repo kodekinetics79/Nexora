@@ -1,5 +1,6 @@
 import axios from 'axios';
 import axiosInstance from '../axiosInstance';
+import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 // One definition of the storage-refusal code, shared with the error boundary that renders it.
 import { DOCUMENT_STORAGE_UNAVAILABLE } from '../../utils/apiErrors';
 
@@ -750,6 +751,10 @@ const leadService = {
     const r = await axiosInstance.get(`/api/Lead/${id}`);
     return r.data;
   },
+
+  /** Downloads the lead's lines as an Excel sheet. */
+  downloadLinesExcel: (id: number, rfqNo?: string | null): Promise<void> =>
+    downloadAuthenticatedFile(`/api/Lead/${id}/lines.xlsx`, `${(rfqNo || `Lead-${id}`).replace(/[^\w.-]+/g, '-')}-lines.xlsx`),
 
   /**
    * Ranked client-organisation candidates the resolver proposed for this lead.
