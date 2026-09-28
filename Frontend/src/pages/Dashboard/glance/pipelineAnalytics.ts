@@ -16,10 +16,10 @@ import { scopeWords } from './scopeWords';
  * and the SAME scope, because they are the same figures cut two ways, and two bands disagreeing
  * about whose numbers they are would be the exact failure the seal exists to prevent.
  */
-export const usePipelineAnalytics = (from: string, to: string, errorLabel: string) =>
+export const usePipelineAnalytics = (from: string, to: string, errorLabel: string, ownerUserId?: number) =>
   useQuery({
-    queryKey: ['glance', 'pipeline-analytics', from, to],
-    queryFn: () => dashboardService.getPipelineAnalytics({ from, to }),
+    queryKey: ['glance', 'pipeline-analytics', from, to, ownerUserId ?? 'all'],
+    queryFn: () => dashboardService.getPipelineAnalytics({ from, to, ownerUserId }),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel },
   });

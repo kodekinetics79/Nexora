@@ -36,6 +36,10 @@ import { priorWindow, scopeWords, type GlanceScopeWords } from './scopeWords';
  * would be a fabricated figure with no scope and no freshness of its own.
  */
 export interface VerdictBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
+  /** A manager's rep filter: only this rep's own work. Absent = everyone the reader can see. */
+  ownerUserId?: number;
   /** Inclusive first day of the selected window, YYYY-MM-DD. */
   from: string;
   /** Inclusive last day of the selected window, YYYY-MM-DD. */
@@ -55,6 +59,7 @@ const SENTENCE_SUBJECTS: Readonly<Record<GlanceScopeWords, { subject: string; po
   'Company-wide': { subject: 'The company', possessive: 'our' },
   'Your managed scope': { subject: 'Your teams', possessive: 'your' },
   'Your assigned accounts': { subject: 'Your accounts', possessive: 'your' },
+  'One rep': { subject: 'This rep', possessive: 'their' },
 });
 
 const numeral = {
@@ -258,27 +263,27 @@ const AxisRow = ({ lost, won, scale, height, ghost = false, countSize, lostLabel
   );
 };
 
-export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
+export default function VerdictBand({ from, to, index = 1, detailsTo, ownerUserId }: VerdictBandProps) {
   const prior = priorWindow(from, to);
 
   // Three independent reads. The prior window and the leads count are each allowed to fail on
   // their own: a ghost row we could not fetch costs the reader a comparison, not the band.
   const performance = useQuery({
-    queryKey: ['glance', 'performance', from, to],
-    queryFn: () => commercialIntelligenceService.getPerformance(from, to),
+    queryKey: ['glance', 'performance', from, to, ownerUserId ?? 'all'],
+    queryFn: () => commercialIntelligenceService.getPerformance(from, to, ownerUserId),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the win and loss counts' },
   });
   const priorPerformance = useQuery({
-    queryKey: ['glance', 'performance', prior?.from, prior?.to],
-    queryFn: () => commercialIntelligenceService.getPerformance(prior!.from, prior!.to),
+    queryKey: ['glance', 'performance', prior?.from, prior?.to, ownerUserId ?? 'all'],
+    queryFn: () => commercialIntelligenceService.getPerformance(prior!.from, prior!.to, ownerUserId),
     enabled: prior !== null,
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the previous period' },
   });
   const release = useQuery({
-    queryKey: ['glance', 'release-01', from, to],
-    queryFn: () => dashboardService.getRelease01({ from, to }),
+    queryKey: ['glance', 'release-01', from, to, ownerUserId ?? 'all'],
+    queryFn: () => dashboardService.getRelease01({ from, to, ownerUserId }),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the requests received' },
   });
@@ -404,6 +409,7 @@ export default function VerdictBand({ from, to, index = 1 }: VerdictBandProps) {
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       title="Did we win what we decided?"
       step="1"
       index={index}

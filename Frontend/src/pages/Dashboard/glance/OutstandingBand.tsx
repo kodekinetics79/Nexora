@@ -44,6 +44,10 @@ import { neuInset } from './neumorphic';
  * fabricated number back on the one screen that exists to carry stated ones.
  */
 export interface OutstandingBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
+  /** A manager's rep filter: only this rep's own work. Absent = everyone the reader can see. */
+  ownerUserId?: number;
   /** Inclusive first day of the selected window, YYYY-MM-DD. */
   from: string;
   /** Inclusive last day of the selected window, YYYY-MM-DD. */
@@ -193,12 +197,12 @@ const compactMoney = (value: number, currency: string | null | undefined): strin
   }
 };
 
-export default function OutstandingBand({ from, to, index = 2 }: OutstandingBandProps) {
+export default function OutstandingBand({ from, to, index = 2, detailsTo, ownerUserId }: OutstandingBandProps) {
   const hatchId = useHatchPatternId();
   // Both charts draw at the band's own width, so their labels render at their stated size.
   const [measureRef, bookW] = useMeasuredWidth<HTMLDivElement>(BOOK_W);
 
-  const analytics = usePipelineAnalytics(from, to, 'the sent book and the funnel');
+  const analytics = usePipelineAnalytics(from, to, 'the sent book and the funnel', ownerUserId);
   const [measure, setMeasure] = useChartChoice('outstanding', MEASURES, 'count');
   // One drill open at a time across both charts, so the band never carries two sentences.
   const [picked, setPicked] = useState<{ chart: 'stage' | 'segment'; key: string } | null>(null);
@@ -534,6 +538,7 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       title="What's out with customers, and where it stops"
       step="2"
       index={index}

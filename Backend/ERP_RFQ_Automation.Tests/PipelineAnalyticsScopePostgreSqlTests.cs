@@ -147,6 +147,35 @@ public sealed class PipelineAnalyticsScopePostgreSqlTests(PostgreSqlTestDatabase
     }
 
     /// <summary>
+    /// The dashboard's one-rep filter (ownerUserId). An executive narrowing to rep A sees exactly
+    /// rep A's owned quotes and assigned leads — and, unlike rep A's own assigned_accounts view,
+    /// no unowned-quote disclosure, because an unowned quote on A's account is nobody's.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_tenant_reader_narrowed_to_one_rep_sees_only_that_reps_funnel()
+    {
+        await SeedAsync();
+        {
+            await using var context = database.ContextFor(Tenant);
+            Assert.True(AccountTeamScope.TenantWide(RepB).TryNarrowToRep(RepA, out var narrowed));
+
+            var result = await new DashboardRepository(context).GetPipelineAnalyticsAsync(Tenant, narrowed);
+
+            Assert.Equal(1, Stage(result, "leads").Count);
+            Assert.Equal(2, Stage(result, "quoted").Count);
+            Assert.Equal(1_500m, Stage(result, "quoted").Value);
+            Assert.Equal(1_000m, Stage(result, "won").Value);
+            Assert.Empty(result.LossReasons);
+            Assert.Equal(0, result.UnownedQuotesExcluded);
+            Assert.Equal("single_rep", result.RoleScope.Scope);
+            Assert.Equal(RepA, result.RoleScope.OwnerUserId);
+            Assert.Equal([RepA], result.RoleScope.ScopedUserIds);
+            Assert.Empty(result.RoleScope.AccountTeamIds);
+        }
+    }
+
+    /// <summary>
     /// Loss reasons carry a stable code and a server-set group. The grouping is the point: an
     /// automatic expiry ranked beside "price too high" reads as the market rejecting our prices
     /// when it means nobody followed the quote up.

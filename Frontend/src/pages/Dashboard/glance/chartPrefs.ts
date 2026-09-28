@@ -51,9 +51,9 @@ export function useChartChoice<T extends string>(chart: string, options: readonl
   return [value, choose] as const;
 }
 
-export type BandKey = 'verdict' | 'outstanding' | 'losses' | 'closing' | 'today' | 'sixmonths';
+export type BandKey = 'verdict' | 'outstanding' | 'losses' | 'closing' | 'today' | 'sixmonths' | 'brands' | 'customers';
 
-export const BAND_KEYS: readonly BandKey[] = ['verdict', 'outstanding', 'losses', 'closing', 'today', 'sixmonths'];
+export const BAND_KEYS: readonly BandKey[] = ['verdict', 'outstanding', 'losses', 'closing', 'today', 'sixmonths', 'brands', 'customers'];
 
 export const BAND_LABELS: Readonly<Record<BandKey, string>> = {
   verdict: 'Did we win what we decided?',
@@ -62,6 +62,8 @@ export const BAND_LABELS: Readonly<Record<BandKey, string>> = {
   closing: "What's closing on us",
   today: 'What needs you today',
   sixmonths: 'The last six months',
+  brands: 'What customers ask for',
+  customers: 'Who we quote',
 };
 
 /** The reader's band order and which bands they hide. */

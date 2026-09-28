@@ -91,7 +91,8 @@ namespace ERP_RFQ_Automation.Controllers
         [HttpGet("pipeline-analytics")]
         [RequireModulePermission("Dashboard", PermissionAction.View)]
         public async Task<ActionResult<PipelineAnalyticsDTO>> GetPipelineAnalytics(
-            [FromQuery] DateTime? from, [FromQuery] DateTime? to, CancellationToken ct)
+            [FromQuery] DateTime? from, [FromQuery] DateTime? to, CancellationToken ct,
+            [FromQuery] long? ownerUserId = null)
         {
             var businessUnitId = GetBusinessUnitId();
             var roleId = ClaimId("roleId");
@@ -114,6 +115,14 @@ namespace ERP_RFQ_Automation.Controllers
                 return BadRequest(new { message = "The reporting window cannot end in the future." });
 
             var scope = await _accountScope.ResolveAsync(userId, roleId, businessUnitId, now, ct);
+            if (ownerUserId.HasValue)
+            {
+                // One-rep filter: leads whose AssignTo is that rep, quotes whose OwnerUserId is.
+                if (ownerUserId.Value <= 0)
+                    return BadRequest(new { message = "ownerUserId must be a positive user id." });
+                if (!scope.TryNarrowToRep(ownerUserId.Value, out var narrowed)) return Forbid();
+                scope = narrowed;
+            }
 
             var data = await _repository.GetPipelineAnalyticsAsync(
                 businessUnitId, scope, effectiveFrom, effectiveTo, ct);
