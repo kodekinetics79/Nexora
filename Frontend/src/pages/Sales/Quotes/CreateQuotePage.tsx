@@ -404,7 +404,7 @@ const CreateQuotePage: React.FC = () => {
                 </FormControl>
               </Grid>
               <Grid size={{ xs: 12, md: 6 }}>
-                <TextField fullWidth label="Header Remarks / Terms" size="small" value={headerRemarks} onChange={(e) => setHeaderRemarks(e.target.value)} />
+                <TextField fullWidth label="Notes to customer" helperText="Printed on the quote and in the email" size="small" value={headerRemarks} onChange={(e) => setHeaderRemarks(e.target.value)} />
               </Grid>
               <Grid size={{ xs: 12, md: 2 }}>
                 <FormControl fullWidth size="small">
