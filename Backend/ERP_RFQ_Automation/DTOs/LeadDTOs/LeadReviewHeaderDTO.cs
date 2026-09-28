@@ -9,6 +9,13 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public DateTime? BidClosingDate { get; set; }
 
         /// <summary>
+        /// When the buyer published / sent the request. Correctable because a portal print read
+        /// in the wrong day/month order put every SEC request in March, and nothing let a person
+        /// put it right.
+        /// </summary>
+        public DateTime? RecDate { get; set; }
+
+        /// <summary>
         /// FR-RFQ-04. The date the BUYER asked for delivery on — never a supplier lead
         /// time. Correctable here because extraction is the only thing that has ever
         /// written it, and an extraction the reviewer cannot correct is an extraction

@@ -35,22 +35,26 @@ public sealed class Gate1ContinuityWiringTests
         var lead = Seed.Lead(context, 8100, 810);
         lead.BidClosingDate = closing;
         lead.RequiredDeliveryDate = required;
+        // A stored Hijri value that does not match the closing date (pilot audit HT-06: it went
+        // stale on every edit). Both projections render it from the closing date as it is now.
         lead.BidClosingDateHijri = "1448-03-12";
         lead.AgreementReference = "FRAME-2026-118";
         await context.SaveChangesAsync();
+        var hijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(closing);
+        Assert.NotEqual("1448-03-12", hijri);
 
         var repo = new LeadRepository(context);
 
         var (rows, _) = await repo.GetLeadListAsync(1, 10, null, null, null, null, 810);
         var listRow = Assert.Single(rows);
         Assert.Equal(required, listRow.RequiredDeliveryDate);
-        Assert.Equal("1448-03-12", listRow.BidClosingDateHijri);
+        Assert.Equal(hijri, listRow.BidClosingDateHijri);
         Assert.Equal("FRAME-2026-118", listRow.AgreementReference);
 
         var detail = await repo.GetLeadByIdAsync(8100, 810);
         Assert.NotNull(detail);
         Assert.Equal(required, detail!.RequiredDeliveryDate);
-        Assert.Equal("1448-03-12", detail.BidClosingDateHijri);
+        Assert.Equal(hijri, detail.BidClosingDateHijri);
         Assert.Equal("FRAME-2026-118", detail.AgreementReference);
 
         // The point of the field: it is NOT the bid deadline, and nothing may collapse the two.
@@ -126,6 +130,49 @@ public sealed class Gate1ContinuityWiringTests
         Assert.NotNull(result);
         Assert.Equal(corrected, result!.RequiredDeliveryDate);
         Assert.Equal(corrected, (await context.Leads.FindAsync(8102L))!.RequiredDeliveryDate);
+    }
+
+    /// <summary>
+    /// Pilot audit HT-05 / HT-06 / CP-07 on the review path: a picker holds a day, so a saved day
+    /// keeps the time the document stated; the Hijri date follows; the received date can be
+    /// corrected; a moved day answers the closing-date question, an untouched one does not.
+    /// </summary>
+    [Fact]
+    public async Task A_review_keeps_the_stated_closing_time_moves_the_Hijri_and_corrects_the_received_date()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        const string note =
+            "\"9/8/2026 5:00 PM\" is ambiguous — both parts of the bid closing date are 12 or lower, so it could be "
+            + "either day/month or month/day. It has been read day-first; confirm it.";
+        var lead = Seed.Lead(context, 8103, 813, parseStatus: "NeedsReview", headerRemarks: note);
+        lead.BidClosingDate = new DateTime(2026, 8, 9, 17, 0, 0);
+        lead.BidClosingDateHijri = "1448-02-26";
+        lead.RecDate = new DateTime(2026, 3, 9, 15, 59, 0);
+        await context.SaveChangesAsync();
+        var repository = new LeadRepository(context);
+
+        // Saving the same day (as the review page always does) keeps the time and asks again.
+        var untouched = await repository.SubmitLeadReviewAsync(8103, 813, new LeadReviewSubmitDTO
+        {
+            Action = "save",
+            ExpectedVersion = Math.Max(1, lead.ReviewVersion),
+            Header = new LeadReviewHeaderDTO { BidClosingDate = new DateTime(2026, 8, 9) }
+        }, "reviewer@nexora.test");
+        Assert.Equal(new DateTime(2026, 8, 9, 17, 0, 0), untouched!.BidClosingDate);
+        Assert.NotNull(untouched.ClosingDateQuestion);
+
+        var moved = await repository.SubmitLeadReviewAsync(8103, 813, new LeadReviewSubmitDTO
+        {
+            Action = "save",
+            ExpectedVersion = untouched.ReviewVersion,
+            Header = new LeadReviewHeaderDTO { BidClosingDate = new DateTime(2026, 9, 8), RecDate = new DateTime(2026, 9, 3, 15, 59, 0) }
+        }, "reviewer@nexora.test");
+        Assert.Equal(new DateTime(2026, 9, 8, 17, 0, 0), moved!.BidClosingDate);
+        Assert.Equal(new DateTime(2026, 9, 3, 15, 59, 0), moved.RecDate);
+        Assert.Equal(ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(new DateTime(2026, 9, 8)), moved.BidClosingDateHijri);
+        Assert.Null(moved.ClosingDateQuestion);
+        Assert.Equal("1448-03-26", (await context.Leads.FindAsync(8103L))!.BidClosingDateHijri);
     }
 
     // ── 2 · The mailbox poll interval carries its unit ───────────────────────────────────────

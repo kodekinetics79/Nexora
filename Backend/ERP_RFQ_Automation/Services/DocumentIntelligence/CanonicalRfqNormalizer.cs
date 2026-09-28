@@ -53,7 +53,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 UnmappedHeaders = new Dictionary<string, string>(first.UnmappedHeaderLabels, StringComparer.Ordinal)
             };
 
-            ResolveDateOrder(document, arrived);
+            ResolveDateOrder(document, arrived, group);
 
             // What THIS document states, decided from the document's own rows before any
             // line is judged. See CanonicalValue.StatedInDocument for why the review signal
@@ -123,7 +123,9 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 document.LineItems.Add(line);
             }
 
-            document.Issues.AddRange(CollectValueIssues(document, first));
+            // Header facts first: a review note is cut to its first three reasons, and a closing
+            // date the rep must confirm was lost behind a run of duplicate-line warnings.
+            document.Issues.InsertRange(0, CollectValueIssues(document, first));
 
             if (document.LineItems.Count == 0)
             {
@@ -349,8 +351,21 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     /// Every other ambiguous date on the document is then read the same way, and the closing
     /// date stays flagged for the reviewer, with the reason.
     /// </summary>
-    private static void ResolveDateOrder(CanonicalRfqDocument document, DateTime arrived)
+    private static void ResolveDateOrder(CanonicalRfqDocument document, DateTime arrived, IEnumerable<RfqSpreadsheetRow> rows)
     {
+        // The document's own word first: an SAP Ariba print, or any date on it that can only be
+        // read one way, settles the order of EVERY ambiguous date on it — and settled is not a
+        // guess, so nothing is left for the reviewer to confirm. "Publish time 9/3/2026, Due date
+        // 9/6/2026 5:00 PM" on an SEC print is 3 and 6 September; it was stored as 9 March and
+        // 9 June because both readings kept the publish date before the close.
+        if (DocumentOrder(rows) is { Order: not DateOrder.Unknown } evidence)
+        {
+            foreach (var value in new[] { document.ReceivedDate, document.BidClosingDate, document.RequiredDeliveryDate })
+                if (IsAmbiguous(value) && value.Kind == CanonicalValueKind.Normalized)
+                    SettleOrder(value, evidence);
+            return;
+        }
+
         var closing = document.BidClosingDate;
         if (closing.Kind != CanonicalValueKind.Normalized)
             return;
@@ -402,6 +417,60 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             if (IsAmbiguous(other) && other.Kind == CanonicalValueKind.Normalized)
                 ReadMonthFirst(other, $"{MonthFirstTransformation}: same order as this document's closing date");
     }
+
+    /// <summary>Marker left on an ambiguous date whose order the document itself established.</summary>
+    private const string DayFirstTransformation = "read_day_first";
+
+    /// <summary>
+    /// The order a document's rows were read under: what the reader established from text the
+    /// rows do not carry (the print banner), else the rows' own unambiguous dates — the dates
+    /// every row states and the label/value pairs and columns nothing mapped.
+    /// </summary>
+    private static DateOrderEvidence? DocumentOrder(IEnumerable<RfqSpreadsheetRow> rows)
+    {
+        var list = rows as IReadOnlyCollection<RfqSpreadsheetRow> ?? rows.ToList();
+        var stated = list.Select(r => r.DocumentDateOrder).FirstOrDefault(e => e is { Order: not DateOrder.Unknown });
+        if (stated is not null) return stated;
+
+        var texts = new List<string?>();
+        var first = list.FirstOrDefault();
+        if (first is not null)
+            texts.AddRange(first.UnmappedHeaderLabels.Values);
+        foreach (var row in list)
+        {
+            texts.Add(row.ReceivedDate);
+            texts.Add(row.BidClosingDate);
+            texts.Add(row.RequiredDeliveryDate);
+            foreach (var value in row.UnmappedColumns.Values)
+                if (value.Length <= 40) texts.Add(value);
+        }
+        return DocumentDateOrder.Detect(texts);
+    }
+
+    /// <summary>
+    /// An ambiguous date whose order the document proved: read in that order, and no longer
+    /// ambiguous. The reason stays on the value so a reviewer can see why.
+    /// </summary>
+    private static void SettleOrder(CanonicalValue<DateTime> value, DateOrderEvidence evidence)
+    {
+        if (evidence.Order == DateOrder.MonthFirst)
+        {
+            if (RfqDateParser.SwapDayAndMonth(value.Value) is not { } swapped) return;
+            value.Value = DateTime.SpecifyKind(swapped, value.Value.Kind);
+            value.Transformations.Add($"{MonthFirstTransformation}: {evidence.Reason}");
+        }
+        else
+        {
+            value.Transformations.Add($"{DayFirstTransformation}: {evidence.Reason}");
+        }
+
+        value.Transformations.Remove(AmbiguousDateTransformation);
+        value.Confidence = SettledOrderConfidence;
+        value.ValidationStatus = ValidationStatus.Valid;
+    }
+
+    /// <summary>A date read in the order its own document proved: an inference, not a certainty of the token.</summary>
+    private const decimal SettledOrderConfidence = 0.95m;
 
     private static void ReadMonthFirst(CanonicalValue<DateTime> value, string reason)
     {

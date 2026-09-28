@@ -383,14 +383,13 @@ describe('ClientIdentityPanel — resolved', () => {
   });
 
   /**
-   * THE UNDO THAT COULD NOT WORK. "Change client" was offered on every resolved lead, but
-   * the server's re-pointing guard refuses to move the customer once the lead has become an
-   * RFQ and answers 409 — which the shared error layer renders as "This changed while you
-   * were working… refresh and reapply". Nothing had changed, so refreshing and retrying
-   * returned the identical refusal, forever. DecidePage already hid its picker once a
-   * customer was set; the two screens contradicted each other on the same lead.
+   * THE UNDO THAT COULD NOT WORK (pilot audit HT-02). "Change client" used to be offered on every
+   * resolved lead and refused by the server; then it was removed and replaced by advice that could
+   * not be followed ("reject and raise it again": a re-upload is a duplicate). The server now allows
+   * the change until an RFQ is made from the lead, so the button is offered exactly then, and after
+   * it the panel says plainly that the client is fixed.
    */
-  it('offers no undo it cannot honour on a confirmed lead, and says instead how to correct it', async () => {
+  it('offers Change client on a confirmed lead that is not an RFQ yet', async () => {
     renderPanel(
       <ClientIdentityPanel
         lead={lead({
@@ -398,15 +397,32 @@ describe('ClientIdentityPanel — resolved', () => {
           customerName: 'Saudi Electricity Company',
           customerMatchStatus: 'CONFIRMED',
           customerMatchReasonCode: 'SENDER_EMAIL_EXACT',
+          hasRfq: false,
+        })}
+      />,
+    );
+
+    expect(await screen.findByRole('link', { name: 'Saudi Electricity Company' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change client' })).toBeEnabled();
+    expect(screen.queryByText(/raise it again/i)).not.toBeInTheDocument();
+  });
+
+  it('offers no undo once the lead is an RFQ, and says the client is fixed', async () => {
+    renderPanel(
+      <ClientIdentityPanel
+        lead={lead({
+          customerId: 42,
+          customerName: 'Saudi Electricity Company',
+          customerMatchStatus: 'CONFIRMED',
+          customerMatchReasonCode: 'SENDER_EMAIL_EXACT',
+          hasRfq: true,
         })}
       />,
     );
 
     expect(await screen.findByRole('link', { name: 'Saudi Electricity Company' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Change client/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/locked now that the inquiry is confirmed/i)).toBeInTheDocument();
-    expect(screen.getByText(/reject this inquiry and raise it again/i)).toBeInTheDocument();
-    expect(screen.getByText(/correct the client there/i)).toBeInTheDocument();
+    expect(screen.getByText('This lead is already an RFQ, so its client is fixed.')).toBeInTheDocument();
   });
 
   it('keeps the client choosable while the lead has no customer yet', async () => {
@@ -414,6 +430,6 @@ describe('ClientIdentityPanel — resolved', () => {
 
     expect(await screen.findByText('No client linked yet')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Choose the customer' })).toBeEnabled();
-    expect(screen.queryByText(/locked now that the inquiry is confirmed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/client is fixed/i)).not.toBeInTheDocument();
   });
 });

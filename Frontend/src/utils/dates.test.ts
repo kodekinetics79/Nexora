@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { formatDateSafe, formatDateTime, formatRelativeReceived, normalizeApiDate, parseDateSafe } from './dates';
+import { calendarDaysUntil, formatDateSafe, formatDateTime, formatDeadline, formatDeadlineDate, formatDeadlineDay, formatRelativeReceived, normalizeApiDate, parseDateSafe } from './dates';
 
 /**
  * The server stores `timestamp without time zone` and sends it with no offset. The browser
@@ -100,5 +100,37 @@ describe('formatRelativeReceived — a document cannot arrive in the future', ()
     expect(formatRelativeReceived('2026-09-13T20:20:00Z', now)).toBe('2 days ago');
     expect(formatRelativeReceived('2026-08-30T20:20:00Z', now)).toBe('30 Aug 2026');
     expect(formatRelativeReceived(null, now)).toBe('—');
+  });
+});
+
+describe('formatDeadline — the buyer\'s clock, for every reader (pilot audit HT-01/HT-05)', () => {
+  it('shows a stored closing time as the portal printed it, east and west of UTC', () => {
+    for (const zone of ['America/New_York', 'Asia/Riyadh', 'Pacific/Auckland']) {
+      vi.stubEnv('TZ', zone);
+      try {
+        expect(formatDeadline('2026-09-06T17:00:00')).toBe('6 Sep 2026, 5:00 PM');
+        expect(formatDeadline('2026-09-13T01:45:00')).toBe('13 Sep 2026, 1:45 AM');
+        expect(formatDeadline('2026-10-08T15:00:00')).toBe('8 Oct 2026, 3:00 PM');
+        expect(formatDeadlineDate('2026-09-13T01:45:00')).toBe('13 Sep 2026');
+        expect(formatDeadlineDay('2026-09-08T17:00:00')).toBe('8 Sep');
+      } finally {
+        vi.stubEnv('TZ', 'Asia/Riyadh');
+      }
+    }
+  });
+
+  it('shows a closing day with no stated time as the day alone, and never a sentinel', () => {
+    expect(formatDeadline('2026-10-08T00:00:00')).toBe('8 Oct 2026');
+    expect(formatDeadline('2026-10-08')).toBe('8 Oct 2026');
+    expect(formatDeadline('0001-01-01T00:00:00')).toBe('—');
+    expect(formatDeadline(null, '')).toBe('');
+  });
+
+  it('counts calendar days to the deadline\'s own day', () => {
+    const now = new Date(2026, 8, 28, 23, 30);
+    expect(calendarDaysUntil('2026-09-28T01:45:00', now)).toBe(0);
+    expect(calendarDaysUntil('2026-09-29T00:00:00', now)).toBe(1);
+    expect(calendarDaysUntil('2026-09-06T17:00:00', now)).toBe(-22);
+    expect(calendarDaysUntil(null, now)).toBeNull();
   });
 });

@@ -47,6 +47,7 @@ import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { inspectableEvidenceUrl } from '../Workbench/evidenceRules';
 import type { DecisionMap, EditableLineDecision } from '../Workbench/workbenchRules';
 import { lineLabel } from './decideRules';
+import { formatDeadline, formatDeadlineDay } from '../../../utils/dates';
 import { readUnit, tenantUnitCode, unitCaption, type UnitOption } from './unitRules';
 
 export interface ConfirmedLine {
@@ -89,6 +90,16 @@ export const CHECK_LINES_PER_PAGE = 50;
 const toDateInput = (iso: string | null | undefined): string => {
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(iso ?? '');
   return match ? match[1] : '';
+};
+
+/**
+ * The picked day with the time the document stated ("2026-09-08" + 17:00 → "2026-09-08T17:00:00").
+ * The picker holds a day only; sending the bare day dropped a 5:00 PM close to midnight.
+ */
+export const withStatedTime = (day: string, original: string | null | undefined): string => {
+  const time = /[T ](\d{2}:\d{2})(?::(\d{2}))?/.exec(original ?? '');
+  if (!day || !time || (time[1] === '00:00' && (time[2] ?? '00') === '00')) return day;
+  return `${day}T${time[1]}:${time[2] ?? '00'}`;
 };
 
 /** Finds the canonical lead item behind a decision line: by line number first, then by position. */
@@ -465,6 +476,10 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
   const [showAll, setShowAll] = React.useState(false);
   const [edits, setEdits] = React.useState<Map<number, LineEdit>>(new Map());
   const [dueDate, setDueDate] = React.useState('');
+  // True once the rep answered "Closes 8 Sep or 9 Aug?" here: the answer is sent even when it is
+  // the reading already held, so the question does not come back.
+  const [dueAnswered, setDueAnswered] = React.useState(false);
+  const [receivedDate, setReceivedDate] = React.useState('');
   const [note, setNote] = React.useState('');
   const [evidenceIndex, setEvidenceIndex] = React.useState(0);
   const [refusal, setRefusal] = React.useState<string | null>(null);
@@ -509,6 +524,8 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
     }
     setEdits(next);
     setDueDate(toDateInput(lead.bidClosingDate));
+    setDueAnswered(false);
+    setReceivedDate(toDateInput(lead.recDate));
     setNote('');
     setShowAll(false);
     setPage(0);
@@ -521,11 +538,26 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
     mutationFn: async () => {
       if (!lead) throw new Error('The request has not loaded yet.');
       const originalDue = toDateInput(lead.bidClosingDate);
+      const header: { bidClosingDate?: string; recDate?: string } = {};
+      let expectedVersion = lead.reviewVersion ?? 0;
+      let received = lead.recDate;
+      if (dueDate && dueAnswered) {
+        // The answer to "Closes 8 Sep or 9 Aug?" is its own recorded decision (it also reads the
+        // received date the same way); the check then goes on from the version it left.
+        const answered = await leadService.confirmClosingDate(leadId, withStatedTime(dueDate, lead.bidClosingDate));
+        expectedVersion = answered.reviewVersion ?? expectedVersion;
+        received = answered.recDate;
+      } else if (dueDate && dueDate !== originalDue) {
+        header.bidClosingDate = withStatedTime(dueDate, lead.bidClosingDate);
+      }
+      if (receivedDate && receivedDate !== toDateInput(lead.recDate) && receivedDate !== toDateInput(received)) {
+        header.recDate = withStatedTime(receivedDate, lead.recDate);
+      }
       return extractionReviewService.submitReview(leadId, {
         action: 'approve',
-        expectedVersion: lead.reviewVersion ?? 0,
+        expectedVersion,
         reason: note.trim() || DEFAULT_CHECK_REASON,
-        header: dueDate && dueDate !== originalDue ? { bidClosingDate: dueDate } : {},
+        header,
         items: buildReviewItems(items, edits),
       });
     },
@@ -716,15 +748,68 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
                   ) : null}
                 </Stack>
 
-                <TextField
-                  size="small"
-                  type="date"
-                  label="Quote due"
-                  value={dueDate}
-                  onChange={(event) => setDueDate(event.target.value)}
-                  slotProps={{ inputLabel: { shrink: true } }}
-                  sx={{ maxWidth: 220 }}
-                />
+                {/* The picker draws the day in the browser's own order (06/09/2026 on a US machine), which
+                    a rep reading day-first takes for a match with the document's 9/6/2026. The day is
+                    therefore also written out, with the time the document stated. */}
+                <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+                  <TextField
+                    size="small"
+                    type="date"
+                    label="Quote due"
+                    value={dueDate}
+                    onChange={(event) => { setDueDate(event.target.value); setDueAnswered(false); }}
+                    helperText={formatDeadline(withStatedTime(dueDate, lead.bidClosingDate), ' ')}
+                    slotProps={{ inputLabel: { shrink: true }, formHelperText: { sx: { fontWeight: 700 } } }}
+                    sx={{ maxWidth: 220 }}
+                  />
+                  <TextField
+                    size="small"
+                    type="date"
+                    label="Received"
+                    value={receivedDate}
+                    onChange={(event) => setReceivedDate(event.target.value)}
+                    helperText={formatDeadline(receivedDate, ' ')}
+                    slotProps={{ inputLabel: { shrink: true } }}
+                    sx={{ maxWidth: 220 }}
+                  />
+                </Stack>
+                {lead.closingDateQuestion ? (
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    role="group"
+                    aria-label="Closing date question"
+                    sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1, p: 1, borderRadius: 2, bgcolor: 'warning.light' }}
+                  >
+                    {(() => {
+                      const readings = [lead.closingDateQuestion.currentReading, lead.closingDateQuestion.otherReading]
+                        .sort((a, b) => a.localeCompare(b));
+                      return (
+                        <>
+                          <Typography variant="body2" sx={{ fontWeight: 800 }}>
+                            {`Closes ${formatDeadlineDay(readings[0])} or ${formatDeadlineDay(readings[1])}?`}
+                          </Typography>
+                          {readings.map((reading) => {
+                            const chosen = dueAnswered && dueDate === toDateInput(reading);
+                            return (
+                              <Button
+                                key={reading}
+                                size="small"
+                                variant={chosen ? 'contained' : 'outlined'}
+                                color="inherit"
+                                aria-pressed={chosen}
+                                onClick={() => { setDueDate(toDateInput(reading)); setDueAnswered(true); }}
+                              >
+                                {formatDeadlineDay(reading)}
+                              </Button>
+                            );
+                          })}
+                          <Typography variant="caption">{`The document says ${lead.closingDateQuestion.documentText}.`}</Typography>
+                        </>
+                      );
+                    })()}
+                  </Stack>
+                ) : null}
 
                 {unitlessRows.length >= 2 ? (
                   <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1, p: 1.25, borderRadius: 2, bgcolor: 'action.hover' }}>

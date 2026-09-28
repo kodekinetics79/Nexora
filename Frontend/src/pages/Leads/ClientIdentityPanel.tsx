@@ -271,25 +271,20 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
         </Typography>
         {/* The engine's own sentence, quoting the document — not the category phrase. */}
         {explanation && <WhyLine>{explanation}</WhyLine>}
-        {/* NO "Change client" HERE — the control could not do what it offered.
-            The server's re-pointing guard (LeadRepository.LinkClientCoreAsync) refuses to
-            move the customer on a lead that has already become an RFQ, because
-            Rfq.InheritCommercialIdentity would then leave the lead and the RFQ naming
-            different buyers with no way to re-inherit. That refusal comes back as 409, and
-            the shared error layer titles every 409 "This changed while you were working"
-            and tells the rep to refresh and reapply — advice that cannot succeed here:
-            nothing changed underneath them, and the answer is the same every time. So the
-            rep refreshed and retried, and retried.
-            DecidePage has always hidden its own picker once a customer is set, which is how
-            the two screens came to contradict each other on the same lead. An honest
-            sentence beats a button that cannot work; the way out is named instead. */}
-        {canResolveClient && (
+        {/* Until an RFQ is made from the lead a wrong client can be changed (the server allows it
+            to that boundary and records who changed it, from and to). After that the RFQ carries
+            the client and every quote is addressed from it, so the change is not offered: no
+            button that cannot work, and no advice that cannot be followed. */}
+        {canResolveClient && !lead.hasRfq ? (
+          <Button size="small" onClick={openDialog} sx={{ mt: 1, fontWeight: 800, textTransform: 'none' }}>
+            Change client
+          </Button>
+        ) : null}
+        {canResolveClient && lead.hasRfq ? (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1.25, maxWidth: 560 }}>
-            This client is locked now that the inquiry is confirmed, so the quote and the order
-            cannot end up naming different buyers. If it is wrong, reject this inquiry and raise
-            it again — or, if it has already become an RFQ, correct the client there.
+            This lead is already an RFQ, so its client is fixed.
           </Typography>
-        )}
+        ) : null}
       </Box>,
       'resolved',
     );

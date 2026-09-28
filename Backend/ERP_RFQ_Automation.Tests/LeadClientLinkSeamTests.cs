@@ -385,15 +385,104 @@ public sealed class LeadClientLinkSeamTests
 
         await using (var context = spine.Context())
         {
-            var refusal = await Assert.ThrowsAsync<LeadReviewConflictException>(() =>
+            // A refusal in plain words (400), not a "this changed, refresh" conflict (409): a
+            // retry can never succeed.
+            var refusal = await Assert.ThrowsAsync<LeadReviewValidationException>(() =>
                 new LeadRepository(context).LinkClientAsync(
                     leadId, Tenant, new LeadClientLinkRequestDTO { CustomerId = otherClient }, "rep@tenant.test"));
-            Assert.Contains("already been converted", refusal.Message);
+            Assert.Contains("already an RFQ", refusal.Message);
+            Assert.True((await new LeadRepository(context).GetLeadByIdAsync(leadId, Tenant))!.HasRfq);
         }
 
         await using var verify = spine.Context();
         var lead2 = await verify.Leads.SingleAsync(x => x.Id == leadId);
         Assert.Equal(ClientLinkSpine.CustomerId, lead2.CustomerId);
+    }
+
+    /// <summary>
+    /// Pilot audit HT-02: an Aramco RFQ was linked to SEC because no Aramco client existed yet,
+    /// and nothing could undo it. Until an RFQ is made from the lead, a person may change the
+    /// client; the change is recorded as a change, from and to, by the person who made it.
+    /// </summary>
+    [Fact]
+    public async Task A_client_linked_by_mistake_can_be_changed_until_the_lead_is_an_RFQ()
+    {
+        using var spine = new ClientLinkSpine();
+        var leadId = await spine.IngestUnresolvedLeadAsync("CRM-SEAM-010", "bids@fultoncountyga.gov");
+        await using (var context = spine.Context())
+            await new LeadRepository(context).LinkClientAsync(
+                leadId, Tenant, new LeadClientLinkRequestDTO { CustomerId = ClientLinkSpine.CustomerId }, "rep@tenant.test");
+
+        const long rightClient = 7_951;
+        await using (var context = spine.Context())
+        {
+            Seed.Customer(context, rightClient, Tenant, "Saudi Aramco");
+            await context.SaveChangesAsync();
+        }
+
+        await using (var context = spine.Context())
+        {
+            var before = await new LeadRepository(context).GetLeadByIdAsync(leadId, Tenant);
+            Assert.False(before!.HasRfq);
+            var changed = await new LeadRepository(context).LinkClientAsync(
+                leadId, Tenant, new LeadClientLinkRequestDTO { CustomerId = rightClient }, "manager@tenant.test");
+            Assert.Equal(rightClient, changed!.CustomerId);
+        }
+
+        await using var verify = spine.Context();
+        var audits = await verify.Set<LeadReviewAudit>().Where(a => a.LeadId == leadId)
+            .OrderBy(a => a.ToVersion).ToListAsync();
+        Assert.Equal(new[] { "link-client", "change-client" }, audits.Select(a => a.Action).ToArray());
+        Assert.Equal("manager@tenant.test", audits[1].ReviewedBy);
+        Assert.Contains($"customer {ClientLinkSpine.CustomerId} to customer {rightClient}", audits[1].Reason);
+    }
+
+    /// <summary>
+    /// Pilot audit CP-02 / HT-01: "Closes 8 Sep or 9 Aug?" answered on Decide sets the closing
+    /// date (keeping its time), reads the received date the same way, re-renders the Hijri date,
+    /// and stays answered.
+    /// </summary>
+    [Fact]
+    public async Task Answering_the_closing_date_question_sets_both_dates_and_the_Hijri_and_records_who()
+    {
+        using var spine = new ClientLinkSpine();
+        var leadId = await spine.IngestUnresolvedLeadAsync("CRM-SEAM-011", "bids@fultoncountyga.gov");
+        const string note =
+            "[NEEDS REVIEW] \"9/8/2026 5:00 PM\" is ambiguous — both parts of the bid closing date are 12 or lower, so it could be "
+            + "either day/month or month/day. It has been read day-first; confirm it. "
+            + "\"9/3/2026 3:59 PM\" is ambiguous — both parts of the received date are 12 or lower, so it could be "
+            + "either day/month or month/day. It has been read day-first; confirm it.";
+        await using (var context = spine.Context())
+        {
+            var lead = await context.Leads.SingleAsync(x => x.Id == leadId);
+            lead.HeaderRemarks = note;
+            lead.BidClosingDate = new DateTime(2026, 8, 9, 17, 0, 0);
+            lead.BidClosingDateHijri = RfqDateParser.ToHijri(lead.BidClosingDate);
+            lead.RecDate = new DateTime(2026, 3, 9, 15, 59, 0);
+            await context.SaveChangesAsync();
+        }
+
+        await using (var context = spine.Context())
+        {
+            var asked = await new LeadRepository(context).GetLeadByIdAsync(leadId, Tenant);
+            Assert.Equal(new DateTime(2026, 9, 8, 17, 0, 0), asked!.ClosingDateQuestion!.OtherReading);
+
+            // The rep presses "8 Sep": the page sends the day, the server keeps the 5:00 PM.
+            var answered = await new LeadRepository(context).ConfirmClosingDateAsync(leadId, Tenant,
+                new LeadClosingDateAnswerDTO { BidClosingDate = new DateTime(2026, 9, 8) }, "rep@tenant.test");
+            Assert.Equal(new DateTime(2026, 9, 8, 17, 0, 0), answered!.BidClosingDate);
+            Assert.Equal(new DateTime(2026, 9, 3, 15, 59, 0), answered.RecDate);
+            Assert.Equal(RfqDateParser.ToHijri(new DateTime(2026, 9, 8)), answered.BidClosingDateHijri);
+            Assert.Null(answered.ClosingDateQuestion);
+        }
+
+        await using var verify = spine.Context();
+        var stored = await verify.Leads.SingleAsync(x => x.Id == leadId);
+        Assert.Equal(RfqDateParser.ToHijri(new DateTime(2026, 9, 8)), stored.BidClosingDateHijri);
+        Assert.DoesNotContain("ambiguous", stored.HeaderRemarks ?? string.Empty);
+        var audit = await verify.Set<LeadReviewAudit>().SingleAsync(a => a.LeadId == leadId && a.Action == "confirm-date");
+        Assert.Equal("rep@tenant.test", audit.ReviewedBy);
+        Assert.Contains("9/8/2026 5:00 PM", audit.Reason);
     }
 
     /// <summary>

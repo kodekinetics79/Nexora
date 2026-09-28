@@ -288,7 +288,7 @@ namespace ERP_RFQ_Automation.Repositories
                 RequiredDeliveryDate = rfq.RequiredDeliveryDate,
                 DeliveryLocation = rfq.DeliveryLocation,
                 AgreementReference = rfq.AgreementReference,
-                BidClosingDateHijri = rfq.BidClosingDateHijri,
+                BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(rfq.BidClosingDate) ?? rfq.BidClosingDateHijri,
                 InquiryType = rfq.InquiryType,
                 LeadId = rfq.LeadId,
                 PromotionId = rfq.PromotionId,
@@ -637,6 +637,8 @@ namespace ERP_RFQ_Automation.Repositories
             if (rfq.RecDate != default)
                 existing.RecDate = rfq.RecDate;
             existing.BidClosingDate = rfq.BidClosingDate;
+            // The Hijri date follows the closing date it renders (it went stale on every edit).
+            existing.BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(existing.BidClosingDate);
             existing.BiddingDecision = rfq.BiddingDecision;
             existing.AcknowledgmentDate = rfq.AcknowledgmentDate;
             existing.SubDate = rfq.SubDate;

@@ -22,7 +22,7 @@ import LateIngestedBadge from './LateIngestedBadge';
 import ClientIdentityPanel from './ClientIdentityPanel';
 import ResolveClientDialog from './ResolveClientDialog';
 import { clientDisplayName } from './ClientCell';
-import { parseDateSafe, formatDateSafe } from '../../utils/dates';
+import { calendarDaysUntil, formatDateSafe, formatDeadline } from '../../utils/dates';
 import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 import { useAuth } from '../../context/AuthContext';
 import { displayDataValue } from '../../utils/displayDataValue';
@@ -44,11 +44,9 @@ import { commercialActionPermissions } from '../../utils/commercialActionPermiss
  * render nothing — parseDateSafe handles that.
  */
 const DeadlineChip: React.FC<{ bidClosingDate?: string | null }> = ({ bidClosingDate }) => {
-  const close = parseDateSafe(bidClosingDate);
-  if (!close) return null;
-
-  const msPerDay = 24 * 60 * 60 * 1000;
-  const daysLeft = Math.ceil((close.getTime() - Date.now()) / msPerDay);
+  // The one calendar-day count every screen uses (utils/dates calendarDaysUntil).
+  const daysLeft = calendarDaysUntil(bidClosingDate);
+  if (daysLeft == null) return null;
 
   const label = daysLeft < 0
     ? `Overdue by ${Math.abs(daysLeft)} day${Math.abs(daysLeft) === 1 ? '' : 's'}`
@@ -66,7 +64,7 @@ const DeadlineChip: React.FC<{ bidClosingDate?: string | null }> = ({ bidClosing
     <Chip
       size="small"
       label={label}
-      title={`Bid closes ${formatDateSafe(bidClosingDate)}`}
+      title={`Bid closes ${formatDeadline(bidClosingDate)}`}
       sx={{ fontWeight: 900, height: 24, fontSize: '0.7rem', border: '1px solid', ...palette }}
     />
   );
@@ -369,7 +367,7 @@ const LeadDetailPage: React.FC = () => {
                   are shown together and the cross-check is a glance rather than a
                   conversion someone has to do in their head. */}
               <Grid size={{ xs: 12, md: 4 }} component="div">
-                <DataField label="Bid Close" value={formatDate(lead.bidClosingDate)} />
+                <DataField label="Bid Close" value={formatDeadline(lead.bidClosingDate)} />
                 {lead.bidClosingDateHijri && (
                   <Typography
                     variant="caption"

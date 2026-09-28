@@ -392,7 +392,7 @@ namespace ERP_RFQ_Automation.Repositories
                     // deadline in the grid: those are two different dates and a trader who
                     // sees only one of them quotes against the wrong one.
                     RequiredDeliveryDate = l.RequiredDeliveryDate,
-                    BidClosingDateHijri = l.BidClosingDateHijri,
+                    BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(l.BidClosingDate) ?? l.BidClosingDateHijri,
                     AgreementReference = l.AgreementReference,
                     DeliveryLocation = l.DeliveryLocation,
                     BiddingDecision = l.BiddingDecision,
@@ -891,6 +891,9 @@ namespace ERP_RFQ_Automation.Repositories
                     .FirstOrDefaultAsync()
                 : null;
             var detailCandidates = await GetClientCandidatesAsync(id, businessUnitId);
+            // Whether the client may still be changed: until an RFQ is made from the lead.
+            var hasRfq = await _context.Rfqs.AsNoTracking().IgnoreQueryFilters()
+                .AnyAsync(r => r.LeadId == lead.Id && r.BusinessUnitId == businessUnitId);
             var emailProvenance = lead.EmailIngestsId.HasValue
                 ? await (from ingest in _context.EmailIngests.AsNoTracking()
                          where ingest.Id == lead.EmailIngestsId.Value
@@ -935,7 +938,11 @@ namespace ERP_RFQ_Automation.Repositories
                 // FR-RFQ-03 / FR-RFQ-04 intake fields — see LeadResponseDTO for why each
                 // is distinct from the date or reference sitting next to it.
                 RequiredDeliveryDate = lead.RequiredDeliveryDate,
-                BidClosingDateHijri = lead.BidClosingDateHijri,
+                // Rendered from the closing date as it is NOW, so an edited date never sits
+                // beside the Hijri date of the value it replaced.
+                BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(lead.BidClosingDate) ?? lead.BidClosingDateHijri,
+                ClosingDateQuestion = ERP_RFQ_Automation.Extraction.ClosingDateQuestion.From(lead.HeaderRemarks, lead.BidClosingDate),
+                HasRfq = hasRfq,
                 AgreementReference = lead.AgreementReference,
                 DeliveryLocation = lead.DeliveryLocation,
                 BiddingDecision = lead.BiddingDecision,
@@ -1393,7 +1400,14 @@ namespace ERP_RFQ_Automation.Repositories
             var headerChanged = new List<string>();
             if (header.Rfqno != null && header.Rfqno != lead.Rfqno) headerChanged.Add("rfqno");
             if (header.BuyersName != null && header.BuyersName != lead.BuyersName) headerChanged.Add("buyersName");
+            // A date picker holds a day, not a time: a day that arrives at midnight keeps the time
+            // the document stated, or every save of the review page turned a 5:00 PM close into 00:00.
+            if (header.BidClosingDate is { } pickedClosing && pickedClosing.TimeOfDay == TimeSpan.Zero
+                && lead.BidClosingDate is { } statedClosing && statedClosing.TimeOfDay != TimeSpan.Zero)
+                header.BidClosingDate = pickedClosing.Date + statedClosing.TimeOfDay;
+            var closingDayChanged = header.BidClosingDate != null && header.BidClosingDate.Value.Date != lead.BidClosingDate?.Date;
             if (header.BidClosingDate != null && header.BidClosingDate != lead.BidClosingDate) headerChanged.Add("bidClosingDate");
+            if (header.RecDate != null && header.RecDate != lead.RecDate) headerChanged.Add("recDate");
             if (header.RequiredDeliveryDate != null && header.RequiredDeliveryDate != lead.RequiredDeliveryDate) headerChanged.Add("requiredDeliveryDate");
             if (header.DeliveryLocation != null && header.DeliveryLocation != lead.DeliveryLocation) headerChanged.Add("deliveryLocation");
             if (header.AgreementReference != null && header.AgreementReference != lead.AgreementReference) headerChanged.Add("agreementReference");
@@ -1408,7 +1422,14 @@ namespace ERP_RFQ_Automation.Repositories
             // Header edits: only apply provided (non-null) fields.
             if (header.Rfqno != null) lead.Rfqno = header.Rfqno;
             if (header.BuyersName != null) lead.BuyersName = header.BuyersName;
-            if (header.BidClosingDate != null) lead.BidClosingDate = header.BidClosingDate;
+            if (header.BidClosingDate != null)
+            {
+                lead.BidClosingDate = header.BidClosingDate;
+                // The Hijri date is a rendering of the Gregorian one: it follows every change,
+                // or the lead shows two dates that disagree.
+                lead.BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(lead.BidClosingDate);
+            }
+            if (header.RecDate != null && header.RecDate.Value.Year >= 2000) lead.RecDate = header.RecDate.Value;
             if (header.RequiredDeliveryDate != null) lead.RequiredDeliveryDate = header.RequiredDeliveryDate;
             if (header.DeliveryLocation != null) lead.DeliveryLocation = header.DeliveryLocation;
             if (header.AgreementReference != null) lead.AgreementReference = header.AgreementReference;
@@ -1419,6 +1440,10 @@ namespace ERP_RFQ_Automation.Repositories
             lead.HeaderRemarks = header.HeaderRemarks ?? (action == "approve"
                 ? StripNeedsReviewPrefix(lead.HeaderRemarks)
                 : lead.HeaderRemarks);
+            // A person who moved the closing date to another day has answered the day/month question
+            // about it. Approving without touching it answers nothing (PUT closing-date does that).
+            if (closingDayChanged && header.HeaderRemarks == null)
+                lead.HeaderRemarks = ERP_RFQ_Automation.Extraction.ClosingDateQuestion.RemoveDateQuestions(lead.HeaderRemarks);
 
             // A review never mutates or deletes a canonical line already referenced by an
             // immutable LeadRevision. Build a fresh current projection, archive the previous
@@ -1702,10 +1727,13 @@ namespace ERP_RFQ_Automation.Repositories
             {
                 var hasRfq = await _context.Rfqs.AsNoTracking().IgnoreQueryFilters()
                     .AnyAsync(r => r.LeadId == lead.Id && r.BusinessUnitId == businessUnitId);
+                // A refusal, not a conflict: 409 reads "this changed while you were working, refresh
+                // and retry", and retrying can never succeed. Until the RFQ exists the change is
+                // allowed (the database rule was relaxed to the same boundary, migration
+                // 20260929010000) and recorded below like any other link.
                 if (hasRfq)
-                    throw new LeadReviewConflictException(
-                        "This lead has already been converted to an RFQ, so its client cannot be changed. "
-                        + "Correct the client on the RFQ instead, or reject and re-raise the enquiry.");
+                    throw new LeadReviewValidationException(
+                        "This lead is already an RFQ, so its client can no longer be changed.");
             }
 
             var beforeJson = SerializeReviewSnapshot(lead);
@@ -1742,9 +1770,15 @@ namespace ERP_RFQ_Automation.Repositories
             try
             {
                 await _context.SaveChangesAsync();
+                // A change of client says so in the identity trail, from and to, so the audit
+                // reads as the correction it is rather than as a second first link.
+                var linkReason = !string.IsNullOrWhiteSpace(request.Reason)
+                    ? request.Reason.Trim()
+                    : previousCustomerId.HasValue && previousCustomerId.Value != customerId
+                        ? $"Human client identity change: customer {previousCustomerId.Value} to customer {customerId}."
+                        : "Human client identity link.";
                 await new LeadIdentityApplicationService(_context).AppendHumanRevisionAsync(
-                    businessUnitId, lead.Id, linkedBy.Trim(),
-                    string.IsNullOrWhiteSpace(request.Reason) ? "Human client identity link." : request.Reason.Trim(),
+                    businessUnitId, lead.Id, linkedBy.Trim(), linkReason,
                     $"lead-client-link-revision:{businessUnitId}:{lead.Id}:{lead.ReviewVersion}");
 
                 var audit = new LeadReviewAudit
@@ -1754,9 +1788,9 @@ namespace ERP_RFQ_Automation.Repositories
                     FromVersion = fromVersion,
                     ToVersion = lead.ReviewVersion,
                     // 11 characters; the column is varchar(20).
-                    Action = "link-client",
+                    Action = previousCustomerId.HasValue && previousCustomerId.Value != customerId ? "change-client" : "link-client",
                     ReviewedBy = linkedBy.Trim(),
-                    Reason = string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim(),
+                    Reason = linkReason,
                     BeforeJson = beforeJson,
                     AfterJson = SerializeReviewSnapshot(lead),
                     ReviewedOn = linkedOn
@@ -1791,6 +1825,96 @@ namespace ERP_RFQ_Automation.Repositories
             _logger?.LogInformation(
                 "Lead {LeadId} linked to customer {CustomerId} (contact {ContactId}) by {LinkedBy}.",
                 lead.Id, customerId, request.ContactId, linkedBy);
+
+            return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
+        /// <summary>
+        /// A person answering "Closes 8 Sep or 9 Aug?" — or setting the closing date outright.
+        ///
+        /// <para>Writes the closing date (keeping the time the document stated), re-renders the
+        /// Hijri date from it, reads the received date in the same day/month order when the
+        /// document's received date was ambiguous the same way, and removes the question from the
+        /// lead's note so it stays answered. One immutable audit row records who answered and the
+        /// before/after image, exactly as a client link does.</para>
+        ///
+        /// <para>Separate from the extraction review on purpose: the review rewrites every line
+        /// from a snapshot the caller holds, and a one-field answer must not need a 1,500-line
+        /// payload or be refused because the review has closed.</para>
+        /// </summary>
+        public async Task<LeadResponseDTO?> ConfirmClosingDateAsync(
+            long id, long businessUnitId, LeadClosingDateAnswerDTO answer, string answeredBy)
+        {
+            ArgumentNullException.ThrowIfNull(answer);
+            if (string.IsNullOrWhiteSpace(answeredBy))
+                throw new LeadReviewValidationException("Reviewer identity is required.");
+            if (answer.BidClosingDate is not { } chosen || chosen.Year < 2000)
+                throw new LeadReviewValidationException("A closing date is required.");
+
+            var lead = await _context.Leads
+                .Include(l => l.LeadItems)
+                .Include(l => l.EmailIngests)
+                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+            if (lead == null) return null;
+
+            if (answer.ExpectedVersion.HasValue && answer.ExpectedVersion.Value != lead.ReviewVersion)
+                throw new LeadReviewConflictException(
+                    $"Review version {answer.ExpectedVersion} is stale; current version is {lead.ReviewVersion}.");
+
+            var beforeJson = SerializeReviewSnapshot(lead);
+            var fromVersion = lead.ReviewVersion;
+            var question = ERP_RFQ_Automation.Extraction.ClosingDateQuestion.From(lead.HeaderRemarks, lead.BidClosingDate);
+
+            var closing = DateTime.SpecifyKind(chosen, DateTimeKind.Unspecified);
+            // An answer given as a bare day keeps the time the document stated.
+            if (closing.TimeOfDay == TimeSpan.Zero && lead.BidClosingDate is { } previous && previous.TimeOfDay != TimeSpan.Zero)
+                closing = closing.Date + previous.TimeOfDay;
+
+            if (question is not null)
+            {
+                var dayFirst = ERP_RFQ_Automation.Extraction.RfqDateParser.Read(question.DocumentText).Value;
+                if (dayFirst is { } df)
+                {
+                    bool? monthFirst = closing.Date == df.Date ? false
+                        : ERP_RFQ_Automation.Extraction.RfqDateParser.SwapDayAndMonth(df) is { } mf && closing.Date == mf.Date ? true
+                        : null;
+                    if (monthFirst is { } order
+                        && ERP_RFQ_Automation.Extraction.ClosingDateQuestion.ReceivedDateInOrder(lead.HeaderRemarks, lead.RecDate, order) is { } received)
+                        lead.RecDate = received.Date + lead.RecDate.TimeOfDay;
+                }
+            }
+
+            lead.BidClosingDate = closing;
+            lead.BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(closing);
+            lead.HeaderRemarks = ERP_RFQ_Automation.Extraction.ClosingDateQuestion.RemoveDateQuestions(lead.HeaderRemarks);
+            var answeredOn = DateTime.UtcNow;
+            lead.ModifiedDate = answeredOn;
+            lead.ReviewVersion++;
+
+            _context.Set<LeadReviewAudit>().Add(new LeadReviewAudit
+            {
+                BusinessUnitId = businessUnitId,
+                LeadId = lead.Id,
+                FromVersion = fromVersion,
+                ToVersion = lead.ReviewVersion,
+                Action = "confirm-date",
+                ReviewedBy = answeredBy.Trim(),
+                Reason = question is null
+                    ? $"Closing date set to {closing:d MMM yyyy, HH:mm}."
+                    : $"Closing date \"{question.DocumentText}\" confirmed as {closing:d MMM yyyy, HH:mm}.",
+                BeforeJson = beforeJson,
+                AfterJson = SerializeReviewSnapshot(lead),
+                ReviewedOn = answeredOn
+            });
+
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                throw new LeadReviewConflictException("The lead changed while the closing date was being saved. Refresh and retry.");
+            }
 
             return await GetLeadByIdAsync(id, businessUnitId);
         }

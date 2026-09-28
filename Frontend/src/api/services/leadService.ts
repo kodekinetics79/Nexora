@@ -61,6 +61,16 @@ export interface ClientResolutionRunDTO {
   failed: number;
 }
 
+/** "Closes 8 Sep or 9 Aug?" — the two readings of a closing date the document left ambiguous. */
+export interface ClosingDateQuestionDTO {
+  /** The date exactly as the document printed it, e.g. "9/8/2026 5:00 PM". */
+  documentText: string;
+  /** What the lead holds now (Nexora's guess). */
+  currentReading: string;
+  /** The same token read the other way round, same time of day. */
+  otherReading: string;
+}
+
 export interface LeadResponseDTO {
   id: number;
   commercialCaseId?: number | null;
@@ -129,6 +139,13 @@ export interface LeadResponseDTO {
   // FR-RFQ-04. bidClosingDate in the Umm al-Qura calendar, shown ALONGSIDE the Gregorian
   // date, never instead of it — a Hijri deadline read as a Gregorian one loses the bid.
   bidClosingDateHijri?: string | null;
+  /**
+   * Detail only. Set when the document's closing date could be read two ways and nothing on it
+   * said which ("9/8/2026": 9 Aug or 8 Sep); the rep answers it on Decide.
+   */
+  closingDateQuestion?: ClosingDateQuestionDTO | null;
+  /** Detail only. True once an RFQ was made from this lead: its client can no longer change. */
+  hasRfq?: boolean;
   // FR-RFQ-03. The standing agreement / frame contract this inquiry is called off
   // against. Distinct from rfqno (the inquiry's own reference).
   agreementReference?: string | null;
@@ -793,6 +810,12 @@ const leadService = {
    * inventing a version to satisfy the wire format would turn a stale render into a
    * spurious conflict.
    */
+  /** Answers "Closes 8 Sep or 9 Aug?" (or sets the closing date). The server keeps the stated time. */
+  confirmClosingDate: async (id: number, bidClosingDate: string): Promise<LeadResponseDTO> => {
+    const r = await axiosInstance.put<LeadResponseDTO>(`/api/Lead/${id}/closing-date`, { bidClosingDate });
+    return r.data;
+  },
+
   linkClient: async (
     id: number,
     body: { customerId: number; contactId?: number | null; reason?: string },
