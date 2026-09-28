@@ -56,6 +56,17 @@ describe('BuyerTermsPanel', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('reads the terms of an SEC print saved as .doc (an Ariba HTML page)', async () => {
+    getBuyerTerms.mockResolvedValue([
+      { key: 'quote_currency', label: 'Quote in', value: 'SAR only (local vendors)', quote: '2 Local vendors MUST bid in SAR only' },
+    ]);
+    renderPanel([evidence({ sourceDocumentId: 24, name: 'SE  RFP C001817585.doc', mediaType: 'text/html' })]);
+
+    const section = await screen.findByRole('region', { name: 'Buyer requires' });
+    expect(getBuyerTerms).toHaveBeenCalledWith(24);
+    expect(within(section).getByText('SAR only (local vendors)')).toBeInTheDocument();
+  });
+
   it('does not ask for terms from a file that is not a Word document', () => {
     const { container } = renderPanel([evidence({ name: 'bid-list.xlsx', mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })]);
     expect(getBuyerTerms).not.toHaveBeenCalled();

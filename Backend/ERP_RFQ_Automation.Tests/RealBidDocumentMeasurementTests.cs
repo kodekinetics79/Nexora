@@ -70,6 +70,17 @@ public sealed class RealBidDocumentMeasurementTests
                 report.AppendLine($"    #{line.LineItemNo.Value} name={Clip(line.ProductName.Value)} qty={line.Quantity.OriginalValue} uom={line.UnitOfMeasure.Value} cur={line.Currency.Value} maker={Clip(line.ManufacturerName.Value)} pn={Clip(line.ManufacturerPartNumber.Value)} mat={line.CustomerMaterialCode.Value} extras=[{string.Join(", ", line.ExtraFields?.Keys ?? Enumerable.Empty<string>())}]");
         }
 
+        // Buyer terms from every document the terms reader can reach (SEC prints are HTML .doc).
+        report.AppendLine();
+        report.AppendLine("buyer terms:");
+        foreach (var path in Directory.GetFiles(root).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(path);
+            if (!ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.CanRead(name, null)) continue;
+            var terms = ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.ReadDocument(File.ReadAllBytes(path), name);
+            report.AppendLine($"{name} | {terms.Count} | " + string.Join(" · ", terms.Select(t => $"{t.Label}: {t.Value}")));
+        }
+
         var output = Environment.GetEnvironmentVariable("NEXORA_REAL_DOCS_REPORT");
         if (!string.IsNullOrWhiteSpace(output))
             File.WriteAllText(output, report.ToString());
