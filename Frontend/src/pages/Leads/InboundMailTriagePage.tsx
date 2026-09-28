@@ -26,6 +26,7 @@ import {
   TableRow,
   Tabs,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import {
@@ -41,7 +42,7 @@ import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import RefreshFailedNotice from '../../components/common/RefreshFailedNotice';
 import { EmptyState, LoadingState } from '../../platform/components/States';
 import { useAuth } from '../../context/AuthContext';
-import { INBOX_ROOT } from '../../components/layout/navCatalog';
+import ViewTabs from '../../components/layout/ViewTabs';
 import { presentableServerText } from '../../utils/apiErrors';
 import emailTriageService, {
   describeAssemblyState,
@@ -683,56 +684,38 @@ export default function InboundMailTriagePage() {
   };
 
   return (
-    <Box sx={{ maxWidth: 1500, mx: 'auto', p: { xs: 2, md: 3 } }}>
+    <Box sx={{ p: { xs: 1, sm: 2 } }}>
       <Stack
         direction={{ xs: 'column', sm: 'row' }}
-        spacing={2}
-        sx={{ mb: 2, justifyContent: 'space-between', alignItems: { sm: 'flex-start' } }}
+        spacing={1.5}
+        sx={{ mb: 1, justifyContent: 'space-between', alignItems: { sm: 'center' } }}
       >
-        <Box>
-          {/*
-            This screen already spends its one level of tabs on the triage outcome (Inquiry route /
-            Uncertain route / Supplier / Noise), so it does NOT also carry the Inbox tab strip its three
-            sibling intake screens do — two stacked strips of the same shape is precisely the
-            tab-within-tab confusion this navigation pass exists to remove. A plain link back to the
-            queue does the same job without a second row of tabs.
-          */}
-          <Link
-            component={RouterLink}
-            to={INBOX_ROOT}
-            variant="body2"
-            sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, fontWeight: 700, mb: 0.5 }}
-          >
-            ← Inbox
-          </Link>
-          <Typography variant="h5" component="h1">
-            Inbound Mail
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 780 }}>
-            What the system decided about each message that arrived in the ingestion mailbox, and why. A decision here
-            is reversible — every original email is kept.
-          </Typography>
-        </Box>
+        {/* The Inbox tabs sit under this header like every other Inbox screen; this screen's own
+            decision tabs sit beneath them as small pills, so the two rows never look alike. */}
+        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em' }}>
+          Inbound mail
+        </Typography>
         <Stack direction="row" spacing={1.5} sx={{ flexShrink: 0 }}>
           <Button
             variant="contained"
             startIcon={pollMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <PollIcon />}
             onClick={() => pollMutation.mutate()}
             disabled={!canPoll || pollMutation.isPending}
-            sx={{ fontWeight: 800 }}
+            sx={{ fontWeight: 700, minHeight: 36 }}
           >
             {pollMutation.isPending ? 'Polling…' : 'Poll now'}
           </Button>
-          <Button
-            variant="outlined"
-            startIcon={manualRefreshing ? <CircularProgress size={18} color="inherit" /> : <RefreshIcon />}
-            onClick={() => void refreshNow()}
-            disabled={manualRefreshing}
-          >
-            Refresh
-          </Button>
+          <Tooltip title="Refresh">
+            <span>
+              <IconButton aria-label="Refresh" onClick={() => void refreshNow()} disabled={manualRefreshing} sx={{ width: 36, height: 36 }}>
+                {manualRefreshing ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon fontSize="small" />}
+              </IconButton>
+            </span>
+          </Tooltip>
         </Stack>
       </Stack>
+
+      <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
 
       {!canPoll && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
@@ -835,7 +818,16 @@ export default function InboundMailTriagePage() {
         variant="scrollable"
         scrollButtons="auto"
         allowScrollButtonsMobile
-        sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}
+        sx={{
+          mb: 1.5,
+          minHeight: 32,
+          '& .MuiTabs-indicator': { display: 'none' },
+          '& .MuiTab-root': {
+            minHeight: 32, py: 0.5, px: 1.5, mr: 0.75, borderRadius: 999, textTransform: 'none',
+            fontSize: '0.8rem', fontWeight: 700, border: '1px solid', borderColor: 'divider', color: 'text.secondary',
+          },
+          '& .MuiTab-root.Mui-selected': { color: 'text.primary', bgcolor: 'action.selected', borderColor: 'text.secondary' },
+        }}
       >
         {TABS.map((tab, index) => (
           <Tab
@@ -850,9 +842,6 @@ export default function InboundMailTriagePage() {
       </Tabs>
 
       <Box role="tabpanel" id="triage-panel" aria-labelledby={`triage-tab-${activeTab.key}`}>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 900 }}>
-          {activeTab.blurb}
-        </Typography>
 
         {confirmation && (
           <Alert
