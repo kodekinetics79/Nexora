@@ -238,6 +238,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(p => p.Uom)
                 .Include(p => p.Bu)
                 .Include(p => p.ProductAttachments)
+                .Include(p => p.PriceCurrency)
                 .FirstOrDefaultAsync(p => p.Id == id && p.Buid == businessUnitId) ?? throw new KeyNotFoundException($"Product with ID {id} not found in Business Unit {businessUnitId}.");
         }
 

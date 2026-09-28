@@ -25,28 +25,41 @@ export interface NextStepPanelProps {
    * one of the two, so a reader (and a test) finds exactly one "Next step".
    */
   ariaLabel?: string;
+  /**
+   * One line: title and sentence run together, the control on the right, tight padding. For a
+   * screen whose work (a line table) must start near the top: the RFQ page, owner 2026-09-27.
+   */
+  dense?: boolean;
 }
 
-const NextStepPanel: React.FC<NextStepPanelProps> = ({ tone, title, sentence, action, children, testId, ariaLabel }) => (
+const NextStepPanel: React.FC<NextStepPanelProps> = ({ tone, title, sentence, action, children, testId, ariaLabel, dense = false }) => (
   <Alert
     severity={tone}
     role="status"
     aria-label={ariaLabel}
     data-testid={testId}
     sx={{
-      mb: 2,
-      px: 1.75,
-      py: 1.15,
-      borderRadius: 3,
+      mb: dense ? 0 : 2,
+      px: dense ? 1.25 : 1.75,
+      py: dense ? 0.25 : 1.15,
+      borderRadius: dense ? 1.5 : 3,
       border: '1px solid',
       borderColor: (t) => alpha(t.palette[tone].main, t.palette.mode === 'dark' ? 0.4 : 0.3),
       borderLeft: '4px solid',
       borderLeftColor: `${tone}.main`,
-      alignItems: 'flex-start',
-      '& .MuiAlert-message': { width: '100%', minWidth: 0 },
-      '& .MuiAlert-icon': { mt: 0.5 },
+      alignItems: dense ? 'center' : 'flex-start',
+      '& .MuiAlert-message': { width: '100%', minWidth: 0, py: dense ? 0.5 : undefined },
+      '& .MuiAlert-icon': { mt: dense ? 0 : 0.5, py: dense ? 0.5 : undefined },
     }}
   >
+    {dense ? (
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={{ xs: 0.75, md: 2 }} sx={{ justifyContent: 'space-between', alignItems: { md: 'center' } }}>
+        <Typography sx={{ fontSize: '0.875rem', lineHeight: 1.4, fontWeight: 500, minWidth: 0 }}>
+          <Box component="span" sx={{ fontWeight: 800, mr: 0.75 }}>{title}:</Box>{sentence}
+        </Typography>
+        {action && <Box sx={{ flexShrink: 0, '& .MuiButton-root': { minHeight: 32, py: 0.25 } }}>{action}</Box>}
+      </Stack>
+    ) : (
     <Stack direction={{ xs: 'column', md: 'row' }} spacing={{ xs: 1.5, md: 3 }} sx={{ justifyContent: 'space-between', alignItems: { md: 'center' } }}>
       <Box sx={{ minWidth: 0 }}>
         <AlertTitle sx={{ fontWeight: 700, mb: 0.15, fontSize: '0.95rem' }}>{title}</AlertTitle>
@@ -54,6 +67,7 @@ const NextStepPanel: React.FC<NextStepPanelProps> = ({ tone, title, sentence, ac
       </Box>
       {action && <Box sx={{ flexShrink: 0 }}>{action}</Box>}
     </Stack>
+    )}
     {children && <Box sx={{ mt: 1.15, pt: 1.15, borderTop: '1px solid', borderColor: 'divider' }}>{children}</Box>}
   </Alert>
 );

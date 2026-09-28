@@ -60,6 +60,12 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public bool IsStale { get; set; }
         /// <summary>Days since the quote was sent (null when never sent).</summary>
         public int? DaysSinceSent { get; set; }
+        /// <summary>
+        /// Set once a later revision of this quote has been SENT: the customer now holds that one,
+        /// so this quote no longer counts, needs no follow-up and says "Superseded by …".
+        /// A revision still in draft does not supersede anything; the customer has not seen it.
+        /// </summary>
+        public string? SupersededByQuoteNo { get; set; }
 
         /// <summary>
         /// R7: when the validity date was last moved by an explicit, reasoned extend command.

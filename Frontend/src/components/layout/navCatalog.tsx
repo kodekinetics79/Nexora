@@ -56,6 +56,7 @@ import {
   UploadFile as UploadIcon,
   RateReview as ReviewIcon,
   Business as AdminOpsIcon,
+  PriceChange as PriceSheetIcon,
 } from '@mui/icons-material';
 
 /**
@@ -811,6 +812,15 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <InventoryIcon />,
         moduleName: 'Products',
         keywords: ['catalogue', 'product', 'part', 'item', 'sku'],
+      },
+      {
+        key: 'pricing-sheet',
+        label: 'Pricing sheet',
+        description: 'Landed cost and sale price for every part, in the currency you choose. Quotes start from these.',
+        path: '/inventory/pricing-sheet',
+        icon: <PriceSheetIcon />,
+        moduleName: 'Products',
+        keywords: ['price', 'pricing', 'price list', 'cost', 'landed cost', 'sale price', 'margin'],
       },
       {
         key: 'categories',

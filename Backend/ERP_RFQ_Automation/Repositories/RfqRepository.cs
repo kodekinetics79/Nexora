@@ -31,7 +31,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .AsNoTracking()
                 .Where(r => r.BusinessUnitId == businessUnitId)
                 .Include(r => r.BusinessUnit)
-                .Include(r => r.Lead)
+                .Include(r => r.Lead).ThenInclude(l => l!.AssignToNavigation)
                 .Include(r => r.Rfqstatus)
                 .Include(r => r.RfqtypeNavigation)
                 .Include(r => r.Customer);
@@ -74,12 +74,19 @@ namespace ERP_RFQ_Automation.Repositories
                 search = search.Trim().ToLower();
                 query = query.Where(r => r.Rfqno.ToLower().Contains(search)
                     || (r.NexoraSerial != null && r.NexoraSerial.ToLower().Contains(search))
-                    || (r.BuyersName != null && r.BuyersName.ToLower().Contains(search)));
+                    || (r.BuyersName != null && r.BuyersName.ToLower().Contains(search))
+                    || (r.Customer != null && r.Customer.Name.ToLower().Contains(search)));
             }
 
             var totalItems = await query.CountAsync();
 
+            // The list is a work queue: RFQs not yet quoted to the customer first, soonest deadline
+            // first, no deadline last. It used to page with no order at all, so rows could shuffle.
             var rfqs = await query
+                .OrderBy(r => _context.Quotes.Any(q => q.Rfqid == r.Id && q.SentOn != null))
+                .ThenBy(r => r.BidClosingDate == null)
+                .ThenBy(r => r.BidClosingDate)
+                .ThenByDescending(r => r.Id)
                 .Skip((pageNumber - 1) * pageSize)
                 .Take(pageSize)
                 .ToListAsync();
@@ -121,6 +128,13 @@ namespace ERP_RFQ_Automation.Repositories
                                  .ToListAsync())
                 .GroupBy(x => x.CustomerId)
                 .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.Priority).ThenByDescending(x => x.EffectiveFrom).First().Name);
+            var latestQuotes = (await _context.Quotes
+                .AsNoTracking()
+                .Where(q => q.Rfqid != null && rfqIds.Contains(q.Rfqid.Value))
+                .Select(q => new { RfqId = q.Rfqid!.Value, q.Id, q.QuoteNo, q.SentOn })
+                .ToListAsync())
+                .GroupBy(q => q.RfqId)
+                .ToDictionary(g => g.Key, g => (Latest: g.OrderByDescending(q => q.Id).First(), SentOn: g.Max(q => q.SentOn)));
 
             var dtos = rfqs.Select(r => new RfqResponseDTO
             {
@@ -182,6 +196,11 @@ namespace ERP_RFQ_Automation.Repositories
                 SourceLeadRevisionNumber = r.SourceLeadRevisionId.HasValue && revisionNumbers.TryGetValue(r.SourceLeadRevisionId.Value, out var revision) ? revision : null,
                 OpportunityOwnerName = r.Lead?.AssignTo is long ownerId && ownerNames.TryGetValue(ownerId, out var ownerName) ? ownerName : null,
                 AccountOwnerName = r.CustomerId.HasValue && accountOwners.TryGetValue(r.CustomerId.Value, out var accountOwner) ? accountOwner : null,
+                OwnerName = r.Lead?.AssignToNavigation is { } owner ? $"{owner.FirstName} {owner.LastName}".Trim() : null,
+                // A revision still in draft does not un-send the quote the customer already has.
+                LatestQuoteId = latestQuotes.TryGetValue(r.Id, out var quotes) ? quotes.Latest.Id : null,
+                LatestQuoteNo = quotes.Latest?.QuoteNo,
+                LatestQuoteSentOn = quotes.SentOn,
                 Rfqitems = new List<RfqitemResponseDTO>() // Empty list for list view
             }).ToList();
 

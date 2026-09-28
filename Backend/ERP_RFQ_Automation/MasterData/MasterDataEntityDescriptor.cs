@@ -114,6 +114,8 @@ internal sealed class MasterDataEntityDescriptor
         // from, it is hand-editable on the product screen and through column 28 of the import
         // sheet, and until E44 it moved with no record of who moved it or why.
         "UnitCost", "SellingPrice", "FinalLandedCost", "FinalSalesPrice",
+        // The currency those two figures are in: changing it reprices the part as surely as the number.
+        "PriceCurrencyId",
         // Supplier — the terms that decide when money leaves.
         "PaymentTerms"
     }.ToFrozenSet(StringComparer.Ordinal);

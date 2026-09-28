@@ -86,10 +86,10 @@ describe('Price from stock', () => {
     expect(within(dialog).getByLabelText('Offer ex stock')).toBeChecked();
     expect(within(dialog).queryByText(/for all stock items/)).not.toBeInTheDocument();
 
-    fireEvent.change(within(dialog).getByLabelText('Margin percent'), { target: { value: '25' } });
-    expect(within(dialog).getByLabelText('Unit price')).toHaveValue(125);
+    fireEvent.change(within(dialog).getByLabelText('Margin on cost percent'), { target: { value: '25' } });
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(125);
     fireEvent.click(within(dialog).getByLabelText(/Use 25% for all stock items from now on/));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save quote price' }));
 
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 125, exStock: true, currencyId: 1 }));
     expect(mocks.saveMargin).toHaveBeenCalledWith(25);
@@ -103,9 +103,9 @@ describe('Price from stock', () => {
     const dialog = await screen.findByRole('dialog');
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use last won price' }));
-    expect(within(dialog).getByLabelText('Unit price')).toHaveValue(150);
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(150);
     expect(within(dialog).queryByText(/for all stock items/)).not.toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save quote price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 150, exStock: true, currencyId: 1 }));
     expect(mocks.saveMargin).not.toHaveBeenCalled();
   });
@@ -121,18 +121,107 @@ describe('Price from stock', () => {
   });
 
   it('a line already sent to the customer says so and a new price makes a revision', async () => {
-    mocks.get.mockResolvedValue(view({ onQuote: { quoteId: 3, quoteNo: 'QT-0926-0003', unitPrice: 130, exStock: true, currencyCode: 'SAR', state: 'SENT' } }));
+    mocks.get.mockResolvedValue(view({
+      price: { source: 'COST_PLUS_MARGIN', sellingPrice: null, unitCost: 100, marginPercent: 20, unitPrice: 120 },
+      onQuote: { quoteId: 3, quoteNo: 'QT-0926-0003', unitPrice: 130, exStock: true, currencyCode: 'SAR', state: 'SENT' },
+    }));
     renderLine();
     expect(await screen.findByText(/Quoted SAR\s?130\.00 on QT-0926-0003/)).toBeInTheDocument();
     expect(screen.getByText(/· sent/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Change price' }));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/already sent to the customer/)).toBeInTheDocument();
-    // Revising a sent quote starts from today's price, not the SAR 130 that was sent.
-    expect(within(dialog).getByLabelText('Unit price')).toHaveValue(100);
-    fireEvent.change(within(dialog).getByLabelText('Unit price'), { target: { value: '128' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Make a revision with this price' }));
+    expect(within(dialog).getByText(/Sent to the customer on QT-0926-0003/)).toBeInTheDocument();
+    // A sent line starts from the price the customer was given, so changing only the delivery
+    // never silently reprices it. Today's price is one click away beside it.
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(130);
+    expect(within(dialog).getByText(/Today's suggestion SAR\s?120\.00/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText('Quote price'), { target: { value: '128' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save as new revision' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, { unitPrice: 128, exStock: true, currencyId: null, reviseIfSent: true }));
+  });
+
+  it('the window lays out cost, sale price and quote price, and a price under cost says it loses money', async () => {
+    mocks.get.mockResolvedValue(view({
+      price: { source: 'SELLING_PRICE', sellingPrice: 150, unitCost: 100, marginPercent: 20, unitPrice: 150 },
+    }));
+    renderLine();
+    fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Cost per EA')).toBeInTheDocument();
+    expect(within(dialog).getByText(/^SAR\s?100\.00$/)).toBeInTheDocument();
+    expect(within(dialog).getByText('Sale price per EA')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(150);
+    expect(within(dialog).getByLabelText('Margin on cost percent')).toHaveValue(50);
+    expect(within(dialog).getByText(/Profit SAR\s?50\.00 per EA · SAR\s?250\.00 on this line/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText('Quote price'), { target: { value: '90' } });
+    expect(within(dialog).getByText(/Below cost: a loss of SAR\s?50\.00 on this line/)).toBeInTheDocument();
+    // Informs, never blocks: the rep may still quote under cost.
+    expect(within(dialog).getByRole('button', { name: 'Save quote price' })).toBeEnabled();
+  });
+
+  it('a part with no sale price says Not set rather than showing a number', async () => {
+    mocks.get.mockResolvedValue(view({
+      price: { source: 'COST_PLUS_MARGIN', sellingPrice: null, unitCost: 100, marginPercent: 20, unitPrice: 120 },
+    }));
+    renderLine();
+    fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    // Owner 2026-09-27: a missing price still shows a figure, SAR 0.00, with the way to set it.
+    await within(dialog).findByText('Sale price per EA');
+    expect(within(dialog).getAllByText(/^SAR\s?0\.00$/).length).toBeGreaterThan(0);
+    expect(within(dialog).getByRole('link', { name: 'pricing sheet' })).toHaveAttribute('href', '/inventory/pricing-sheet');
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(120);
+  });
+
+  it('says where the cost came from: the pricing sheet, or the stock record copy when the sheet has none', async () => {
+    mocks.get.mockResolvedValue(view({
+      price: { source: 'COST_PLUS_MARGIN', sellingPrice: null, unitCost: 100, marginPercent: 20, unitPrice: 120 },
+      costSource: 'STOCK_RECORD',
+    }));
+    renderLine();
+    fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/From the stock record, copied when the stock was counted/)).toBeInTheDocument();
+  });
+
+  it('a sheet price in another currency is named, not converted and not used', async () => {
+    mocks.get.mockResolvedValue(view({
+      price: { source: 'NONE', sellingPrice: null, unitCost: null, marginPercent: 20, unitPrice: null },
+      sheet: { currencyCode: 'USD', landedCost: 30, salePrice: 50, usable: false, currencySet: true },
+    }));
+    renderLine();
+    fireEvent.click(await screen.findByRole('button', { name: 'Price from stock' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/The pricing sheet has this part in USD .*not SAR\. Nothing is converted\./)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(null);
+  });
+
+  it('a supplier price in another currency is shown in its own currency and never becomes the cost', async () => {
+    mocks.get.mockResolvedValue(view({
+      coveredByStock: false,
+      stock: { onHand: 0, free: 0, heldForOrders: 0, places: [] },
+      price: { source: 'NONE', sellingPrice: null, unitCost: null, marginPercent: 20, unitPrice: null },
+      onQuote: null,
+      supplierPrices: [{ id: 3, supplierId: 12, supplierName: 'Houston Valves', cost: 30, currencyCode: 'USD', leadTimeDays: 21, validUntil: '2026-12-31T00:00:00', valid: true, forThisRequest: true }],
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SnackbarProvider>
+          <MemoryRouter>
+            <LinePriceAction rfqId={2} itemId={10} canPrice primary />
+          </MemoryRouter>
+        </SnackbarProvider>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Price it' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/\$30\.00|US\$30\.00|USD\s?30\.00/)).toBeInTheDocument();
+    // Cost shows SAR 0.00, and it is not treated as a real cost: nothing is worked out from it.
+    expect(within(dialog).getAllByText(/^SAR\s?0\.00$/).length).toBe(2);
+    expect(within(dialog).queryByText(/Profit|Below cost/)).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/The supplier price is not in SAR/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(null);
   });
 
   it('a line the customer already decided on cannot be repriced', async () => {
@@ -168,8 +257,14 @@ describe('Price from stock', () => {
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText(/one of the makers the customer accepts/)).toBeInTheDocument();
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(2, 10, 17));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
-    await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ productId: 17 })));
+    // Cost 100 with no usual margin: the box stays empty rather than quoting the part at cost.
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(null);
+    expect(within(dialog).getByText('Type a margin on cost or a quote price.')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Save quote price' })).toBeDisabled();
+    fireEvent.change(within(dialog).getByLabelText('Quote price'), { target: { value: '120' } });
+    expect(within(dialog).getByText(/Profit SAR\s?20\.00 per EA/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save quote price' }));
+    await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ productId: 17, unitPrice: 120 })));
   });
 
   it('a line not in stock is priced from a supplier price with its delivery time', async () => {
@@ -200,7 +295,7 @@ describe('Price from stock', () => {
     await waitFor(() => expect(within(dialog).getByLabelText('Delivery time')).toHaveValue(3));
     expect(within(dialog).getByText('Expired')).toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: 'Use Old Supplier price' })).not.toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save quote price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ unitPrice: 120, exStock: false, leadTimeDays: 21 })));
   });
 
@@ -226,7 +321,7 @@ describe('Price from stock', () => {
     expect(await screen.findByText(/Old Supplier price expired/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Price it' }));
     const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText('The supplier price has expired. Ask them again, or type a price.')).toBeInTheDocument();
+    expect(await within(dialog).findByText('The supplier price has expired. Ask them again, or type a quote price.')).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Ask Old Supplier again' }));
     expect(askAgain).toHaveBeenCalledWith([12]);
   });
@@ -253,10 +348,15 @@ describe('Price from stock', () => {
     );
     fireEvent.click(await screen.findByRole('button', { name: 'Price it' }));
     const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText(/150 from stock at SAR\s?5\.00 \+ 50 from Gulf Switchgear at SAR\s?6\.50 = SAR\s?5\.38 each/)).toBeInTheDocument();
+    expect(await within(dialog).findByText('150 from stock')).toBeInTheDocument();
+    expect(within(dialog).getByText(/^SAR\s?5\.00 each$/)).toBeInTheDocument();
+    expect(within(dialog).getByText('50 from Gulf Switchgear')).toBeInTheDocument();
+    expect(within(dialog).getByText(/^SAR\s?6\.50 each$/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/^SAR\s?5\.38$/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Quote price')).toHaveValue(6.45);
     expect(within(dialog).getByLabelText('Send the stock part straight away')).toBeChecked();
     expect(within(dialog).getByText('Quote prints "Delivery: 150 ex stock, balance in 2 weeks"')).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this price' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save quote price' }));
     await waitFor(() => expect(mocks.use).toHaveBeenCalledWith(2, 10, expect.objectContaining({ unitPrice: 6.45, exStock: false, leadTimeDays: 14, exStockQuantity: 150 })));
   });
 
@@ -296,9 +396,9 @@ describe('Price from stock', () => {
     );
     fireEvent.click(await screen.findByRole('button', { name: 'Change price' }));
     const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(within(dialog).getByLabelText('Unit price')).toHaveValue(50));
+    await waitFor(() => expect(within(dialog).getByLabelText('Quote price')).toHaveValue(50));
     expect(within(dialog).getByLabelText('Delivery time')).toHaveValue(3);
-    expect(within(dialog).getByRole('button', { name: 'Make a revision with this price' })).toBeEnabled();
+    expect(within(dialog).getByRole('button', { name: 'Save as new revision' })).toBeEnabled();
   });
 
   it('a priced line with another maker in stock shows the price and one button, not two', async () => {

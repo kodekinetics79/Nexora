@@ -38,6 +38,7 @@ import gridEmptyOverlay from '../../components/common/gridOverlays';
 import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
 import { formatDateSafe, formatDateTimeSafe, parseDateSafe } from '../../utils/dates';
+import { DEADLINE_COLOR, deadlineWords } from '../../utils/deadline';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import commercialRoutingService, {
@@ -316,7 +317,7 @@ const LeadsPage: React.FC = () => {
   const { hasPermission, userData } = useAuth();
   const myUserId = userData?.id ?? null;
   const isManager = userData?.isManager === true || Boolean(userData?.isSuperAdmin);
-  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
+  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 25, page: 0 });
   const [search, setSearch] = useState('');
   const [leadSource, setLeadSource] = useState('all');
   const [ownerView, setOwnerView] = useState<OwnerView>(DEFAULT_OWNER_VIEW);
@@ -571,6 +572,12 @@ const LeadsPage: React.FC = () => {
   }), [filtersActive, isTrueZero, canUploadDocuments, canConnectMailbox, clearFilters, navigate, ownerView, untriagedOnly]);
 
   const rows = useMemo(() => data?.items ?? [], [data]);
+  // The simple view is a work queue: leads still waiting for a decision first, soonest deadline
+  // first, no deadline last. Within the loaded page only; the server pages newest first.
+  const workFirstRows = useMemo(() => {
+    const due = (r: LeadResponseDTO) => parseDateSafe(r.bidClosingDate)?.getTime() ?? Number.POSITIVE_INFINITY;
+    return [...rows].sort((a, b) => Number(isDecided(a)) - Number(isDecided(b)) || due(a) - due(b));
+  }, [rows]);
 
   /**
    * Can the reader take a lead THEMSELVES?
@@ -1210,7 +1217,6 @@ const LeadsPage: React.FC = () => {
       renderCell: (p) => {
         const items = p.row.itemCount ?? 0;
         const marker = (p.row.duplicateStatus ?? '').toLowerCase();
-        const status = leadStatus(p.row);
         return (
           <Box sx={{ lineHeight: 1.3, py: 0.25, minWidth: 0 }}>
             {col('client').renderCell!(p)}
@@ -1223,9 +1229,6 @@ const LeadsPage: React.FC = () => {
               {(marker === 'suspected' || marker === 'confirmed') && (
                 <Chip label="Possible duplicate" color="warning" variant="outlined" size="small" sx={{ fontWeight: 700, height: 20 }} />
               )}
-              {status.label !== 'Open' && status.label !== 'New' && (
-                <Chip label={status.label} color={status.color} variant={status.variant} size="small" sx={{ fontWeight: 700, height: 20 }} />
-              )}
             </Stack>
           </Box>
         );
@@ -1233,32 +1236,34 @@ const LeadsPage: React.FC = () => {
     },
     {
       field: 'when',
-      headerName: 'When',
-      width: 150,
+      headerName: 'Deadline',
+      width: 130,
       sortable: false,
       filterable: false,
       valueGetter: (_value, row) => row.bidClosingDate || '',
       renderCell: (p) => {
         const due = formatDateSafe(p.row.bidClosingDate);
         const wanted = formatDateSafe(p.row.requiredDeliveryDate);
-        const received = formatDateSafe(p.row.recDate);
+        // Once decided, the deadline is history, not urgency.
+        const { text, tone } = deadlineWords(p.row.bidClosingDate);
+        const quiet = isDecided(p.row);
         return (
           <Box sx={{ lineHeight: 1.3, py: 0.25 }}>
-            <Typography variant="body2" sx={{ fontSize: '0.85rem', ...deadlineSx(p.row.bidClosingDate) }}>
-              {due === '—' ? 'No deadline stated' : `Due ${due}`}
+            <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: quiet ? 500 : 700, color: quiet ? 'text.secondary' : DEADLINE_COLOR[tone] }}>
+              {text}
             </Typography>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-              {wanted !== '—' ? `Wanted by ${wanted}` : received === '—' ? 'Received date unknown' : `Received ${received}`}
+              {due !== '—' ? due : wanted !== '—' ? `Wanted by ${wanted}` : ''}
             </Typography>
           </Box>
         );
       },
     },
-    { ...col('assignee'), headerName: "Who's on it", width: 150 },
+    { ...col('assignee'), headerName: 'Owner', width: 160 },
     {
       field: 'worth',
-      headerName: 'Worth chasing?',
-      width: 210,
+      headerName: 'Status',
+      width: 220,
       sortable: false,
       filterable: false,
       renderCell: (p) => {
@@ -1266,6 +1271,10 @@ const LeadsPage: React.FC = () => {
           const meta = leadStatus(p.row);
           return <Chip label={meta.label} color={meta.color} variant={meta.variant} size="small" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />;
         }
+        const flagged = leadStatus(p.row);
+        const flagChip = flagged.label !== 'Open' && flagged.label !== 'New'
+          ? <Chip label={flagged.label} color={flagged.color} variant={flagged.variant} size="small" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+          : null;
         if (decisionQuery.isError) {
           return <Typography variant="caption" color="text.secondary">Read unavailable</Typography>;
         }
@@ -1275,12 +1284,16 @@ const LeadsPage: React.FC = () => {
         const summary = decisionSummaries?.[String(p.row.id)];
         const meta = summary ? DECISION_META[summary.recommendation] : undefined;
         if (!summary || !meta) {
-          return <Typography variant="caption" color="text.secondary">No read yet</Typography>;
+          return flagChip ?? <Typography variant="caption" color="text.secondary">No read yet</Typography>;
         }
-        const facts = decisionFacts(summary);
+        // The deadline has its own column; saying it here too was the same fact twice.
+        const facts = decisionFacts({ ...summary, daysLeft: null });
         return (
           <Box sx={{ lineHeight: 1.3, py: 0.25, minWidth: 0 }}>
-            <Chip label={meta.label} color={meta.color} size="small" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+            <Stack direction="row" spacing={0.5}>
+              <Chip label={meta.label} color={meta.color} size="small" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+              {flagChip}
+            </Stack>
             {facts.length > 0 && (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', whiteSpace: 'normal' }} title={facts.join(' · ')}>
                 {facts.join(' · ')}
@@ -1302,10 +1315,11 @@ const LeadsPage: React.FC = () => {
         return commercialAccess.canOpenLeadWorkbench ? (
           <Button
             size="small"
-            variant={decided ? 'text' : 'outlined'}
+            variant="outlined"
+            color={decided ? 'inherit' : 'primary'}
             aria-label={`Decide ${p.row.rfqno || `lead ${p.row.id}`}`}
             onClick={() => navigate(`/procurement/leads/${p.row.id}/workbench`)}
-            sx={{ fontWeight: 700, minWidth: 0, px: 1.25, whiteSpace: 'nowrap' }}
+            sx={{ fontWeight: 700, width: 108, whiteSpace: 'nowrap', ...(decided ? { color: 'text.secondary', borderColor: 'divider' } : {}) }}
           >
             {decided ? 'See decision' : 'Decide'}
           </Button>
@@ -1324,12 +1338,21 @@ const LeadsPage: React.FC = () => {
   const totalCount = data?.totalCount ?? 0;
 
   return (
-    <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, bgcolor: 'background.default', minHeight: '100vh', minWidth: 0 }}>
+    <Box sx={{ p: { xs: 1, sm: 2 }, minWidth: 0 }}>
       {/* Header Section */}
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { xs: 'stretch', sm: 'center' }, mb: 1 }}>
+        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
           {t('leads')}
+          {!isLoading && !isError && (
+            <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }} title={`${totalCount} ${totalCount === 1 ? 'inquiry' : 'inquiries'}`}>
+              {' · '}{totalCount}
+            </Box>
+          )}
         </Typography>
+        <Box sx={{ width: { xs: '100%', sm: 340 }, maxWidth: '100%' }}>
+          <SearchField width="100%" value={search} onChange={setSearch} placeholder="Search by serial, RFQ number, buyer or email" />
+        </Box>
+        <Box sx={{ flexGrow: 1 }} />
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', sm: 'flex-end' } }}>
           <Tooltip title={canCheckMailboxes
             ? 'Fetches new emails from your connected inboxes now'
@@ -1340,7 +1363,7 @@ const LeadsPage: React.FC = () => {
                 startIcon={syncEmailsMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <EmailIcon />}
                 onClick={() => syncEmailsMutation.mutate()}
                 disabled={syncEmailsMutation.isPending || !canCheckMailboxes}
-                sx={{ fontWeight: 600, borderRadius: 2 }}
+                sx={{ fontWeight: 700, minHeight: 36 }}
               >
                 {syncEmailsMutation.isPending ? 'Checking…' : 'Check for new leads'}
               </Button>
@@ -1359,8 +1382,8 @@ const LeadsPage: React.FC = () => {
             })))}
           />
           <Tooltip title="Refresh">
-            <IconButton aria-label="Refresh" onClick={() => refetch()} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
-              <RefreshIcon />
+            <IconButton aria-label="Refresh" onClick={() => refetch()} sx={{ width: 36, height: 36 }}>
+              <RefreshIcon fontSize="small" />
             </IconButton>
           </Tooltip>
         </Stack>
@@ -1371,11 +1394,8 @@ const LeadsPage: React.FC = () => {
       <ViewTabs primaryKey="leads" ariaLabel="Inquiry views" />
 
       {/* Filters + view controls */}
-      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-        <Box sx={{ width: { xs: '100%', sm: 360 }, maxWidth: '100%' }}>
-          <SearchField width="100%" value={search} onChange={setSearch} placeholder="Search by serial, RFQ number, buyer or email" />
-        </Box>
-        <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ width: { xs: '100%', sm: 'auto' }, minWidth: { sm: 160 } }} label="Where it came from">
+      <Box sx={{ mb: 1, display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', '& .MuiToggleButton-root': { py: 0.5, minHeight: 34 }, '& .MuiButton-root': { minHeight: 34 } }}>
+        <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ width: { xs: '100%', sm: 'auto' }, minWidth: { sm: 150 }, '& .MuiInputBase-input': { py: 0.75 } }} label="Where it came from">
           <MenuItem value="all">All Sources</MenuItem>
           <MenuItem value="Email">Email</MenuItem>
           <MenuItem value="Manual">Manual</MenuItem>
@@ -1428,15 +1448,9 @@ const LeadsPage: React.FC = () => {
           </Typography>
         )}
         <Box sx={{ flexGrow: 1 }} />
-        {!isLoading && !isError && (
-          <Typography variant="body2" sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>
-            {totalCount} {totalCount === 1 ? 'inquiry' : 'inquiries'}
-          </Typography>
-        )}
         {/* Progressive disclosure: the layout controls are still here, one click away, rather
             than sitting on the default path competing with the day's work. */}
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>View</Typography>
           <ToggleButtonGroup
             size="small"
             exclusive
@@ -1482,23 +1496,23 @@ const LeadsPage: React.FC = () => {
             </ToggleButtonGroup>
           </Box>
         </Collapse>
-      </Paper>
+      </Box>
 
       {/* Constraint 7: a control that cannot work is not silently missing. Said ONCE, in words,
           instead of a disabled button repeated down every row. */}
       {whyICannotTakeLeads && !(isManager && repProfileNoticeDismissed) && (
         <Alert
           severity="info"
-          sx={{ mb: 1.5, borderRadius: 2 }}
+          sx={{ mb: 1, borderRadius: 2, py: 0, '& .MuiAlert-message': { py: 0.75 }, '& .MuiAlert-icon': { py: 0.75 } }}
           onClose={isManager ? dismissRepProfileNotice : undefined}
           slotProps={{ closeButton: { 'aria-label': 'Dismiss this notice' } }}
         >
-          <Typography variant="body2" sx={{ fontWeight: 700 }}>
-            {isManager
-              ? 'You can assign inquiries to other people, but not to yourself yet.'
-              : 'You cannot pick up inquiries yet.'}
-          </Typography>
           <Typography variant="body2">
+            <Box component="span" sx={{ fontWeight: 700 }}>
+              {isManager
+                ? 'You can assign inquiries to other people, but not to yourself yet.'
+                : 'You cannot pick up inquiries yet.'}
+            </Box>{' '}
             {whyICannotTakeLeads}
             {/* The rep directory is a manager screen; a link a reader cannot open is a dead end,
                 so only a manager gets the shortcut and everyone else gets the menu path. */}
@@ -1585,7 +1599,7 @@ const LeadsPage: React.FC = () => {
       )}
 
       {/* Grid */}
-      <Paper sx={{ height: { xs: 'calc(100vh - 330px)', sm: 'calc(100vh - 240px)' }, minHeight: 420, width: '100%', minWidth: 0, borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ height: { xs: 'calc(100vh - 330px)', sm: 'calc(100vh - 200px)' }, minHeight: 420, boxShadow: 'none', width: '100%', minWidth: 0, borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         {isError ? (
           <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
             <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
@@ -1597,7 +1611,7 @@ const LeadsPage: React.FC = () => {
           </Box>
         ) : (
           <DataGrid
-            rows={rows}
+            rows={listView === 'simple' ? workFirstRows : rows}
             columns={gridColumns}
             rowCount={totalCount}
             loading={isLoading}
@@ -1616,6 +1630,15 @@ const LeadsPage: React.FC = () => {
             getRowId={(r) => r.id}
             density={density}
             getRowHeight={listView === 'simple' ? () => 'auto' : undefined}
+            columnHeaderHeight={40}
+            sx={{
+              border: 0,
+              '& .MuiDataGrid-columnHeaderTitle': { fontWeight: 700 },
+              // The theme's 44px touch floor made every in-cell button and link a tall block and
+              // left the rows uneven; inside a dense row they are 30px.
+              '& .MuiDataGrid-cell .MuiButton-root': { minHeight: 30, py: 0.25 },
+              ...(listView === 'simple' ? { '& .MuiDataGrid-cell': { display: 'flex', alignItems: 'center', py: 0.75 } } : {}),
+            }}
             {...(listView === 'spreadsheet'
               ? {
                   columnVisibilityModel: columnPreferences.columnVisibilityModel,

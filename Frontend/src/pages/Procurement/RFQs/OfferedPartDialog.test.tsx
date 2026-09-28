@@ -65,7 +65,7 @@ describe('Offer a different part', () => {
     renderCell();
     fireEvent.click(screen.getByRole('button', { name: 'Offer a different part' }));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByText('Discontinued: offering an equivalent'));
+    fireEvent.click(within(dialog).getByText('Different brand, similar part'));
     fireEvent.change(within(dialog).getByLabelText('Part number offered'), { target: { value: 'SEL-751A' } });
     expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
     fireEvent.change(within(dialog).getByLabelText('Specs for the customer'), { target: { value: 'IEC 61850, 5A CT, 110V DC' } });
@@ -78,7 +78,7 @@ describe('Offer a different part', () => {
   it('shows what is offered on the line and can go back to the part asked for', async () => {
     renderCell({ offeredPartNumber: 'SEL-751A', offeredMakerName: 'SEL', offeredKind: 'EQUIVALENT', offeredSpecs: 'IEC 61850' });
     expect(screen.getByText('SEL SEL-751A')).toBeInTheDocument();
-    expect(screen.getByText('equivalent offered')).toBeInTheDocument();
+    expect(screen.getByText('Similar part offered')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Offer a different part' }));
     const dialog = await screen.findByRole('dialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Offer as asked' }));

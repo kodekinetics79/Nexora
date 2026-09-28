@@ -47,6 +47,13 @@ export interface RfqResponseDTO {
     businessUnitName?: string;
     rfqstatusId?: number;
     rfqstatusValue?: string;
+    rfqstatusCode?: string | null;
+    /** List view only. */
+    itemCount?: number;
+    ownerName?: string | null;
+    latestQuoteId?: number | null;
+    latestQuoteNo?: string | null;
+    latestQuoteSentOn?: string | null;
     customerId?: number;
     customerName?: string;
     customerEmail?: string;

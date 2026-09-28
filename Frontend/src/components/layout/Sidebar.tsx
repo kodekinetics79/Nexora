@@ -209,7 +209,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
     <ListItem key={key} disablePadding sx={{ display: 'block', mb: 0.5 }}>
       {/* Collapsed, the label is not rendered — the tooltip carries the name. Expanded, it carries
           the one-line description, which is the only place the rail can say what a row is for. */}
-      <Tooltip title={collapsed ? label : (description ?? '')} placement="right">
+      <Tooltip title={collapsed ? label : (description ?? '')} placement="right" enterDelay={700} enterNextDelay={700}>
         <ListItemButton
           onClick={() => navigateTo(path)}
           selected={isSelected}

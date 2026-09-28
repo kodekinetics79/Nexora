@@ -540,6 +540,33 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        public sealed record PortalSubmissionRequest(string? PortalReference);
+
+        // -------- POST /api/Quote/{id}/portal-submission --------
+        // The rep downloaded the PDF and uploaded it to the customer's own procurement portal (most
+        // customers work this way): record the quote as sent. Same permission and gates as email.
+        [HttpPost("{id}/portal-submission")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<IActionResult> RecordPortalSubmission(long id,
+            [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] PortalSubmissionRequest? request = null)
+        {
+            try
+            {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
+                var result = await _quoteService.RecordPortalSubmissionAsync(
+                    id, businessUnitId, ActorEmail(), ActorUserId(), request?.PortalReference, HttpContext.RequestAborted);
+                if (result.BlockCode is not null)
+                    return Conflict(new { blockCode = result.BlockCode, message = result.BlockReason });
+                return Ok(new { quoteNo = result.QuoteNo, submitted = result.IsSubmitted, alreadySent = result.WasAlreadySent });
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (LifecycleValidationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (LifecycleConflictException ex) { return Conflict(new { message = ex.Message }); }
+            catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+        }
+
         // -------- POST /api/Quote/{id}/revise (revisions-lite, WP-B4) --------
         // Clones a non-DRAFT quote (+items) as a new DRAFT revision (RevisionNo+1,
         // linked back). Draft / superseded / outcome-locked chains → 409.

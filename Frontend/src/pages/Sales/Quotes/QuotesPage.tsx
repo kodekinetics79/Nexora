@@ -54,6 +54,13 @@ const QuoteStatusCell: React.FC<{ quote: QuoteDTO }> = ({ quote }) => {
 
   const reasonTip = [quote.outcomeReasonName, quote.outcomeNote].filter(Boolean).join(' — ');
 
+  // Checked before SENT: a quote a sent revision replaced still carries SENT, but the customer
+  // now holds the revision, so it must not read as a live offer or a quote to chase.
+  if (quote.supersededByQuoteNo) {
+    return chip(`Superseded by ${quote.supersededByQuoteNo}`, { bg: 'action.hover', fg: 'text.secondary', border: 'divider' },
+      'A newer revision was sent to the customer. This quote no longer counts.');
+  }
+
   if (code === 'ACCEPTED' || code === 'ORDERED') {
     return chip('Won', { bg: 'success.lighter', fg: 'success.main', border: 'success.light' }, reasonTip);
   }

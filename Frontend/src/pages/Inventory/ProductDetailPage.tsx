@@ -15,6 +15,7 @@ import {
 import productService from '../../api/services/productService';
 import ProductFormDialog from './ProductFormDialog';
 import ChangeHistoryPanel from '../../components/common/ChangeHistoryPanel';
+import { formatMoney } from '../../utils/currency';
 import { useAuth } from '../../context/AuthContext';
 
 // ─── Info Row ──────────────────────────────────────────────────────────────
@@ -54,6 +55,10 @@ const StatBox: React.FC<{ label: string; value: React.ReactNode }> = ({ label, v
 );
 
 // ─── Main ─────────────────────────────────────────────────────────────────
+/** A price in the currency the pricing sheet gives it; without one, the number and a plain note. */
+const priceTextFor = (currencyCode?: string | null) => (value: number) =>
+  currencyCode ? formatMoney(value, currencyCode) : `${value.toFixed(2)} (currency not set)`;
+
 const ProductDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
@@ -91,6 +96,8 @@ const ProductDetailPage: React.FC = () => {
     if (product.qtyOnHand <= product.reorderPoint) return <Chip label="Low Stock" color="warning" size="small" />;
     return <Chip label="In Stock" color="success" size="small" />;
   };
+
+  const priceText = priceTextFor(product.priceCurrencyCode);
 
   return (
     <Box sx={{ p: 3, width: '100%' }}>
@@ -169,7 +176,7 @@ const ProductDetailPage: React.FC = () => {
           <StatBox label={t('quantity') || 'Qty on Hand'} value={product.qtyOnHand} />
           <StatBox label="Reorder Point" value={product.reorderPoint} />
           <StatBox label={t('uom') || 'UOM'} value={product.uomName} />
-          <StatBox label={t('price') || 'Selling Price'} value={product.sellingPrice != null ? `$${product.sellingPrice.toFixed(2)}` : null} />
+          <StatBox label="Sale price" value={product.sellingPrice != null ? priceText(product.sellingPrice) : null} />
           <StatBox label="Lead Time" value={product.leadTime ? `${product.leadTime}d` : null} />
         </Box>
       </Paper>
@@ -190,11 +197,16 @@ const ProductDetailPage: React.FC = () => {
             </Section>
 
             {/* Pricing */}
+            {/* The pricing sheet's figures, in the currency they were entered in. A price entered
+                before the sheet existed has no currency and says so, rather than borrowing "$". */}
             <Section title="Pricing">
-              <InfoRow label="Unit Cost" value={product.unitCost != null ? `${product.unitCost.toFixed(2)} (currency not recorded)` : null} />
-              <InfoRow label={t('price') || 'Selling Price'} value={product.sellingPrice != null ? `${product.sellingPrice.toFixed(2)} (currency not recorded)` : null} />
-              <InfoRow label="Final Landed Cost" value={product.finalLandedCost != null ? `${product.finalLandedCost.toFixed(2)} (currency not recorded)` : null} />
-              <InfoRow label="Final Sales Price" value={product.finalSalesPrice != null ? `${product.finalSalesPrice.toFixed(2)} (currency not recorded)` : null} />
+              <InfoRow label="Landed cost" value={product.unitCost != null ? priceText(product.unitCost) : null} />
+              <InfoRow label="Sale price" value={product.sellingPrice != null ? priceText(product.sellingPrice) : null} />
+              <InfoRow label="Margin on cost" value={product.unitCost && product.sellingPrice ? `${(Math.round((product.sellingPrice / product.unitCost - 1) * 10000) / 100).toLocaleString()}%` : null} />
+              <InfoRow label="Last purchase" value={product.finalLandedCost != null ? priceText(product.finalLandedCost) : null} />
+              <Box sx={{ pt: 1 }}>
+                <Button size="small" href="/inventory/pricing-sheet">Change prices on the pricing sheet</Button>
+              </Box>
             </Section>
 
             {/* Logistics */}

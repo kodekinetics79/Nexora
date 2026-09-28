@@ -56,6 +56,8 @@ namespace ERP_RFQ_Automation.Services
         /// only) skips the check.
         /// </summary>
         Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
+        /// <summary>The rep downloaded the quote and uploaded it to the customer's own portal: record it as sent.</summary>
+        Task<PortalSubmissionResult> RecordPortalSubmissionAsync(long quoteId, long businessUnitId, string actor, long? actorUserId, string? portalReference, CancellationToken ct = default);
 
         /// <summary>
         /// The default covering e-mail for this quote — subject, plain-text body, attachment name
@@ -379,7 +381,11 @@ namespace ERP_RFQ_Automation.Services
                 //
                 // Identity integrity is not waived: customer, canonical Lead and Nexora Serial
                 // are each checked explicitly above and below this block.
-                if (intelligence.CommercialDecision == "NO_QUOTE_REVIEW")
+                //
+                // A passed customer deadline alone no longer blocks (owner ruling 2026-09-26): the
+                // rep decides whether to quote late, and Send asks "the deadline has passed, send
+                // anyway?". What still blocks is an RFQ with nothing to quote.
+                if (intelligence.CommercialDecision == "NO_QUOTE_REVIEW" && intelligence.SlaRisk != "OVERDUE")
                     throw new InvalidOperationException(
                         $"Customer Quote preparation is blocked: {intelligence.NextBestAction.Explanation}");
             }
@@ -745,8 +751,32 @@ namespace ERP_RFQ_Automation.Services
                 .SingleAsync(q => q.Id == draft.Id && q.BusinessUnitId == businessUnitId, ct);
             await EnsureQuoteEditableAsync(quote);
 
+            var rfqLine = await _context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == rfqItemId, ct);
             var line = quote.QuoteItems.FirstOrDefault(i => i.RfqitemId == rfqItemId)
-                ?? throw new InvalidOperationException("This line is not on the quote. Mark it to quote first.");
+                ?? await HandBuiltLineForAsync(_context, quote, rfqLine, ct);
+            if (line is null)
+            {
+                // Not on the quote at all: the line joins it now, exactly as preparing the draft
+                // would have added it, rather than refusing a price the rep has just chosen.
+                line = new QuoteItem
+                {
+                    RfqitemId = rfqLine.Id,
+                    ProductId = rfqLine.ProductId,
+                    ItemDescription = rfqLine.ProductShortDescription ?? rfqLine.ProductShortName ?? rfqLine.ItemText ?? rfqLine.ItemMaterialCode,
+                    Quantity = rfqLine.Quantity ?? 0m,
+                    UnitOfMeasure = rfqLine.UnitOfMeasure,
+                    CustomerLineRef = rfqLine.LineItemNo,
+                    UnitPrice = 0m,
+                    TotalAmount = 0m,
+                    TaxAmount = null,
+                    TaxCategory = QuoteLineTaxCategories.Standard,
+                    TaxRatePercentApplied = null,
+                    CreatedBy = actor,
+                    CreatedDate = DateTime.UtcNow
+                };
+                if (line.Quantity <= 0m) throw new InvalidOperationException("This RFQ line has no quantity to quote.");
+                quote.QuoteItems.Add(line);
+            }
             if (quote.CurrencyId is null && currencyId is not null)
             {
                 var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId, ct);
@@ -756,7 +786,6 @@ namespace ERP_RFQ_Automation.Services
 
             // Another maker the customer accepts, from our own stock: the quote line names what is
             // actually offered ("… — SIEMENS 3RT2046-1AN20"), so the customer is never surprised.
-            var rfqLine = await _context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == rfqItemId, ct);
             // What the customer is actually being offered when the part they asked for is obsolete.
             line.OfferedNote = OfferedPartKinds.Sentence(rfqLine.OfferedKind, rfqLine.OfferedMakerName, rfqLine.OfferedPartNumber,
                 rfqLine.ManufacturerPartNumber, rfqLine.OfferedNote);
@@ -791,6 +820,24 @@ namespace ERP_RFQ_Automation.Services
             await CalculateQuoteTotals(quote);
             await _context.SaveChangesAsync(ct);
             return await GetQuoteByIdAsync(quote.Id);
+        }
+
+        /// <summary>
+        /// A quote typed by hand and attached to the RFQ carries no link from its lines to the RFQ's
+        /// lines, so a price already given for the part cannot be found by that link. The quote line
+        /// for the same product is this line when there is exactly one such quote line and exactly
+        /// one RFQ line for that product; the link is then written so it is never lost again.
+        /// Anything less certain is left alone rather than guessed.
+        /// </summary>
+        internal static async Task<QuoteItem?> HandBuiltLineForAsync(ErpRfqAutomationContext context, Quote quote, Rfqitem rfqLine, CancellationToken ct)
+        {
+            if (rfqLine.ProductId is not long productId) return null;
+            var rfqLinesForPart = await context.Rfqitems.CountAsync(x => x.Rfqid == rfqLine.Rfqid && x.ProductId == productId, ct);
+            if (rfqLinesForPart != 1) return null;
+            var unlinked = quote.QuoteItems.Where(i => i.RfqitemId == null && i.ProductId == productId).ToList();
+            if (unlinked.Count != 1) return null;
+            unlinked[0].RfqitemId = rfqLine.Id;
+            return unlinked[0];
         }
 
         public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
@@ -1139,7 +1186,10 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
 /// <summary>28 → "4 weeks"; 10 → "10 days". What the customer reads under the line.</summary>
         internal static string DeliveryText(int days) =>
-            days % 7 == 0 ? $"{days / 7} week{(days == 7 ? "" : "s")}" : $"{days} day{(days == 1 ? "" : "s")}";
+            // A month is 30 days; the largest whole unit wins. Same rule as the screens (utils/delivery.ts).
+            days > 0 && days % 30 == 0 ? $"{days / 30} month{(days == 30 ? "" : "s")}"
+            : days % 7 == 0 ? $"{days / 7} week{(days == 7 ? "" : "s")}"
+            : $"{days} day{(days == 1 ? "" : "s")}";
 
                 internal static IReadOnlyList<QuoteItem> OrderQuoteLines(IEnumerable<QuoteItem> items) => items
             .OrderBy(i => string.IsNullOrWhiteSpace(i.CustomerLineRef) ? 1 : 0)
@@ -2452,6 +2502,82 @@ namespace ERP_RFQ_Automation.Services
                     throw;
                 }
                 return QuoteSendResult.Queued(false, false);
+            });
+        }
+
+        /// <summary>
+        /// Most customers (SEC, Aramco and alike) take quotes through their own procurement portal:
+        /// the rep downloads the PDF, uploads it there, and records it here. Without this the quote
+        /// would stay a draft forever: no follow-up, no revision rule, a wrong pipeline.
+        ///
+        /// The same gates as <see cref="SendQuoteEmailAsync"/>, in the same order, because what the
+        /// customer receives is the same document. The one difference is the below-floor gate: the
+        /// email path parks the send for a manager and sends it on approval, but a portal
+        /// submission has already happened outside Nexora, so it is refused with the reason instead.
+        /// </summary>
+        public async Task<PortalSubmissionResult> RecordPortalSubmissionAsync(
+            long quoteId, long businessUnitId, string actor, long? actorUserId, string? portalReference, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            if (string.IsNullOrWhiteSpace(actor)) throw new ArgumentException("Authenticated actor is required.", nameof(actor));
+            var reference = string.IsNullOrWhiteSpace(portalReference) ? null : portalReference.Trim();
+            if (reference is { Length: > 200 }) throw new InvalidOperationException("Keep the portal reference under 200 characters.");
+
+            if (!await _context.Quotes.AnyAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct))
+                throw new KeyNotFoundException("Quote not found");
+            if (await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                    .OpenQuoteImpacts(_context, businessUnitId, quoteId).AsNoTracking().AnyAsync(ct))
+                throw new InvalidOperationException(
+                    "This Quote Draft is stale because a customer revision was received. Review and resolve the revision impact before submitting it.");
+            var attestation = await new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(_context)
+                .EvaluateAsync(quoteId, businessUnitId, ct);
+            if (!attestation.Satisfied) return PortalSubmissionResult.Blocked("PRICE_ATTESTATION_REQUIRED", attestation.Reason!);
+            if (await EvaluateTaxDerivationAsync(quoteId, businessUnitId, ct) is { } taxBlocker)
+                return PortalSubmissionResult.Blocked("TAX_DERIVATION_REQUIRED", taxBlocker);
+            if (_belowFloorGuard is not null && (await _belowFloorGuard.CheckQuoteSendAsync(quoteId, businessUnitId, ct)).IsBelowFloor)
+                return PortalSubmissionResult.Blocked("BELOW_FLOOR",
+                    "A price is below your company's minimum. A manager must approve it, which the email send arranges; submit it by email or raise the price.");
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+                var quote = await _context.Quotes
+                    .Include(q => q.Status)
+                    .Include(q => q.Rfq).ThenInclude(r => r.Lead)
+                    .SingleAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct);
+                if (quote.SentOn.HasValue)
+                {
+                    await transaction.CommitAsync(ct);
+                    return PortalSubmissionResult.AlreadySent(quote.QuoteNo);
+                }
+                if (LifecyclePolicy.Canonicalize("Quote", quote.Status?.SetupCode, quote.Status?.SetupValue) != "DRAFT")
+                    throw new InvalidOperationException($"Quote '{quote.QuoteNo}' is not a draft, so it cannot be recorded as submitted.");
+
+                quote.SentOn = DateTime.UtcNow;
+                quote.ModifiedBy = actor;
+                quote.ModifiedDate = quote.SentOn;
+                var note = reference is null ? "Submitted on the customer's portal." : $"Submitted on the customer's portal. Portal reference: {reference}";
+                if (_lifecycle is not null)
+                {
+                    await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                        businessUnitId, quote.Id,
+                        new LifecycleActor(actor, "quote-portal-submission"),
+                        new LifecycleTransitionCommand(
+                            "SENT", quote.LifecycleVersion, null, note, "quote-submitted-on-portal",
+                            Guid.NewGuid().ToString("N"), $"quote:{quote.Id}:portal",
+                            $"quote-portal-submitted:{quote.Id}"),
+                        false, ct);
+                }
+                else
+                {
+                    quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", businessUnitId);
+                    await _context.SaveChangesAsync(ct);
+                }
+                await RecordQuoteSentWorkAsync(quote, new QuoteSendOptions { RequestedBy = actor, RequestedByUserId = actorUserId }, ct);
+                await transaction.CommitAsync(ct);
+                return PortalSubmissionResult.Submitted(quote.QuoteNo);
             });
         }
 

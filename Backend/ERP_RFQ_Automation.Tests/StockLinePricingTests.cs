@@ -96,6 +96,42 @@ public sealed class StockLinePricingTests
     }
 
     [Fact]
+    public async Task A_cheaper_supplier_price_in_another_currency_is_listed_but_never_becomes_the_cost()
+    {
+        using var fixture = new ProcurementScenario(); // wants 10, shelf holds 2
+        await using (var setup = fixture.Context())
+        {
+            // Nothing in this window converts: a USD 30 ranked or blended against the quote's own
+            // currency by its bare number would be a price nobody was quoted.
+            setup.Currencies.Add(new Currency
+            {
+                Id = 96_990, BusinessUnitId = fixture.BusinessUnitId, Code = "USD", CurrencyName = "US Dollar",
+                ExchangeRate = 3.75m, IsBaseCurrency = false, IsActive = true, CreatedBy = "qa", CreatedOn = DateTime.UtcNow
+            });
+            var foreign = AgentSeed.Supplier(setup, 96_991, fixture.BusinessUnitId, "Houston Valves", "houston@example.test");
+            void Price(long id, long supplierId, decimal unitPrice, long currencyId) => setup.SupplierQuotedItems.Add(new Models.SupplierQuotedItem
+            {
+                Id = id, BusinessUnitId = fixture.BusinessUnitId, SupplierId = supplierId, RfqItemId = fixture.RfqItemId,
+                ProductId = ProcurementTestData.Product, Quantity = 10m, UnitPrice = unitPrice, CurrencyId = currencyId,
+                LeadTimeDays = 14, ValidUntil = DateTime.UtcNow.AddDays(20), IsActive = true, CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+            });
+            Price(96_992, foreign.Id, 30m, 96_990);
+            Price(96_993, ProcurementTestData.Supplier, 120m, ProcurementTestData.Currency);
+            await setup.SaveChangesAsync();
+        }
+
+        await using var db = fixture.Context();
+        var service = new StockLinePricingService(db);
+        await service.SaveStandardMarginAsync(fixture.BusinessUnitId, 25m, "qa", CancellationToken.None);
+        var view = await service.GetAsync(fixture.BusinessUnitId, fixture.RfqId, fixture.RfqItemId, CancellationToken.None);
+
+        Assert.Contains(view!.SupplierPrices!, x => x.SupplierName == "Houston Valves" && x.CurrencyCode == "USD");
+        // The cost is the quote-currency supplier's 120, blended with the shelf, never the USD 30.
+        Assert.NotNull(view.Price.UnitCost);
+        Assert.True(view.Price.UnitCost > 30m, $"cost was {view.Price.UnitCost}");
+    }
+
+    [Fact]
     public async Task Partly_in_stock_blends_the_stock_cost_with_the_supplier_price()
     {
         using var fixture = new ProcurementScenario(); // wants 10, shelf holds 2
@@ -126,6 +162,9 @@ public sealed class StockLinePricingTests
     [InlineData(28, "4 weeks")]
     [InlineData(10, "10 days")]
     [InlineData(1, "1 day")]
+    [InlineData(30, "1 month")]
+    [InlineData(60, "2 months")]
+    [InlineData(210, "7 months")]
     public void Delivery_prints_in_weeks_when_it_divides(int days, string text) =>
         Assert.Equal(text, QuoteService.DeliveryText(days));
 
