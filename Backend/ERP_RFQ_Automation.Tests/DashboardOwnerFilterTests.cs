@@ -402,6 +402,8 @@ public sealed class DashboardOwnerFilterTests
             return Task.FromResult(new PipelineAnalyticsDTO());
         }
 
+        public Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId) => Task.FromResult(new TeamWorkloadDTO());
+
         public Task<DeadlineBoardDTO> GetDeadlineBoardAsync(
             long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default,
             AccountTeamScope? accessScope = null)

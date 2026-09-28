@@ -252,11 +252,12 @@ const DecidePage: React.FC = () => {
     retry: false,
   });
 
-  // Who owns the request. The same record the lead page reads, so Take it / Give to… here and
-  // there are one control over one fact; the owner control refreshes it after every change.
+  // Who owns the request, and its RFQ number. Read on its own: the full lead record is 2.46 MB on
+  // a 1,500-line request and this page used five fields of it. The key sits under the lead
+  // record's, so the owner control's refresh of ['lead-detail', id] after every change reaches it.
   const leadQuery = useQuery({
-    queryKey: ['lead-detail', leadId],
-    queryFn: () => leadService.getById(leadId),
+    queryKey: ['lead-detail', leadId, 'owner'],
+    queryFn: () => leadDecisionService.getOwner(leadId),
     enabled: Number.isFinite(leadId) && leadId > 0,
     retry: false,
   });
@@ -493,10 +494,13 @@ const DecidePage: React.FC = () => {
         const request = buildFitRequest(current, concern, codes);
         const operation = retryOperation(fitOperation.current, 'lead-fit', leadId, request);
         fitOperation.current = operation;
-        await leadDecisionService.saveFitAssessment(leadId, request, operation.key);
+        const savedFit = await leadDecisionService.saveFitAssessment(leadId, request, operation.key);
         fitOperation.current = null;
         written.fitSaved = true;
-        current = await freshWorkbench();
+        // The save answers with the assessment it recorded; nothing the next write quotes (the
+        // revision, its decision version, the participation version, the lines) moves with it.
+        // Re-reading the whole request here rebuilt every line of it for nothing (PERF-03).
+        current = { ...current, fitAssessment: savedFit ?? current.fitAssessment };
       }
 
       // The server refuses to commit a Bid line on a lead that is not yet QUALIFIED, so the
@@ -521,11 +525,15 @@ const DecidePage: React.FC = () => {
         const scope = commit ? 'lead-participation-commit' : 'lead-participation-draft';
         const operation = retryOperation(participationOperation.current, scope, leadId, request);
         participationOperation.current = operation;
-        await leadDecisionService.saveParticipation(leadId, request, operation.key);
+        const savedChoices = await leadDecisionService.saveParticipation(leadId, request, operation.key);
         participationOperation.current = null;
         written.choicesSavedNow = true;
         guard.markSaved(formOf(workbench, decisions, concern));
-        current = await freshWorkbench();
+        // A save for a manager stays on this page, which re-reads the request once to show what
+        // was saved. Creating the RFQ needs only the version the save answered with.
+        current = commit && mode === 'rfq'
+          ? { ...current, participationVersion: savedChoices.participationVersion, participationStatus: savedChoices.participationStatus }
+          : await freshWorkbench();
       }
 
       if (mode === 'draft') {
@@ -561,8 +569,17 @@ const DecidePage: React.FC = () => {
         `RFQ ${receipt.rfqNumber || `#${receipt.rfqId}`} created with ${receipt.promotedLineCount} line${receipt.promotedLineCount === 1 ? '' : 's'}.`,
         { variant: 'success' },
       );
-      await refresh();
-      if (commercialAccess.canViewPromotedRfq) navigate(`/procurement/rfqs/view/${receipt.rfqId}`);
+      if (commercialAccess.canViewPromotedRfq) {
+        // Leaving for the RFQ: the request is marked out of date for the next visit, not rebuilt
+        // now for a page nobody will look at.
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['lead-decision-workbench', leadId], refetchType: 'none' }),
+          refresh({ workbench: false }),
+        ]);
+        navigate(`/procurement/rfqs/view/${receipt.rfqId}`);
+      } else {
+        await refresh();
+      }
     } catch (error: unknown) {
       const sentence = partialFailureSentence(
         mode,

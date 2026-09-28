@@ -1536,6 +1536,9 @@ public sealed class LeadPersister : ILeadPersister
             : AutoVerification.None;
     }
 
+    /// <summary>The clock the persist-lease keep-alive reads; replaced only by tests.</summary>
+    internal TimeProvider PersistClock { get; set; } = TimeProvider.System;
+
     public LeadPersister(
         ErpRfqAutomationContext context,
         ILogger<LeadPersister> log,
@@ -1628,7 +1631,8 @@ public sealed class LeadPersister : ILeadPersister
         ChunkedExtractionOutcome outcome,
         bool enrichAfterPersistence,
         bool bypassAssemblyFence,
-        CancellationToken ct)
+        CancellationToken ct,
+        PersistLeaseKeepAlive? keepAlive = null)
     {
         if (outcome.Result is null)
             throw new InvalidOperationException("Cannot persist a null extraction result.");
@@ -1911,6 +1915,7 @@ public sealed class LeadPersister : ILeadPersister
                         LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey,
                         ThreadReferencedMessageIds = threadAncestorKeys
                     }, ct));
+                if (keepAlive is not null) await keepAlive.RenewIfDueAsync(ct);
             }
             if (job.SourceDocumentOccurrenceId.HasValue)
             {
@@ -1954,7 +1959,8 @@ public sealed class LeadPersister : ILeadPersister
 
         if (outcome.CanonicalImport is not null && leads.Count == results.Count)
         {
-            var evidencePersister = new StructuredEvidenceLedgerPersister(_context);
+            var evidencePersister = new StructuredEvidenceLedgerPersister(_context,
+                keepAlive is null ? null : keepAlive.RenewIfDueAsync);
             await evidencePersister.PersistAsync(job, outcome, leads, ct);
         }
         else
@@ -1964,6 +1970,7 @@ public sealed class LeadPersister : ILeadPersister
             if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
                 await PersistUnstructuredRunAsync(job, outcome, leads, reconciliation, ct);
         }
+        if (keepAlive is not null) await keepAlive.RenewIfDueAsync(ct);
 
         _log.LogInformation(
             "Persisted {LeadCount} lead(s) ({LeadIds}) with {Count} item(s) total from job {JobId}.",
@@ -2442,13 +2449,18 @@ public sealed class LeadPersister : ILeadPersister
             await transaction.RollbackAsync(ct);
             return null;
         }
+        // Renewed again at the persist's own checkpoints whenever a third of the lease has gone:
+        // a CPU-starved persist of even a small document outlived the single renewal above and
+        // fenced its own completion (XS-09). Same connection, same transaction, row already locked.
+        var keepAlive = new PersistLeaseKeepAlive(job.Id, persistLease,
+            token => queue.RenewLeaseAsync(job.Id, workerId, leaseAttempt, persistLease, token), PersistClock);
 
         var previouslyTrackedLeadIds = _context.ChangeTracker.Entries<Lead>()
             .Select(entry => entry.Entity.Id)
             .Where(id => id > 0)
             .ToHashSet();
         var leadId = await PersistInternalAsync(
-            job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: false, ct);
+            job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: false, ct, keepAlive);
         var persistedLeads = _context.ChangeTracker.Entries<Lead>()
             .Where(entry => entry.Entity.Id > 0 && !previouslyTrackedLeadIds.Contains(entry.Entity.Id))
             .Select(entry => entry.Entity)
@@ -2503,6 +2515,8 @@ public sealed class LeadPersister : ILeadPersister
         // NOT wrapped in a try/catch, deliberately. Unbilled usage is a silent revenue loss that
         // nobody discovers; a failed extraction job is loud, retried and visible. If metering
         // cannot record, this transaction must roll back.
+        // Before the platform-plane block: a renewal re-enters the tenant role on this connection.
+        await keepAlive.RenewIfDueAsync(ct);
         if (_usageMetering is not null)
         {
             // Fail closed on the one way the block below could be misused. Inside it the
@@ -2547,6 +2561,7 @@ public sealed class LeadPersister : ILeadPersister
             if (restoreRole is not null)
                 await SetLocalRoleAsync(restoreRole, ct);
         }
+        await keepAlive.RenewIfDueAsync(ct);
         if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
             throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
 

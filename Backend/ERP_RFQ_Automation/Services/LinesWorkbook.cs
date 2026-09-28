@@ -20,6 +20,13 @@ public static class LinesWorkbook
     /// <summary>Excel refuses a cell longer than this.</summary>
     private const int MaxCellLength = 32_000;
 
+    /// <summary>
+    /// Lines whose text sets the column widths. EPPlus measures every cell it fits: fitting all
+    /// 1,500 lines × 30+ columns of a bid list made "Download Excel" take 27–71 s when the data
+    /// took ~3 s to read (PERF-09). The heading and the first lines are a fair sample of a column.
+    /// </summary>
+    internal const int AutoFitSampleRows = 200;
+
     private sealed record Column<T>(string Header, Func<T, object?> Value);
 
     private static readonly Column<LeadItemResponseDTO>[] LeadLineColumns =
@@ -232,7 +239,9 @@ public static class LinesWorkbook
             sheet.Cells[headerRow, 1, row - 1, headers.Length].AutoFilter = true;
         sheet.View.FreezePanes(headerRow + 1, 3);
         sheet.Column(5).Style.Numberformat.Format = "#,##0.##";
-        if (sheet.Dimension is not null) sheet.Cells[sheet.Dimension.Address].AutoFitColumns(8, 50);
+        if (sheet.Dimension is not null)
+            sheet.Cells[1, 1, Math.Min(sheet.Dimension.End.Row, headerRow + AutoFitSampleRows), sheet.Dimension.End.Column]
+                .AutoFitColumns(8, 50);
         sheet.Column(2).Style.WrapText = true;
 
         return package.GetAsByteArray();

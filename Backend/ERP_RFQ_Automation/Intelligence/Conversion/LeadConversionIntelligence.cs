@@ -61,6 +61,19 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         if (lead == null)
             throw new KeyNotFoundException($"Lead with ID {leadId} not found in Business Unit {businessUnitId}.");
 
+        return await BuildPreviewAsync(lead, businessUnitId, ct);
+    }
+
+    public Task<ConversionPreview> PreviewAsync(Lead loadedLead, long businessUnitId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(loadedLead);
+        if (loadedLead.BusinessUnitId != businessUnitId)
+            throw new KeyNotFoundException($"Lead with ID {loadedLead.Id} not found in Business Unit {businessUnitId}.");
+        return BuildPreviewAsync(loadedLead, businessUnitId, ct);
+    }
+
+    private async Task<ConversionPreview> BuildPreviewAsync(Lead lead, long businessUnitId, CancellationToken ct)
+    {
         var resolved = await ResolveLinesAsync(lead.LeadItems, businessUnitId, ct);
 
         var items = lead.LeadItems
@@ -180,8 +193,12 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             foreach (var c in exactRows) candidates[c.Id] = c;
         }
 
-        // ---- Candidate fetch 2: one bounded ILIKE query per distinct name, using
-        // the two most significant tokens. Leads carry few lines, so this stays cheap.
+        // ---- Candidate fetch 2: per distinct name, the first MaxNameCandidatesPerLine products
+        // (by id) whose name or description contains either of the name's two most significant
+        // tokens. This used to be one ILIKE query PER NAME: a 1,500-line bid list issued 1,295 of
+        // them on every Decide read (PERF-01, 110–148 s under load). The catalogue is now read
+        // ONCE and the identical rule is applied in memory by CatalogueNameIndex.
+        var nameQueries = new List<(string Token1, string Token2)>();
         var nameQueriesDone = new HashSet<string>();
         foreach (var item in fallbackItems)
         {
@@ -191,26 +208,34 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             var tokens = Tokenize(normName).OrderByDescending(t => t.Length).Take(2).ToList();
             if (tokens.Count == 0) continue;
 
-            var token1 = tokens[0];
-            var token2 = tokens.Count > 1 ? tokens[1] : token1;
-
-            var nameRows = await ActiveProducts()
-                .Where(p => (p.ProductName != null && (p.ProductName.ToLower().Contains(token1)
-                                                       || p.ProductName.ToLower().Contains(token2)))
-                            || (p.Description != null && (p.Description.ToLower().Contains(token1)
-                                                          || p.Description.ToLower().Contains(token2))))
-                .OrderBy(p => p.Id)
-                .Take(MaxNameCandidatesPerLine)
-                .Select(p => new Candidate(p.Id, p.ProductName, p.PartNo, p.ModelNo, p.Description))
-                .ToListAsync(ct);
-            foreach (var c in nameRows) candidates.TryAdd(c.Id, c);
+            nameQueries.Add((tokens[0], tokens.Count > 1 ? tokens[1] : tokens[0]));
         }
 
-        // ---- Score every line against the pooled candidate set, in memory.
+        if (nameQueries.Count > 0)
+        {
+            // The same rows the per-name queries saw: active (or NULL-active) products visible to
+            // this tenant, in id order. The explicit business-unit predicate matches the Product
+            // query filter on every tenant-scoped context and keeps a context without a tenant
+            // from reading every tenant's catalogue.
+            var catalogue = await ActiveProducts()
+                .Where(p => p.Buid == null || p.Buid == businessUnitId)
+                .OrderBy(p => p.Id)
+                .Select(p => new Candidate(p.Id, p.ProductName, p.PartNo, p.ModelNo, p.Description))
+                .ToListAsync(ct);
+            var index = new CatalogueNameIndex(catalogue);
+            foreach (var (token1, token2) in nameQueries)
+                foreach (var c in index.FirstContainingEither(token1, token2, MaxNameCandidatesPerLine))
+                    candidates.TryAdd(c.Id, c);
+        }
+
+        // ---- Score every line against the pooled candidate set, in memory. Each candidate's
+        // normalised name, tokens and folded numbers are computed once for the whole pool rather
+        // than once per line.
+        var pool = candidates.Values.Select(c => new ScoringCandidate(c)).ToList();
         foreach (var item in items)
         {
             authoritative.TryGetValue(item.Id, out var authoritativeMatch);
-            var matches = authoritativeMatch?.Matches ?? ScoreItem(item, candidates.Values)
+            var matches = authoritativeMatch?.Matches ?? ScoreItem(item, pool)
                 .OrderByDescending(m => m.Score)
                 .ThenBy(m => m.ProductId)
                 .Take(MaxMatchesPerLine)
@@ -272,13 +297,17 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .Where(line => line.BusinessUnitId == businessUnitId && line.LeadRevisionId == revisionId.Value)
             .OrderBy(line => line.LineNumber)
             .ToListAsync(ct);
+        // One pass, not a scan of every revision line per item (1,500 × 1,500 on a bid list).
+        // SingleOrDefault on each group keeps the old guard: two revision lines naming the same
+        // canonical projection is corrupt lineage and still throws.
+        var revisionLinesByLeadItem = revisionLines.ToLookup(line => line.LeadItemId);
 
         foreach (var item in items)
         {
             // Catalog evidence belongs to the immutable revision line that names this exact
             // canonical projection. Line numbers and collection positions are presentation
             // details and must never be used as identity fallbacks.
-            var revisionLine = revisionLines.SingleOrDefault(line => line.LeadItemId == item.Id);
+            var revisionLine = revisionLinesByLeadItem[item.Id].SingleOrDefault();
             if (revisionLine is null) continue;
             // The buyer's material number first (it is what a trading house keys its catalogue
             // by), the maker's number as the alternate; either may be the one the catalogue holds.
@@ -318,25 +347,111 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     private IQueryable<Product> ActiveProducts() =>
         _db.Products.AsNoTracking().Where(p => p.IsActive == null || p.IsActive == true);
 
-    private static IEnumerable<ProductMatch> ScoreItem(LeadItem item, IEnumerable<Candidate> candidates)
+    /// <summary>
+    /// The candidate-name rule the per-name ILIKE query used to apply in the database, applied to
+    /// one in-memory read of the catalogue: for a name's two tokens, the first <c>limit</c>
+    /// products by id whose lower-cased name or description contains either token.
+    ///
+    /// <para>Exactly equivalent, cheaply: every product in the first <c>limit</c> matches for
+    /// "token1 OR token2" is also among the first <c>limit</c> matches for the token it contains
+    /// (fewer than <c>limit</c> rows with a smaller id can match that token), so each token's
+    /// first <c>limit</c> matches are computed once, cached — names share tokens heavily — and
+    /// merged in id order.</para>
+    /// </summary>
+    private sealed class CatalogueNameIndex
+    {
+        private readonly IReadOnlyList<Candidate> _byId;
+        private readonly string?[] _names;
+        private readonly string?[] _descriptions;
+        private readonly Dictionary<(string Token, int Limit), int[]> _firstMatches = new();
+
+        public CatalogueNameIndex(IReadOnlyList<Candidate> catalogueInIdOrder)
+        {
+            _byId = catalogueInIdOrder;
+            // lower() in the database, ToLowerInvariant here: the tokens are [a-z0-9] only, so the
+            // two agree on every character a token can contain.
+            _names = catalogueInIdOrder.Select(p => p.ProductName?.ToLowerInvariant()).ToArray();
+            _descriptions = catalogueInIdOrder.Select(p => p.Description?.ToLowerInvariant()).ToArray();
+        }
+
+        public IEnumerable<Candidate> FirstContainingEither(string token1, string token2, int limit)
+        {
+            var first = FirstMatches(token1, limit);
+            var second = token2 == token1 ? first : FirstMatches(token2, limit);
+            int i = 0, j = 0, taken = 0;
+            while (taken < limit && (i < first.Length || j < second.Length))
+            {
+                int next;
+                if (j >= second.Length || (i < first.Length && first[i] <= second[j]))
+                {
+                    next = first[i++];
+                    if (j < second.Length && second[j] == next) j++;
+                }
+                else next = second[j++];
+                taken++;
+                yield return _byId[next];
+            }
+        }
+
+        private int[] FirstMatches(string token, int limit)
+        {
+            if (_firstMatches.TryGetValue((token, limit), out var cached)) return cached;
+            var found = new List<int>(Math.Min(limit, 16));
+            for (var i = 0; i < _byId.Count && found.Count < limit; i++)
+            {
+                if ((_names[i] is { } name && name.Contains(token, StringComparison.Ordinal))
+                    || (_descriptions[i] is { } description && description.Contains(token, StringComparison.Ordinal)))
+                    found.Add(i);
+            }
+            var result = found.ToArray();
+            _firstMatches[(token, limit)] = result;
+            return result;
+        }
+    }
+
+    /// <summary>A pooled candidate with everything scoring reads from it computed once.</summary>
+    private sealed class ScoringCandidate
+    {
+        public ScoringCandidate(Candidate product)
+        {
+            Product = product;
+            NormalizedName = NormalizeName(product.ProductName);
+            var tokens = NormalizedName is null ? new HashSet<string>() : Tokenize(NormalizedName);
+            var description = NormalizeName(product.Description);
+            if (description is not null) tokens.UnionWith(Tokenize(description));
+            NameAndDescriptionTokens = tokens;
+            FoldedPartNo = ProductIdentityNormalizer.FoldIdentifier(product.PartNo);
+            FoldedModelNo = ProductIdentityNormalizer.FoldIdentifier(product.ModelNo);
+        }
+
+        public Candidate Product { get; }
+        public string? NormalizedName { get; }
+        public HashSet<string> NameAndDescriptionTokens { get; }
+        public string? FoldedPartNo { get; }
+        public string? FoldedModelNo { get; }
+    }
+
+    private static IEnumerable<ProductMatch> ScoreItem(LeadItem item, IEnumerable<ScoringCandidate> candidates)
     {
         var identifiers = CodeIdentifiers(item).ToList();
+        var foldedIdentifiers = identifiers.Select(id => ProductIdentityNormalizer.FoldIdentifier(id.Value)).ToArray();
         var normName = NormalizeName(item.ProductShortName ?? item.ProductShortDescription);
         var nameTokens = normName is null ? new HashSet<string>() : Tokenize(normName);
 
-        foreach (var p in candidates)
+        foreach (var scoring in candidates)
         {
+            var p = scoring.Product;
             decimal score;
             string reason;
 
-            if (BestCodeHit(identifiers, p) is { } hit)
+            if (BestCodeHit(identifiers, foldedIdentifiers, scoring) is { } hit)
             {
                 (score, reason) = hit;
             }
             else
             {
                 if (normName is null) continue;
-                var candName = NormalizeName(p.ProductName);
+                var candName = scoring.NormalizedName;
                 if (candName is not null && candName == normName)
                 {
                     (score, reason) = (0.90m, "Exact product name match");
@@ -345,9 +460,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 {
                     // Token overlap across candidate name + description, with a
                     // containment boost; scaled into the 0.40–0.85 band.
-                    var candTokens = candName is null ? new HashSet<string>() : Tokenize(candName);
-                    var candDesc = NormalizeName(p.Description);
-                    if (candDesc is not null) candTokens.UnionWith(Tokenize(candDesc));
+                    var candTokens = scoring.NameAndDescriptionTokens;
 
                     decimal ratio = 0m;
                     if (nameTokens.Count > 0 && candTokens.Count > 0)
@@ -454,15 +567,18 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     /// tenant keyed its catalogue on is its own choice, not something a lead line can know.
     /// </summary>
     private static (decimal Score, string Reason)? BestCodeHit(
-        IReadOnlyList<CodeIdentifier> identifiers, Candidate p)
+        IReadOnlyList<CodeIdentifier> identifiers, IReadOnlyList<string?> foldedIdentifiers, ScoringCandidate scoring)
     {
+        var p = scoring.Product;
         (decimal Score, string Reason)? best = null;
-        foreach (var identifier in identifiers)
+        for (var i = 0; i < identifiers.Count; i++)
         {
+            var identifier = identifiers[i];
             decimal? score = null;
             if (Eq(p.PartNo, identifier.Value) || Eq(p.ModelNo, identifier.Value))
                 score = identifier.ExactScore;
-            else if (FoldedEq(p.PartNo, identifier.Value) || FoldedEq(p.ModelNo, identifier.Value))
+            else if (FoldedEq(scoring.FoldedPartNo, foldedIdentifiers[i])
+                     || FoldedEq(scoring.FoldedModelNo, foldedIdentifiers[i]))
                 score = identifier.ExactScore - FoldedHitPenalty;
 
             if (score is { } value && (best is null || value > best.Value.Score))
@@ -476,10 +592,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     /// (<c>ProductIntelligence/ProductIdentityNormalizer</c>) the deterministic resolver already
     /// trusts for this, rather than a second opinion about what a part number is.
     /// </summary>
-    private static bool FoldedEq(string? a, string? b) =>
-        ProductIdentityNormalizer.FoldIdentifier(a) is { } x
-        && ProductIdentityNormalizer.FoldIdentifier(b) is { } y
-        && x == y;
+    private static bool FoldedEq(string? foldedA, string? foldedB) =>
+        foldedA is { } x && foldedB is { } y && x == y;
 
     private static bool Eq(string? a, string? b) =>
         a is not null && b is not null &&

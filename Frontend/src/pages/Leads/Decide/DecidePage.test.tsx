@@ -47,13 +47,17 @@ vi.mock('../../../api/services/leadDecisionService', () => ({
     saveParticipation: (...args: unknown[]) => api.saveParticipation(...args),
     promoteToRfq: (...args: unknown[]) => api.promoteToRfq(...args),
     resolveRfqRevisionImpact: (...args: unknown[]) => api.resolveRfqRevisionImpact(...args),
+    getOwner: (...args: unknown[]) => getLead(...args),
   },
 }));
+/** The owner read (GET /api/leads/{id}/owner). */
 const getLead = vi.fn();
+/** The full lead record, lines and all: Decide must never need it. */
+const getFullLead = vi.fn();
 const downloadLinesExcel = vi.fn();
 vi.mock('../../../api/services/leadService', () => ({
   default: {
-    getById: (...args: unknown[]) => getLead(...args),
+    getById: (...args: unknown[]) => getFullLead(...args),
     downloadLinesExcel: (...args: unknown[]) => downloadLinesExcel(...args),
   },
 }));
@@ -207,10 +211,11 @@ beforeEach(() => {
     aggregateId: 407, currentStatusCode: 'RECEIVED', version: 2, isTerminal: false,
     allowedTransitions: [{ statusId: 8, statusCode: 'QUALIFIED', label: 'Qualified', requiresReason: false }],
   });
+  // As the server does: a fit save records the assessment and answers with it. The decision
+  // version is the lead's revision number and does not move.
   api.saveFitAssessment.mockImplementation(async () => {
     record = {
       ...record,
-      decisionVersion: record.decisionVersion + 1,
       fitAssessment: { version: 1, overallDecision: 'FIT', rationale: NO_CONCERN_RATIONALE, criteria: record.fitAssessment!.criteria.map((c) => ({ ...c, decision: 'PASS' as const })) },
       blockers: record.blockers.filter((b) => b.code !== 'FIT_REQUIRED'),
     };
@@ -277,8 +282,7 @@ describe('DecidePage', () => {
 
     const participation = api.saveParticipation.mock.calls[0][1];
     expect(participation.commit).toBe(true);
-    // The fit save bumped the decision version; the commit must quote the fresh one.
-    expect(participation.expectedDecisionVersion).toBe(4);
+    expect(participation.expectedDecisionVersion).toBe(3);
     expect(participation.lines.map((l: { decision: string; currency: string }) => [l.decision, l.currency]))
       .toEqual([['Bid', 'SAR'], ['Bid', 'SAR'], ['Bid', 'SAR']]);
 
@@ -287,12 +291,33 @@ describe('DecidePage', () => {
     expect(api.transition.mock.invocationCallOrder[0]).toBeLessThan(api.saveParticipation.mock.invocationCallOrder[0]);
     expect(api.promoteToRfq).toHaveBeenCalledWith(407, expect.objectContaining({
       expectedLeadRevisionId: 9001,
-      expectedDecisionVersion: 4,
+      expectedDecisionVersion: 3,
       expectedParticipationVersion: 1,
       idempotencyKey: expect.stringMatching(/^lead-promotion:407:9001:/),
     }));
     expect(snack).toHaveBeenCalledWith('RFQ RFQ-2026-0417 created with 3 lines.', { variant: 'success' });
     expect(navigate).toHaveBeenCalledWith('/procurement/rfqs/view/417');
+  });
+
+  it('builds the request once for a whole Create RFQ click, and never reads the full lead record', async () => {
+    // PERF-03: the click used to re-read the whole request after the assessment, after the
+    // decision and after the RFQ: four builds of a 1,500-line request for one click.
+    renderPage();
+    await quoteEveryLine();
+    await pickOption('Currency for line 00002', 'SAR');
+    expect(api.getWorkbench).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create RFQ' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create an RFQ for Saudi Electricity Company?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, create the RFQ' }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/procurement/rfqs/view/417'));
+
+    expect(api.saveFitAssessment).toHaveBeenCalledTimes(1);
+    expect(api.saveParticipation).toHaveBeenCalledTimes(1);
+    expect(api.getWorkbench).toHaveBeenCalledTimes(1);
+    // PERF-02: the owner comes from the owner read, not the 2.46 MB lead record.
+    expect(getLead).toHaveBeenCalledWith(407);
+    expect(getFullLead).not.toHaveBeenCalled();
   });
 
   it('lets a rep save for a manager and never offers Create RFQ', async () => {

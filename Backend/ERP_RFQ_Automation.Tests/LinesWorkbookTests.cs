@@ -189,6 +189,29 @@ public class LinesWorkbookTests
         Assert.Equal("EA", At(sheet, "Unit", 2).Text);
     }
 
+    /// <summary>
+    /// PERF-09: "Download Excel" of the 1,500-line request took 27–71 s, almost none of it SQL.
+    /// EPPlus measured every cell of every column to fit widths. Widths now come from the heading
+    /// and the first lines, so a long value far down a column no longer sets its width.
+    /// </summary>
+    [Fact]
+    public void Column_widths_come_from_the_heading_and_the_first_lines_only()
+    {
+        var rfq = Rfq(1_500);
+        rfq.Rfqitems[1_399].NoQuoteReason = new string('W', 400);
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var bytes = LinesWorkbook.ForRfq(rfq);
+        Console.WriteLine($"1,500-line workbook built in {watch.ElapsedMilliseconds} ms");
+        var sheet = Read(bytes);
+
+        var reason = Headers(sheet).IndexOf("Reason") + 1;
+        var description = Headers(sheet).IndexOf("Description") + 1;
+        Assert.True(sheet.Column(reason).Width < 30, $"Reason column width {sheet.Column(reason).Width}");
+        Assert.True(sheet.Column(description).Width > 12, $"Description column width {sheet.Column(description).Width}");
+        Assert.Equal(new string('W', 400), At(sheet, "Reason", 1_400).Text);
+    }
+
     [Theory]
     [InlineData("CABLE", "Cu 4c 16mm", "CABLE — Cu 4c 16mm")]
     [InlineData("CIRCUIT BREAKER, MCCB", "CIRCUIT BREAKER, MCCB, 3P, 250A", "CIRCUIT BREAKER, MCCB, 3P, 250A")]

@@ -168,6 +168,19 @@ export interface LeadDecisionWorkbenchDTO {
   uploadedByName?: string | null;
 }
 
+/**
+ * Who owns the request, and its RFQ number: what the decision screen needs from the lead record,
+ * without the record's 1,500 lines.
+ */
+export interface LeadOwnerDTO {
+  leadId: number;
+  assignedToId?: number | null;
+  assignedToFullName?: string | null;
+  assignmentMethod?: 'AUTOMATIC' | 'MANUAL';
+  assignmentVersion?: number | null;
+  rfqno?: string | null;
+}
+
 export interface ParticipationLineInput {
   revisionLineId: number;
   decision: LineParticipationDecision;
@@ -249,6 +262,12 @@ export interface SourceGridDTO {
 const leadDecisionService = {
   getWorkbench: async (leadId: number): Promise<LeadDecisionWorkbenchDTO> => {
     const response = await axiosInstance.get<LeadDecisionWorkbenchDTO>(`/api/leads/${leadId}/decision-workbench`);
+    return response.data;
+  },
+
+  /** The request's owner and RFQ number, without its lines. */
+  getOwner: async (leadId: number): Promise<LeadOwnerDTO> => {
+    const response = await axiosInstance.get<LeadOwnerDTO>(`/api/leads/${leadId}/owner`);
     return response.data;
   },
 
