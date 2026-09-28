@@ -423,7 +423,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 line.ManufacturerName.Value,
                 JoinText(line.ProductName.Value, line.ItemText.Value),
                 line.ManufacturerPartNumber.Value,
-                snapshot.Patterns, snapshot.KnownManufacturers);
+                snapshot.Patterns, snapshot.KnownManufacturers,
+                buyerListsApprovedMakers: line.ExtraFields?.ContainsKey(Templates.ManufacturingPartText.ApprovedManufacturersField) == true);
             if (result is null) continue;
 
             // The evidence points at the cell the answer was read FROM — the description or
