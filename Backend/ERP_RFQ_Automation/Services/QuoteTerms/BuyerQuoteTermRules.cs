@@ -83,15 +83,24 @@ public static class BuyerQuoteTermRules
         return BuyerValidityRule.Unstated;
     }
 
+    /// <summary>
+    /// The buyer's sentence around a match. A portal print often runs clauses together with no
+    /// space ("…rejected.6.Quotation must be valid for 90 days from bid due date.7.For…"), so a
+    /// full stop followed by a clause number or a capital also ends a sentence.
+    /// </summary>
     private static string SentenceAround(string text, int index)
     {
+        static bool EndsAt(string t, int dot) => t[dot] == '.'
+            && (dot + 1 >= t.Length || char.IsWhiteSpace(t[dot + 1]) || char.IsUpper(t[dot + 1])
+                || char.IsDigit(t[dot + 1]) && !(dot > 0 && char.IsDigit(t[dot - 1])));
         var start = index;
-        while (start > 0 && text[start - 1] != '\n' && !(text[start - 1] == '.' && start < text.Length && char.IsWhiteSpace(text[start]))
-               && index - start < 160) start--;
-        var end = text.IndexOfAny(new[] { '\n' }, index);
-        if (end < 0) end = text.Length;
-        var stop = text.IndexOf(". ", index, StringComparison.Ordinal);
-        if (stop >= 0 && stop < end) end = stop + 1;
+        while (start > 0 && text[start - 1] != '\n' && !EndsAt(text, start - 1) && index - start < 160) start--;
+        // A clause number the sentence begins with ("6.") is not part of the buyer's words.
+        var numbered = Regex.Match(text[start..Math.Min(text.Length, start + 6)], @"^\d{1,2}\.(?=\D)");
+        if (numbered.Success) start += numbered.Length;
+        var end = index;
+        while (end < text.Length && text[end] != '\n' && !EndsAt(text, end) && end - index < 300) end++;
+        if (end < text.Length && text[end] == '.') end++;
         var sentence = Regex.Replace(text[start..end], @"\s+", " ").Trim();
         return sentence.Length <= 300 ? sentence : sentence[..300].TrimEnd() + " …";
     }

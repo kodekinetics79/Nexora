@@ -103,6 +103,25 @@ public sealed class BuyerQuoteTermsTests
         Assert.Equal(new[] { "SAR" }, rule!.Value.Codes);
     }
 
+    /// <summary>Every SEC RFP arrives as an SAP Ariba print saved as ".doc" that is really HTML.</summary>
+    [Fact]
+    public void An_Ariba_print_saved_as_doc_is_read_as_HTML()
+    {
+        const string html = "<!-- class: ariba.sourcing.rfxui.PrintRFXEncode -->\n<html><body><table>"
+            + "<tr><td>2</td><td>Local vendors MUST bid in SAR only</td></tr>"
+            + "<tr><td>4.6</td><td>Quotation Validity (minimum 90 days)</td></tr>"
+            + "<tr><td>5 Header Text</td><td>Important points.5.Any change in the price after bid close will be rejected."
+            + "6.Quotation must be valid for 90 days from bid due date.7.For local vendor, the delivery of material&nbsp;must be delivered.</td></tr>"
+            + "</table></body></html>";
+
+        var terms = BuyerQuoteTermsService.Read("doc", System.Text.Encoding.UTF8.GetBytes(html), "SE  RFP C001817585.doc");
+
+        Assert.Equal(90, terms.Validity!.Days);
+        Assert.Equal(BuyerValidityRule.FromClosing, terms.Validity.Basis);
+        Assert.Equal("Quotation must be valid for 90 days from bid due date.", terms.Validity.Sentence);
+        Assert.Equal(new[] { "SAR" }, terms.AllowedCurrencies);
+    }
+
     [Fact]
     public void Terms_from_the_word_table_reader_and_the_text_combine()
     {

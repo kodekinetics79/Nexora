@@ -176,6 +176,9 @@ public sealed class BuyerQuoteTermsService : IBuyerQuoteTermsService
     {
         string text;
         IReadOnlyList<BuyerTerms.Term> tableTerms = Array.Empty<BuyerTerms.Term>();
+        // An SAP Ariba event print saved as ".doc" is HTML ("<!-- class: ariba.sourcing.rfxui…"),
+        // which is how every SEC RFP arrives. The Word reader sees nothing in it.
+        if (LooksLikeHtml(bytes)) kind = "html";
         switch (kind)
         {
             case "docx":
@@ -186,6 +189,9 @@ public sealed class BuyerQuoteTermsService : IBuyerQuoteTermsService
                 break;
             case "doc":
                 text = WordBinaryTextExtractor.Extract(bytes, logger);
+                break;
+            case "html":
+                text = HtmlText(Encoding.UTF8.GetString(bytes));
                 break;
             case "pdf":
                 var builder = new StringBuilder();
@@ -198,6 +204,27 @@ public sealed class BuyerQuoteTermsService : IBuyerQuoteTermsService
                 return BuyerQuoteTerms.None;
         }
         return FromTermsAndText(tableTerms, text, fileName);
+    }
+
+    private static bool LooksLikeHtml(byte[] bytes)
+    {
+        var head = Encoding.UTF8.GetString(bytes, 0, Math.Min(bytes.Length, 2048)).TrimStart('\uFEFF', ' ', '\r', '\n', '\t');
+        return head.StartsWith("<!--", StringComparison.Ordinal) && head.Contains("<html", StringComparison.OrdinalIgnoreCase)
+            || head.StartsWith("<html", StringComparison.OrdinalIgnoreCase)
+            || head.StartsWith("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Visible text of an HTML print, one line per row, cell or paragraph.</summary>
+    internal static string HtmlText(string html)
+    {
+        var withoutScripts = System.Text.RegularExpressions.Regex.Replace(html, @"<(script|style)[^>]*>.*?</\1>", " ",
+            System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var lines = System.Text.RegularExpressions.Regex.Replace(withoutScripts, @"<\s*(br|/p|/div|/tr|/li|/h\d|/td|/th)[^>]*>", "\n",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var text = System.Net.WebUtility.HtmlDecode(System.Text.RegularExpressions.Regex.Replace(lines, "<[^>]+>", " "));
+        return string.Join("\n", text.Split('\n')
+            .Select(line => System.Text.RegularExpressions.Regex.Replace(line, @"[ \t\r\u00A0]+", " ").Trim())
+            .Where(line => line.Length > 0));
     }
 
     /// <summary>Combine the Word reader's terms with the document's running text. Pure.</summary>
