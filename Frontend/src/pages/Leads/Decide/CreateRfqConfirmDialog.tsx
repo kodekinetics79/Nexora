@@ -1,6 +1,7 @@
 import React from 'react';
 import { Button, Dialog, DialogActions, DialogContent, DialogTitle, Stack, Typography } from '@mui/material';
 import { lineWord } from './decideRules';
+import { partialReadSentence, usePartialReadForRoute } from './PartialReadNotice';
 
 /** What pressing "Yes" will do to the request's status, as far as the page knows it. */
 export type QualificationOutlook = 'transition' | 'already' | 'checking' | 'unknown';
@@ -42,24 +43,35 @@ export interface CreateRfqConfirmDialogProps {
  */
 const CreateRfqConfirmDialog: React.FC<CreateRfqConfirmDialogProps> = ({
   open, customer, bidCount, lineCount, qualification, onCancel, onConfirm,
-}) => (
-  <Dialog open={open} onClose={onCancel} fullWidth maxWidth="xs" aria-labelledby="create-rfq-confirm-title">
-    <DialogTitle id="create-rfq-confirm-title" sx={{ fontWeight: 800 }}>
-      {`Create an RFQ for ${customer}?`}
-    </DialogTitle>
-    <DialogContent>
-      <Stack spacing={1.25}>
-        <Typography>{linesIntoRfqSentence(bidCount, lineCount)}</Typography>
-        <Typography>{QUALIFICATION_SENTENCES[qualification]}</Typography>
-        <Typography>Concern: none raised.</Typography>
-        <Typography color="text.secondary">Once the RFQ exists, these choices are locked on this screen.</Typography>
-      </Stack>
-    </DialogContent>
-    <DialogActions sx={{ px: 3, pb: 2 }}>
-      <Button onClick={onCancel}>Go back</Button>
-      <Button variant="contained" onClick={onConfirm} sx={{ fontWeight: 800 }}>Yes, create the RFQ</Button>
-    </DialogActions>
-  </Dialog>
-);
+}) => {
+  // Nexora read only part of the document: the question says so first, and Yes becomes "anyway".
+  const partialRead = usePartialReadForRoute();
+  return (
+    <Dialog open={open} onClose={onCancel} fullWidth maxWidth="xs" aria-labelledby="create-rfq-confirm-title">
+      <DialogTitle id="create-rfq-confirm-title" sx={{ fontWeight: 800 }}>
+        {`Create an RFQ for ${customer}?`}
+      </DialogTitle>
+      <DialogContent>
+        <Stack spacing={1.25}>
+          {partialRead ? (
+            <Typography sx={{ fontWeight: 700, color: 'warning.dark' }} data-testid="create-rfq-partial-read">
+              {`${partialReadSentence(partialRead)}.`}
+            </Typography>
+          ) : null}
+          <Typography>{linesIntoRfqSentence(bidCount, lineCount)}</Typography>
+          <Typography>{QUALIFICATION_SENTENCES[qualification]}</Typography>
+          <Typography>Concern: none raised.</Typography>
+          <Typography color="text.secondary">Once the RFQ exists, these choices are locked on this screen.</Typography>
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button onClick={onCancel}>Go back</Button>
+        <Button variant="contained" onClick={onConfirm} sx={{ fontWeight: 800 }}>
+          {partialRead ? 'Yes, create the RFQ anyway' : 'Yes, create the RFQ'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
 
 export default CreateRfqConfirmDialog;
