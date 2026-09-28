@@ -49,6 +49,8 @@ const BuyerTermsPanel: React.FC<{ evidence: LeadDecisionEvidenceDTO[] }> = ({ ev
                 {index > 0 ? <Box component="span" sx={{ color: 'text.disabled', mx: 1 }}>·</Box> : null}
                 <Box component="span" sx={{ color: 'text.secondary' }}>{term.label} </Box>
                 <Tooltip title={`“${term.quote}”`} placement="bottom-start" enterDelay={300}>
+                  {/* Focusable so a keyboard reader can reach the tooltip holding the buyer's own words. */}
+                  {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
                   <Box component="span" tabIndex={0} sx={{ fontWeight: 600, cursor: 'help' }}>{term.value}</Box>
                 </Tooltip>
               </React.Fragment>
@@ -78,6 +80,7 @@ const BuyerTermsPanel: React.FC<{ evidence: LeadDecisionEvidenceDTO[] }> = ({ ev
               <Box component="dt">{term.label}</Box>
               <Box component="dd">
                 <Tooltip title={`“${term.quote}”`} placement="bottom-start" enterDelay={300}>
+                  {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- keyboard reach to the quote tooltip */}
                   <Box component="span" tabIndex={0} data-term={term.key} sx={{ cursor: 'help', borderBottom: 1, borderColor: 'divider', borderBottomStyle: 'dotted' }}>
                     {term.value}
                   </Box>
