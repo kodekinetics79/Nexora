@@ -35,22 +35,26 @@ public sealed class Gate1ContinuityWiringTests
         var lead = Seed.Lead(context, 8100, 810);
         lead.BidClosingDate = closing;
         lead.RequiredDeliveryDate = required;
+        // A stored Hijri value that does not match the closing date (pilot audit HT-06: it went
+        // stale on every edit). Both projections render it from the closing date as it is now.
         lead.BidClosingDateHijri = "1448-03-12";
         lead.AgreementReference = "FRAME-2026-118";
         await context.SaveChangesAsync();
+        var hijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(closing);
+        Assert.NotEqual("1448-03-12", hijri);
 
         var repo = new LeadRepository(context);
 
         var (rows, _) = await repo.GetLeadListAsync(1, 10, null, null, null, null, 810);
         var listRow = Assert.Single(rows);
         Assert.Equal(required, listRow.RequiredDeliveryDate);
-        Assert.Equal("1448-03-12", listRow.BidClosingDateHijri);
+        Assert.Equal(hijri, listRow.BidClosingDateHijri);
         Assert.Equal("FRAME-2026-118", listRow.AgreementReference);
 
         var detail = await repo.GetLeadByIdAsync(8100, 810);
         Assert.NotNull(detail);
         Assert.Equal(required, detail!.RequiredDeliveryDate);
-        Assert.Equal("1448-03-12", detail.BidClosingDateHijri);
+        Assert.Equal(hijri, detail.BidClosingDateHijri);
         Assert.Equal("FRAME-2026-118", detail.AgreementReference);
 
         // The point of the field: it is NOT the bid deadline, and nothing may collapse the two.

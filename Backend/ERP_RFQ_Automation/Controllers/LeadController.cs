@@ -400,6 +400,43 @@ public class LeadController : ControllerBase
         }
     }
 
+    // A person answering "Closes 8 Sep or 9 Aug?" on the decision screen. One field, its own
+    // audit row; see LeadRepository.ConfirmClosingDateAsync.
+    [HttpPut("{id}/closing-date")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public async Task<ActionResult<LeadResponseDTO>> ConfirmClosingDate(long id, [FromBody] LeadClosingDateAnswerDTO answer)
+    {
+        try
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
+
+            var answeredBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? string.Empty;
+
+            var lead = await _repository.ConfirmClosingDateAsync(id, businessUnitId, answer, answeredBy);
+            if (lead == null) return NotFound($"Lead with ID {id} not found.");
+            return Ok(lead);
+        }
+        catch (LeadReviewConflictException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
+        catch (LeadReviewValidationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return Unexpected(ex, "closing-date");
+        }
+    }
+
     // What the machine proposed for this lead, ranked, each with the reason behind it.
     // Read-only; confirming one of them goes through PUT {id}/client above.
     [HttpGet("{id}/client-candidates")]

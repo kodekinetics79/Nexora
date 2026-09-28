@@ -62,5 +62,12 @@ namespace ERP_RFQ_Automation.Interfaces
         /// </summary>
         Task<LeadResponseDTO?> LinkClientAsync(
             long id, long businessUnitId, LeadClientLinkRequestDTO request, string linkedBy = "system");
+
+        /// <summary>
+        /// A person answering the lead's day/month question about its closing date, or setting
+        /// the closing date outright. Returns null when the lead is not in this tenant.
+        /// </summary>
+        Task<LeadResponseDTO?> ConfirmClosingDateAsync(
+            long id, long businessUnitId, LeadClosingDateAnswerDTO answer, string answeredBy);
     }
 }
