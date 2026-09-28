@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -184,7 +184,13 @@ describe('QuoteViewPage — a customer revision arrived after the draft', () => 
     expect(await screen.findByText(/This quote is stale because a customer revision was received/i)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /keep as quoted/i }));
 
-    await waitFor(() => expect(resolveRevisionImpact).toHaveBeenCalledWith(91));
+    // D-04: keeping the old quantities needs a reason, recorded with the review.
+    const reasonDialog = await screen.findByRole('dialog', { name: 'Keep as quoted' });
+    expect(within(reasonDialog).getByRole('button', { name: 'Keep as quoted' })).toBeDisabled();
+    fireEvent.click(within(reasonDialog).getByText('Buyer confirmed the old quantities'));
+    fireEvent.click(within(reasonDialog).getByRole('button', { name: 'Keep as quoted' }));
+
+    await waitFor(() => expect(resolveRevisionImpact).toHaveBeenCalledWith(91, 'Buyer confirmed the old quantities'));
     await waitFor(() => expect(toastMock.success).toHaveBeenCalled());
     // The readiness query was asked again — the defect was that it never was.
     expect(getSendReadiness.mock.calls.length).toBeGreaterThanOrEqual(2);

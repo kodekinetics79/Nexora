@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getLatestQuote: vi.fn(), prepareQuoteDraft: vi.fn(), saveQuoteTerms: vi.fn(), saveLinePricing: vi.fn(), stockGet: vi.fn(),
   getById: vi.fn(), getSendReadiness: vi.fn(), getPriceAttestation: vi.fn(), getEmailDraft: vi.fn(),
   confirmPriceAttestation: vi.fn(), sendEmail: vi.fn(), downloadPdf: vi.fn(), recordPortalSubmission: vi.fn(),
+  resolveRevisionImpact: vi.fn(), applyRevisionQuantities: vi.fn(),
 }));
 
 vi.mock('../../../api/services/rfqService', () => ({
@@ -23,6 +24,7 @@ vi.mock('../../../api/services/quoteService', () => ({
     getById: mocks.getById, getSendReadiness: mocks.getSendReadiness, getPriceAttestation: mocks.getPriceAttestation,
     getEmailDraft: mocks.getEmailDraft, confirmPriceAttestation: mocks.confirmPriceAttestation, sendEmail: mocks.sendEmail,
     downloadPdf: mocks.downloadPdf, recordPortalSubmission: mocks.recordPortalSubmission,
+    resolveRevisionImpact: mocks.resolveRevisionImpact, applyRevisionQuantities: mocks.applyRevisionQuantities,
   },
 }));
 vi.mock('../../../api/services/stockPriceService', () => ({ default: { get: mocks.stockGet } }));
@@ -34,6 +36,12 @@ vi.mock('../../../context/AuthContext', () => ({
 }));
 
 import SendQuoteDialog from './SendQuoteDialog';
+
+/** UX-07: nothing is pre-chosen, so the rep picks the source and names it. */
+const confirmSource = async (dialog: HTMLElement) => {
+  fireEvent.click(await within(dialog).findByLabelText("Price list or a manager's price"));
+  fireEvent.change(within(dialog).getByLabelText('Manager or price list'), { target: { value: 'Ahmed Saleh' } });
+};
 
 const line = (overrides = {}) => ({
   id: 1, quoteId: 7, itemDescription: 'BATTERY, DRY CELL, 3.6VDC', quantity: 20, unitOfMeasure: 'EA', customerLineRef: '10',
@@ -80,12 +88,13 @@ describe('Send quote', () => {
     expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeDisabled();
 
     fireEvent.change(within(dialog).getByLabelText('Customer email'), { target: { value: 'buyer@sec.example' } });
+    await confirmSource(dialog);
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeEnabled());
     fireEvent.click(within(dialog).getByRole('button', { name: 'Send by email' }));
 
     await waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledWith(7, 'buyer@sec.example', undefined));
     expect(mocks.saveQuoteTerms).toHaveBeenCalledWith(7, expect.objectContaining({ currencyId: 1, validUntil: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) }));
-    expect(mocks.confirmPriceAttestation).toHaveBeenCalledWith(7, 'SALES_MANAGER', 'Golden Manager');
+    expect(mocks.confirmPriceAttestation).toHaveBeenCalledWith(7, 'SALES_MANAGER', 'Ahmed Saleh');
     await waitFor(() => expect(onSent).toHaveBeenCalled());
   });
 
@@ -93,6 +102,7 @@ describe('Send quote', () => {
     renderDialog(vi.fn(), '2026-01-15T00:00:00');
     const dialog = await screen.findByRole('dialog');
     fireEvent.change(await within(dialog).findByLabelText('Customer email'), { target: { value: 'buyer@sec.example' } });
+    await confirmSource(dialog);
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeEnabled());
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Send by email' }));
@@ -115,6 +125,7 @@ describe('Send quote', () => {
     const onSent = renderDialog();
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('BATTERY, DRY CELL, 3.6VDC');
+    await confirmSource(dialog);
 
     // No email typed: emailing is not possible yet, downloading for the portal is.
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Download PDF' })).toBeEnabled());
@@ -139,6 +150,7 @@ describe('Send quote', () => {
     URL.revokeObjectURL = vi.fn();
     renderDialog(vi.fn(), '2026-01-15T00:00:00');
     const dialog = await screen.findByRole('dialog');
+    await confirmSource(dialog);
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Download PDF' })).toBeEnabled());
     fireEvent.click(within(dialog).getByRole('button', { name: 'Download PDF' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Mark as submitted' }));
@@ -234,6 +246,83 @@ describe('Send quote', () => {
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText('To follow')).toBeInTheDocument();
     expect(within(dialog).getByText('Not quoted: Discontinued by manufacturer')).toBeInTheDocument();
+    await confirmSource(dialog);
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeEnabled());
+  });
+  it('UX-07: the price source starts empty, never "a sales manager" with the rep\'s own name', async () => {
+    mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', validUntil: '2099-01-01T00:00:00' }));
+    renderDialog();
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('BATTERY, DRY CELL, 3.6VDC');
+
+    expect(within(dialog).getByLabelText("Price list or a manager's price")).not.toBeChecked();
+    expect(within(dialog).getByLabelText('From a supplier quote')).not.toBeChecked();
+    expect(within(dialog).queryByDisplayValue('Golden Manager')).not.toBeInTheDocument();
+    expect(await within(dialog).findByText(/Say where the prices came from/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeDisabled();
+
+    fireEvent.click(within(dialog).getByLabelText('From a supplier quote'));
+    fireEvent.change(within(dialog).getByLabelText('Supplier quote number'), { target: { value: 'SQ-4471' } });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeEnabled());
+  });
+
+  it('UX-06: email not set up stops only the email — the portal PDF still downloads', async () => {
+    mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', validUntil: '2099-01-01T00:00:00' }));
+    mocks.getSendReadiness.mockResolvedValue({ quoteId: 7, canSend: false, blockers: [
+      { code: 'OUTBOUND_MAIL_DRAFT_ONLY', message: 'Nothing can be emailed to customers right now.' },
+      { code: 'PRICE_ATTESTATION_REQUIRED', message: 'confirm' },
+    ] });
+    renderDialog();
+    const dialog = await screen.findByRole('dialog');
+    await confirmSource(dialog);
+
+    expect(await within(dialog).findByText(/You can still download the PDF for the customer's portal/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/A manager needs to finish Setup/)).not.toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Download PDF' })).toBeEnabled());
+    expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeDisabled();
+  });
+
+  it("warns when the validity is shorter than the buyer asks, and one click sets the buyer's date", async () => {
+    mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', validUntil: '2099-01-01T00:00:00' }));
+    mocks.getSendReadiness.mockResolvedValue({ quoteId: 7, canSend: false, blockers: [{ code: 'PRICE_ATTESTATION_REQUIRED', message: 'confirm' }],
+      warnings: [{ code: 'LINES_NOT_FIRM', message: '1 line is an estimate. Tender buyers treat these as no bid.' }],
+      buyerTerms: { minimumValidityDays: 90, validityBasis: 'CLOSING', requiredValidUntil: '2099-03-01T00:00:00', allowedCurrencies: ['SAR'] } });
+    renderDialog();
+    const dialog = await screen.findByRole('dialog');
+
+    expect(await within(dialog).findByText(/Buyer asks for prices valid until/)).toBeInTheDocument();
+    expect(within(dialog).getByText('1 line is an estimate. Tender buyers treat these as no bid.')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getAllByRole('button', { name: /^Set to / })[0]);
+    await waitFor(() => expect(within(dialog).getByLabelText('Prices valid until')).toHaveValue('2099-03-01'));
+    expect(within(dialog).queryByText(/Buyer asks for prices valid until/)).not.toBeInTheDocument();
+    // A warning never disables anything.
+    await confirmSource(dialog);
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeEnabled());
+  });
+
+  it('D-01/D-04: a newer buyer version asks on Send; "Send anyway" records the reason, then sends', async () => {
+    mocks.getById.mockResolvedValue(quote({ customerEmail: 'buyer@sec.example', currencyId: 1, currencyCode: 'SAR', validUntil: '2099-01-01T00:00:00' }));
+    const stale = { quoteId: 7, canSend: false, blockers: [{ code: 'PRICE_ATTESTATION_REQUIRED', message: 'confirm' }],
+      warnings: [{ code: 'BUYER_REVISION_NEWER', message: 'The buyer sent a newer version (rev 4): 1 line changed. Quantities: line 10 20 → 35.',
+        canApply: true, revision: { impactId: 0, impactType: 'BUYER_REVISION_NEWER', fromRevision: 3, toRevision: 4, changes: [{ line: '10', field: 'quantity', from: '20', to: '35' }] } }] };
+    mocks.getSendReadiness.mockResolvedValueOnce(stale).mockResolvedValueOnce(stale)
+      .mockResolvedValue({ quoteId: 7, canSend: false, blockers: [{ code: 'PRICE_ATTESTATION_REQUIRED', message: 'confirm' }], warnings: [] });
+    mocks.resolveRevisionImpact.mockResolvedValue(undefined);
+    renderDialog();
+    const dialog = await screen.findByRole('dialog');
+    await confirmSource(dialog);
+    expect(await within(dialog).findByText(/The buyer sent a newer version \(rev 4\)/)).toBeInTheDocument();
+
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Send by email' })).toBeEnabled());
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send by email' }));
+    const gate = await screen.findByRole('dialog', { name: 'The buyer sent a newer version' });
+    expect(within(gate).getByText('line 10 quantity 20 → 35')).toBeInTheDocument();
+    expect(within(gate).getByRole('button', { name: 'Send anyway' })).toBeDisabled();
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+
+    fireEvent.click(within(gate).getByText('Buyer confirmed the old quantities'));
+    fireEvent.click(within(gate).getByRole('button', { name: 'Send anyway' }));
+    await waitFor(() => expect(mocks.resolveRevisionImpact).toHaveBeenCalledWith(7, 'Buyer confirmed the old quantities'));
+    await waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledWith(7, 'buyer@sec.example', undefined));
   });
 });
