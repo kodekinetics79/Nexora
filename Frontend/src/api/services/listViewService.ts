@@ -13,7 +13,8 @@ export type ListViewKey =
   | 'leads.list'
   | 'customers.list'
   | 'suppliers.list'
-  | 'lead.items';
+  | 'lead.items'
+  | 'sales.performance.chart';
 
 export type CustomFieldDataType =
   | 'Text' | 'Integer' | 'Decimal' | 'Boolean' | 'Date'

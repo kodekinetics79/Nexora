@@ -194,6 +194,25 @@ public static class ListViewCatalog
                 new("stockUnitCost", "Stock unit cost", DefaultVisible: false),
 
                 new("actions", "Actions", Locked: true)
+            ]),
+
+            // Not a grid: the team chart on Frontend/src/pages/SalesManagement/TeamChart.tsx. It
+            // reuses this store because the preference is the same shape — an ordered choice of
+            // keys per user — and it follows the reader to any browser. The FIRST visible entry is
+            // the across axis and the SECOND the up axis; everything else is stored hidden. Keys
+            // are RepPerformance field names from /api/commercial-intelligence/performance.
+            ["sales.performance.chart"] = new("sales.performance.chart", null,
+            [
+                new("quoteSent", "Quotes sent"),
+                new("wonQuotes", "Won"),
+                new("lostQuotes", "Lost", DefaultVisible: false),
+                new("conversionRate", "Win rate", DefaultVisible: false),
+                new("averageResponseHours", "Hours to customer reply", DefaultVisible: false),
+                new("opportunities", "Opportunities", DefaultVisible: false),
+                new("activityCount", "Activities", DefaultVisible: false),
+                new("overdueFollowUps", "Overdue follow-ups", DefaultVisible: false),
+                new("openRfqs", "Open RFQs", DefaultVisible: false),
+                new("activeLeads", "Active leads", DefaultVisible: false)
             ])
         };
 
