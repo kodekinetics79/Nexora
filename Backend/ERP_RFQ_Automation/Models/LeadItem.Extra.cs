@@ -41,14 +41,34 @@ public static class ExtraFieldsJson
     /// <summary>Defensive caps: at most this many captured columns per item…</summary>
     public const int MaxKeys = 20;
 
-    /// <summary>…and at most this many chars of serialized JSON per item (~2 KB).</summary>
-    public const int MaxSerializedChars = 2048;
+    /// <summary>
+    /// …at most this many chars of serialized JSON per item (~16 KB)…
+    ///
+    /// <para>It was 2 KB, and the rule dropped entries from the end until the rest fitted — or
+    /// returned null when the FIRST entry alone was too long. An Aramco motor line naming 54 to 63
+    /// approved makers put 15–18 KB of buyer text in its first entry, so the line arrived with no
+    /// approved makers, no part numbers and no Hazardous / SASO flags at all: just a description.
+    /// The column is jsonb; the cap is a guard against a runaway document, not a budget.</para>
+    /// </summary>
+    public const int MaxSerializedChars = 16_384;
+
+    /// <summary>…and at most this many chars in any one value, cut visibly rather than dropped.</summary>
+    public const int MaxValueChars = 8_000;
+
+    /// <summary>What a shortened value ends with, so a reader can tell it was cut.</summary>
+    public const string CutMarker = " …";
+
+    /// <summary>A value is never shortened below this many chars to make room; entries are dropped instead.</summary>
+    private const int MinShortenedValueChars = 500;
 
     /// <summary>
     /// Sanitizes and serializes captured columns to a JSON object string, or null when
     /// nothing usable remains. Empty/whitespace keys and values are dropped, keys are
-    /// capped at <see cref="MaxKeys"/>, and entries are dropped from the end until the
-    /// payload fits <see cref="MaxSerializedChars"/>.
+    /// capped at <see cref="MaxKeys"/> and each value at <see cref="MaxValueChars"/>. When the
+    /// payload is still over <see cref="MaxSerializedChars"/>, the LONGEST value is shortened
+    /// first (visibly, with <see cref="CutMarker"/>), so a short flag such as "Hazardous
+    /// Indicator: Yes" is never lost to make room for a long list; only then are entries dropped
+    /// from the end. A usable first entry always survives.
     /// </summary>
     public static string? Serialize(IReadOnlyDictionary<string, string>? extraFields)
     {
@@ -58,21 +78,39 @@ public static class ExtraFieldsJson
         foreach (var (key, value) in extraFields)
         {
             if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(value)) continue;
-            kept[key.Trim()] = value.Trim();
+            kept[key.Trim()] = Shorten(value.Trim(), MaxValueChars);
             if (kept.Count >= MaxKeys) break;
         }
         if (kept.Count == 0) return null;
 
         var json = JsonSerializer.Serialize(kept);
-        while (json.Length > MaxSerializedChars && kept.Count > 1)
+        while (json.Length > MaxSerializedChars)
         {
-            // Drop the most recently added entry until the payload fits.
-            var lastKey = LastKey(kept);
-            kept.Remove(lastKey);
+            var longest = kept.OrderByDescending(pair => pair.Value.Length).First();
+            var floor = kept.Count == 1 ? CutMarker.Length + 1 : MinShortenedValueChars;
+            if (longest.Value.Length > floor)
+            {
+                // Escaping can make the JSON longer than the text, so aim a little lower than
+                // the plain excess; the loop re-measures and goes again if needed.
+                var excess = json.Length - MaxSerializedChars;
+                kept[longest.Key] = Shorten(longest.Value,
+                    Math.Max(floor, longest.Value.Length - excess - CutMarker.Length - 16));
+            }
+            else if (kept.Count > 1)
+            {
+                kept.Remove(LastKey(kept));
+            }
+            else
+            {
+                break;
+            }
             json = JsonSerializer.Serialize(kept);
         }
         return json.Length <= MaxSerializedChars ? json : null;
     }
+
+    private static string Shorten(string value, int maxChars)
+        => value.Length <= maxChars ? value : value[..Math.Max(0, maxChars - CutMarker.Length)].TrimEnd() + CutMarker;
 
     /// <summary>
     /// Parses a stored jsonb payload back into a dictionary. Never throws: malformed or
