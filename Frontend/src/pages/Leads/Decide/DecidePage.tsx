@@ -25,7 +25,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { ExpandMore as ExpandIcon } from '@mui/icons-material';
+import { ExpandMore as ExpandIcon, FileDownloadOutlined as DownloadIcon } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import leadDecisionService, {
   type LeadDecisionWorkbenchDTO,
@@ -253,6 +253,18 @@ const DecidePage: React.FC = () => {
     retry: false,
   });
 
+  const [downloadingLines, setDownloadingLines] = React.useState(false);
+  const downloadLines = async () => {
+    setDownloadingLines(true);
+    try {
+      await leadService.downloadLinesExcel(leadId, leadQuery.data?.rfqno);
+    } catch {
+      enqueueSnackbar("We couldn't make the Excel file. Please try again.", { variant: 'error' });
+    } finally {
+      setDownloadingLines(false);
+    }
+  };
+
   const workbench = workbenchQuery.data;
 
   React.useEffect(() => {
@@ -341,6 +353,8 @@ const DecidePage: React.FC = () => {
   // 1,500 buttons. "Quote all" says yes to everything and the rep then skips the exceptions;
   // "Skip all" needs one reason, which every skipped line carries.
   const [skipAllAnchor, setSkipAllAnchor] = React.useState<HTMLElement | null>(null);
+  // One currency for every line (the request is USD, we quote in SAR): one pick, not 1,500.
+  const [currencyAllAnchor, setCurrencyAllAnchor] = React.useState<HTMLElement | null>(null);
   const updateEveryLine = React.useCallback((patch: Partial<EditableLineDecision>) => {
     if (!workbench) return;
     setDecisions((current) => {
@@ -940,6 +954,27 @@ const DecidePage: React.FC = () => {
                       </MenuItem>
                     ))}
                   </Menu>
+                  {(workbench.currencyOptions ?? []).length > 0 ? (
+                    <>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        aria-haspopup="menu"
+                        aria-expanded={currencyAllAnchor ? 'true' : undefined}
+                        onClick={(event) => setCurrencyAllAnchor(event.currentTarget)}
+                        sx={{ fontWeight: 700 }}
+                      >
+                        Currency for all…
+                      </Button>
+                      <Menu anchorEl={currencyAllAnchor} open={Boolean(currencyAllAnchor)} onClose={() => setCurrencyAllAnchor(null)} aria-label="Currency for every line">
+                        {(workbench.currencyOptions ?? []).map((option) => (
+                          <MenuItem key={option.code} onClick={() => { updateEveryLine({ currency: option.code }); setCurrencyAllAnchor(null); }}>
+                            {option.code}
+                          </MenuItem>
+                        ))}
+                      </Menu>
+                    </>
+                  ) : null}
                 </Stack>
               ) : null}
               {!locked && canEdit && workbench.lines.some((line) => line.verificationStatus === 'NEEDS_CHECK') ? (
@@ -947,6 +982,16 @@ const DecidePage: React.FC = () => {
                   Check against the document
                 </Button>
               ) : null}
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={downloadingLines ? <CircularProgress size={14} color="inherit" /> : <DownloadIcon />}
+                onClick={() => { void downloadLines(); }}
+                disabled={downloadingLines}
+                sx={{ fontWeight: 700 }}
+              >
+                {downloadingLines ? 'Downloading…' : 'Download Excel'}
+              </Button>
               {counter ? (
                 <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
                   {counter}

@@ -42,7 +42,7 @@ import leadDecisionService, {
   type LeadDecisionWorkbenchDTO,
   type SourceGridSheetDTO,
 } from '../../../api/services/leadDecisionService';
-import { downloadAuthenticatedFile, fetchAuthenticatedObjectUrl, openAuthenticatedFile } from '../../../utils/authenticatedFile';
+import { downloadAuthenticatedFile, fetchAuthenticatedObjectUrl } from '../../../utils/authenticatedFile';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { inspectableEvidenceUrl } from '../Workbench/evidenceRules';
 import type { DecisionMap, EditableLineDecision } from '../Workbench/workbenchRules';
@@ -163,17 +163,19 @@ export const buildReviewItems = (
 /**
  * How a document can be shown, decided from what the workbench already knows about the file so
  * nothing is downloaded only to be discarded. Browsers frame PDFs, images and HTML; they will
- * not frame plain text (shown as text here) and cannot draw Office files at all. A spreadsheet
+ * not frame plain text (shown as text here) and cannot draw Office files at all. A Word file
+ * (.docx) is drawn here from its own XML; the older binary .doc cannot be, so it is downloaded. A spreadsheet
  * — the most common shape an RFQ arrives in — is drawn from its cells, which the server reads
  * from the same retained bytes the parser read.
  */
-export type DocumentKind = 'frame' | 'image' | 'text' | 'sheet' | 'file';
+export type DocumentKind = 'frame' | 'image' | 'text' | 'sheet' | 'word' | 'file';
 
 export const documentKind = (contentType: string, name: string): DocumentKind => {
   const type = contentType.toLowerCase();
   const file = name.toLowerCase();
   if (type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|tiff?)$/.test(file)) return 'image';
   if (/pdf|html/.test(type) || /\.(pdf|html?)$/.test(file)) return 'frame';
+  if (/wordprocessingml/.test(type) || /\.docx$/.test(file)) return 'word';
   if (/spreadsheetml|ms-excel|\/csv$/.test(type) || /\.(xlsx|xlsm|xls|csv)$/.test(file)) return 'sheet';
   // Office types also end in "xml" (wordprocessingml); only bare data types count.
   if (/^text\//.test(type) || /^application\/(json|xml)$/.test(type) || /\.(txt|json|xml|md)$/.test(file)) return 'text';
@@ -303,13 +305,60 @@ const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string
             ? `Row ${focusedRow} is the line you are checking.`
             : sheet.truncated ? 'The first rows of the sheet are shown.' : `${bodyRows.length} rows as the spreadsheet holds them.`}
         </Typography>
-        <Link component="button" type="button" variant="caption" onClick={() => void openAuthenticatedFile(path)} sx={{ fontWeight: 700 }}>
-          Open the file
-        </Link>
         <Link component="button" type="button" variant="caption" onClick={() => void downloadAuthenticatedFile(path, evidence.name)} sx={{ fontWeight: 700 }}>
           Download
         </Link>
       </Stack>
+    </Box>
+  );
+};
+
+/**
+ * A Word file drawn in the page: tables, headings and line breaks as the document has them, so a
+ * rep reads the original beside the lines instead of downloading it. Falls back to the download
+ * when the file cannot be drawn.
+ */
+const WordView: React.FC<{ url: string; name: string; fallback: React.ReactNode }> = ({ url, name, fallback }) => {
+  const bodyRef = React.useRef<HTMLDivElement | null>(null);
+  const [status, setStatus] = React.useState<'drawing' | 'drawn' | 'failed'>('drawing');
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setStatus('drawing');
+    (async () => {
+      try {
+        const [{ renderAsync }, blob] = await Promise.all([import('docx-preview'), fetch(url).then((response) => response.blob())]);
+        if (cancelled || !bodyRef.current) return;
+        bodyRef.current.innerHTML = '';
+        await renderAsync(blob, bodyRef.current, undefined, { inWrapper: false, ignoreWidth: true, ignoreHeight: true, breakPages: false });
+        if (!cancelled) setStatus('drawn');
+      } catch {
+        if (!cancelled) setStatus('failed');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [url]);
+
+  if (status === 'failed') return <>{fallback}</>;
+  return (
+    <Box sx={{ position: 'relative' }}>
+      {status === 'drawing' ? (
+        <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
+          <CircularProgress size={28} />
+        </Box>
+      ) : null}
+      <Box
+        ref={bodyRef}
+        aria-label={name}
+        sx={{
+          display: status === 'drawn' ? 'block' : 'none',
+          p: 2, bgcolor: '#fff', color: '#111', border: 1, borderColor: 'divider', borderRadius: 2,
+          maxHeight: { xs: '48vh', md: '70vh' }, overflow: 'auto', fontSize: '0.85rem',
+          '& section.docx': { padding: '0 !important', width: 'auto !important', minHeight: '0 !important', boxShadow: 'none', background: 'transparent' },
+          '& table': { borderCollapse: 'collapse', maxWidth: '100%' },
+          '& td, & th': { border: '1px solid #ccc', padding: '2px 6px', verticalAlign: 'top' },
+        }}
+      />
     </Box>
   );
 };
@@ -354,13 +403,10 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus
     <Alert
       severity="info"
       action={(
-        <Stack direction="row" spacing={1}>
-          <Button color="inherit" size="small" onClick={() => void openAuthenticatedFile(path)}>Open in a new tab</Button>
-          <Button color="inherit" size="small" onClick={() => void downloadAuthenticatedFile(path, evidence.name)}>Download</Button>
-        </Stack>
+        <Button color="inherit" size="small" onClick={() => void downloadAuthenticatedFile(path, evidence.name)}>Download</Button>
       )}
     >
-      <strong>{evidence.name}</strong> is a file the browser cannot show here. Open it beside this window to cross-check.
+      <strong>{evidence.name}</strong> cannot be shown here. Download it and open it beside this window to cross-check.
     </Alert>
   );
   if (knownKind === 'file') return fileOffer;
@@ -389,6 +435,7 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus
     );
   }
   if (state.kind === 'file') return fileOffer;
+  if (state.kind === 'word') return <WordView url={state.url} name={evidence.name} fallback={fileOffer} />;
   return state.kind === 'image' ? (
     <Box component="img" src={state.url} alt={evidence.name} sx={{ maxWidth: '100%', display: 'block' }} />
   ) : (
