@@ -539,11 +539,23 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
       if (!lead) throw new Error('The request has not loaded yet.');
       const originalDue = toDateInput(lead.bidClosingDate);
       const header: { bidClosingDate?: string; recDate?: string } = {};
-      if (dueDate && (dueDate !== originalDue || dueAnswered)) header.bidClosingDate = withStatedTime(dueDate, lead.bidClosingDate);
-      if (receivedDate && receivedDate !== toDateInput(lead.recDate)) header.recDate = withStatedTime(receivedDate, lead.recDate);
+      let expectedVersion = lead.reviewVersion ?? 0;
+      let received = lead.recDate;
+      if (dueDate && dueAnswered) {
+        // The answer to "Closes 8 Sep or 9 Aug?" is its own recorded decision (it also reads the
+        // received date the same way); the check then goes on from the version it left.
+        const answered = await leadService.confirmClosingDate(leadId, withStatedTime(dueDate, lead.bidClosingDate));
+        expectedVersion = answered.reviewVersion ?? expectedVersion;
+        received = answered.recDate;
+      } else if (dueDate && dueDate !== originalDue) {
+        header.bidClosingDate = withStatedTime(dueDate, lead.bidClosingDate);
+      }
+      if (receivedDate && receivedDate !== toDateInput(lead.recDate) && receivedDate !== toDateInput(received)) {
+        header.recDate = withStatedTime(receivedDate, lead.recDate);
+      }
       return extractionReviewService.submitReview(leadId, {
         action: 'approve',
-        expectedVersion: lead.reviewVersion ?? 0,
+        expectedVersion,
         reason: note.trim() || DEFAULT_CHECK_REASON,
         header,
         items: buildReviewItems(items, edits),

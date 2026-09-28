@@ -1400,6 +1400,12 @@ namespace ERP_RFQ_Automation.Repositories
             var headerChanged = new List<string>();
             if (header.Rfqno != null && header.Rfqno != lead.Rfqno) headerChanged.Add("rfqno");
             if (header.BuyersName != null && header.BuyersName != lead.BuyersName) headerChanged.Add("buyersName");
+            // A date picker holds a day, not a time: a day that arrives at midnight keeps the time
+            // the document stated, or every save of the review page turned a 5:00 PM close into 00:00.
+            if (header.BidClosingDate is { } pickedClosing && pickedClosing.TimeOfDay == TimeSpan.Zero
+                && lead.BidClosingDate is { } statedClosing && statedClosing.TimeOfDay != TimeSpan.Zero)
+                header.BidClosingDate = pickedClosing.Date + statedClosing.TimeOfDay;
+            var closingDayChanged = header.BidClosingDate != null && header.BidClosingDate.Value.Date != lead.BidClosingDate?.Date;
             if (header.BidClosingDate != null && header.BidClosingDate != lead.BidClosingDate) headerChanged.Add("bidClosingDate");
             if (header.RecDate != null && header.RecDate != lead.RecDate) headerChanged.Add("recDate");
             if (header.RequiredDeliveryDate != null && header.RequiredDeliveryDate != lead.RequiredDeliveryDate) headerChanged.Add("requiredDeliveryDate");
@@ -1434,8 +1440,9 @@ namespace ERP_RFQ_Automation.Repositories
             lead.HeaderRemarks = header.HeaderRemarks ?? (action == "approve"
                 ? StripNeedsReviewPrefix(lead.HeaderRemarks)
                 : lead.HeaderRemarks);
-            // A person who set the closing date has answered the day/month question about it.
-            if (header.BidClosingDate != null && header.HeaderRemarks == null)
+            // A person who moved the closing date to another day has answered the day/month question
+            // about it. Approving without touching it answers nothing (PUT closing-date does that).
+            if (closingDayChanged && header.HeaderRemarks == null)
                 lead.HeaderRemarks = ERP_RFQ_Automation.Extraction.ClosingDateQuestion.RemoveDateQuestions(lead.HeaderRemarks);
 
             // A review never mutates or deletes a canonical line already referenced by an

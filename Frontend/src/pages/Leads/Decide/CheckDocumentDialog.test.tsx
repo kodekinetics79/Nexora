@@ -12,11 +12,14 @@ import type { LeadDecisionLineDTO, LeadDecisionWorkbenchDTO } from '../../../api
 const snack = vi.fn();
 vi.mock('notistack', () => ({ useSnackbar: () => ({ enqueueSnackbar: snack }) }));
 
-const api = { getById: vi.fn(), submitReview: vi.fn(), fetchObjectUrl: vi.fn(), getSourceGrid: vi.fn() };
+const api = { getById: vi.fn(), submitReview: vi.fn(), fetchObjectUrl: vi.fn(), getSourceGrid: vi.fn(), confirmClosingDate: vi.fn() };
 const renderDocx = vi.fn();
 vi.mock('docx-preview', () => ({ renderAsync: (...args: unknown[]) => renderDocx(...args) }));
 vi.mock('../../../api/services/leadService', () => ({
-  default: { getById: (...args: unknown[]) => api.getById(...args) },
+  default: {
+    getById: (...args: unknown[]) => api.getById(...args),
+    confirmClosingDate: (...args: unknown[]) => api.confirmClosingDate(...args),
+  },
 }));
 vi.mock('../../../api/services/leadDecisionService', () => ({
   default: { getSourceGrid: (...args: unknown[]) => api.getSourceGrid(...args) },
@@ -302,11 +305,29 @@ describe('CheckDocumentDialog', () => {
     fireEvent.click(within(question).getByRole('button', { name: '8 Sep' }));
     expect(within(question).getByRole('button', { name: '8 Sep' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('8 Sep 2026, 5:00 PM')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Received'), { target: { value: '2026-09-03' } });
+    // The server reads the received date the same way when it answers; here the rep also sets it.
+    api.confirmClosingDate.mockResolvedValue({ reviewVersion: 4, recDate: '2026-03-09T15:59:00' });
+    fireEvent.change(screen.getByLabelText('Received'), { target: { value: '2026-09-04' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'Confirm what the document says' }));
     await waitFor(() => expect(api.submitReview).toHaveBeenCalled());
-    expect(api.submitReview.mock.calls[0][1].header).toEqual({ bidClosingDate: '2026-09-08T17:00:00', recDate: '2026-09-03T15:59:00' });
+    // The answer is its own recorded decision, with the stated time; the check goes on from its version.
+    expect(api.confirmClosingDate).toHaveBeenCalledWith(5, '2026-09-08T17:00:00');
+    expect(api.submitReview.mock.calls[0][1].expectedVersion).toBe(4);
+    expect(api.submitReview.mock.calls[0][1].header).toEqual({ recDate: '2026-09-04T15:59:00' });
+  });
+
+  it('keeps the stated closing time when the day is changed with the picker', async () => {
+    api.getById.mockResolvedValue({ ...lead, bidClosingDate: '2026-09-06T17:00:00' });
+    renderDialog();
+    await screen.findByText('1 of 2 lines to check');
+    await pickOption('Unit, line 00001', 'EA');
+    expect(screen.getByText('6 Sep 2026, 5:00 PM')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Quote due'), { target: { value: '2026-09-07' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm what the document says' }));
+    await waitFor(() => expect(api.submitReview).toHaveBeenCalled());
+    expect(api.submitReview.mock.calls[0][1].header).toEqual({ bidClosingDate: '2026-09-07T17:00:00' });
+    expect(api.confirmClosingDate).not.toHaveBeenCalled();
   });
 
   it('sends the answer even when the rep confirms the reading already held', async () => {
@@ -318,10 +339,12 @@ describe('CheckDocumentDialog', () => {
     renderDialog();
     await screen.findByText('1 of 2 lines to check');
     await pickOption('Unit, line 00001', 'EA');
+    api.confirmClosingDate.mockResolvedValue({ reviewVersion: 4, recDate: '2026-03-09T00:00:00' });
     fireEvent.click(within(screen.getByRole('group', { name: 'Closing date question' })).getByRole('button', { name: '9 Aug' }));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm what the document says' }));
     await waitFor(() => expect(api.submitReview).toHaveBeenCalled());
-    expect(api.submitReview.mock.calls[0][1].header).toEqual({ bidClosingDate: '2026-08-09T17:00:00' });
+    expect(api.confirmClosingDate).toHaveBeenCalledWith(5, '2026-08-09T17:00:00');
+    expect(api.submitReview.mock.calls[0][1].header).toEqual({});
   });
 
   it('says so when no document is on file', async () => {
