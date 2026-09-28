@@ -176,6 +176,22 @@ public sealed class ManufacturingPartTextTests
         Assert.Null(reading.AgreedPartNumber);
     }
 
+    [Fact]
+    public void A_part_number_under_the_bare_NUMBER_key_is_read_and_does_not_garble_the_record()
+    {
+        // XS-04, verbatim from line 765 of ARAMCO Enquiry 6028: GE GENERAL PURPOSE CONTROL states its
+        // part under "NUMBER -"; it used to be read as "replaces CR206D022DBA NUMBER - CR306D002BDA".
+        var reading = ManufacturingPartText.Read(
+            "4000017449 - 0060001005 - GE GENERAL PURPOSE CONTROL - US\n000000005000702243 - 10018484 - GE GENERAL PURPOSE CONTROL - US\n" +
+            "ED_NUMBER - CR306D002BDA\nCUSTOMER_MATERIAL_DESCRIPTION1 - STARTER, ELECTRIC MOTOR: NEMA\nCUSTOMER_MATERIAL_CODE - 000000005000702243\n" +
+            "CUSTOMER_MATERIAL_DESCRIPTION2 - 2, 45 A\nSUPERSEDED_NUMBER - CR206D022DBA\nNUMBER - CR306D002BDA\nED_SUPERSEDED_NUMBER - CR206D022DBA");
+
+        var vendor = Assert.Single(reading.Vendors);
+        Assert.Equal("CR306D002BDA", vendor.PartNumber);
+        Assert.Equal(["CR206D022DBA"], vendor.SupersededNumbers);
+        Assert.Equal(new[] { "CR306D002BDA" }, reading.PartNumbers);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

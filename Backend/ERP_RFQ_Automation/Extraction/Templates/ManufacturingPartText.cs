@@ -91,9 +91,11 @@ public static class ManufacturingPartText
         @"(?<!\d)\d{10} - \d{10} - (?<vendor>[^\r\n]{1,80}?) - [A-Z]{2}\s+\d{18} - \d{8} - (?<maker>[^\r\n]{1,80}?) - (?<country>[A-Z]{2})(?=\s|\z)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    // A key is UPPER_SNAKE with at least one underscore — plus REMARKS, the one single-word key
-    // these records use ("REMARKS - WILL SHIP AS PARTS 149986-01").
-    private const string KeyToken = @"(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|REMARKS)";
+    // A key is UPPER_SNAKE with at least one underscore — plus the single-word keys these records
+    // use: REMARKS ("REMARKS - WILL SHIP AS PARTS 149986-01") and NUMBER ("NUMBER - CR306D002BDA",
+    // the part number some vendor records state under a bare key). Unrecognised, "NUMBER - …" ran
+    // on inside the value before it: "replaces CR206D022DBA NUMBER - CR306D002BDA".
+    private const string KeyToken = @"(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|REMARKS|NUMBER)";
 
     private static readonly Regex KeyedValue = new(
         @"\b(?<key>" + KeyToken + @") - (?<value>.*?)(?=(?:\s\b" + KeyToken + @" - )|(?:\s\d{10} - \d{10} - )|\z)",
@@ -102,7 +104,7 @@ public static class ManufacturingPartText
     /// <summary>The keys whose value is a maker's own number for the goods.</summary>
     private static readonly HashSet<string> PartNumberKeys = new(StringComparer.Ordinal)
     {
-        "PART_NUMBER", "MODEL_NUMBER", "CATALOG_NUMBER", "PART_NUMBER_C1",
+        "PART_NUMBER", "MODEL_NUMBER", "CATALOG_NUMBER", "PART_NUMBER_C1", "NUMBER",
     };
 
     private static readonly HashSet<string> SupersededKeys = new(StringComparer.Ordinal)
@@ -207,7 +209,7 @@ public static class ManufacturingPartText
                 if (stripped && continuation.Success) continue;
                 switch (field)
                 {
-                    case "PART_NUMBER" or "CATALOG_NUMBER": part = continuation.Success ? Append(part, value) : Prefer(part, value, stripped); break;
+                    case "PART_NUMBER" or "CATALOG_NUMBER" or "NUMBER": part = continuation.Success ? Append(part, value) : Prefer(part, value, stripped); break;
                     case "MODEL_NUMBER": model = continuation.Success ? Append(model, value) : Prefer(model, value, stripped); break;
                     case "SUPERSEDED_NUMBER":
                         if (continuation.Success && superseded.Count > 0) { superseded[^1] = Append(superseded[^1], value)!; break; }
