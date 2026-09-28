@@ -117,6 +117,14 @@ public sealed class TenantBaselineSeederTests
         Assert.Equal("sales@acme-trading.example", quoteConfiguration.CompanyEmail);
         Assert.Equal("Acme Industrial Trading LLC", quoteConfiguration.FooterText);
         Assert.False(string.IsNullOrWhiteSpace(quoteConfiguration.TermsAndConditions));
+        // Pilot audit CB-01: the seed printed "valid for 30 days" beside a different Valid Until,
+        // "taxes not included" beside a VAT line and "Net 30" to 60-day payers. The quote now
+        // generates those facts itself; the seed must not contradict them.
+        Assert.DoesNotContain("30 days", quoteConfiguration.TermsAndConditions);
+        Assert.DoesNotContain("Net 30", quoteConfiguration.TermsAndConditions);
+        Assert.DoesNotContain("not included", quoteConfiguration.TermsAndConditions);
+        Assert.DoesNotContain("property of the seller", quoteConfiguration.TermsAndConditions);
+        Assert.NotNull(ERP_RFQ_Automation.Services.QuoteDocumentText.AdditionalTerms(quoteConfiguration.TermsAndConditions));
         Assert.True(summary.QuoteConfigurationCreated);
 
         // ---- the base currency, resolved the way the product resolves it ------------------

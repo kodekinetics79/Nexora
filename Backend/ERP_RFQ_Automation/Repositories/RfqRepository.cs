@@ -791,6 +791,10 @@ namespace ERP_RFQ_Automation.Repositories
                     // buyer match our line back to their RFQ line (SAP "00010", "OPT-29", …).
                     UnitOfMeasure = i.UnitOfMeasure,
                     CustomerLineRef = i.LineItemNo,
+                    // The buyer's material number, maker and part number (QuoteItem.BuyerIdentity).
+                    CustomerMaterialCode = QuoteItem.Clean(i.ItemMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                    ManufacturerName = QuoteItem.Clean(i.ManufacturerName, QuoteItem.MaxManufacturerName),
+                    ManufacturerPartNumber = QuoteItem.Clean(i.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                     UnitPrice = i.UnitPrice ?? 0,
                     TotalAmount = i.Quantity!.Value * (i.UnitPrice ?? 0),
                     CreatedBy = approvedBy,

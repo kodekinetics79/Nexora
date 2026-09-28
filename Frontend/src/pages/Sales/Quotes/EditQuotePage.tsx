@@ -32,6 +32,7 @@ import { calculateQuoteTotals, type DiscountKind } from './quoteTotals';
 import { formatMoney } from '../../../utils/currency';
 import { deliveryText } from '../../../utils/delivery';
 import NextStepPanel from '../../../components/common/NextStepPanel';
+import { buyerIdentityLine, buyerNotes } from './quoteLineText';
 
 interface QuoteItem {
   id?: number;
@@ -48,6 +49,8 @@ interface QuoteItem {
   // echoed back on save so an edit round-trip cannot strip them.
   unitOfMeasure?: string | null;
   customerLineRef?: string | null;
+  /** Read-only: what the buyer calls the line (printed on the PDF). Never posted back; the server keeps it. */
+  buyerIdentity?: string | null;
   unitPrice: number;
   totalAmount: number;
   discount: number;
@@ -149,7 +152,9 @@ const EditQuotePage: React.FC = () => {
       setCustomerId(quote.customerId || null);
       setQuoteDate(quote.quoteDate ? quote.quoteDate.split('T')[0] : '');
       setValidUntil(quote.validUntil ? quote.validUntil.split('T')[0] : '');
-      setHeaderRemarks(quote.headerRemarks || '');
+      // The internal "Commercial Review Required" marker is not a note to the customer; the field
+      // opens empty rather than inviting the rep to send it.
+      setHeaderRemarks(buyerNotes(quote.headerRemarks) ?? '');
       setStatusId(quote.statusId || null);
       setStatusValue(quote.statusValue || '');
       setDiscountTypeId(quote.discountTypeId || null);
@@ -166,6 +171,7 @@ const EditQuotePage: React.FC = () => {
         quantity: i.quantity,
         unitOfMeasure: i.unitOfMeasure || null,
         customerLineRef: i.customerLineRef || null,
+        buyerIdentity: buyerIdentityLine(i),
         unitPrice: i.unitPrice,
         totalAmount: i.totalAmount,
         discount: i.discount || 0,
@@ -526,7 +532,7 @@ const EditQuotePage: React.FC = () => {
                 <TextField fullWidth type="date" label="Valid Until" size="small" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
               </Grid>
               <Grid size={{ xs: 12, md: 8 }}>
-                <TextField fullWidth label="Remarks / Terms" size="small" value={headerRemarks} onChange={(e) => setHeaderRemarks(e.target.value)} />
+                <TextField fullWidth label="Notes to customer" helperText="Printed on the quote and in the email" size="small" value={headerRemarks} onChange={(e) => setHeaderRemarks(e.target.value)} />
               </Grid>
               <Grid size={{ xs: 12, md: 2 }}>
                 <FormControl fullWidth size="small">
@@ -564,13 +570,16 @@ const EditQuotePage: React.FC = () => {
                   <TableCell sx={{ fontWeight: 800, width: 110 }} align="center">Price</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 100 }} align="center">Disc</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 190 }} align="center">Tax treatment</TableCell>
-                  <TableCell sx={{ fontWeight: 800, width: 100 }} align="center">Total</TableCell>
+                  <TableCell sx={{ fontWeight: 800, width: 100 }} align="center">Total excl. VAT</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 50 }} align="center"></TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {items.filter(i => !i.isDeleted).map((item, index) => (
-                  <TableRow key={index} sx={{ '&:hover': { bgcolor: 'action.hover' } }}>
+                {/* Walk `items` with its REAL index and skip deleted rows here. Filtering first
+                    renumbered the rows, so after a delete each row showed its neighbour's total
+                    (pricedByItemIndex is keyed by the real index) and an edit landed on the wrong line. */}
+                {items.map((item, index) => item.isDeleted ? null : (
+                  <TableRow key={item.id ?? `new-${index}`} sx={{ '&:hover': { bgcolor: 'action.hover' } }}>
                     {/* Read-only: the buyer's own line reference from their RFQ */}
                     <TableCell>
                       <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{item.customerLineRef || '—'}</Typography>
@@ -587,6 +596,9 @@ const EditQuotePage: React.FC = () => {
                     </TableCell>
                     <TableCell>
                       <TextField fullWidth size="small" variant="standard" value={item.itemDescription} onChange={(e) => updateItem(index, { itemDescription: e.target.value })} />
+                      {item.buyerIdentity && (
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>{item.buyerIdentity}</Typography>
+                      )}
                       {item.exStockQuantity != null && item.exStockQuantity > 0 ? (
                         <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mt: 0.25 }}>
                           {item.exStockQuantity} ex stock, balance {item.deliveryLeadTime ? `in ${deliveryText(item.deliveryLeadTime)}` : 'to follow'}
@@ -663,7 +675,9 @@ const EditQuotePage: React.FC = () => {
                       </Stack>
                     </TableCell>
                     <TableCell align="center">
-                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>{(pricedByItemIndex.get(index)?.net ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                      {/* The figure the PDF prints in its line column: after the line's discount and its
+                          share of the header discount, VAT excluded. */}
+                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>{(pricedByItemIndex.get(index)?.taxableBase ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Typography>
                     </TableCell>
                     <TableCell align="center">
                       <IconButton color="error" size="small" onClick={() => removeItem(index)}><DeleteIcon fontSize="small" /></IconButton>
@@ -705,7 +719,7 @@ const EditQuotePage: React.FC = () => {
           </Card>
 
           {/* WP-B2: "This customer" history — win rate + last-sold prices. */}
-          <CustomerContextPanel customerId={customerId} />
+          <CustomerContextPanel customerId={customerId} currencyCode={currencyCode} />
         </Grid>
       </Grid>
     </Box>
