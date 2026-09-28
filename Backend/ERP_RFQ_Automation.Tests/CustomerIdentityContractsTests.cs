@@ -803,6 +803,22 @@ public sealed class CustomerIdentityContractsTests
         }
     }
 
+    [Theory]
+    [InlineData("6000000028")]   // Aramco
+    [InlineData("5500813867")]   // SABIC
+    [InlineData("9500202307")]   // MaSa
+    public void An_all_digit_rfq_number_has_no_learnable_shape(string rfqNumber)
+        => Assert.Null(RfqNumberPattern.Derive(rfqNumber));
+
+    [Fact]
+    public void A_digits_only_shape_learned_before_the_rule_matches_nothing()
+    {
+        // The row already stored on the owner's stack (customer_identifiers 15) stops matching.
+        Assert.False(RfqNumberPattern.Matches(@"^\d{10}$", "5500813867"));
+        Assert.False(RfqNumberPattern.Matches(@"^\d{10}$", "6000000028"));
+        Assert.True(RfqNumberPattern.Matches(@"^C\d{9}$", "C001832162"));
+    }
+
     [Fact]
     public void A_separator_generalises_but_the_shape_does_not()
     {
