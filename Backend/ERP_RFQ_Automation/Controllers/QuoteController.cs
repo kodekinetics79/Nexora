@@ -386,10 +386,18 @@ namespace ERP_RFQ_Automation.Controllers
             catch (Exception ex) { return Unexpected(ex, "validity-extensions"); }
         }
 
+        public sealed record KeepAsQuotedRequest(string? Reason);
+
+        /// <summary>
+        /// "Keep as quoted": the rep reviewed the buyer's newer revision and keeps the quoted
+        /// quantities. The reason is required (D-04) and stored with the lines that differ.
+        /// </summary>
         [HttpPost("{id}/revision-impact/resolve")]
         [RequireModulePermission("Quotations", PermissionAction.Edit)]
         public async Task<IActionResult> ResolveRevisionImpact(long id,
-            [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey, CancellationToken ct)
+            [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+            [FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] KeepAsQuotedRequest? request,
+            CancellationToken ct)
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId <= 0) return BadRequest(new { message = "A valid businessUnitId claim is required." });
@@ -399,8 +407,29 @@ namespace ERP_RFQ_Automation.Controllers
                 var actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
                     ?? User.Identity?.Name ?? "authenticated-user";
                 await _quoteService.ResolveRevisionImpactAsync(id, businessUnitId, actor,
-                    string.IsNullOrWhiteSpace(idempotencyKey) ? Guid.NewGuid().ToString("N") : idempotencyKey, ct);
+                    string.IsNullOrWhiteSpace(idempotencyKey) ? Guid.NewGuid().ToString("N") : idempotencyKey, ct,
+                    request?.Reason);
                 return NoContent();
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// The buyer's commercial terms read from the quote's RFQ document: validity floor,
+        /// allowed currencies, delivery terms, agreement, payment. 204 when it states none.
+        /// </summary>
+        [HttpGet("{id}/buyer-terms")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<QuoteBuyerTermsDTO>> GetBuyerTerms(long id, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return Forbid();
+            if (!await CanAccessQuoteAsync(id, ct)) return NotFound();
+            try
+            {
+                var terms = await _quoteService.GetBuyerTermsAsync(id, businessUnitId, ct);
+                return terms is null ? NoContent() : Ok(terms);
             }
             catch (KeyNotFoundException) { return NotFound(); }
         }

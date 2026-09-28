@@ -66,5 +66,24 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
 
         /// <summary>The re-totalled quote total after the change.</summary>
         public decimal? TotalAmount { get; set; }
+
+        /// <summary>RFQ lines that took the buyer's new quantity too (D-05), so the RFQ, the quote
+        /// and the next supplier request agree.</summary>
+        public List<QuoteRevisionLineChangeDTO> RfqLinesUpdated { get; set; } = new();
+
+        /// <summary>Supplier requests still open that asked for the OLD quantity. They are flagged
+        /// on their sourcing case; the rep asks the supplier again.</summary>
+        public List<OutdatedSupplierRequestDTO> OutdatedSupplierRequests { get; set; } = new();
+    }
+
+    /// <summary>One open supplier request that asked for a quantity the buyer has since changed.</summary>
+    public sealed class OutdatedSupplierRequestDTO
+    {
+        public long SolicitationId { get; set; }
+        public string? SupplierRfqNumber { get; set; }
+        public string? SupplierName { get; set; }
+        public string Line { get; set; } = string.Empty;
+        public decimal AskedQuantity { get; set; }
+        public decimal NewQuantity { get; set; }
     }
 }

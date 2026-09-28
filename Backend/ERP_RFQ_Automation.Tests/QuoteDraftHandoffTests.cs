@@ -41,7 +41,9 @@ public sealed class QuoteDraftHandoffTests
         Assert.Equal(lead.CurrentRevisionNumber, quote.SourceLeadRevision);
         Assert.Equal(rfq.LifecycleVersion, quote.SourceRfqRevision);
         Assert.Null(quote.CurrencyId);
-        Assert.Null(quote.ValidUntil);
+        // Buyer-terms slice 2: the draft is born valid for the ordinary 30 days when the buyer's
+        // document states no floor (it used to be born with none, and the send dialog guessed).
+        Assert.Equal(DateTime.UtcNow.Date.AddDays(30), quote.ValidUntil);
         Assert.Equal(0m, quote.TotalAmount);
         Assert.All(quote.QuoteItems, item =>
         {
@@ -66,6 +68,59 @@ public sealed class QuoteDraftHandoffTests
         var unchangedQuote = await context.Quotes.SingleAsync();
         Assert.Equal(sourceLeadRevision, unchangedQuote.SourceLeadRevision);
         Assert.Equal(sourceRfqRevision, unchangedQuote.SourceRfqRevision);
+    }
+
+    private sealed class FixedBuyerTerms(ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTerms terms)
+        : ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService
+    {
+        public Task<ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTerms> ForLeadAsync(long businessUnitId, long leadId, CancellationToken ct = default)
+            => Task.FromResult(terms);
+        public Task<ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTerms> ForQuoteAsync(long businessUnitId, long quoteId, CancellationToken ct = default)
+            => Task.FromResult(terms);
+    }
+
+    /// <summary>
+    /// HT-03 / CB-02: SEC requires "Quotation must be valid for 90 days from bid due date"; the
+    /// draft was born with no date and the dialog offered today + 30, so every SEC quote went out
+    /// short. Aramco allows "USD or SAR"; with a SAR-only tenant the draft now starts in SAR.
+    /// </summary>
+    [Fact]
+    public async Task PrepareDraftFromRfq_DefaultsValidityAndCurrencyFromTheBuyersTerms()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(9402);
+        var lead = Seed.Lead(context, 94021, 9402, items: new[] { CompleteLine(94022) });
+        Seed.Customer(context, 94023, 9402, "SEC");
+        Seed.Contact(context, 94024, 9402, 94023);
+        context.SetupMasters.Add(Status(94025, 9402, "QuoteStatus", "DRAFT"));
+        context.Currencies.Add(new Currency
+        {
+            Id = 94029, BusinessUnitId = 9402, Code = "SAR", CurrencyName = "Saudi Riyal", IsBaseCurrency = true,
+            IsActive = true, CreatedBy = "seed", CreatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(94023, 94024, "CONFIRMED");
+        var closing = DateTime.UtcNow.Date.AddDays(5);
+        var rfq = RfqFrom(lead, 94026);
+        rfq.BidClosingDate = closing;
+        context.Rfqs.Add(rfq);
+        await context.SaveChangesAsync();
+
+        var terms = ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTerms.None with
+        {
+            Validity = ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTermRules.ParseValidity(
+                "Quotation must be valid for 90 days from bid due date"),
+            AllowedCurrencies = new[] { "USD", "SAR" },
+        };
+        var service = new QuoteService(context, null!, null!, buyerTerms: new FixedBuyerTerms(terms));
+        await service.PrepareDraftFromRfqAsync(rfq.Id, 9402, "owner@example.com");
+
+        context.ChangeTracker.Clear();
+        var quote = await context.Quotes.SingleAsync();
+        Assert.Equal(closing.AddDays(90), quote.ValidUntil);
+        Assert.Equal(94029, quote.CurrencyId);
+        // Internal review state is not the customer's remarks (CB-03).
+        Assert.Null(quote.HeaderRemarks);
     }
 
     [Fact]
