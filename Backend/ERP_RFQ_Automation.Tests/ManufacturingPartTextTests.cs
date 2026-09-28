@@ -99,6 +99,83 @@ public sealed class ManufacturingPartTextTests
         Assert.Equal(new[] { "W206730-000" }, reading.SupersededNumbers);
     }
 
+    /// <summary>
+    /// XS-16: the same vendor records as the Word print, as the HTML print (.doc) and Aramco's own
+    /// Excel bid sheet state them — each record's two halves on separate lines. Verbatim shape from
+    /// RFP 6000000003 (.doc), which read 0 makers on 1,514 lines while its .docx read 870.
+    /// </summary>
+    private const string LineSeparatedRecords =
+        "4000633182 - 0060000235 - BENTLY-NEVADA LLC - US\n000000005001557107 - 10030469 - BENTLY-NEVADA LLC - US\n" +
+        "CUSTOMER_MATERIAL_DESCRIPTION1 - ACCELEROMETER: DRIVE ELECTRIC\nCATALOG_NUMBER - 23733-03\nED_CATALOG_NUMBER - 2373303\n" +
+        "CUSTOMER_MATERIAL_CODE - 000000005001557107\n\n" +
+        "4000631506 - 0060001003 - GE ENERGY - US\n000000005000640484 - 10018481 - GE ENERGY - US\n" +
+        "ED_PART_NUMBER - 4002B1191DTG002\nPART_NUMBER - 4002B1191DTG002\nSUPERSEDED_NUMBER - 4002B1191DTG001\n\n" +
+        "4019054000 - 0060003313 - ## SIEMENS AG  AUTOMATION AND DRIVE - DE\n000000005001915323 - 10004620 - ## SIEMENS AG  AUTOMATION AND DRIVE - DE\n" +
+        "PART_NUMBER - 6ES7414-5HM06-0AB0";
+
+    [Fact]
+    public void Records_whose_halves_sit_on_separate_lines_are_read_like_the_Word_print()
+    {
+        var reading = ManufacturingPartText.Read(LineSeparatedRecords);
+
+        Assert.Equal(new[] { "BENTLY-NEVADA LLC", "GE ENERGY", "SIEMENS AG AUTOMATION AND DRIVE" }, reading.Manufacturers);
+        Assert.Equal(3, reading.Vendors.Count);
+        Assert.Equal("23733-03", reading.Vendors[0].PartNumber);
+        Assert.Equal("4002B1191DTG002", reading.Vendors[1].PartNumber);
+        Assert.Equal(["4002B1191DTG001"], reading.Vendors[1].SupersededNumbers);
+        Assert.Equal("DE", reading.Vendors[2].Country);
+    }
+
+    [Fact]
+    public void The_same_records_read_the_same_whichever_print_they_came_from()
+    {
+        var spaced = ManufacturingPartText.Read(LineSeparatedRecords.Replace("\n", " "));
+        var lined = ManufacturingPartText.Read(LineSeparatedRecords);
+
+        Assert.Equal(spaced.Manufacturers, lined.Manufacturers);
+        Assert.Equal(spaced.PartNumbers, lined.PartNumbers);
+        Assert.Equal(spaced.Vendors.Select(v => v.PartNumber), lined.Vendors.Select(v => v.PartNumber));
+    }
+
+    [Theory]
+    [InlineData("$$ SIEMENS AG")]
+    [InlineData("$$SIEMENS AG")]
+    [InlineData("** SIEMENS AG")]
+    [InlineData("## SIEMENS AG")]
+    [InlineData("@@ SIEMENS AG")]
+    public void Every_export_status_flag_is_dropped_from_the_maker(string flagged)
+    {
+        // XS-12: "$$" was not a flag to the reader, so "$$ SIEMENS AG" became a maker of its own.
+        var reading = ManufacturingPartText.Read(
+            $"4000019054 - 0060003313 - {flagged} - DE 000000005001915323 - 10004620 - {flagged} - DE PART_NUMBER - 3RH1122-1AP00");
+
+        Assert.Equal(new[] { "SIEMENS AG" }, reading.Manufacturers);
+        Assert.True(ManufacturingPartText.CarriesStatusFlag(flagged));
+        Assert.False(ManufacturingPartText.CarriesStatusFlag("SIEMENS AG"));
+    }
+
+    [Fact]
+    public void Vendors_that_state_no_number_do_not_stop_the_others_agreeing()
+    {
+        // XS-05: line 23 of 6000000028 — the makers all state ZB4BZ102, a distributor states none.
+        var reading = ManufacturingPartText.Read(
+            "4000000001 - 0060000001 - SCHNEIDER ELECTRIC FRANCE - FR 000000005000000001 - 10000001 - SCHNEIDER ELECTRIC FRANCE - FR PART_NUMBER - ZB4BZ102 " +
+            "4000000002 - 0060000002 - WAHAH ELECTRIC SUPPLY - SA 000000005000000002 - 10000002 - SCHNEIDER ELECTRIC FRANCE - FR CUSTOMER_MATERIAL_CODE - 000000005000000002 " +
+            "4000000003 - 0060000003 - TELEMECANIQUE - FR 000000005000000003 - 10000003 - TELEMECANIQUE - FR ED_PART_NUMBER - ZB4BZ102 PART_NUMBER - ZB4-BZ102");
+
+        Assert.Equal("ZB4-BZ102", reading.AgreedPartNumber);
+    }
+
+    [Fact]
+    public void One_vendor_alone_stating_a_number_is_not_an_agreement()
+    {
+        var reading = ManufacturingPartText.Read(
+            "4000000001 - 0060000001 - SCHNEIDER ELECTRIC FRANCE - FR 000000005000000001 - 10000001 - SCHNEIDER ELECTRIC FRANCE - FR PART_NUMBER - ZB4BZ102 " +
+            "4000000002 - 0060000002 - WAHAH ELECTRIC SUPPLY - SA 000000005000000002 - 10000002 - ABB - SE CUSTOMER_MATERIAL_CODE - 000000005000000002");
+
+        Assert.Null(reading.AgreedPartNumber);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

@@ -147,9 +147,21 @@ public sealed class StructuredEvidenceLedgerPersister
                 var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
                     description, quantity is > 0 ? quantity : null,
                     canonical.UnitOfMeasure.Value);
+                // Same rule for the currency: the ledger accepts a three-letter code or nothing,
+                // and a word in the currency cell ("Currency" on an Ariba help row) used to
+                // dead-letter the whole document from here. The normaliser already leaves an
+                // unknown word blank and holds the line; this keeps one cell from ever doing it
+                // again, and the line is held for a person rather than certified.
+                var currency = canonical.Currency.Value;
+                var lineStatus = MapLineStatus(canonical.ValidationStatus);
+                if (currency is not null && !IsCurrencyCode(currency))
+                {
+                    currency = null;
+                    if (lineStatus == CanonicalValidationStatus.Valid) lineStatus = CanonicalValidationStatus.Warning;
+                }
                 line.Enrich(canonical.ManufacturerName.Value, canonical.ManufacturerPartNumber.Value,
-                    canonical.Currency.Value, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),
-                    JsonSerializer.Serialize(canonical), MapLineStatus(canonical.ValidationStatus));
+                    currency, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),
+                    JsonSerializer.Serialize(canonical), lineStatus);
                 var availableLeadItems = lead.LeadItems
                     .Where(x => x.IsCurrentRevisionProjection
                         && !boundLeadItemIds[lead.Id].Contains(x.Id))
@@ -330,6 +342,9 @@ public sealed class StructuredEvidenceLedgerPersister
                 JsonSerializer.Serialize(value.Transformations)));
         }
     }
+
+    /// <summary>What <see cref="EvidenceLedgerGuard.CurrencyCode"/> accepts: exactly three upper-case ASCII letters.</summary>
+    internal static bool IsCurrencyCode(string value) => value.Length == 3 && value.All(char.IsAsciiLetterUpper);
 
     private static decimal? ValueOrNull(CanonicalValue<decimal> value) =>
         value.Confidence == 0 && value.Value == 0 ? null : value.Value;

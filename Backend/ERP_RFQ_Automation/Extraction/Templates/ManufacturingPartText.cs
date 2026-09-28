@@ -27,6 +27,12 @@ namespace ERP_RFQ_Automation.Extraction.Templates;
 /// </summary>
 public static class ManufacturingPartText
 {
+    /// <summary>
+    /// The extra field a line's approved-maker list travels under. Its presence means the buyer
+    /// named several acceptable makers and the manufacturer field is blank on purpose.
+    /// </summary>
+    public const string ApprovedManufacturersField = "Approved manufacturers";
+
     public sealed record Reading(
         IReadOnlyList<string> Manufacturers,
         IReadOnlyList<string> PartNumbers,
@@ -37,16 +43,19 @@ public static class ManufacturingPartText
         public bool IsEmpty => Manufacturers.Count == 0 && PartNumbers.Count == 0 && SupersededNumbers.Count == 0 && CustomerMaterialCode is null;
 
         /// <summary>
-        /// The one number every approved vendor states for the part, when they all agree — the
-        /// buyer is naming the same maker part through two suppliers, and that IS the part number.
-        /// Null when the vendors name different numbers, or none.
+        /// The one number the approved vendors state for the part, when every vendor that states
+        /// a number states the same one and at least two do — the buyer is naming the same maker
+        /// part through several suppliers, and that IS the part number. A distributor record that
+        /// states no number ("WAHAH ELECTRIC SUPPLY") neither agrees nor disagrees; requiring every
+        /// record to state one left the Part No. blank on 329 of 1,500 Aramco lines whose number
+        /// was unambiguous. Null when the vendors name different numbers, or fewer than two name one.
         /// </summary>
         public string? AgreedPartNumber
         {
             get
             {
                 var numbers = Vendors.Select(v => v.PartNumber).Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n!).ToList();
-                if (numbers.Count == 0 || numbers.Count != Vendors.Count) return null;
+                if (numbers.Count < 2) return null;
                 return numbers.Select(Fold).Distinct().Count() == 1 ? numbers.OrderByDescending(n => n.Length).First() : null;
             }
         }
@@ -62,8 +71,15 @@ public static class ManufacturingPartText
 
     // Names are bounded: a record that omits its trailing country code must not let the lazy
     // group run on into the next record and hand a hundred-character "maker" to the line.
+    //
+    // The break between a record's two halves ("… - KR" / "000000005001722507 - …") is ANY run
+    // of white space, not one space. The Word print joins them with a space; the same event
+    // printed as HTML (the .doc) and Aramco's own Excel bid sheet keep the source line break.
+    // Matching a literal space found no vendor record in either, so the .doc copy of RFP
+    // 6000000003 arrived with no maker and no part number on any of its 1,514 lines while the
+    // .docx copy of the same RFP had 870 makers — and the poorer reading replaced the good one.
     private static readonly Regex VendorRecord = new(
-        @"(?<!\d)\d{10} - \d{10} - (?<vendor>[^\r\n]{1,80}?) - [A-Z]{2} \d{18} - \d{8} - (?<maker>[^\r\n]{1,80}?) - [A-Z]{2}(?=\s|\z)",
+        @"(?<!\d)\d{10} - \d{10} - (?<vendor>[^\r\n]{1,80}?) - [A-Z]{2}\s+\d{18} - \d{8} - (?<maker>[^\r\n]{1,80}?) - [A-Z]{2}(?=\s|\z)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -72,7 +88,7 @@ public static class ManufacturingPartText
     /// punctuation stripped), so the token SHAPE is the delimiter, not a list of names.
     /// </summary>
     private static readonly Regex VendorRecordWithCountry = new(
-        @"(?<!\d)\d{10} - \d{10} - (?<vendor>[^\r\n]{1,80}?) - [A-Z]{2} \d{18} - \d{8} - (?<maker>[^\r\n]{1,80}?) - (?<country>[A-Z]{2})(?=\s|\z)",
+        @"(?<!\d)\d{10} - \d{10} - (?<vendor>[^\r\n]{1,80}?) - [A-Z]{2}\s+\d{18} - \d{8} - (?<maker>[^\r\n]{1,80}?) - (?<country>[A-Z]{2})(?=\s|\z)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     // A key is UPPER_SNAKE with at least one underscore — plus REMARKS, the one single-word key
@@ -94,7 +110,16 @@ public static class ManufacturingPartText
         "SUPERSEDED_NUMBER", "SUPERSEDED_NUMBER_C1",
     };
 
-    private static readonly Regex StatusFlag = new(@"^[\*#@]+\s*", RegexOptions.Compiled);
+    // "$$" is one of the export's status flags too ("$$ SIEMENS AG"). Left on the name it became
+    // a maker of its own, and the pattern store learned "3RH -> $$ SIEMENS AG" from it.
+    private static readonly Regex StatusFlag = new(@"^[\*#@$]+\s*", RegexOptions.Compiled);
+
+    /// <summary>True when a maker name still carries one of the export's status flags.</summary>
+    public static bool CarriesStatusFlag(string? name)
+        => !string.IsNullOrWhiteSpace(name) && StatusFlag.IsMatch(name.TrimStart());
+
+    /// <summary>A maker name without the export's status flag and with its spacing collapsed.</summary>
+    public static string CleanMakerName(string name) => Clean(name);
 
     /// <summary>True when the text carries the export's own key tokens, so the reader applies.</summary>
     public static bool Recognises(string? text)
@@ -210,7 +235,10 @@ public static class ManufacturingPartText
             => current is null ? value : $"{current} {value}";
     }
 
-    private static string Clean(string name) => StatusFlag.Replace(name.Trim(), string.Empty).Trim();
+    // Spacing collapsed as well: the print pads some names ("SIEMENS AG  AUTOMATION AND DRIVE"),
+    // and the same maker must read the same from every print of the event.
+    private static string Clean(string name)
+        => Regex.Replace(StatusFlag.Replace(name.Trim(), string.Empty), @"\s+", " ").Trim();
 
     private static string Fold(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
