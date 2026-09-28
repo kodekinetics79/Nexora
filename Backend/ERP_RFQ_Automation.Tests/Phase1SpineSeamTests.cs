@@ -73,6 +73,26 @@ public sealed class Phase1SpineSeamTests
     /// quantity and unit, and the serial that ties them together — because those are the values a
     /// cut seam drops silently.</para>
     /// </summary>
+    /// <summary>
+    /// X9. A document that prints no line numbers must not acquire them on the way to the RFQ.
+    /// Promotion used to write the revision POSITION as the buyer's line number, so the buyer's
+    /// lines 8, 9 and 35 went into the RFQ — and onto the quote — as 1, 2 and 3.
+    /// </summary>
+    [Fact]
+    public async Task A_line_the_buyer_did_not_number_reaches_the_RFQ_without_a_made_up_number()
+    {
+        using var spine = new UpstreamSpine();
+        var lead = await spine.EstablishLeadAsync(firstLineItemNo: null);
+
+        var (rfqId, _) = await spine.ConvertAsync(lead.Id);
+
+        await using var read = spine.Context();
+        var line = Assert.Single(await read.Rfqitems.Where(x => x.Rfqid == rfqId).ToListAsync());
+        Assert.Null(line.LineItemNo);
+        Assert.Equal(UpstreamSpine.FirstLineQuantity, line.Quantity);
+        Assert.NotNull(line.SourceLeadItemRevisionId); // the position still travels, as lineage
+    }
+
     [Fact]
     public async Task An_inquiry_becomes_a_lead_an_RFQ_and_a_sourcing_case_carrying_one_case_throughout()
     {
@@ -374,7 +394,8 @@ internal sealed class UpstreamSpine : IDisposable
     /// A directly-constructed Lead has no current revision and conversion rightly refuses it, so
     /// building one here would prove nothing about the product.
     /// </summary>
-    public async Task<Lead> EstablishLeadAsync()
+    /// <param name="firstLineItemNo">The buyer's number printed for the first line; null for a document that prints none.</param>
+    public async Task<Lead> EstablishLeadAsync(string? firstLineItemNo = "00010")
     {
         const string reference = "SPINE-A-001";
         var candidate = new Lead
@@ -396,7 +417,7 @@ internal sealed class UpstreamSpine : IDisposable
         };
         candidate.LeadItems.Add(new LeadItem
         {
-            LineItemNo = "00010", ItemMaterialCode = FirstLinePart, ManufacturerPartNumber = FirstLinePart,
+            LineItemNo = firstLineItemNo, ItemMaterialCode = FirstLinePart, ManufacturerPartNumber = FirstLinePart,
             ProductShortDescription = "Ball valve 2IN class 300", Quantity = FirstLineQuantity,
             UnitOfMeasure = "EA", Currency = "SAR", BidClosingDateLine = Now.Date.AddDays(21)
         });

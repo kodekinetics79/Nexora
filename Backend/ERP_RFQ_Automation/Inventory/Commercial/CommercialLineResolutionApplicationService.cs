@@ -206,7 +206,11 @@ public sealed class CommercialLineResolutionApplicationService(
         foreach (var row in rows.OrderBy(x => revisionLineNumbers.GetValueOrDefault(x.LeadLineId)).ThenBy(x => x.LeadLineId))
         {
             var lineNumber = revisionLineNumbers.GetValueOrDefault(row.LeadLineId);
+            // The RFQ line's own lineage first: promotion records the revision line it came from.
+            // RFQ lines no longer carry the revision position as the buyer's line number.
             var exact = rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id)
+                && x.SourceLeadItemRevisionId == row.LeadLineId);
+            exact ??= rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id)
                 && int.TryParse(x.LineItemNo, out var rfqLineNumber) && rfqLineNumber == lineNumber);
             exact ??= rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id)
                 && x.ProductId.HasValue && x.ProductId == row.ProductId);
