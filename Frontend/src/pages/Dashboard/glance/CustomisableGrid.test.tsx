@@ -15,6 +15,8 @@ const bands = {
   closing: <section>Closing body</section>,
   today: <section>Today body</section>,
   sixmonths: <section>Six months body</section>,
+  brands: <section>Brands body</section>,
+  customers: <section>Customers body</section>,
 };
 
 const empty = (viewKey: string) => ({ viewKey, columns: [], isCustomised: false, supportsCustomFields: false });
@@ -38,7 +40,7 @@ describe('CustomisableGrid', () => {
 
   it('shows every band in the default order with no arranging bar outside Edit layout', () => {
     renderGrid(false);
-    expect(bandOrder()).toEqual(['verdict', 'outstanding', 'losses', 'closing', 'today', 'sixmonths']);
+    expect(bandOrder()).toEqual(['verdict', 'outstanding', 'losses', 'closing', 'today', 'sixmonths', 'brands', 'customers']);
     expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
   });
 

@@ -1023,7 +1023,7 @@ test('34 role Today surfaces expose persisted operational work', async ({ page }
   // cards. The route into the full board is still here, under the words it actually offers.
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Verified performance' })).toBeVisible();
-  await page.getByRole('button', { name: 'Every deadline in full' }).click();
+  await page.getByRole('button', { name: 'Deadlines' }).click();
   await expect(page).toHaveURL(/\/analytics\/deadlines$/);
 
   const users = await jsonOk<{ totalCount: number }>(await api(page, token, 'get', '/api/User?pageSize=500'));

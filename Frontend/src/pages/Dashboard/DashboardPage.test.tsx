@@ -23,6 +23,24 @@ import type {
  * asserted together, on one screen, in the state a new tenant actually opens.
  */
 const auth = vi.hoisted(() => ({ businessUnitId: 3 as number | undefined, grants: null as Set<string> | null, isManager: true }));
+// Bands 7 and 8 read their own sources. An empty answer from each keeps this file about the page:
+// they render their empty states, and none of them turns into an error the page tests would count.
+vi.mock('../../api/services/commercialLearningService', () => ({
+  default: { getCustomers: vi.fn(async () => []) },
+}));
+vi.mock('../../api/axiosInstance', () => ({
+  default: {
+    get: vi.fn(async (url: string) => {
+      if (url.includes('brand-demand')) {
+        return { data: { generatedAt: '2026-09-17T08:00:00Z', from: null, to: null, totalLines: 0, linesWithManufacturer: 0,
+          linesWithoutManufacturer: 0, distinctManufacturers: 0, distinctRawSpellings: 0, topFiveLineSharePercent: 0, rows: [], quantityCaveat: null } };
+      }
+      throw new Error('offline in this test');
+    }),
+    put: vi.fn(async () => { throw new Error('offline in this test'); }),
+    delete: vi.fn(async () => { throw new Error('offline in this test'); }),
+  },
+}));
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
     userData: { id: 41, businessUnitId: auth.businessUnitId, isManager: auth.isManager },
@@ -197,7 +215,7 @@ beforeEach(() => {
 });
 
 describe('the dashboard reads as one sentence', () => {
-  it('puts all six bands in the story order', async () => {
+  it('puts all eight bands in the story order', async () => {
     renderPage();
 
     await waitFor(() => expect(bandTitles()).toEqual([
@@ -207,6 +225,8 @@ describe('the dashboard reads as one sentence', () => {
       "What's closing on us",
       'What needs you today',
       'The last six months',
+      'What customers ask for',
+      'Who we quote',
     ]));
     expect(screen.queryByText(/coming soon|not yet available|placeholder/i)).toBeNull();
   });
@@ -272,7 +292,7 @@ describe('the period control', () => {
     await waitFor(() => expect(getPerformance).toHaveBeenCalled());
     getPerformance.mockClear();
 
-    fireEvent.click(screen.getByRole('button', { name: /Custom/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Custom…' }));
     fireEvent.change(screen.getByLabelText('To'), { target: { value: iso(TODAY.subtract(400, 'day')) } });
 
     expect(await screen.findByText(/start date must be on or before the end date/)).toBeInTheDocument();
@@ -294,8 +314,8 @@ describe('one band failing leaves the rest of the screen standing', () => {
     // Exactly one band failed, so exactly one band says so.
     expect(screen.getAllByText('We could not load this')).toHaveLength(1);
 
-    // The six bands are all still on the screen, and the ones that loaded still show their data.
-    expect(bandTitles()).toHaveLength(6);
+    // The eight bands are all still on the screen, and the ones that loaded still show their data.
+    expect(bandTitles()).toHaveLength(8);
     expect(await screen.findByText(/3 went our way/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Past deadline/)).toBeInTheDocument();
   });
@@ -325,7 +345,7 @@ describe('the empty screen a new tenant opens', () => {
     expect(screen.getByText('No requests or orders were recorded in the last six months.')).toBeInTheDocument();
 
     // Empty is not an error anywhere on the screen: no Alert, nothing to retry.
-    expect(bandTitles()).toHaveLength(6);
+    expect(bandTitles()).toHaveLength(8);
     expect(screen.queryByText('We could not load this')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
@@ -380,9 +400,11 @@ describe('the figures this screen refuses to show', () => {
     renderPage();
     await waitFor(() => expect(getPerformance).toHaveBeenCalled());
 
-    expect(screen.getByRole('button', { name: 'Performance by rep' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Every deadline in full' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Documents to check' })).toBeNull();
+    const tabs = within(screen.getByRole('navigation', { name: 'Dashboard sections' }));
+    expect(tabs.getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-current', 'page');
+    expect(tabs.getByRole('button', { name: 'Reps' })).toBeInTheDocument();
+    expect(tabs.queryByRole('button', { name: 'Deadlines' })).toBeNull();
+    expect(tabs.queryByRole('button', { name: 'Documents to check' })).toBeNull();
   });
 });
 
