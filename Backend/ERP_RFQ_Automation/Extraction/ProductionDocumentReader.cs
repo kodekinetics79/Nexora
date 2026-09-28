@@ -422,6 +422,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
             if (tableRows.Count > 0)
             {
+                ApplyBuyerDeliveryPoint(bytes, name, tableRows);
                 _log.LogInformation(
                     "DOCX {Name} was read deterministically from its table: {Rows} line(s), no model involved.",
                     name, tableRows.Count);
@@ -506,6 +507,29 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             : prose[..MaxRetainedProseChars]
               + "\n[Truncated: the document states more text than the reviewer panel retains. "
               + "Open the source attachment for the rest.]";
+    }
+
+    /// <summary>
+    /// Where the buyer says to deliver, when the document states it only in a clause ("Vendor shall
+    /// quote for supply and delivery of Goods to ASMO or ASMO customer's delivery point in Saudi
+    /// Arabia."). The lead's Deliver-to field otherwise read "Not stated" directly above the buyer's
+    /// terms naming the place. A delivery location the header already states wins.
+    /// </summary>
+    private void ApplyBuyerDeliveryPoint(byte[] bytes, string name, IReadOnlyList<RfqSpreadsheetRow> rows)
+    {
+        if (rows.All(row => !string.IsNullOrWhiteSpace(row.DeliveryLocation))) return;
+        try
+        {
+            var deliverTo = Templates.BuyerTerms.Read(DocxTableParser.ReadLeadingGrids(bytes, Templates.BuyerTerms.LeadingRows), name)
+                .FirstOrDefault(term => term.Key == "deliver_to")?.Value;
+            if (string.IsNullOrWhiteSpace(deliverTo)) return;
+            foreach (var row in rows)
+                if (string.IsNullOrWhiteSpace(row.DeliveryLocation)) row.DeliveryLocation = deliverTo;
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Buyer terms could not be read from {Name}; the lines still read.", name);
+        }
     }
 
     private string? ProseOutsideTables(byte[] bytes, string name)

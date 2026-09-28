@@ -48,6 +48,29 @@ describe('formatDateSafe — a day stays the day it was', () => {
     expect(formatDateSafe('2026-09-15T20:20:00')).toBe('15 Sep 2026');
   });
 
+  it('renders a day stored at midnight as that day, east and west of UTC', () => {
+    // The bid closes on the 8th; a New York reader saw "07 Oct" under a Hijri date for the 8th.
+    for (const zone of ['America/New_York', 'Asia/Riyadh', 'Pacific/Auckland']) {
+      vi.stubEnv('TZ', zone);
+      try {
+        expect(formatDateSafe('2026-10-08T00:00:00')).toBe('08 Oct 2026');
+        expect(formatDateTime('2027-01-02T00:00:00')).toBe('02 Jan 2027');
+      } finally {
+        vi.stubEnv('TZ', 'Asia/Riyadh');
+      }
+    }
+  });
+
+  it('still reads a real instant in the reader\'s zone', () => {
+    vi.stubEnv('TZ', 'America/New_York');
+    try {
+      expect(formatDateSafe('2026-10-08T00:00:01')).toBe('07 Oct 2026');
+      expect(formatDateSafe('2026-10-08T00:00:00Z')).toBe('07 Oct 2026');
+    } finally {
+      vi.stubEnv('TZ', 'Asia/Riyadh');
+    }
+  });
+
   it('renders a bare calendar day as that day for a reader west of UTC', () => {
     vi.stubEnv('TZ', 'America/New_York');
     try {

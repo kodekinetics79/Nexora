@@ -21,6 +21,14 @@ export const MIN_VALID_YEAR = 2000;
 
 /** "2026-09-15" — a calendar day with no time. Rendered as that day wherever the reader is. */
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * "2026-10-08T00:00:00" — a calendar day the server stored in a date-time column (a bid's closing
+ * day, a required delivery day). Midnight exactly, no zone: it names a day, not an instant. Read
+ * as a UTC instant it showed "07 Oct" to every reader west of UTC while the Hijri date beside it
+ * said the 8th. A real instant carries seconds, fractions or a zone and is not caught here.
+ */
+const MIDNIGHT_DAY = /^\d{4}-\d{2}-\d{2}[T ]00:00(?::00(?:\.0+)?)?$/;
+const isCalendarDay = (value: string): boolean => DATE_ONLY.test(value) || MIDNIGHT_DAY.test(value);
 /** Ends in Z or an explicit ±HH:MM / ±HHMM offset. */
 const HAS_ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
 /** Looks like an ISO date-time: YYYY-MM-DD then a T (or a space) then a time. */
@@ -69,7 +77,7 @@ const fields = (d: Date, utc: boolean) => utc
 export function formatDateSafe(dateStr: string | null | undefined, fallback = '—'): string {
   const d = parseDateSafe(dateStr);
   if (!d) return fallback;
-  const f = fields(d, DATE_ONLY.test(dateStr!.trim()));
+  const f = fields(d, isCalendarDay(dateStr!.trim()));
   return `${two(f.day)} ${MONTHS[f.month]} ${f.year}`;
 }
 
@@ -80,7 +88,7 @@ export function formatDateSafe(dateStr: string | null | undefined, fallback = '�
 export function formatDateTime(dateStr: string | null | undefined, fallback = '—'): string {
   const d = parseDateSafe(dateStr);
   if (!d) return fallback;
-  if (DATE_ONLY.test(dateStr!.trim())) return formatDateSafe(dateStr, fallback);
+  if (isCalendarDay(dateStr!.trim())) return formatDateSafe(dateStr, fallback);
   const f = fields(d, false);
   return `${two(f.day)} ${MONTHS[f.month]} ${f.year}, ${two(f.hours)}:${two(f.minutes)}`;
 }

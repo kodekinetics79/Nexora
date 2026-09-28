@@ -79,7 +79,7 @@ public sealed class DocxTableParser
         // cell of another table, so a layout table wrapping the line grid was read twice and every
         // line was counted twice — while Lead.NoOfLineItems reported the inflated number as if it
         // were a conservation guarantee.
-        var grids = body.Elements<Table>().Select(BuildGrid).ToList<IReadOnlyList<IReadOnlyList<string?>>>();
+        var grids = body.Elements<Table>().Select(table => BuildGrid(table)).ToList<IReadOnlyList<IReadOnlyList<string?>>>();
         var paragraphs = body.Descendants<Paragraph>()
             .Where(paragraph => !paragraph.Ancestors<Table>().Any())
             .Take(HeaderBlockParagraphLimit)
@@ -177,7 +177,81 @@ public sealed class DocxTableParser
     /// the guard in ChunkedExtractionService) persisted as the number 0 — and a value spanning
     /// three rows populated the first and was silently null on the other two.</para>
     /// </summary>
-    private static List<IReadOnlyList<string?>> BuildGrid(Table table)
+    private static List<IReadOnlyList<string?>> BuildGrid(Table table) => BuildGrid(table, int.MaxValue);
+
+    /// <summary>
+    /// The first rows of every top-level table, in document order. A portal event print states its
+    /// commercial terms in the rows above the line items, so the terms reader needs only the top of
+    /// each table, not the 100,000 rows of a 1,500-item print.
+    /// </summary>
+    /// <remarks>
+    /// Streamed, not loaded: a 1,500-item print is a 100,000-row document part, and building its
+    /// object model only to read the top of each table took 17 seconds. Cell text is the text of
+    /// the cell's paragraphs, space-joined — what <see cref="CellText"/> reads for a plain cell.
+    /// </remarks>
+    public static IReadOnlyList<IReadOnlyList<IReadOnlyList<string?>>> ReadLeadingGrids(byte[] bytes, int maxRowsPerTable)
+    {
+        const string W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var document = WordprocessingDocument.Open(stream, isEditable: false);
+        var part = document.MainDocumentPart;
+        if (part is null) return Array.Empty<IReadOnlyList<IReadOnlyList<string?>>>();
+
+        var grids = new List<IReadOnlyList<IReadOnlyList<string?>>>();
+        using var xml = System.Xml.XmlReader.Create(part.GetStream(FileMode.Open, FileAccess.Read),
+            new System.Xml.XmlReaderSettings { DtdProcessing = System.Xml.DtdProcessing.Prohibit, IgnoreWhitespace = false });
+        var bodyDepth = -1;
+        while (xml.Read())
+        {
+            if (xml.NodeType != System.Xml.XmlNodeType.Element || xml.NamespaceURI != W) continue;
+            if (xml.LocalName == "body") { bodyDepth = xml.Depth; continue; }
+            if (xml.LocalName != "tbl" || bodyDepth < 0 || xml.Depth != bodyDepth + 1) continue;
+
+            var grid = new List<IReadOnlyList<string?>>();
+            using (var table = xml.ReadSubtree())
+            {
+                table.Read();
+                var tableDepth = table.Depth;
+                List<string?>? row = null;
+                System.Text.StringBuilder? cell = null;
+                var paragraphs = 0;
+                while (table.Read())
+                {
+                    if (table.NamespaceURI != W) continue;
+                    if (table.NodeType == System.Xml.XmlNodeType.Element)
+                    {
+                        // Rows of THIS table only; a nested table's rows are part of its cell's text.
+                        if (table.LocalName == "tr" && table.Depth == tableDepth + 1)
+                        {
+                            if (grid.Count >= maxRowsPerTable) break;
+                            row = new List<string?>();
+                        }
+                        else if (table.LocalName == "tc" && row is not null && table.Depth == tableDepth + 2) { cell = new System.Text.StringBuilder(); paragraphs = 0; }
+                        else if (table.LocalName == "p" && cell is not null) { if (paragraphs++ > 0) cell.Append(' '); }
+                        else if (table.LocalName == "t" && cell is not null) cell.Append(table.ReadElementContentAsString());
+                    }
+                    else if (table.NodeType == System.Xml.XmlNodeType.EndElement)
+                    {
+                        if (table.LocalName == "tc" && cell is not null && table.Depth == tableDepth + 2)
+                        {
+                            var text = cell.ToString().Replace('\u00A0', ' ').Trim();
+                            row!.Add(text.Length == 0 ? null : text);
+                            cell = null;
+                        }
+                        else if (table.LocalName == "tr" && row is not null && table.Depth == tableDepth + 1)
+                        {
+                            grid.Add(row);
+                            row = null;
+                        }
+                    }
+                }
+            }
+            grids.Add(grid);
+        }
+        return grids;
+    }
+
+    private static List<IReadOnlyList<string?>> BuildGrid(Table table, int maxRows)
     {
         var grid = new List<IReadOnlyList<string?>>();
 
@@ -185,7 +259,7 @@ public sealed class DocxTableParser
         // can carry its originating cell's value down instead of reading as blank.
         var carried = new List<string?>();
 
-        foreach (var tableRow in table.Elements<TableRow>())
+        foreach (var tableRow in table.Elements<TableRow>().Take(maxRows))
         {
             var cells = new List<string?>();
 
