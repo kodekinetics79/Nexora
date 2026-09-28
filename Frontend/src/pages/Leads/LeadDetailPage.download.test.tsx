@@ -60,3 +60,36 @@ describe('LeadDetailPage — Download Excel', () => {
     await waitFor(() => expect(downloadLinesExcel).toHaveBeenCalledWith(77, '7000999'));
   });
 });
+
+describe('LeadDetailPage — lines', () => {
+  it('draws one page of a long request at a time', async () => {
+    // PERF-08: a 1,500-line bid list drew every line at once (59,000 DOM nodes).
+    getById.mockResolvedValue({
+      id: 77,
+      rfqno: '7000999',
+      customerName: 'SEC',
+      businessUnitId: 7,
+      reviewVersion: 1,
+      leadItems: Array.from({ length: 250 }, (_, i) => ({
+        id: i + 1, lineItemNo: String(i + 1), productShortName: `PART ${i + 1}`, quantity: 1, unitOfMeasure: 'EA',
+      })),
+    });
+    render(<LeadDetailPage />, { wrapper });
+
+    expect(await screen.findByText('PART 1')).toBeInTheDocument();
+    expect(screen.getByText('PART 100')).toBeInTheDocument();
+    expect(screen.queryByText('PART 101')).not.toBeInTheDocument();
+    expect(screen.getByText('Lines 1–100 of 250')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to next page' }));
+    expect(await screen.findByText('PART 101')).toBeInTheDocument();
+    expect(screen.queryByText('PART 1')).not.toBeInTheDocument();
+    expect(screen.getByText('Lines 101–200 of 250')).toBeInTheDocument();
+  });
+
+  it('shows no pager for a short request', async () => {
+    render(<LeadDetailPage />, { wrapper });
+    expect(await screen.findByText('CABLE')).toBeInTheDocument();
+    expect(screen.queryByText(/^Lines \d/)).not.toBeInTheDocument();
+  });
+});

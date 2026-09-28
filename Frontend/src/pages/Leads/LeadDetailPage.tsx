@@ -7,7 +7,7 @@ import {
   CircularProgress, Stack, Table, TableHead, TableContainer,
   TableRow, TableCell, TableBody, IconButton,
   Breadcrumbs, Link, Dialog, DialogTitle, DialogContent,
-  DialogActions, Alert, AlertTitle,
+  DialogActions, Alert, AlertTitle, TablePagination,
 } from '@mui/material';
 import {
   Description as FileIcon,
@@ -92,6 +92,9 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
   </Box>
 );
 
+/** Lines drawn per page on the lead page; the same page size the decision screen uses. */
+const LINES_PER_PAGE = 100;
+
 const LeadDetailPage: React.FC = () => {
   const { hasPermission } = useAuth();
   const commercialAccess = commercialActionPermissions(hasPermission);
@@ -122,6 +125,9 @@ const LeadDetailPage: React.FC = () => {
   // Information. Shares the query cache with ClientIdentityPanel's own dialog.
   const [resolveClientOpen, setResolveClientOpen] = React.useState(false);
   const [intakeRecordOpen, setIntakeRecordOpen] = React.useState(false);
+  // One page of lines at a time. A 1,500-line bid list drew every line and its extra-columns row
+  // at once: 59,000 DOM nodes and a page that froze for seconds (PERF-08).
+  const [linesPage, setLinesPage] = React.useState(0);
 
   // WP-A3: duplicate-flag resolution ("Not a duplicate" unblocks conversion;
   // "Confirm duplicate" keeps it blocked).
@@ -173,6 +179,10 @@ const LeadDetailPage: React.FC = () => {
     );
   }
   if (!lead) return <Box sx={{ p: 4 }}><Typography>Lead not found.</Typography></Box>;
+
+  const lineCount = lead.leadItems?.length ?? 0;
+  // A page past the end (the lead was re-read with fewer lines) shows the last page instead.
+  const shownLinesPage = Math.min(linesPage, Math.max(0, Math.ceil(lineCount / LINES_PER_PAGE) - 1));
 
   // Review state, from facts the platform records — not from a model score.
   const awaitingReview = (lead.headerRemarks ?? '').startsWith('[NEEDS REVIEW]');
@@ -566,7 +576,7 @@ const LeadDetailPage: React.FC = () => {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {lead.leadItems?.map((item: any) => (
+                  {(lead.leadItems ?? []).slice(shownLinesPage * LINES_PER_PAGE, (shownLinesPage + 1) * LINES_PER_PAGE).map((item: any) => (
                     <React.Fragment key={item.id}>
                     <TableRow sx={{ '&:hover': { bgcolor: 'action.selected' } }}>
                       <TableCell sx={{ width: '35%', py: 2 }}>
@@ -631,6 +641,17 @@ const LeadDetailPage: React.FC = () => {
                 </TableBody>
               </Table>
               </TableContainer>
+              {lineCount > LINES_PER_PAGE && (
+                <TablePagination
+                  component="div"
+                  count={lineCount}
+                  page={shownLinesPage}
+                  onPageChange={(_event, next) => setLinesPage(next)}
+                  rowsPerPage={LINES_PER_PAGE}
+                  rowsPerPageOptions={[LINES_PER_PAGE]}
+                  labelDisplayedRows={({ from, to, count }) => `Lines ${from}–${to} of ${count}`}
+                />
+              )}
             </Paper>
           </Box>
         </Grid>
