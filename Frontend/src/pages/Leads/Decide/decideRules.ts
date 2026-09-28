@@ -7,7 +7,7 @@ import type {
   SaveParticipationRequest,
 } from '../../../api/services/leadDecisionService';
 import type { LifecycleState, LifecycleTransitionOption } from '../../../api/services/commercialLifecycleService';
-import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
+import { calendarDaysUntil, formatDateSafe } from '../../../utils/dates';
 import { leadStatusWords } from '../../../utils/leadStatusWords';
 import {
   countDecisions,
@@ -640,12 +640,13 @@ export const nextThing = ({ workbench, decisions, concern, lifecycle, leadId }: 
   return { kind: 'ready' };
 };
 
-/** Whole days until a bid closes, negative when it has passed, null when there is no real date. */
-export const daysUntil = (iso: string | null | undefined, now: Date = new Date()): number | null => {
-  const due = parseDateSafe(iso);
-  if (!due) return null;
-  return Math.ceil((due.getTime() - now.getTime()) / 86_400_000);
-};
+/**
+ * Whole calendar days until a bid closes, negative when it has passed, null when there is no real
+ * date. The same count as the Leads list (utils/dates calendarDaysUntil): this used to round up
+ * the hours instead, so one bid read "10 days left" here and "9 days left" on the list.
+ */
+export const daysUntil = (iso: string | null | undefined, now: Date = new Date()): number | null =>
+  calendarDaysUntil(iso, now);
 
 export const dueSentence = (days: number | null): string => {
   if (days == null) return 'No deadline stated';

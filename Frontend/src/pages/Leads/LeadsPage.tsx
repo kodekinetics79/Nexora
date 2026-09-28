@@ -37,7 +37,7 @@ import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../compon
 import gridEmptyOverlay from '../../components/common/gridOverlays';
 import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
-import { formatDateSafe, formatDateTimeSafe, parseDateSafe } from '../../utils/dates';
+import { formatDateSafe, formatDateTimeSafe, formatDeadline, formatDeadlineDate, parseDateSafe } from '../../utils/dates';
 import { DEADLINE_COLOR, deadlineWords } from '../../utils/deadline';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -192,7 +192,7 @@ const LEAD_EXPORT_COLUMNS: ExportColumn<LeadExportRow>[] = [
   { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
   { header: 'Ingested', value: (r) => formatDateTimeSafe(r.ingestedOn || r.ingestedAtUtc, '') },
   { header: 'Arrived late', value: (r) => yesNo(r.lateIngested) },
-  { header: 'Deadline', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Deadline', value: (r) => formatDeadline(r.bidClosingDate, '') },
   { header: 'Deadline (Hijri)', value: (r) => r.bidClosingDateHijri },
   { header: 'Required delivery', value: (r) => formatDateSafe(r.requiredDeliveryDate, '') },
   { header: 'Delivery location', value: (r) => r.deliveryLocation },
@@ -902,7 +902,7 @@ const LeadsPage: React.FC = () => {
         const sx = deadlineSx(p.row.bidClosingDate);
         return (
           <Typography variant="body2" sx={{ fontSize: '0.8rem', ...sx }}>
-            {formatDateSafe(p.row.bidClosingDate)}
+            {formatDeadlineDate(p.row.bidClosingDate)}
           </Typography>
         );
       },
@@ -1242,7 +1242,7 @@ const LeadsPage: React.FC = () => {
       filterable: false,
       valueGetter: (_value, row) => row.bidClosingDate || '',
       renderCell: (p) => {
-        const due = formatDateSafe(p.row.bidClosingDate);
+        const due = formatDeadlineDate(p.row.bidClosingDate);
         const wanted = formatDateSafe(p.row.requiredDeliveryDate);
         // Once decided, the deadline is history, not urgency.
         const { text, tone } = deadlineWords(p.row.bidClosingDate);

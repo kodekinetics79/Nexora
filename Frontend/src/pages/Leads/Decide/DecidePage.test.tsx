@@ -233,7 +233,7 @@ describe('DecidePage', () => {
   it('shows who is asking, what Nexora thinks, and names one next thing at a time', async () => {
     renderPage();
     expect(await screen.findByRole('heading', { level: 1, name: 'Saudi Electricity Company' })).toBeInTheDocument();
-    // A matched customer cannot be changed here: the server refuses it once resolved.
+    // A matched customer is not re-chosen here; it can be changed until the request is an RFQ.
     expect(screen.queryByRole('button', { name: /Not them|Choose the customer/ })).not.toBeInTheDocument();
     expect(await screen.findByText(/Nexora's read:/)).toBeInTheDocument();
     // The same name the list gives the same read.

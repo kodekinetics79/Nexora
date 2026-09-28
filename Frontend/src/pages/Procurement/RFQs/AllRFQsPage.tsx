@@ -21,7 +21,7 @@ import SearchField from '../../../components/common/SearchField';
 import gridEmptyOverlay from '../../../components/common/gridOverlays';
 import ViewTabs from '../../../components/layout/ViewTabs';
 import { useAuth } from '../../../context/AuthContext';
-import { formatDateSafe, formatDateTimeSafe } from '../../../utils/dates';
+import { formatDateSafe, formatDateTimeSafe, formatDeadline } from '../../../utils/dates';
 import { DEADLINE_COLOR, deadlineWords } from '../../../utils/deadline';
 
 /**
@@ -49,7 +49,7 @@ const RFQ_EXPORT_COLUMNS: ExportColumn<RfqResponseDTO>[] = [
   { header: 'Opportunity owner', value: (r) => r.opportunityOwnerName },
   { header: 'Lines', value: (r) => r.noOfLineItems ?? 0 },
   { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
-  { header: 'Closing date', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Closing date', value: (r) => formatDeadline(r.bidClosingDate, '') },
   { header: 'Closing date (Hijri)', value: (r) => r.bidClosingDateHijri },
   { header: 'Required delivery', value: (r) => formatDateSafe(r.requiredDeliveryDate, '') },
   { header: 'Delivery location', value: (r) => r.deliveryLocation },
@@ -139,7 +139,7 @@ const AllRFQsPage: React.FC = () => {
         const sent = Boolean(p.row.latestQuoteSentOn);
         const { text, tone } = deadlineWords(p.row.bidClosingDate);
         return (
-          <Tooltip title={p.row.bidClosingDate ? formatDateSafe(p.row.bidClosingDate) : ''} placement="top-start">
+          <Tooltip title={p.row.bidClosingDate ? formatDeadline(p.row.bidClosingDate) : ''} placement="top-start">
             <Typography sx={{ ...cellText, fontSize: '0.85rem', fontWeight: sent ? 500 : 700, color: sent ? 'text.secondary' : DEADLINE_COLOR[tone] }}>
               {text}
             </Typography>

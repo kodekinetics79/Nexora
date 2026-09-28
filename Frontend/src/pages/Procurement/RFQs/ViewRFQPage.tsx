@@ -48,7 +48,7 @@ import NextStepPanel from '../../../components/common/NextStepPanel';
 import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
 import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
 import { formatMoney } from '../../../utils/currency';
-import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
+import { calendarDaysUntil, formatDateSafe, formatDeadline, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import productService, { type ProductDTO } from '../../../api/services/productService';
@@ -562,8 +562,7 @@ const ViewRFQPage: React.FC = () => {
   const overdue = deadline !== null && deadline < new Date();
   // Closing today or tomorrow with the quote not yet out: say so, and offer to send what is ready.
   // Calendar days, not hours: a bid closing tomorrow afternoon is "tomorrow" all day today.
-  const daysToClose = deadline === null ? null
-    : Math.round((new Date(deadline).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86_400_000);
+  const daysToClose = deadline === null ? null : calendarDaysUntil(rfq.bidClosingDate);
   const closingSoon = daysToClose !== null && daysToClose >= 0 && daysToClose <= 1 && latestQuote?.state !== 'SENT' && latestQuote?.state !== 'DECIDED';
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
   // What this RFQ is waiting for, in one sentence, from facts the page already holds.
@@ -786,7 +785,7 @@ const ViewRFQPage: React.FC = () => {
               <span><span className="fact-label">Opportunity owner</span><span className="fact-value">{rfq.opportunityOwnerName || 'Unassigned'}</span></span>
             </>
           )}
-          <span><span className="fact-label">Customer deadline</span><Box component="span" className="fact-value" sx={{ color: overdue ? 'error.main' : 'text.primary' }}>{formatDateSafe(rfq.bidClosingDate || null)}</Box></span>
+          <span><span className="fact-label">Customer deadline</span><Box component="span" className="fact-value" sx={{ color: overdue ? 'error.main' : 'text.primary' }}>{formatDeadline(rfq.bidClosingDate || null)}</Box></span>
           {/* A determinate bar pinned at 0 while the request is in flight is an assertion,
               and it is indistinguishable from an RFQ that genuinely scores zero. */}
           <Tooltip title={readinessNarrative} describeChild>
@@ -1249,7 +1248,7 @@ const ViewRFQPage: React.FC = () => {
                     <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
                 
                     <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDateSafe(rfq.recDate)} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDateSafe(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDeadline(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
                     <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ Type" value={rfq.rfqtype || 'Agreement'} /></Grid>
 
                     <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>

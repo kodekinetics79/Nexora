@@ -1,4 +1,4 @@
-import { parseDateSafe } from './dates';
+import { calendarDaysUntil } from './dates';
 
 export type DeadlineTone = 'late' | 'soon' | 'near' | 'calm' | 'none';
 
@@ -7,10 +7,10 @@ export type DeadlineTone = 'late' | 'soon' | 'near' | 'calm' | 'none';
  * calendar days, so a deadline of today reads "Due today" all day long.
  */
 export function deadlineWords(dateStr: string | null | undefined, now: Date = new Date()): { text: string; tone: DeadlineTone } {
-  const due = parseDateSafe(dateStr);
-  if (!due) return { text: 'No deadline', tone: 'none' };
-  const day = (d: Date) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
-  const days = Math.round((day(due) - day(now)) / 86_400_000);
+  // The shared count (see calendarDaysUntil): the deadline's own day, not the day it lands on
+  // once moved into the reader's zone.
+  const days = calendarDaysUntil(dateStr, now);
+  if (days == null) return { text: 'No deadline', tone: 'none' };
   if (days < 0) return { text: `${-days} ${-days === 1 ? 'day' : 'days'} late`, tone: 'late' };
   if (days === 0) return { text: 'Due today', tone: 'soon' };
   if (days === 1) return { text: 'Due tomorrow', tone: 'soon' };

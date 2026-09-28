@@ -38,7 +38,7 @@ import NextStepPanel from '../../../components/common/NextStepPanel';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
-import { formatDateSafe } from '../../../utils/dates';
+import { formatDateSafe, formatDeadline } from '../../../utils/dates';
 import { leadStatusWords } from '../../../utils/leadStatusWords';
 import {
   commercialActionPermissions,
@@ -46,6 +46,7 @@ import {
 } from '../../../utils/commercialActionPermissions';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import ResolveClientDialog from '../ResolveClientDialog';
+import ClosingDateQuestion from './ClosingDateQuestion';
 import FullNoBidCommitDialog from '../Workbench/FullNoBidCommitDialog';
 import RfqRevisionImpactResolutionDialog from '../Workbench/RfqRevisionImpactResolutionDialog';
 import LegacyDecisionRecordNotice from '../Workbench/LegacyDecisionRecordNotice';
@@ -855,7 +856,7 @@ const DecidePage: React.FC = () => {
         tone={dueTone}
         value={workbench.bidClosingDate ? (
           <>
-            {formatDateSafe(workbench.bidClosingDate)}
+            {formatDeadline(workbench.bidClosingDate)}
             <Box
               component="span"
               sx={{
@@ -926,17 +927,19 @@ const DecidePage: React.FC = () => {
             <Typography id="decide-customer" component="h1" variant="h5" sx={{ fontWeight: 800, fontSize: { xs: '1.3rem', md: '1.45rem', xl: '1.6rem' }, letterSpacing: '-0.015em', lineHeight: 1.2 }}>
               {workbench.customerName || 'Customer not matched yet'}
             </Typography>
-            {/* A resolved customer is immutable on the server (a database rule refuses any change),
-                so the picker is offered only while the request has none. */}
-            {!locked && commercialAccess.canLinkLeadClient && !workbench.customerId ? (
+            {/* The customer can be chosen, and changed, until an RFQ is made from the request; the
+                server records who changed it. After that the RFQ carries it. */}
+            {!locked && commercialAccess.canLinkLeadClient && (!workbench.customerId || !promotion) ? (
               <Link component="button" type="button" onClick={() => setCustomerDialogOpen(true)} sx={{ fontWeight: 700 }}>
-                Choose the customer
+                {workbench.customerId ? 'Change' : 'Choose the customer'}
               </Link>
             ) : null}
           </Stack>
         </Box>
         {factsRow}
       </Stack>
+
+      <ClosingDateQuestion leadId={leadId} canEdit={canEdit && !locked} />
 
       {/* Banners carry facts. The control for the next move is in the Next step panel, so each
           name appears once; the one exception is a manager reviewing a customer's change, whose

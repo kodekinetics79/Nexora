@@ -135,3 +135,71 @@ export function formatRelativeReceived(
 export function formatDateTimeSafe(dateStr: string | null | undefined, fallback = '—'): string {
   return formatDateTime(dateStr, fallback);
 }
+
+// ── Deadlines: the buyer's own clock ─────────────────────────────────────────────────────────
+//
+// A bid's closing date is stored exactly as the buyer's portal printed it: "Due date 9/6/2026
+// 5:00 PM" is kept as 2026-09-06T17:00:00, with no zone. It is a time on the BUYER's clock, not
+// an instant this server recorded, so it is shown as written — "6 Sep 2026, 5:00 PM" — for every
+// reader. Moved into the reader's zone like a timestamp, an SEC tender closing "9/13/2026 1:45 AM"
+// read "12 Sep" in New York, beside a Hijri date and a days-left count for the 13th.
+
+/** "2026-09-06T17:00:00" → the digits as written. Null when the value is not an ISO date. */
+const WALL_CLOCK = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/;
+
+interface WallClock { year: number; month: number; day: number; hours: number; minutes: number; hasTime: boolean }
+
+const readWallClock = (value: string | null | undefined): WallClock | null => {
+  const match = WALL_CLOCK.exec((value ?? '').trim());
+  if (!match) {
+    // Not ISO-shaped: let Date judge it, on the reader's clock.
+    const d = parseDateSafe(value);
+    return d ? { year: d.getFullYear(), month: d.getMonth(), day: d.getDate(), hours: d.getHours(), minutes: d.getMinutes(), hasTime: true } : null;
+  }
+  const [, y, m, d, hh, mm] = match;
+  const year = Number(y);
+  if (year < MIN_VALID_YEAR) return null;
+  const hours = hh ? Number(hh) : 0;
+  const minutes = mm ? Number(mm) : 0;
+  return { year, month: Number(m) - 1, day: Number(d), hours, minutes, hasTime: hours !== 0 || minutes !== 0 };
+};
+
+/** "5:00 PM" — the way a portal prints a closing time. */
+const clock12 = (hours: number, minutes: number): string =>
+  `${hours % 12 === 0 ? 12 : hours % 12}:${two(minutes)} ${hours < 12 ? 'AM' : 'PM'}`;
+
+/**
+ * A deadline as the buyer wrote it: "6 Sep 2026, 5:00 PM", or "6 Sep 2026" when no time was
+ * stated. Never moved into the reader's zone; see above.
+ */
+export function formatDeadline(dateStr: string | null | undefined, fallback = '—'): string {
+  const w = readWallClock(dateStr);
+  if (!w) return fallback;
+  const day = `${w.day} ${MONTHS[w.month]} ${w.year}`;
+  return w.hasTime ? `${day}, ${clock12(w.hours, w.minutes)}` : day;
+}
+
+/** "13 Sep 2026" — the deadline's own day, for a narrow list column. */
+export function formatDeadlineDate(dateStr: string | null | undefined, fallback = '—'): string {
+  const w = readWallClock(dateStr);
+  return w ? `${w.day} ${MONTHS[w.month]} ${w.year}` : fallback;
+}
+
+/** "8 Sep" — the short form a question offers as a button. */
+export function formatDeadlineDay(dateStr: string | null | undefined, fallback = '—'): string {
+  const w = readWallClock(dateStr);
+  return w ? `${w.day} ${MONTHS[w.month]}` : fallback;
+}
+
+/**
+ * Whole calendar days from today (the reader's today) to the deadline's own day: 0 on the day it
+ * closes, negative once that day has passed, null when there is no real date. The ONE count every
+ * screen uses — the Leads list and Decide used to say 9 and 10 for the same bid.
+ */
+export function calendarDaysUntil(dateStr: string | null | undefined, now: Date = new Date()): number | null {
+  const w = readWallClock(dateStr);
+  if (!w) return null;
+  const due = Date.UTC(w.year, w.month, w.day);
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((due - today) / DAY_MS);
+}
