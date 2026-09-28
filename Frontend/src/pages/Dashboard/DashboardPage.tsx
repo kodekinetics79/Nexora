@@ -2,7 +2,6 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Alert, Box, Button, Chip, GlobalStyles, Stack, TextField, Typography } from '@mui/material';
 import { visuallyHidden } from '@mui/utils';
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
 import dashboardService from '../../api/services/dashboardService';
@@ -17,6 +16,10 @@ import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
 import RepDesk from './RepDesk';
 import CustomisableGrid from './glance/CustomisableGrid';
+import ChartMenu from './glance/ChartMenu';
+import DashboardTabs from './glance/DashboardTabs';
+import BrandsBand from './glance/BrandsBand';
+import CustomersBand from './glance/CustomersBand';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
 import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuFocus, neuInset, neuKey, neuRaised, neuWell } from './glance/neumorphic';
 import { glanceCssVariables } from './glance/tokens';
@@ -93,6 +96,7 @@ const SCOPE_GLOSS: Readonly<Record<GlanceScopeWords, string>> = Object.freeze({
   'Company-wide': 'every account in this workspace',
   'Your managed scope': 'the accounts your teams own',
   'Your assigned accounts': 'only the accounts assigned to you',
+  'One rep': 'only the work assigned to the rep picked above',
 });
 
 const day = (value: string): string => {
@@ -158,7 +162,8 @@ function ViewSwitch({ view, onChange }: { view: DeskView; onChange: (next: DeskV
 
 function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
   const { hasPermission, userData } = useAuth();
-  const navigate = useNavigate();
+  // "details →" on a band only when the reader may open the page it points at.
+  const detailsIf = (module: string, to: string) => (hasPermission(module) ? to : undefined);
   const today = useMemo(() => dayjs().startOf('day'), []);
 
   const [period, setPeriod] = useState<PeriodKey>('30d');
@@ -190,6 +195,12 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
     setCustomTo(end);
   };
 
+  // The rep filter: one rep's own work on every band that can be narrowed to one person. The list
+  // is the reps the server already placed in this reader's scope, so no one outside it is offered.
+  const [rep, setRep] = useState<number | null>(null);
+  const filtered = rep !== null || period !== '30d';
+  const clearFilters = () => { setRep(null); choosePeriod('30d'); };
+
   // A half-typed date is not a window. The bands keep the last window that was actually valid, and
   // the strip says so, rather than being sent to refetch on every keystroke of "2026-0…".
   const changeCustom = (next: GlanceWindow) => {
@@ -207,12 +218,13 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
    * band 1 shows its own Alert — no other band notices.
    */
   const scope = useQuery({
-    queryKey: ['glance', 'performance', applied.from, applied.to],
+    queryKey: ['glance', 'performance', applied.from, applied.to, 'all'],
     queryFn: () => commercialIntelligenceService.getPerformance(applied.from, applied.to),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'whose numbers these are' },
   });
   const words = scopeWords(scope.data?.scope);
+  const repOptions = (scope.data?.representatives ?? []).map(r => ({ value: String(r.userId), label: r.name }));
 
   /**
    * Band 6's series. It is fetched here because `SixMonthsBand` is presentational — it draws the
@@ -246,8 +258,8 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
    * a KPI that can never become available is not a pending figure, it is a definition.
    */
   const release = useQuery({
-    queryKey: ['glance', 'release-01', applied.from, applied.to],
-    queryFn: () => dashboardService.getRelease01({ from: applied.from, to: applied.to }),
+    queryKey: ['glance', 'release-01', applied.from, applied.to, rep ?? 'all'],
+    queryFn: () => dashboardService.getRelease01({ from: applied.from, to: applied.to, ownerUserId: rep ?? undefined }),
     retry: 1,
     meta: { silenceGlobalError: true, errorLabel: 'the verified snapshot' },
   });
@@ -255,6 +267,9 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
   const notYetMeasurable = (release.data?.kpis ?? []).length - verified.length;
 
   const scopeSentence = (() => {
+    // A picked rep outranks the reader's own scope: the bands that can narrow now show that rep.
+    const picked = rep === null ? null : repOptions.find(o => o.value === String(rep));
+    if (picked) return { words: picked.label, gloss: 'only their own work, where a band can be narrowed to one person' };
     if (words) return { words, gloss: SCOPE_GLOSS[words] };
     if (scope.isLoading) return { words: 'Working out whose numbers these are…', gloss: null };
     if (scope.isError) return { words: SCOPE_UNRESOLVED, gloss: presentableErrorMessage(scope.error, undefined, 'list') };
@@ -369,6 +384,24 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
                 }}
               />
             ))}
+            {/* One rep, or everyone the reader can see. Only offered when there is more than one. */}
+            {repOptions.length > 1 && (
+              <ChartMenu
+                label="Rep"
+                value={rep === null ? 'all' : String(rep)}
+                options={[{ value: 'all', label: 'All reps' }, ...repOptions]}
+                onChange={(next) => setRep(next === 'all' ? null : Number(next))}
+              />
+            )}
+            {filtered && (
+              <Chip
+                label="Clear"
+                size="small"
+                clickable
+                onClick={clearFilters}
+                sx={(theme) => ({ ...neuFocus, height: 28, fontWeight: 700, backgroundColor: 'transparent', color: 'var(--nx-glance-seal-ink)', '&&:hover': { backgroundColor: NEU_SURFACE[theme.palette.mode] } })}
+              />
+            )}
           </Stack>
           {/*
             Which bands these dates actually move. A period control that silently governs one band
@@ -389,6 +422,8 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
           </Typography>
         </Stack>
       </Box>
+
+      <DashboardTabs />
 
       {period === 'custom' && (
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5, alignItems: { sm: 'center' } }}>
@@ -467,21 +502,6 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
         )}
         <Stack spacing={0.5} sx={{ flex: '1 1 auto', alignItems: { xs: 'flex-start', md: 'flex-end' } }}>
           <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { md: 'flex-end' } }}>
-            {hasPermission('Leads') && (
-              <Button size="small" onClick={() => navigate('/analytics/deadlines')} sx={(theme) => ({ ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5 })}>
-                Every deadline in full
-              </Button>
-            )}
-            {hasPermission('Dashboard') && (
-              <Button size="small" onClick={() => navigate('/sales/performance')} sx={(theme) => ({ ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5 })}>
-                Performance by rep
-              </Button>
-            )}
-            {hasPermission('Leads') && (
-              <Button size="small" onClick={() => navigate('/procurement/extraction/review')} sx={(theme) => ({ ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5 })}>
-                Documents to check
-              </Button>
-            )}
             <Button
               size="small"
               aria-pressed={customising}
@@ -511,11 +531,11 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
       <CustomisableGrid
         editing={customising}
         bands={{
-          verdict: <VerdictBand from={applied.from} to={applied.to} index={1} />,
-          outstanding: <OutstandingBand from={applied.from} to={applied.to} index={2} />,
-          losses: <LossesBand from={applied.from} to={applied.to} index={3} />,
-          closing: <ClosingBand step="4" index={4} />,
-          today: <TodayBand index={5} />,
+          verdict: <VerdictBand from={applied.from} to={applied.to} index={1} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Quotations', '/sales/quotes?state=outcomes')} />,
+          outstanding: <OutstandingBand from={applied.from} to={applied.to} index={2} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Quotations', '/sales/quotes')} />,
+          losses: <LossesBand from={applied.from} to={applied.to} index={3} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Quotations', '/sales/quotes?state=outcomes')} />,
+          closing: <ClosingBand step="4" index={4} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Leads', '/analytics/deadlines')} />,
+          today: <TodayBand index={5} ownerUserId={rep ?? undefined} detailsTo={detailsIf('Leads', '/sales/today')} />,
           sixmonths: (
             <SixMonthsBand
               points={points}
@@ -525,8 +545,11 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
               index={6}
               picked={applied}
               onPickPeriod={pickMonths}
+              detailsTo={detailsIf('RFQ Management', '/procurement/rfqs/all')}
             />
           ),
+          brands: <BrandsBand from={applied.from} to={applied.to} step="7" index={7} />,
+          customers: <CustomersBand step="8" index={8} />,
         }}
       />
 

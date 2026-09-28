@@ -110,6 +110,10 @@ const timeLeft = (lead: DeadlineLeadDTO): string => {
 };
 
 export interface ClosingBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
+  /** A manager's rep filter: only this rep's own work. Absent = everyone the reader can see. */
+  ownerUserId?: number;
   /** The band's numeral in the screen's sentence. */
   step?: string;
   index?: number;
@@ -120,7 +124,7 @@ export interface ClosingBandProps {
   onOpenBucket?: (bucketKey: string) => void;
 }
 
-export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: ClosingBandProps) {
+export default function ClosingBand({ step = '4', index = 0, onOpenBucket, detailsTo, ownerUserId }: ClosingBandProps) {
   const navigate = useNavigate();
   const [measure, setMeasure] = useChartChoice('closing', MEASURES, 'enquiries');
 
@@ -136,16 +140,16 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
   // enquiry in scope regardless, and the chart draws no rows, so asking for two hundred lead
   // records to render seven numbers would be a payload nobody reads.
   const board = useQuery({
-    queryKey: ['glance', 'closing-band'],
-    queryFn: () => dashboardService.getDeadlineBoard({ maxLeads: 1 }),
+    queryKey: ['glance', 'closing-band', ownerUserId ?? 'all'],
+    queryFn: () => dashboardService.getDeadlineBoard({ maxLeads: 1, ownerUserId }),
     staleTime: 60_000,
     meta: { silenceGlobalError: true, errorLabel: 'the deadline board' },
   });
 
   // The rows are fetched only once a reader drills in, and then once for every bucket.
   const rows = useQuery({
-    queryKey: ['glance', 'closing-band', 'rows'],
-    queryFn: () => dashboardService.getDeadlineBoard({ maxLeads: DRILL_MAX_LEADS }),
+    queryKey: ['glance', 'closing-band', 'rows', ownerUserId ?? 'all'],
+    queryFn: () => dashboardService.getDeadlineBoard({ maxLeads: DRILL_MAX_LEADS, ownerUserId }),
     enabled: picked !== null,
     staleTime: 60_000,
     meta: { silenceGlobalError: true, errorLabel: 'the enquiries in this group' },
@@ -256,6 +260,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       title="What's closing on us"
       step={step}
       index={index}

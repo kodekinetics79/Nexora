@@ -227,7 +227,9 @@ public static class ListViewCatalog
                 new("losses", "Why we lost"),
                 new("closing", "What's closing on us"),
                 new("today", "What needs you today"),
-                new("sixmonths", "The last six months")
+                new("sixmonths", "The last six months"),
+                new("brands", "What customers ask for"),
+                new("customers", "Who we quote")
             ]),
             ["dashboard.charts"] = new("dashboard.charts", null,
             [
@@ -237,6 +239,9 @@ public static class ListViewCatalog
                 new("losses.value", "Why we lost: value", DefaultVisible: false),
                 new("closing.enquiries", "Closing: enquiries"),
                 new("closing.lines", "Closing: lines", DefaultVisible: false),
+                new("customers.quotes", "Who we quote: quotes"),
+                new("customers.inquiries", "Who we quote: requests", DefaultVisible: false),
+                new("customers.won", "Who we quote: won", DefaultVisible: false),
                 // Band width: `size.<band>.wide` spans two grid columns on a wide screen.
                 new("size.verdict.normal", "Size: verdict normal"),
                 new("size.verdict.wide", "Size: verdict wide", DefaultVisible: false),
@@ -249,7 +254,11 @@ public static class ListViewCatalog
                 new("size.today.normal", "Size: today normal"),
                 new("size.today.wide", "Size: today wide", DefaultVisible: false),
                 new("size.sixmonths.normal", "Size: sixmonths normal"),
-                new("size.sixmonths.wide", "Size: sixmonths wide", DefaultVisible: false)
+                new("size.sixmonths.wide", "Size: sixmonths wide", DefaultVisible: false),
+                new("size.brands.normal", "Size: brands normal"),
+                new("size.brands.wide", "Size: brands wide", DefaultVisible: false),
+                new("size.customers.normal", "Size: customers normal"),
+                new("size.customers.wide", "Size: customers wide", DefaultVisible: false)
             ])
         };
 

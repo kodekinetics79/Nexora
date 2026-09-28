@@ -59,6 +59,8 @@ export interface SixMonthPoint {
 }
 
 export interface SixMonthsBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
   points?: SixMonthPoint[] | null;
   /** The server's freshness. This endpoint states none today, so it is honestly absent. */
   generatedAt?: string | null;
@@ -156,7 +158,7 @@ const columnPath = (x: number, w: number, top: number, r = 4): string => {
 };
 
 export default function SixMonthsBand({
-  points, generatedAt = null, loading = false, error = null, onRetry, index = 6, onPickPeriod, picked = null,
+  points, generatedAt = null, loading = false, error = null, onRetry, index = 6, onPickPeriod, picked = null, detailsTo,
 }: SixMonthsBandProps) {
   const theme = useTheme();
   // The panels draw at the band's own width, so an 11px tick label renders at 11px.
@@ -216,6 +218,27 @@ export default function SixMonthsBand({
   const drawnSegments = segments.filter((s) => s.length > 0);
   const lastPoint = linePoints.filter((p) => p !== null).slice(-1)[0] ?? null;
   const lastRow = lastPoint ? rows[lastPoint.i] : null;
+
+  // ── The headline figures. The value total follows the same null rule as the chart: a total
+  // over a month the server would not state is a partial sum wearing a whole-period label, so one
+  // null month makes the total "Not stated" rather than quietly smaller. No rows at all is not a
+  // measured zero either.
+  const totalCount = rows.reduce((sum, r) => sum + r.count, 0);
+  const valueTotalStated = rows.length > 0 && rows.every((r) => typeof r.value === 'number');
+  const totalValue = valueTotalStated ? rows.reduce((sum, r) => sum + (r.value as number), 0) : null;
+  const totalValueReason = valueTotalStated
+    ? null
+    : (rows.find((r) => typeof r.value !== 'number' && r.valueUnavailableReason)?.valueUnavailableReason
+      ?? 'The server did not state order value for every month.');
+  // This month against last, in words. A count difference is a fact; a percentage or an arrow
+  // would be a verdict (the screen bans CalculateTrend-style "100%" claims).
+  const thisMonth = rows.length ? rows[rows.length - 1].count : 0;
+  const previous = rows.length > 1 ? { count: rows[rows.length - 2].count, label: labels[rows.length - 2] } : null;
+  const comparison = previous
+    ? thisMonth > previous.count ? `${(thisMonth - previous.count).toLocaleString('en-US')} more than ${previous.label}`
+      : thisMonth < previous.count ? `${(previous.count - thisMonth).toLocaleString('en-US')} fewer than ${previous.label}`
+        : `same as ${previous.label}`
+    : null;
 
   const countSummary = rows.length
     ? rows.map((r, i) => `${labels[i]} ${r.count}`).join(', ')
@@ -339,6 +362,7 @@ export default function SixMonthsBand({
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       title="The last six months"
       step="6"
       index={index}
@@ -357,6 +381,30 @@ export default function SixMonthsBand({
         governed: false,
       }}
     >
+
+      {/* The headline: three stat tiles, grey label over a large ink figure. Ink, not series
+          colour — the figures are read, the marks below are what carry the brass and graphite. */}
+      <Box
+        component="dl"
+        data-testid="six-months-headline"
+        sx={{ display: 'flex', flexWrap: 'wrap', columnGap: 3, rowGap: 0.5, m: 0, mb: 0.75 }}
+      >
+        <HeadlineStat label="RFQs created" testId="six-months-total-count">
+          {totalCount.toLocaleString('en-US')}
+        </HeadlineStat>
+        <HeadlineStat
+          label="Order value" testId="six-months-total-value"
+          title={totalValueReason ?? undefined}
+        >
+          {totalValue === null ? 'Not stated' : formatMoney(totalValue, currency)}
+        </HeadlineStat>
+        <HeadlineStat
+          label="This month" testId="six-months-this-month"
+          aside={comparison ? <Box component="span" data-testid="six-months-this-month-comparison">{` · ${comparison}`}</Box> : null}
+        >
+          {thisMonth.toLocaleString('en-US')}
+        </HeadlineStat>
+      </Box>
 
       {empty ? (
         <Typography variant="body2" sx={{ color: 'text.secondary', mb: 1 }}>
@@ -562,6 +610,54 @@ export default function SixMonthsBand({
   );
 }
 
+interface HeadlineStatProps {
+  label: string;
+  testId: string;
+  children: ReactNode;
+  /** Small secondary words after the figure, on the same line. */
+  aside?: ReactNode;
+  /** Why the figure is not stated; the same sentence is on screen below the panels. */
+  title?: string;
+}
+
+/**
+ * One headline figure. Kept to two short lines (an 11px label, a 30px figure at 1.1 line height)
+ * so the three together add roughly 55px to the band and the dashboard still fits one glance.
+ */
+function HeadlineStat({ label, testId, children, aside = null, title }: HeadlineStatProps) {
+  return (
+    <Box sx={{ minWidth: 0 }}>
+      <Box
+        component="dt"
+        sx={{ fontSize: 11, lineHeight: 1.4, fontWeight: 700, color: 'text.secondary', letterSpacing: 0.2 }}
+      >
+        {label}
+      </Box>
+      <Box component="dd" sx={{ m: 0, display: 'flex', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+        <Box
+          component="span"
+          data-testid={testId}
+          title={title}
+          sx={{
+            fontSize: 30, lineHeight: 1.1, fontWeight: 800, color: 'text.primary',
+            fontVariantNumeric: 'tabular-nums', letterSpacing: -0.5,
+          }}
+        >
+          {children}
+        </Box>
+        {aside && (
+          <Box
+            component="span"
+            sx={{ ml: 0.5, fontSize: 12, fontWeight: 600, color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
+          >
+            {aside}
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
 interface ValueFrameProps {
   viewW: number;
   labels: string[];
@@ -654,18 +750,21 @@ function ValueFrame({
               d={line} fill="none" stroke={series.brassMark} strokeWidth={2}
               strokeLinejoin="round" strokeLinecap="round"
             />
-            {segment.map((p) => (
+            {segment.length === 1 && segment.map((p) => (
+              // A month stranded between two gaps has no line to sit on, so it keeps its dot at
+              // rest; without one it would vanish rather than read as a stated value.
               <Box
                 component="circle" key={`${s}-${p.x}`} cx={p.x} cy={p.y} r={4} fill={series.brassMark}
                 sx={{ opacity: dimmed[p.i] ? 0.4 : 1, ...QUIET }}
               />
             ))}
             {segment.filter((p) => p.i === active).map((p) => (
-              // The crosshair's point: a ring, so the column above and this dot read as one month.
-              <circle
-                key={`active-${p.i}`} data-testid="six-months-active-point" cx={p.x} cy={p.y} r={7}
-                fill="none" stroke={series.brassMark} strokeWidth={2}
-              />
+              // The crosshair's point: a dot and a ring, so the column above and this point read as
+              // one month. Markers appear at hover only; the latest point carries its own below.
+              <g key={`active-${p.i}`} data-testid="six-months-active-point">
+                <circle cx={p.x} cy={p.y} r={4} fill={series.brassMark} />
+                <circle cx={p.x} cy={p.y} r={7} fill="none" stroke={series.brassMark} strokeWidth={2} />
+              </g>
             ))}
           </g>
         );

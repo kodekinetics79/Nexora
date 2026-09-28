@@ -25,7 +25,8 @@ export interface CommercialAttentionItem {
 
 export interface SalesTodayDTO {
   generatedAt: string;
-  scope: 'tenant' | 'managed_scope' | 'assigned_to_me';
+  /** 'single_rep' when the request carried the ownerUserId one-rep filter. */
+  scope: 'tenant' | 'managed_scope' | 'assigned_to_me' | 'single_rep';
   /**
    * The open- and overdue-follow-up counts are now the true totals for the caller's scope and may
    * exceed the number of `attentionItems` rows. They used to saturate at exactly 100 because the
@@ -226,7 +227,8 @@ export interface PerformanceDTO {
   from: string;
   to: string;
   metrics: IntelligenceMetric[];
-  scope: 'tenant' | 'managed_scope' | 'assigned_to_me';
+  /** 'single_rep' when the request carried the ownerUserId one-rep filter. */
+  scope: 'tenant' | 'managed_scope' | 'assigned_to_me' | 'single_rep';
   minimumConversionSample: number;
   /** Won plus lost across the resolved scope — the denominator the floor is measured against. */
   decidedQuotes: number;
@@ -732,8 +734,14 @@ const commercialRoot = '/api/commercial-intelligence';
 const inventoryRoot = '/api/inventory-intelligence';
 
 const commercialIntelligenceService = {
-  getSalesToday: async (): Promise<SalesTodayDTO> =>
-    (await axiosInstance.get<SalesTodayDTO>(`${commercialRoot}/sales-today`)).data,
+  /**
+   * `ownerUserId` narrows to one rep in the caller's scope (403 outside it). Typed `number | object`
+   * and checked at runtime because several screens pass this function straight in as a react-query
+   * `queryFn`, which calls it with its context object — that must never become a query param.
+   */
+  getSalesToday: async (ownerUserId?: number | object): Promise<SalesTodayDTO> =>
+    (await axiosInstance.get<SalesTodayDTO>(`${commercialRoot}/sales-today`,
+      typeof ownerUserId === 'number' ? { params: { ownerUserId } } : undefined)).data,
   getTeamOverview: async (): Promise<TeamOverviewDTO> =>
     (await axiosInstance.get<TeamOverviewDTO>(`${commercialRoot}/team-overview`)).data,
   getRepDirectory: async (): Promise<RepSummaryDTO[]> =>
@@ -773,8 +781,10 @@ const commercialIntelligenceService = {
   completeFollowUp: async (id: number, expectedVersion: number, idempotencyKey: string): Promise<void> => {
     await axiosInstance.post(`${commercialRoot}/follow-ups/${id}/complete`, { expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } });
   },
-  getPerformance: async (from: string, to: string): Promise<PerformanceDTO> =>
-    (await axiosInstance.get<PerformanceDTO>(`${commercialRoot}/performance`, { params: { from, to } })).data,
+  /** `ownerUserId` narrows to one rep in the caller's scope (403 outside it). */
+  getPerformance: async (from: string, to: string, ownerUserId?: number): Promise<PerformanceDTO> =>
+    (await axiosInstance.get<PerformanceDTO>(`${commercialRoot}/performance`,
+      { params: ownerUserId !== undefined ? { from, to, ownerUserId } : { from, to } })).data,
   getCoachingRecovery: async (from: string, to: string): Promise<CoachingRecoveryDTO> =>
     (await axiosInstance.get<CoachingRecoveryDTO>(`${commercialRoot}/coaching-recovery`, { params: { from, to } })).data,
   acknowledgeCoachingFinding: async (findingKey: string, disposition: string, reason: string, from: string, to: string, idempotencyKey: string): Promise<CoachingAcknowledgementDTO> =>
