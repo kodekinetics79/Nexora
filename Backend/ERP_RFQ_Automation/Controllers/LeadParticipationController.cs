@@ -124,6 +124,20 @@ public sealed class LeadParticipationController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(Problem(409, "Workbench unavailable", ex.Message)); }
     }
 
+    /// <summary>
+    /// Who owns the request and its RFQ number, for the decision screen. It used to read the full
+    /// lead record for these five fields — 2.46 MB on a 1,500-line request (PERF-02).
+    /// </summary>
+    [HttpGet("owner")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<ActionResult<LeadOwnerDto>> GetOwner(long leadId, CancellationToken ct)
+    {
+        if (!TryContext(out var businessUnitId, out _)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
+        try { return Ok(await _workbench.GetOwnerAsync(businessUnitId, leadId, ct)); }
+        catch (KeyNotFoundException ex) { return NotFound(Problem(404, "Lead not found", ex.Message)); }
+    }
+
     [HttpPut("fit-assessment")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult<FitAssessmentDto>> SaveFitAssessment(
@@ -134,13 +148,17 @@ public sealed class LeadParticipationController : ControllerBase
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
-            await _participation.RecordFitAssessmentAsync(businessUnitId, leadId,
+            var saved = await _participation.RecordFitAssessmentAsync(businessUnitId, leadId,
                 new RecordLeadFitAssessmentCommand(request.ExpectedLeadRevisionId, request.ExpectedDecisionVersion,
                     request.ExpectedFitVersion, request.OverallDecision, request.Rationale,
                     (request.Criteria ?? Array.Empty<FitCriterionRequest>())
                         .Select(x => new LeadFitCriterionCommand(x.Code, x.Decision, x.Note)).ToArray(), key, actor), ct);
-            var workbench = await _workbench.GetAsync(businessUnitId, leadId, ct);
-            return Ok(workbench.FitAssessment);
+            // The assessment just saved, read on its own. This used to rebuild the whole decision
+            // workbench — every line, its evidence, its catalogue matches — only to return this one
+            // object from it: the first of four full rebuilds behind one "Create RFQ" click on a
+            // 1,500-line request (PERF-03). A workbench that could not be built also turned a
+            // saved assessment into a 409.
+            return Ok(await _workbench.GetFitAssessmentAsync(businessUnitId, saved.Id, ct));
         }
         catch (KeyNotFoundException ex) { return NotFound(Problem(404, "Lead not found", ex.Message)); }
         catch (ArgumentException ex) { return BadRequest(Problem(400, "Assessment refused", ex.Message)); }
