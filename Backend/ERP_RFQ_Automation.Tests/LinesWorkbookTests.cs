@@ -33,9 +33,12 @@ public class LinesWorkbookTests
                 ManufacturerPartNumber = $"MPN-{i}",
                 Quantity = i * 2.5m,
                 UnitOfMeasure = i == 2 ? null : "PC",
+                ItemMaterialCode = $"1000{i}",
                 ParticipationDecision = i == 1 ? Rfqitem.ParticipationQuote
                     : i == 2 ? Rfqitem.ParticipationNoQuote : Rfqitem.ParticipationPending,
                 NoQuoteReason = i == 2 ? "Obsolete part" : null,
+                ExtraFields = i == 1 ? "{\"Approved manufacturers\": \"TELEDYNE; EMERSON\", \"Plant\": \"Ras Tanura\"}"
+                    : i == 2 ? "{\"Plant\": \"Abqaiq\", \"Material group\": \"VALVES\"}" : null,
                 CreatedBy = "qa",
             });
         }
@@ -56,29 +59,65 @@ public class LinesWorkbookTests
         throw new Xunit.Sdk.XunitException("Column heading row not found.");
     }
 
+    private static List<string> Headers(ExcelWorksheet sheet) =>
+        Enumerable.Range(1, sheet.Dimension.End.Column).Select(c => sheet.Cells[HeaderRow(sheet), c].Text).ToList();
+
+    /// <summary>The cell under a heading, <paramref name="line"/> rows below it (1 = first line).</summary>
+    private static ExcelRange At(ExcelWorksheet sheet, string heading, int line)
+    {
+        var column = Headers(sheet).IndexOf(heading);
+        Assert.True(column >= 0, $"No '{heading}' column.");
+        return sheet.Cells[HeaderRow(sheet) + line, column + 1];
+    }
+
     [Fact]
-    public void Every_line_is_one_row_in_the_on_screen_columns()
+    public void Every_line_is_one_row_with_every_field()
     {
         var sheet = Read(LinesWorkbook.ForRfq(Rfq(100)));
-        var header = HeaderRow(sheet);
 
-        for (var c = 0; c < LinesWorkbook.RfqColumns.Length; c++)
-            Assert.Equal(LinesWorkbook.RfqColumns[c], sheet.Cells[header, c + 1].Text);
-        Assert.Equal(header + 100, sheet.Dimension.End.Row);
+        Assert.Equal(HeaderRow(sheet) + 100, sheet.Dimension.End.Row);
+        Assert.Equal(new[] { "Line", "Description", "Manufacturer", "Part number", "Qty", "Unit", "Quoting", "Reason" },
+            Headers(sheet).Take(8));
+        foreach (var heading in new[] { "Catalogue product", "Offered part number", "Unit price", "Supplier",
+                     "Customer material code", "Item text", "Material PO text", "Lead time (days)", "Customer portal ID" })
+            Assert.Contains(heading, Headers(sheet));
 
-        var first = header + 1;
-        Assert.Equal("00010", sheet.Cells[first, 1].Text);
-        Assert.Equal("VALVE 1 — Gate valve 2in class 1", sheet.Cells[first, 2].Text);
-        Assert.Equal("TELEDYNE", sheet.Cells[first, 3].Text);
-        Assert.Equal("MPN-1", sheet.Cells[first, 4].Text);
-        Assert.Equal(2.5m, Convert.ToDecimal(sheet.Cells[first, 5].Value));
-        Assert.Equal("PC", sheet.Cells[first, 6].Text);
-        Assert.Equal("Yes", sheet.Cells[first, 7].Text);
+        Assert.Equal("00010", At(sheet, "Line", 1).Text);
+        Assert.Equal("VALVE 1 — Gate valve 2in class 1", At(sheet, "Description", 1).Text);
+        Assert.Equal("TELEDYNE", At(sheet, "Manufacturer", 1).Text);
+        Assert.Equal("MPN-1", At(sheet, "Part number", 1).Text);
+        Assert.Equal(2.5m, Convert.ToDecimal(At(sheet, "Qty", 1).Value));
+        Assert.Equal("PC", At(sheet, "Unit", 1).Text);
+        Assert.Equal("Yes", At(sheet, "Quoting", 1).Text);
+        Assert.Equal("10001", At(sheet, "Customer material code", 1).Text);
 
-        Assert.Equal("EA", sheet.Cells[first + 1, 6].Text);
-        Assert.Equal("No", sheet.Cells[first + 1, 7].Text);
-        Assert.Equal("Obsolete part", sheet.Cells[first + 1, 8].Text);
-        Assert.Equal("Not decided", sheet.Cells[first + 2, 7].Text);
+        Assert.Equal("EA", At(sheet, "Unit", 2).Text);
+        Assert.Equal("No", At(sheet, "Quoting", 2).Text);
+        Assert.Equal("Obsolete part", At(sheet, "Reason", 2).Text);
+        Assert.Equal("Not decided", At(sheet, "Quoting", 3).Text);
+    }
+
+    [Fact]
+    public void The_customers_own_columns_follow_ours_one_column_each()
+    {
+        var sheet = Read(LinesWorkbook.ForRfq(Rfq(3)));
+        var headers = Headers(sheet);
+
+        Assert.Equal(new[] { "Approved manufacturers", "Plant", "Material group" }, headers.TakeLast(3));
+        Assert.Equal("TELEDYNE; EMERSON", At(sheet, "Approved manufacturers", 1).Text);
+        Assert.Equal("Ras Tanura", At(sheet, "Plant", 1).Text);
+        Assert.Equal("Abqaiq", At(sheet, "Plant", 2).Text);
+        Assert.Equal("VALVES", At(sheet, "Material group", 2).Text);
+        Assert.Equal("", At(sheet, "Plant", 3).Text);
+    }
+
+    [Fact]
+    public void Unreadable_customer_columns_do_not_break_the_file()
+    {
+        var rfq = Rfq(1);
+        rfq.Rfqitems[0].ExtraFields = "{not json";
+        var sheet = Read(LinesWorkbook.ForRfq(rfq));
+        Assert.Equal("MPN-1", At(sheet, "Part number", 1).Text);
     }
 
     [Fact]
@@ -87,7 +126,7 @@ public class LinesWorkbookTests
         var sheet = Read(LinesWorkbook.ForRfq(Rfq(3)));
 
         Assert.Equal("RFQ RFQ/2026 0042", sheet.Cells[1, 1].Text);
-        var labels = Enumerable.Range(1, HeaderRow(sheet)).ToDictionary(r => sheet.Cells[r, 1].Text, r => sheet.Cells[r, 2].Text);
+        var labels = Enumerable.Range(1, HeaderRow(sheet) - 1).ToDictionary(r => sheet.Cells[r, 1].Text, r => sheet.Cells[r, 2].Text);
         Assert.Equal("Saudi Aramco", labels["Customer"]);
         Assert.Equal("7000123456", labels["Customer reference"]);
         Assert.Equal("05 Oct 2026", labels["Closing date"]);
@@ -108,7 +147,7 @@ public class LinesWorkbookTests
         rfq.Rfqitems[0].ProductName = null;
         rfq.Rfqitems[0].ProductShortDescription = "=HYPERLINK(\"http://x\",\"click\")";
         var sheet = Read(LinesWorkbook.ForRfq(rfq));
-        var cell = sheet.Cells[HeaderRow(sheet) + 1, 2];
+        var cell = At(sheet, "Description", 1);
 
         Assert.True(string.IsNullOrEmpty(cell.Formula));
         Assert.Equal("=HYPERLINK(\"http://x\",\"click\")", cell.Text);
@@ -122,29 +161,32 @@ public class LinesWorkbookTests
     }
 
     [Fact]
-    public void A_lead_exports_the_same_columns_without_the_quote_decision()
+    public void A_lead_exports_every_line_field_and_the_customers_columns()
     {
         var lead = new LeadResponseDTO { Id = 77, Rfqno = "7000999", CustomerName = "SEC", BidClosingDate = new DateTime(2026, 10, 1) };
-        lead.LeadItems.Add(new LeadItemResponseDTO { Id = 1, LineItemNo = "10", ProductShortName = "CABLE", ProductShortDescription = "Cu 4c 16mm", ManufacturerName = "ELSEWEDY", ManufacturerPartNumber = "C-16", Quantity = 500, UnitOfMeasure = "M" });
+        lead.LeadItems.Add(new LeadItemResponseDTO
+        {
+            Id = 1, LineItemNo = "10", ProductShortName = "CABLE", ProductShortDescription = "Cu 4c 16mm",
+            ManufacturerName = "ELSEWEDY", ManufacturerPartNumber = "C-16", Quantity = 500, UnitOfMeasure = "M",
+            ItemMaterialCode = "5003100001", ExtraFields = new Dictionary<string, string> { ["Plant"] = "Qurayyah" },
+        });
         lead.LeadItems.Add(new LeadItemResponseDTO { Id = 2, ProductShortName = "GLAND", Quantity = 0 });
 
         var sheet = Read(LinesWorkbook.ForLead(lead));
-        var header = HeaderRow(sheet);
 
         Assert.Equal("Lead 77 · 7000999", sheet.Cells[1, 1].Text);
-        for (var c = 0; c < LinesWorkbook.LeadColumns.Length; c++)
-            Assert.Equal(LinesWorkbook.LeadColumns[c], sheet.Cells[header, c + 1].Text);
-        Assert.Equal("", sheet.Cells[header, LinesWorkbook.LeadColumns.Length + 1].Text);
-
-        Assert.Equal("10", sheet.Cells[header + 1, 1].Text);
-        Assert.Equal("CABLE — Cu 4c 16mm", sheet.Cells[header + 1, 2].Text);
-        Assert.Equal(500m, Convert.ToDecimal(sheet.Cells[header + 1, 5].Value));
-        Assert.Equal("M", sheet.Cells[header + 1, 6].Text);
+        Assert.DoesNotContain("Quoting", Headers(sheet));
+        Assert.Equal("Plant", Headers(sheet).Last());
+        Assert.Equal("CABLE — Cu 4c 16mm", At(sheet, "Description", 1).Text);
+        Assert.Equal(500m, Convert.ToDecimal(At(sheet, "Qty", 1).Value));
+        Assert.Equal("M", At(sheet, "Unit", 1).Text);
+        Assert.Equal("5003100001", At(sheet, "Customer material code", 1).Text);
+        Assert.Equal("Qurayyah", At(sheet, "Plant", 1).Text);
 
         // No line number on the document: position. Quantity never stated: blank, not 0.
-        Assert.Equal("2", sheet.Cells[header + 2, 1].Text);
-        Assert.Null(sheet.Cells[header + 2, 5].Value);
-        Assert.Equal("EA", sheet.Cells[header + 2, 6].Text);
+        Assert.Equal("2", At(sheet, "Line", 2).Text);
+        Assert.Null(At(sheet, "Qty", 2).Value);
+        Assert.Equal("EA", At(sheet, "Unit", 2).Text);
     }
 
     [Theory]

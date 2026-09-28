@@ -113,17 +113,42 @@ const QUOTE_FILTERS: Record<string, { label: string; description: string }> = {
   },
 };
 
+const day = (value?: string | null) => (value ? dayjs(value).format('DD MMM YYYY') : '');
+const dayTime = (value?: string | null) => (value ? dayjs(value).format('DD MMM YYYY HH:mm') : '');
+
 const QUOTE_EXPORT_COLUMNS: ExportColumn<QuoteDTO>[] = [
-  { header: 'Nexora Serial', value: (q) => q.nexoraSerial },
+  { header: 'Nexora Serial', value: (q) => q.nexoraSerial || q.commercialCaseReference },
   { header: 'Quote #', value: (q) => q.quoteNo },
+  { header: 'Revision', value: (q) => q.version },
   { header: 'RFQ #', value: (q) => q.rfqNo },
   { header: 'Customer', value: (q) => q.customerName },
+  { header: 'Contact', value: (q) => q.contactName },
   { header: 'Customer email', value: (q) => q.customerEmail },
-  { header: 'Date', value: (q) => (q.quoteDate ? dayjs(q.quoteDate).format('DD MMM YYYY') : '') },
-  { header: 'Valid until', value: (q) => (q.validUntil ? dayjs(q.validUntil).format('DD MMM YYYY') : '') },
-  { header: 'Currency', value: (q) => q.currencyCode },
-  { header: 'Total', value: (q) => q.totalAmount },
+  { header: 'Date', value: (q) => day(q.quoteDate) },
+  { header: 'Valid until', value: (q) => day(q.validUntil) },
   { header: 'Status', value: (q) => q.statusValue },
+  { header: 'Currency', value: (q) => q.currencyCode },
+  { header: 'Discount type', value: (q) => q.discountTypeName },
+  { header: 'Discount', value: (q) => q.discountValue },
+  { header: 'Total', value: (q) => q.totalAmount },
+  { header: 'Lines', value: (q) => q.itemCount },
+  { header: 'Sent', value: (q) => dayTime(q.sentOn) },
+  { header: 'Days since sent', value: (q) => q.daysSinceSent },
+  { header: 'Stale', value: (q) => (q.isStale ? 'Yes' : 'No') },
+  { header: 'Customer responded', value: (q) => dayTime(q.respondedOn) },
+  { header: 'Outcome date', value: (q) => dayTime(q.outcomeOn) },
+  { header: 'Outcome reason', value: (q) => q.outcomeReasonName },
+  { header: 'Outcome note', value: (q) => q.outcomeNote },
+  { header: 'Validity extended', value: (q) => dayTime(q.validityExtendedOn) },
+  { header: 'Revision impact', value: (q) => q.revisionImpactDetail
+    ? `Lead revision ${q.revisionImpactDetail.fromRevision} → ${q.revisionImpactDetail.toRevision}: ${q.revisionImpactDetail.changes.length} line change(s)`
+    : q.revisionImpact },
+  { header: 'Remarks', value: (q) => q.headerRemarks },
+  { header: 'Business unit', value: (q) => q.businessUnitName },
+  { header: 'Created by', value: (q) => q.createdBy },
+  { header: 'Created', value: (q) => dayTime(q.createdDate) },
+  { header: 'Modified by', value: (q) => q.modifiedBy },
+  { header: 'Modified', value: (q) => dayTime(q.modifiedDate) },
 ];
 
 const QuotesPage: React.FC = () => {

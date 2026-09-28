@@ -93,6 +93,35 @@ namespace ERP_RFQ_Automation.Repositories
                 .Select(g => new { RfqId = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.RfqId, x => x.Count);
 
+            // The same lineage and ownership facts the detail view shows, one query each for the
+            // page, so an export of the list is as complete as opening every RFQ.
+            var promotionIds = rfqs.Where(r => r.PromotionId.HasValue).Select(r => r.PromotionId!.Value).ToList();
+            var promotions = await _context.Set<RfqPromotion>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && promotionIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id);
+            var decisionIds = rfqs.Where(r => r.ParticipationDecisionId.HasValue).Select(r => r.ParticipationDecisionId!.Value).ToList();
+            var participationVersions = await _context.Set<LeadParticipationDecision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && decisionIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, x => x.Sequence);
+            var revisionIds = rfqs.Where(r => r.SourceLeadRevisionId.HasValue).Select(r => r.SourceLeadRevisionId!.Value).ToList();
+            var revisionNumbers = await _context.Set<LeadRevision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && revisionIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, x => x.RevisionNumber);
+            var ownerIds = rfqs.Where(r => r.Lead?.AssignTo != null).Select(r => r.Lead!.AssignTo!.Value).Distinct().ToList();
+            var ownerNames = await _context.Users.AsNoTracking()
+                .Where(x => x.Buid == businessUnitId && ownerIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, x => (x.FirstName + " " + x.LastName).Trim());
+            var customerIds = rfqs.Where(r => r.CustomerId.HasValue).Select(r => r.CustomerId!.Value).Distinct().ToList();
+            var accountOwners = (await (from ownership in _context.Set<CustomerOwnership>().AsNoTracking()
+                                        join user in _context.Users.AsNoTracking() on ownership.PrimaryUserId equals user.Id
+                                        where ownership.BusinessUnitId == businessUnitId
+                                              && customerIds.Contains(ownership.CustomerId)
+                                              && ownership.IsActive && ownership.EffectiveTo == null
+                                        select new { ownership.CustomerId, ownership.Priority, ownership.EffectiveFrom, Name = (user.FirstName + " " + user.LastName).Trim() })
+                                 .ToListAsync())
+                .GroupBy(x => x.CustomerId)
+                .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.Priority).ThenByDescending(x => x.EffectiveFrom).First().Name);
+
             var dtos = rfqs.Select(r => new RfqResponseDTO
             {
                 Id = r.Id,
@@ -147,6 +176,12 @@ namespace ERP_RFQ_Automation.Repositories
                 CustomerEmail = r.Customer != null ? r.Customer.ContactEmail : null,
                 LeadEmail = r.Lead != null ? r.Lead.Clientemail : null,
                 ItemCount = itemCounts.TryGetValue(r.Id, out var count) ? count : 0,
+                PromotedAtUtc = r.PromotionId.HasValue && promotions.TryGetValue(r.PromotionId.Value, out var promotion) ? promotion.PromotedAtUtc : null,
+                PromotedBy = r.PromotionId.HasValue && promotions.TryGetValue(r.PromotionId.Value, out var promotedBy) ? promotedBy.PromotedBy : null,
+                ParticipationVersion = r.ParticipationDecisionId.HasValue && participationVersions.TryGetValue(r.ParticipationDecisionId.Value, out var sequence) ? sequence : null,
+                SourceLeadRevisionNumber = r.SourceLeadRevisionId.HasValue && revisionNumbers.TryGetValue(r.SourceLeadRevisionId.Value, out var revision) ? revision : null,
+                OpportunityOwnerName = r.Lead?.AssignTo is long ownerId && ownerNames.TryGetValue(ownerId, out var ownerName) ? ownerName : null,
+                AccountOwnerName = r.CustomerId.HasValue && accountOwners.TryGetValue(r.CustomerId.Value, out var accountOwner) ? accountOwner : null,
                 Rfqitems = new List<RfqitemResponseDTO>() // Empty list for list view
             }).ToList();
 

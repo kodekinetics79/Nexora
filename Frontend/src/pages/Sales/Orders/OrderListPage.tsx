@@ -23,15 +23,30 @@ import PermissionGuard from '../../../components/common/PermissionGuard';
 import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
 import { formatMoney } from '../../../utils/currency';
 
+const day = (value?: string | null) => (value ? dayjs(value).format('DD MMM YYYY') : '');
+
 const ORDER_EXPORT_COLUMNS: ExportColumn<OrderDTO>[] = [
   { header: 'Order #', value: (o) => o.orderNo || o.orderNumber },
-  { header: 'Date', value: (o) => (o.orderDate ? dayjs(o.orderDate).format('DD MMM YYYY') : '') },
+  { header: 'Nexora Serial', value: (o) => o.nexoraSerial },
+  { header: 'Date', value: (o) => day(o.orderDate) },
+  { header: 'Delivery date', value: (o) => day(o.deliveryDate) },
   { header: 'Customer', value: (o) => o.customerName },
   { header: 'Quote #', value: (o) => o.quoteNo },
-  { header: 'Currency', value: (o) => o.currencyCode },
-  { header: 'Amount', value: (o) => o.totalAmount },
+  { header: 'RFQ #', value: (o) => o.rfqNo },
+  { header: 'Lead #', value: (o) => o.leadNo },
   { header: 'Status', value: (o) => o.status },
   { header: 'Payment', value: (o) => o.paymentStatus || 'UNPAID' },
+  { header: 'Payment reference', value: (o) => o.paymentReference },
+  { header: 'Currency', value: (o) => o.currencyCode },
+  { header: 'Subtotal', value: (o) => o.subTotal },
+  { header: 'Discount', value: (o) => o.discountAmount },
+  { header: 'Tax', value: (o) => o.taxAmount },
+  { header: 'Total', value: (o) => o.totalAmount },
+  { header: 'Paid', value: (o) => o.paidAmount },
+  { header: 'Balance', value: (o) => o.balanceAmount },
+  { header: 'Shipped', value: (o) => (o.hasShipments ? 'Yes' : 'No') },
+  { header: 'Notes', value: (o) => o.notes },
+  { header: 'Terms and conditions', value: (o) => o.termsAndConditions },
 ];
 
 const OrderListPage: React.FC = () => {

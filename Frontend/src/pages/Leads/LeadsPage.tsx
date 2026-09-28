@@ -27,8 +27,8 @@ import {
 import useColumnPreferences from '../../hooks/useColumnPreferences';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
 import leadService, { type LeadResponseDTO } from '../../api/services/leadService';
-import decisionService from '../../api/services/decisionService';
-import { DECISION_META, decisionFacts } from './decisionRead';
+import decisionService, { DECISION_SUMMARY_BATCH_CAP, type LeadDecisionSummary } from '../../api/services/decisionService';
+import { DECISION_META, decisionFacts, decisionLabel } from './decisionRead';
 import LateIngestedBadge from './LateIngestedBadge';
 import ClientCell from './ClientCell';
 import ResolveClientDialog from './ResolveClientDialog';
@@ -37,7 +37,7 @@ import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../compon
 import gridEmptyOverlay from '../../components/common/gridOverlays';
 import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
-import { formatDateSafe, parseDateSafe } from '../../utils/dates';
+import { formatDateSafe, formatDateTimeSafe, parseDateSafe } from '../../utils/dates';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import commercialRoutingService, {
@@ -170,18 +170,70 @@ const leadStatus = (row: LeadResponseDTO): StatusMeta => {
   return { label: 'New', color: 'primary', variant: 'outlined' };
 };
 
-const LEAD_EXPORT_COLUMNS: ExportColumn<LeadResponseDTO>[] = [
+type LeadExportRow = LeadResponseDTO & { decision?: LeadDecisionSummary };
+const yesNo = (value?: boolean | null) => (value == null ? '' : value ? 'Yes' : 'No');
+
+const LEAD_EXPORT_COLUMNS: ExportColumn<LeadExportRow>[] = [
   { header: 'Nexora Serial', value: (r) => r.nexoraSerial || r.commercialCaseReference },
   { header: 'RFQ #', value: (r) => r.rfqno },
   { header: 'Client', value: (r) => r.customerName },
+  { header: 'Client as written on document', value: (r) => r.customerCompanyNameExtracted },
+  { header: 'Customer portal', value: (r) => r.customerPortalNameExtracted },
+  { header: 'Client match', value: (r) => r.customerMatchStatus },
+  { header: 'Client match reason', value: (r) => r.customerMatchExplanation },
   { header: 'Buyer contact', value: (r) => r.buyersName },
-  { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
-  { header: 'Deadline', value: (r) => formatDateSafe(r.bidClosingDate, '') },
-  { header: 'Items', value: (r) => r.itemCount ?? 0 },
+  { header: 'Buyer email', value: (r) => r.clientemail },
+  { header: 'Account owner', value: (r) => r.accountOwnerName },
   { header: 'Source', value: (r) => r.leadSource },
+  { header: 'Email from', value: (r) => r.emailSender },
+  { header: 'Email subject', value: (r) => r.emailSubject },
+  { header: 'Email received', value: (r) => formatDateTimeSafe(r.emailReceivedAtUtc, '') },
+  { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
+  { header: 'Ingested', value: (r) => formatDateTimeSafe(r.ingestedOn || r.ingestedAtUtc, '') },
+  { header: 'Arrived late', value: (r) => yesNo(r.lateIngested) },
+  { header: 'Deadline', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Deadline (Hijri)', value: (r) => r.bidClosingDateHijri },
+  { header: 'Required delivery', value: (r) => formatDateSafe(r.requiredDeliveryDate, '') },
+  { header: 'Delivery location', value: (r) => r.deliveryLocation },
+  { header: 'Agreement reference', value: (r) => r.agreementReference },
+  { header: 'Opportunity #', value: (r) => r.opportunityNo },
+  { header: 'RFQ type', value: (r) => r.rfqtype },
+  { header: 'Agreement duration', value: (r) => r.durationAgreement },
+  { header: 'Bidding decision', value: (r) => r.biddingDecision },
+  { header: 'Acknowledged', value: (r) => formatDateSafe(r.acknowledgmentDate, '') },
+  { header: 'Submitted', value: (r) => formatDateSafe(r.subDate, '') },
+  { header: 'Items', value: (r) => r.itemCount ?? 0 },
   { header: 'Status', value: (r) => leadStatus(r).label },
+  { header: "Nexora's read", value: (r) => (r.decision ? decisionLabel(r.decision.recommendation) : '') },
+  { header: 'We stock (%)', value: (r) => r.decision?.coveragePct },
+  { header: 'Estimated value', value: (r) => r.decision?.estimatedValue },
+  { header: 'Needs commercial review', value: (r) => yesNo(r.requiresCommercialReview) },
   { header: 'Owner', value: (r) => r.assignedToFullName || 'Unassigned' },
+  { header: 'How assigned', value: (r) => r.assignmentMethod },
+  { header: 'Assignment reason', value: (r) => r.assignmentReason },
+  { header: 'Assignment comment', value: (r) => r.assignComment },
+  { header: 'Revision', value: (r) => r.currentRevisionNumber },
+  { header: 'Duplicate', value: (r) => r.duplicateStatus },
+  { header: 'Duplicate of lead', value: (r) => r.duplicateOfLeadId },
+  { header: 'Remarks', value: (r) => r.headerRemarks },
+  { header: 'Business unit', value: (r) => r.businessUnitName },
+  { header: 'Created by', value: (r) => r.createdBy },
+  { header: 'Created', value: (r) => formatDateTimeSafe(r.createdDate, '') },
 ];
+
+/** Adds Nexora's read to each lead, 100 at a time. A lead the service cannot read stays blank. */
+const withDecisions = async (leads: LeadResponseDTO[]): Promise<LeadExportRow[]> => {
+  const summaries: Record<string, LeadDecisionSummary> = {};
+  for (let i = 0; i < leads.length; i += DECISION_SUMMARY_BATCH_CAP) {
+    try {
+      const batch = await decisionService.getDecisionSummaries(leads.slice(i, i + DECISION_SUMMARY_BATCH_CAP).map((l) => l.id));
+      Object.assign(summaries, batch.summaries);
+    } catch {
+      // The export still carries every other field.
+    }
+  }
+  return leads.map((lead) => ({ ...lead, decision: summaries[String(lead.id)] }));
+};
 
 // NOTE: this grid used to carry a "Confidence" column driven by
 // Lead.Aiconfidence, rendered High/Medium/Low in green/amber/red. That score is
@@ -1297,14 +1349,14 @@ const LeadsPage: React.FC = () => {
           <ExportExcelButton
             name="Leads"
             columns={LEAD_EXPORT_COLUMNS}
-            loadRows={() => loadAllPages((pageNumber, pageSize) => leadService.getAll({
+            loadRows={async () => withDecisions(await loadAllPages((pageNumber, pageSize) => leadService.getAll({
               pageNumber,
               pageSize,
               rfqno: search || undefined,
               search: search || undefined,
               leadSource: leadSource === 'all' ? undefined : leadSource,
               view: requestedView,
-            }))}
+            })))}
           />
           <Tooltip title="Refresh">
             <IconButton aria-label="Refresh" onClick={() => refetch()} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
