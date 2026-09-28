@@ -464,6 +464,16 @@ function SourcingWorkbenchPage() {
     });
   };
   const workbench = workbenchQuery.data;
+  // UX-15: with no DRAFT on the RFQ, "Prepare the customer quote" was offered even when a quote
+  // had already gone to the customer — and answered 409. The latest quote says which case this is.
+  const latestQuoteQuery = useQuery({
+    queryKey: ["sourcing-latest-quote", rfqId],
+    queryFn: () => rfqService.getLatestQuote(rfqId as number),
+    enabled: Boolean(rfqId) && Boolean(workbench) && !workbench?.customerQuoteDraft,
+    retry: false,
+    meta: { silenceGlobalError: true },
+  });
+  const issuedQuote = latestQuoteQuery.data && latestQuoteQuery.data.state !== "DRAFT" ? latestQuoteQuery.data : null;
 
   const comparisonLineIds = useMemo(
     () => [...new Set((workbench?.offers ?? []).map((offer) => offer.rfqItemId))],
@@ -649,6 +659,11 @@ function SourcingWorkbenchPage() {
                       action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortNotAsked[0])}>Ask suppliers{shortNotAsked.length === 1 ? "" : " for the first line"}</Button> : undefined }
                   : awaitingSuppliers.length > 0 && unresolvedLines.some((line) => !awardedLineIds.has(line.id))
                     ? { tone: "info", sentence: `Waiting for ${awaitingSuppliers.length} supplier${awaitingSuppliers.length === 1 ? "" : "s"} to reply. When a reply arrives, capture it from the Solicitations tab.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
+                    : approvedUnconverted.length > 0 && !workbench.customerQuoteDraft && issuedQuote
+                      // A submitted quote is final for SEC/Aramco-type buyers (owner ruling
+                      // 2026-09-26): open it; revising stays the rep's choice on the quote page.
+                      ? { tone: "info", sentence: `Quote ${issuedQuote.quoteNo} was already sent to the customer. Open it to see where it stands.`,
+                          action: <Button variant="contained" startIcon={<OpenInNew />} onClick={() => navigate(`/sales/quotes/view/${issuedQuote.quoteId}`)}>{`Open quote ${issuedQuote.quoteNo}`}</Button> }
                     : approvedUnconverted.length > 0 && !workbench.customerQuoteDraft
                       // D18: the draft is one call. Make it here and land on the pricing step,
                       // instead of sending the rep back to the RFQ to find the button.

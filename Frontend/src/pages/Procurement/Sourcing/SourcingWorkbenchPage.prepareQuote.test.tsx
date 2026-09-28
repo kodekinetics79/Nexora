@@ -21,7 +21,7 @@ vi.mock('../../../api/services/procurementService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../api/services/procurementService')>();
   return { ...actual, default: { ...actual.default, getWorkbench: vi.fn(), getQuoteComparison: vi.fn() } };
 });
-vi.mock('../../../api/services/rfqService', () => ({ default: { prepareQuoteDraft: vi.fn() } }));
+vi.mock('../../../api/services/rfqService', () => ({ default: { prepareQuoteDraft: vi.fn(), getLatestQuote: vi.fn() } }));
 vi.mock('../../../api/services/currencyService', () => ({ default: { getAll: vi.fn().mockResolvedValue({ items: [] }) } }));
 vi.mock('../../../api/services/warehouseService', () => ({ default: { getAll: vi.fn().mockResolvedValue({ items: [] }) } }));
 vi.mock('../../../context/AuthContext', () => ({
@@ -34,6 +34,7 @@ const procurementService = (await import('../../../api/services/procurementServi
 };
 const rfqService = (await import('../../../api/services/rfqService')).default as unknown as {
   prepareQuoteDraft: ReturnType<typeof vi.fn>;
+  getLatestQuote: ReturnType<typeof vi.fn>;
 };
 const SourcingWorkbenchPage = (await import('./SourcingWorkbenchPage')).default;
 
@@ -65,6 +66,7 @@ const renderPage = () => render(
 beforeEach(() => {
   vi.clearAllMocks();
   procurementService.getWorkbench.mockResolvedValue(awardedNoDraft);
+  rfqService.getLatestQuote.mockResolvedValue(null);
   procurementService.getQuoteComparison.mockResolvedValue({ rfqItemId: 10, lines: [], recommendedSupplierQuotedItemId: null });
   rfqService.prepareQuoteDraft.mockResolvedValue({
     id: 77, quoteNo: 'QT-0926-0001',
@@ -101,5 +103,18 @@ describe('an approved award and no customer quote draft', () => {
     const price = await screen.findByRole('button', { name: /price customer quote/i });
     expect(price).toBeDisabled();
     expect(screen.getByLabelText('Prepare the quote draft first — open the RFQ and press Prepare Quote Draft')).toContainElement(price);
+  });
+});
+
+describe('UX-15: an approved award on an RFQ whose quote was already sent', () => {
+  it('opens the sent quote instead of offering a draft the server refuses', async () => {
+    rfqService.getLatestQuote.mockResolvedValue({ quoteId: 91, quoteNo: 'QT-0926-0001', state: 'SENT' });
+    renderPage();
+    const panel = await screen.findByTestId('sourcing-next-step');
+    const open = await within(panel).findByRole('button', { name: 'Open quote QT-0926-0001' });
+    expect(open.className).toMatch(/MuiButton-contained/);
+    expect(panel).toHaveTextContent(/Quote QT-0926-0001 was already sent to the customer/);
+    expect(within(panel).queryByRole('button', { name: 'Prepare the customer quote' })).not.toBeInTheDocument();
+    expect(rfqService.prepareQuoteDraft).not.toHaveBeenCalled();
   });
 });
