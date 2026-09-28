@@ -673,6 +673,8 @@ builder.Services.AddHttpClient<OllamaLlmService>(client =>
 // visitor's session carried. Normalisation and exact-match semantics are unchanged.
 var corsOrigins = TransportSecurityPolicy.ResolveCorsOrigins(
     builder.Configuration, builder.Environment.IsDevelopment());
+// PERF-07: Brotli/gzip for JSON and text only; files and the event stream pass through untouched.
+builder.Services.AddNexoraResponseCompression();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("DefaultCors", policy =>
@@ -1165,6 +1167,10 @@ await app.SeedPlatformOwnerAsync();
 // The body carries the correlation id alongside the generic message, so the one value a user
 // can quote back is the one that finds the stack trace (Platform/Hardening/GlobalExceptionResponse).
 app.UseExceptionHandler(errApp => errApp.Run(ERP_RFQ_Automation.Platform.Hardening.GlobalExceptionResponse.WriteAsync));
+
+// PERF-07: compress JSON responses (Infrastructure/ResponseCompressionSetup.cs). Early, so every
+// response a later middleware or controller writes goes through it.
+app.UseResponseCompression();
 
 // Baseline security headers (SEC-13). SEC-G9 adds the Content-Security-Policy this set was
 // missing; the policy itself and the reasoning behind every directive live in
