@@ -2156,7 +2156,13 @@ public sealed class LeadPersister : ILeadPersister
                                   ?? "[description requires review]";
                 var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
                     description, item.Quantity is > 0 ? item.Quantity : null, item.UnitOfMeasure);
-                line.Enrich(item.ManufacturerName, item.ManufacturerPartNumber, item.Currency,
+                // The ledger accepts a three-letter code or nothing. A model answer such as
+                // "Saudi Riyal" or "Currency" must not dead-letter the document; the line is
+                // already held as Warning for a person.
+                var currency = item.Currency?.Trim().ToUpperInvariant();
+                if (currency is not null && !StructuredEvidenceLedgerPersister.IsCurrencyCode(currency))
+                    currency = null;
+                line.Enrich(item.ManufacturerName, item.ManufacturerPartNumber, currency,
                     item.UnitPrice, ParseNonNegativeInt(item.LeadTime), JsonSerializer.Serialize(item),
                     CanonicalValidationStatus.Warning);
                 line.BindLeadItem(leadItemIds[lineIndex]);
