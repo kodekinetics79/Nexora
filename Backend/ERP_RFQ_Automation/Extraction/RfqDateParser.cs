@@ -63,12 +63,21 @@ public static class RfqDateParser
 
     // Ordered deliberately. Day-first precedes month-first so an ambiguous numeric token reads
     // the way Gulf correspondence writes it; the ambiguity is reported separately.
+    //
+    // The single-digit forms matter: in ParseExact "dd" and "MM" demand TWO digits, so a portal
+    // print's "9/6/2026 5:00 PM" or "10/8/2026 3:00 PM" matched no format here, fell through to
+    // the date-only read below and lost its closing time — every tender became a midnight
+    // deadline, twelve hours early for a 3:00 PM close.
     private static readonly string[] DateTimeFormats =
     {
         "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm",
         "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "dd/MM/yyyy h:mm tt",
+        "d/M/yyyy H:mm:ss", "d/M/yyyy H:mm", "d/M/yyyy h:mm tt", "d/M/yyyy h:mm:ss tt", "d/M/yyyy h:mmtt",
         "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy HH:mm", "MM/dd/yyyy h:mm tt",
-        "dd-MM-yyyy HH:mm", "yyyy/MM/dd HH:mm",
+        "M/d/yyyy H:mm:ss", "M/d/yyyy H:mm", "M/d/yyyy h:mm tt", "M/d/yyyy h:mm:ss tt", "M/d/yyyy h:mmtt",
+        "dd-MM-yyyy HH:mm", "d-M-yyyy H:mm", "yyyy/MM/dd HH:mm",
+        // SAP prints a bid's closing moment as "16.09.2026 10:00:00".
+        "dd.MM.yyyy HH:mm:ss", "dd.MM.yyyy HH:mm", "d.M.yyyy H:mm:ss", "d.M.yyyy H:mm",
         "dd MMM yyyy HH:mm", "d MMM yyyy HH:mm",
     };
 

@@ -93,6 +93,13 @@ public sealed class RfqSpreadsheetRow
     /// </summary>
     public Dictionary<string, RowFieldProvenance> FieldProvenance { get; set; } = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// The order the whole DOCUMENT writes numeric dates in, when the reader could establish it
+    /// from text the row does not carry (an SAP Ariba print's banner, a date elsewhere on the page).
+    /// Shared by every row of the document; the normaliser applies it to every ambiguous date.
+    /// </summary>
+    public ERP_RFQ_Automation.Extraction.DateOrderEvidence? DocumentDateOrder { get; set; }
+
     public string SourceAddress(string fieldName, string legacyColumn)
     {
         if (FieldSourceAddresses.TryGetValue(fieldName, out var address))
