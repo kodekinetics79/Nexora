@@ -1,0 +1,61 @@
+[[page 1]]
+                  RFQ
+RFQ number :   5500813867
+RFQ name    :  20260908_1400_0000562380
+Version         :        2
+Date              :     08.09.2026 07:00:34
+SABIC (Saudi Basic Industries Corporation)
+Global Procurement Service
+P.O. Box 11115
+Jubail Industial City
+Jubail #  31961 , Saudi Arabia
+RFQ Information
+Company
+EVOLVING CONSTELLATION
+COMPANY FOR
+ENERGY
+PO Box 10112
+32233 AL JUBAIL
+SAUDI ARABIA
+Submission start        : 00.00.0000 00:00:00
+Submission deadline  : 16.09.2026 10:00:34
+Incoterm                     : DDP Delivered Duty Paid
+Delivery location        : 
+Term of Payment       : WT60 60 days after receipt of the invoice and
+materials
+Buyer Name               : [buyer name]
+Telephone No             :
+Fax No                        :
+Email                          : buyer@example.com
+RFQ Instruction
+You are invited to submit a quotation to supply SABIC the following materials/services in accordance with the
+specifications provided with this RFQ.
+Please submit your quotation through the online system after the submission start date but before the submission
+deadline specified above. In the event you choose not to submit a quotation, then kindly decline this request through
+the online system.
+This RFQ is made without any commitment by SABIC to contract.
+Purchase Orders are subject to SABIC standard terms and conditions.
+RFQ details
+Item
+Number
+Item category Product description Order
+Quantity
+Currency Net
+Value
+Delivery
+Date
+Comment Line Item Taxes/Duties
+Product
+Number.
+UOM Price per Unit
+1 Material
+MATL
+FLDLGHT-ELCTRC;LED,150W,100
+- 277V,IP65
+43 SAR
+0,00
+21.07.2027
+1637334 EA    1
+Material long text:FLOODLIGHT, ELECTRIC; TYPE: LED , POWER: 150 W, POTENTIAL: 100 - 277 V, MATERIAL: ALUMINIUM
+CASING, LENS COLOR: ANTI FOG YELLOWISH , CLASSIFICATION: IP65; FFT: CORRELATED COLOR TEMPERATURE (CCT):
+2700K, 50/60HZ, 1.7A; P/N: EA-F150WBM65, OEM: ECOALY; TEST CERTIFICATE COMMENTS: CERTIFICATE OF CONFORMITY

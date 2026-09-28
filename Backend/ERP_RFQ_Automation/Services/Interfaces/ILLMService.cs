@@ -33,6 +33,21 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         /// </summary>
         int MaxOutputTokens => 4096;
 
+        /// <summary>
+        /// The context window this client asks the provider for on every call (Ollama's
+        /// <c>num_ctx</c>), or null when it leaves the provider's default in force.
+        /// </summary>
+        int? ContextWindowTokens => null;
+
+        /// <summary>
+        /// The most DOCUMENT tokens one extraction call may carry so that instructions, document
+        /// and the full output ceiling all fit <see cref="ContextWindowTokens"/>. A provider
+        /// silently drops the start of a prompt that does not fit — which is where the
+        /// instructions are — so callers that pack text into a call MUST stay under this. Null
+        /// means "no known window": the caller's own character ceiling is the only bound.
+        /// </summary>
+        int? MaxDocumentInputTokens => null;
+
         Task<LeadExtractionResult?> ExtractLeadDataAsync(
             string fullText, AiCallContext context, CancellationToken cancellationToken = default);
 
@@ -272,7 +287,14 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         // owning extraction job at the durable component boundary. It must survive message-level
         // email assembly so an attachment-derived Lead line can still prove where every value
         // came from when the governed RFQ promotion gate revalidates the revision.
-        List<LeadItemEvidenceData>? VerifiedEvidence = null);
+        List<LeadItemEvidenceData>? VerifiedEvidence = null,
+
+        // Server-owned, cleared from every model response. TRUE when this line was READ BY A
+        // MODEL and its VerifiedEvidence was found afterwards by checking those values against
+        // the page text (Extraction/Anchoring/AiItemAnchoring). Such evidence makes a line
+        // checkable — NEEDS_CHECK instead of MISSING_SOURCE — but never verifies it on its own:
+        // a model-read commercial fact always goes to a person, however well it checks out.
+        bool EvidenceFromDocumentCheck = false);
 
     public sealed record LeadItemEvidenceData(
         string FieldName,
