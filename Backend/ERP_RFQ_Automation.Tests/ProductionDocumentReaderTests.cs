@@ -77,6 +77,30 @@ public sealed class ProductionDocumentReaderTests
     }
 
     [Fact]
+    public async Task Docx_DeliveryPointStatedOnlyInAClause_BecomesTheLinesDeliveryLocation()
+    {
+        using var stream = new MemoryStream();
+        using (var document = WordprocessingDocument.Create(stream, WordprocessingDocumentType.Document, true))
+        {
+            var main = document.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Table(
+                    new TableRow(TableCellWithText("Introduction")),
+                    new TableRow(TableCellWithText("Vendor shall quote for supply and delivery of Goods to ASMO or ASMO customer's delivery point in Saudi Arabia.  Operation and governance follow."))),
+                new Table(
+                    new TableRow(TableCellWithText("Part Number"), TableCellWithText("Description"), TableCellWithText("Quantity"), TableCellWithText("Unit")),
+                    new TableRow(TableCellWithText("3500/33-02-02"), TableCellWithText("Relay output module"), TableCellWithText("4"), TableCellWithText("EA")))));
+            main.Document.Save();
+        }
+        var reader = CreateReader(stream.ToArray());
+
+        var result = await reader.ReadAsync(CreateJob("rfq.docx", "docx"));
+
+        var row = Assert.Single(result.StructuredRows!);
+        Assert.Equal("ASMO or ASMO customer's delivery point in Saudi Arabia", row.DeliveryLocation);
+    }
+
+    [Fact]
     public async Task Docx_MultiParagraphCells_JoinWithSpaces_UnderTheStreamingReader()
     {
         // Regression for the DOM->streaming rewrite (a real 121MB document.xml forced

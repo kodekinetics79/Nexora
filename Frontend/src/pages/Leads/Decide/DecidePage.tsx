@@ -58,6 +58,7 @@ import {
   type EditableLineDecision,
 } from '../Workbench/workbenchRules';
 import LinesTable from './LinesTable';
+import BuyerTermsPanel from './BuyerTermsPanel';
 import CheckDocumentDialog, { type ConfirmedLine } from './CheckDocumentDialog';
 import CreateRfqConfirmDialog, { type QualificationOutlook } from './CreateRfqConfirmDialog';
 import { decisionLabel } from '../decisionRead';
@@ -908,6 +909,9 @@ const DecidePage: React.FC = () => {
             </Box>
           ) : null}
         </Box>
+
+        {/* WHAT THE BUYER REQUIRES — the terms a quote must meet, above the lines */}
+        <BuyerTermsPanel evidence={workbench.evidence ?? []} />
 
         {/* WHAT THEY WANT */}
         <Box component="section" aria-labelledby="decide-lines" sx={{ pt: 2 }}>

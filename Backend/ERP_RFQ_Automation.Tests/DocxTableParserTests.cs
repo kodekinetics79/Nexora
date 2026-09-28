@@ -233,6 +233,29 @@ public sealed class DocxTableParserTests
         Assert.Equal("RFQ-260011", Assert.Single(parsed).RfqNo);
     }
 
+    [Fact]
+    public void Leading_grids_are_the_top_rows_of_each_table_in_order()
+    {
+        var bytes = BuildDocument(body =>
+        {
+            body.AppendChild(Paragraph("Event print"));
+            var terms = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            terms.AppendChild(Row(new[] { "Timing Rules" }));
+            terms.AppendChild(Row(new[] { "Due date", "10/8/2026 3:00 PM" }));
+            body.AppendChild(terms);
+            var items = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            for (var i = 1; i <= 50; i++) items.AppendChild(Row(new[] { $"{i} ITEM", "", $"{i} each" }));
+            body.AppendChild(items);
+        });
+
+        var grids = DocxTableParser.ReadLeadingGrids(bytes, maxRowsPerTable: 5);
+
+        Assert.Equal(2, grids.Count);
+        Assert.Equal(new string?[] { "Due date", "10/8/2026 3:00 PM" }, grids[0][1]);
+        Assert.Equal(5, grids[1].Count);
+        Assert.Equal(new string?[] { "5 ITEM", null, "5 each" }, grids[1][4]);
+    }
+
     private static byte[] BuildDocxWithRows(IReadOnlyList<string[]> rows)
         => BuildDocument(body =>
         {
