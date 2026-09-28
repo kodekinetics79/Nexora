@@ -727,7 +727,7 @@ public sealed class SupplierQuoteInboxService
                     + $"{SupplierQuoteWarranty.MaximumMonths}, or left empty when the warranty period was not captured.");
         }
         // A discount larger than the round it discounts produces a negative landed cost, and the
-        // customer price is landed / (1 - margin) — so it would arrive as a negative price rather
+        // customer price is landed x (1 + margin on cost) — so it would arrive as a negative price rather
         // than as an error anybody could see.
         if (command.DiscountAmount > command.Lines.Sum(x => x.UnitPrice * x.Quantity) +
                 command.FreightAmount + command.DutyAmount + command.OtherAmount)

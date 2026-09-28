@@ -235,7 +235,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
                 ? Math.Round((partial.FromStock * stockCost + partial.ToOrder * bestSupplier.Cost) / need, 4)
                 : bestSupplier.Cost;
             price = new StockPriceSuggestion(partial?.StockUnitCost is not null ? "BLENDED_PLUS_MARGIN" : "SUPPLIER_PLUS_MARGIN",
-                null, blendedCost, margin, Math.Round(blendedCost * (1m + (margin ?? 0m) / 100m), 2));
+                null, blendedCost, margin, MarginFormula.SaleFromCost(blendedCost, margin ?? 0m));
         }
 
         var history = pricedProductId is null
@@ -357,7 +357,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
             return new StockPriceSuggestion("SELLING_PRICE", sellingPrice, unitCost, marginPercent, Math.Round(sellingPrice.Value, 2));
         if (unitCost is > 0m && marginPercent is not null)
             return new StockPriceSuggestion("COST_PLUS_MARGIN", null, unitCost, marginPercent,
-                Math.Round(unitCost.Value * (1m + marginPercent.Value / 100m), 2));
+                MarginFormula.SaleFromCost(unitCost.Value, marginPercent.Value));
         if (unitCost is > 0m)
             return new StockPriceSuggestion("COST_ONLY", null, unitCost, null, Math.Round(unitCost.Value, 2));
         return new StockPriceSuggestion("NONE", null, null, marginPercent, null);

@@ -15,7 +15,7 @@ namespace ERP_RFQ_Automation.OrderToCash;
 /// which must carry the SUPPLIER's VAT registration number. If we cannot name the counterparty to
 /// the authority, the deduction is disallowed and the tax lands back in cost after the fact —
 /// after it has already been excluded from the margin, marked up through
-/// <c>landed / (1 - margin)</c>, and quoted to a customer.</para>
+/// <c>landed × (1 + margin on cost)</c>, and quoted to a customer.</para>
 ///
 /// <para><b>Fail closed, not fail quiet.</b> The alternative — silently reverting the line to 0%
 /// recoverable — would change the landed cost, and therefore the customer price, with nobody

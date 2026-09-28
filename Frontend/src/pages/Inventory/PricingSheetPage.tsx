@@ -1,4 +1,5 @@
 import React from 'react';
+import { saleFromCost } from '../../utils/margin';
 import { useMutation, useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import {
   Alert,
@@ -88,10 +89,10 @@ export default function PricingSheetPage() {
     // Margin is on cost (owner ruling): sale price = landed cost × (1 + margin). Typing one figure
     // moves the one that depends on it, never the one the keeper just typed.
     if (field === 'margin' && cost && cost > 0 && margin != null && Number.isFinite(margin)) {
-      next.salePrice = String(round2(cost * (1 + margin / 100)));
+      next.salePrice = String(saleFromCost(cost, margin));
     }
     if (field === 'landedCost') {
-      if (cost && cost > 0 && margin != null && Number.isFinite(margin)) next.salePrice = String(round2(cost * (1 + margin / 100)));
+      if (cost && cost > 0 && margin != null && Number.isFinite(margin)) next.salePrice = String(saleFromCost(cost, margin));
       else next.margin = marginOf(cost, num(next.salePrice));
     }
     if (field === 'salePrice') next.margin = marginOf(cost, num(next.salePrice));

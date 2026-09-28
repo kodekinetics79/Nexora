@@ -397,6 +397,7 @@ builder.Services.AddHostedService<ProcurementDispatchWorker>();
 builder.Services.AddSingleton<ICommercialDocumentClassifier, DeterministicCommercialDocumentClassifier>();
 builder.Services.AddScoped<CommercialDocumentClassificationService>();
 builder.Services.AddScoped<SupplierGovernanceService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService, ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTermsService>();
 builder.Services.AddScoped<IQuoteService, QuoteService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Services.IStockLinePricingService, ERP_RFQ_Automation.Services.StockLinePricingService>();
 builder.Services.AddScoped<IQuoteDeliveryStore, QuoteDeliveryStore>();

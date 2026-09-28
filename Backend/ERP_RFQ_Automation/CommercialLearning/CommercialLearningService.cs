@@ -924,15 +924,17 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                     $"Pricing decision {decision.Id}", decision.CreatedOn, "TARGET_BRIDGE");
                 var validOffer = offer is not null && offer.CurrencyId == decision.CurrencyId &&
                     offer.Quantity > 0m && decision.CustomerUnitPrice > 0m &&
-                    decision.TargetMarginPercent is >= 0m and < 100m &&
+                    decision.TargetMarginPercent >= 0m &&
                     IsOfferEvidenceCurrent(offer, suppliers.GetValueOrDefault(offer.SupplierId), revisions,
                         quoteStates, requiredDates.GetValueOrDefault(decision.RfqItemId));
                 if (!validOffer)
                     return new CustomerTargetBridge(decision.RfqItemId, "STALE_OR_INVALID_EVIDENCE",
                         decision.CustomerUnitPrice, decision.TargetMarginPercent, null, null, null,
                         decision.CurrencyId, "Target bridge withheld until the selected offer is current, canonical, currency-matched and valid.", evidence);
-                var maximumLanded = decimal.Round(decision.CustomerUnitPrice *
-                    (1m - decision.TargetMarginPercent / 100m), 6);
+                // Margin is ON COST (MarginFormula): price = landed x (1 + m), so the most the
+                // goods may cost for the target price to keep its margin is price / (1 + m).
+                var maximumLanded = ERP_RFQ_Automation.Services.MarginFormula.MaxCostForPrice(
+                    decision.CustomerUnitPrice, decision.TargetMarginPercent);
                 // This term must contain exactly what landed cost contains, or the bridge stops
                 // reconciling. Recoverable input tax is not in landed cost (LandedCostFormula), so
                 // it is not deducted here either — deducting it would understate the maximum
@@ -946,7 +948,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                     maximumSupplier > 0m ? "VERIFIED_SOURCING_DECISION" : "TARGET_INFEASIBLE",
                     decision.CustomerUnitPrice, decision.TargetMarginPercent, maximumLanded, adjustments,
                     maximumSupplier, decision.CurrencyId,
-                    "max landed = target price x (1 - gross margin); max supplier = max landed - per-unit freight, " +
+                    "max landed = target price / (1 + margin on cost); max supplier = max landed - per-unit freight, " +
                     "duty and other captured cost, plus discount" + (supplierInputTaxRecoverablePercent >= 100m
                         ? "; recoverable Supplier input tax is not a cost and is excluded"
                         : supplierInputTaxRecoverablePercent <= 0m

@@ -34,6 +34,7 @@ import stockPriceService from "../../../api/services/stockPriceService";
 import { useAuth } from "../../../context/AuthContext";
 import { formatMoney } from "../../../utils/currency";
 import { deliveryText } from "../../../utils/delivery";
+import KeepAsQuotedDialog from "../../Sales/Quotes/KeepAsQuotedDialog";
 
 const EMAIL = /^[^\s@;,]+@[^\s@;,]+\.[^\s@;,]+$/;
 const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -46,6 +47,11 @@ const describeError = (error: unknown, fallback: string) => {
 
 // Handled inside this window (currency, validity, unpriced lines, price source), so never listed as blockers.
 const HANDLED_HERE = new Set(["QUOTE_INCOMPLETE", "PRICE_ATTESTATION_REQUIRED"]);
+// Email transport. These stop "Send by email" only: a portal customer's PDF needs no mailbox
+// (pilot audit UX-06 — the portal download was disabled by the outbound-mail guard).
+const MAIL_ONLY = new Set(["OUTBOUND_MAIL_NOT_CONFIGURED", "OUTBOUND_MAIL_DRAFT_ONLY"]);
+const shortDay = (iso: string) => new Date(`${iso.split("T")[0]}T00:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+type GatedAction = "email" | "portal" | "download";
 
 const deliveryOf = (line: QuoteLineDTO) => {
   const days = line.deliveryLeadTime;
@@ -171,6 +177,8 @@ export interface SendQuoteDialogProps {
 export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline }: SendQuoteDialogProps) {
   // Which action the passed-deadline question is for: sending by email, or recording a portal upload.
   const [confirmLate, setConfirmLate] = React.useState<"email" | "portal" | null>(null);
+  // The buyer sent a newer version: keep (with a reason) before the action goes on, or apply it.
+  const [revisionGate, setRevisionGate] = React.useState<GatedAction | "keep" | null>(null);
   // After the PDF is downloaded: the rep uploads it to the customer's portal, then records it here.
   const [portalStep, setPortalStep] = React.useState(false);
   const [portalReference, setPortalReference] = React.useState("");
@@ -217,7 +225,9 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
 
   const [currencyId, setCurrencyId] = React.useState<number | "">("");
   const [validUntil, setValidUntil] = React.useState("");
-  const [source, setSource] = React.useState<PriceAttestationSource>("SALES_MANAGER");
+  // UX-07: nothing is pre-chosen. This used to start on "Approved by a sales manager" with the
+  // rep's OWN name typed in, so one click attested on a manager's behalf.
+  const [source, setSource] = React.useState<PriceAttestationSource | "">("");
   const [reference, setReference] = React.useState("");
   const [to, setTo] = React.useState("");
   const [subject, setSubject] = React.useState("");
@@ -232,8 +242,9 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
     setTo(quote.customerEmail || draftQuery.data.recipientEmail || "");
     setSubject(draftQuery.data.subject);
     setBody(draftQuery.data.body);
-    setReference(userData?.userName ?? "");
-  }, [open, quote, draftQuery.data, userData?.userName]);
+    setSource("");
+    setReference("");
+  }, [open, quote, draftQuery.data]);
   // The email shows the quote total: when a line choice changes it, follow the new wording unless
   // the rep has already edited the email themselves.
   const shownDraft = React.useRef<{ subject: string; body: string } | null>(null);
@@ -247,11 +258,17 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
     }
     shownDraft.current = { subject: draft.subject, body: draft.body };
   }, [draftQuery.data]);
+  const buyerTerms = readinessQuery.data?.buyerTerms ?? null;
   React.useEffect(() => {
-    if (quote && !quote.currencyId && currencyId === "" && currencies.length > 0) {
-      setCurrencyId((currencies.find((c) => c.isBaseCurrency) ?? currencies[0]).id);
+    if (quote && !quote.currencyId && currencyId === "" && currencies.length > 0 && readinessQuery.data) {
+      // The buyer's allowed currency first (Aramco: USD or SAR), else the company's own.
+      const allowed = (buyerTerms?.allowedCurrencies ?? []).map((code) => code.toUpperCase());
+      const pick = currencies.find((c) => c.isBaseCurrency && allowed.includes(c.code.toUpperCase()))
+        ?? currencies.find((c) => allowed.includes(c.code.toUpperCase()))
+        ?? currencies.find((c) => c.isBaseCurrency) ?? currencies[0];
+      setCurrencyId(pick.id);
     }
-  }, [quote, currencies, currencyId]);
+  }, [quote, currencies, currencyId, readinessQuery.data, buyerTerms]);
 
   const lines = quote?.quoteItems ?? [];
   // Lines still to decide: no price and not sent "to follow" or "not quoted".
@@ -264,15 +281,25 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
   const tax = lines.reduce((sum, line) => sum + (line.taxAmount ?? 0), 0);
   const attestation = attestationQuery.data;
   const confirmed = attestation?.satisfied === true;
-  const setupBlockers = (readinessQuery.data?.blockers ?? [])
+  const allSetupBlockers = (readinessQuery.data?.blockers ?? [])
     .filter((blocker) => !HANDLED_HERE.has(blocker.code))
     // Tax cannot be worked out on a line with no price; the unpriced lines are already called out.
     .filter((blocker) => !(blocker.code === "OUTPUT_TAX_NOT_DERIVED" && unpriced.length > 0));
+  const setupBlockers = allSetupBlockers.filter((blocker) => !MAIL_ONLY.has(blocker.code));
+  const mailBlockers = allSetupBlockers.filter((blocker) => MAIL_ONLY.has(blocker.code));
   const alreadySent = quoteIdQuery.data && quoteIdQuery.data.state !== "DRAFT";
+
+  // What the buyer asked for, checked against what is on screen now (the server checks the saved
+  // quote; the date here may already have been changed). Warnings never disable a button.
+  const warnings = readinessQuery.data?.warnings ?? [];
+  const revisionWarning = warnings.find((w) => w.code === "BUYER_REVISION_NEWER") ?? null;
+  const requiredValidUntil = buyerTerms?.requiredValidUntil ? buyerTerms.requiredValidUntil.split("T")[0] : null;
+  const validityShort = requiredValidUntil !== null && validUntil !== "" && validUntil < requiredValidUntil;
+  const otherWarnings = warnings.filter((w) => w.code !== "BUYER_REVISION_NEWER" && w.code !== "VALIDITY_BELOW_BUYER_MINIMUM");
 
   const toOk = EMAIL.test(to.trim());
   const validOk = validUntil !== "" && validUntil >= isoDay(new Date());
-  const referenceOk = confirmed || reference.trim().length > 0;
+  const referenceOk = confirmed || (source !== "" && reference.trim().length > 0);
   const currencyOk = !!quote?.currencyId || currencyId !== "";
   // What the quote itself needs, whichever way it goes out. The email address is needed only to
   // email it: most customers take quotes through their own portal, from the downloaded PDF.
@@ -283,7 +310,11 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
     !referenceOk ? "Say where the prices came from" : null,
     setupBlockers.length > 0 ? "Setup needs finishing first" : null,
   ].filter(Boolean) as string[];
-  const reasons = [...readyReasons, ...(!toOk ? ["Enter the customer's email to send it by email"] : [])];
+  const reasons = [
+    ...readyReasons,
+    ...(mailBlockers.length > 0 ? ["Email is not set up yet"] : []),
+    ...(!toOk ? ["Enter the customer's email to send it by email"] : []),
+  ];
 
   // Currency, validity and the price-source confirmation are saved the same way before either route.
   const prepare = async () => {
@@ -292,7 +323,7 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
     if (termsChanged) {
       await rfqService.saveQuoteTerms(id, { currencyId: quote!.currencyId ? null : (currencyId as number), validUntil });
     }
-    if (!confirmed) await quoteService.confirmPriceAttestation(id, source, reference.trim());
+    if (!confirmed) await quoteService.confirmPriceAttestation(id, source as PriceAttestationSource, reference.trim());
     return id;
   };
   const refreshAfterSend = () => {
@@ -356,6 +387,34 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
     onError: (error) => enqueueSnackbar(describeError(error, "The quote could not be sent."), { variant: "error" }),
   });
 
+  // One order for every way out: a newer buyer version first (keep with a reason, or apply), then
+  // a passed deadline, then the action. Each asks; none refuses.
+  const run = (action: GatedAction) => (action === "download" ? download.mutate() : action === "portal" ? portal.mutate() : send.mutate());
+  const afterRevision = (action: GatedAction) => (deadlinePassed && action !== "download" ? setConfirmLate(action) : run(action));
+  const guard = (action: GatedAction) => (revisionWarning ? setRevisionGate(action) : afterRevision(action));
+  const keep = useMutation({
+    mutationFn: ({ reason }: { reason: string; next: GatedAction | "keep" | null }) => quoteService.resolveRevisionImpact(quoteId!, reason),
+    onSuccess: async (_, { next }) => {
+      setRevisionGate(null);
+      await queryClient.invalidateQueries({ queryKey: ["send-quote-readiness"] });
+      if (next && next !== "keep") afterRevision(next);
+      else enqueueSnackbar("Kept as quoted. The reason is recorded.", { variant: "success" });
+    },
+    onError: (error) => enqueueSnackbar(describeError(error, "The review could not be recorded."), { variant: "error" }),
+  });
+  const applyRevision = useMutation({
+    mutationFn: () => quoteService.applyRevisionQuantities(quoteId!),
+    onSuccess: (result) => {
+      setRevisionGate(null);
+      refreshQuote();
+      const suppliers = result.outdatedSupplierRequests?.length
+        ? ` ${result.outdatedSupplierRequests.length} supplier request${result.outdatedSupplierRequests.length === 1 ? "" : "s"} asked for the old quantity: ask again from Sourcing.`
+        : "";
+      enqueueSnackbar(`The buyer's new quantities are on the quote and the RFQ.${suppliers}`, { variant: "success" });
+    },
+    onError: (error) => enqueueSnackbar(describeError(error, "The new quantities could not be applied."), { variant: "error" }),
+  });
+
   const loading = quoteIdQuery.isLoading || quoteQuery.isLoading || draftQuery.isLoading;
 
   return (
@@ -405,6 +464,48 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
                       )}
                     </Stack>
                   ))}
+                </Alert>
+              )}
+
+              {mailBlockers.length > 0 && (
+                <Alert severity="info" sx={{ mb: 2 }}
+                  action={mailBlockers[0].setupPath ? (
+                    <Button size="small" color="inherit" onClick={() => { onClose(); navigate(mailBlockers[0].setupPath!); }}>
+                      {mailBlockers[0].setupLabel || "Open setup"}
+                    </Button>
+                  ) : undefined}>
+                  Email is not set up, so this quote cannot be emailed yet. You can still download the PDF for the customer's portal.
+                </Alert>
+              )}
+              {revisionWarning && (
+                <Alert severity="warning" sx={{ mb: 2 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{revisionWarning.message}</Typography>
+                  <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                    {revisionWarning.canApply && (
+                      <Button size="small" variant="contained" disabled={applyRevision.isPending || keep.isPending}
+                        onClick={() => applyRevision.mutate()}>Use the new quantities</Button>
+                    )}
+                    <Button size="small" color="inherit" variant="outlined" disabled={applyRevision.isPending || keep.isPending}
+                      onClick={() => setRevisionGate("keep")}>Keep as quoted</Button>
+                  </Stack>
+                </Alert>
+              )}
+              {(validityShort || otherWarnings.length > 0) && (
+                <Alert severity="warning" sx={{ mb: 2 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>Check before it goes out:</Typography>
+                  <Stack component="ul" spacing={0.25} sx={{ m: 0, pl: 2.5 }}>
+                    {validityShort && requiredValidUntil && (
+                      <Typography component="li" variant="body2">
+                        Buyer asks for prices valid until {shortDay(requiredValidUntil)} at least. This quote: {shortDay(validUntil)}.{" "}
+                        <Button size="small" color="inherit" sx={{ py: 0, fontWeight: 800 }} onClick={() => setValidUntil(requiredValidUntil)}>
+                          Set to {shortDay(requiredValidUntil)}
+                        </Button>
+                      </Typography>
+                    )}
+                    {otherWarnings.map((warning) => (
+                      <Typography key={warning.code} component="li" variant="body2">{warning.message}</Typography>
+                    ))}
+                  </Stack>
                 </Alert>
               )}
 
@@ -484,6 +585,11 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
                   <TextField type="date" label="Prices valid until" value={validUntil} error={validUntil !== "" && !validOk}
                     onChange={(event) => setValidUntil(event.target.value)} slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: isoDay(new Date()) } }} />
                   <Stack direction="row" spacing={0.5} sx={{ mt: 0.75 }}>
+                    {requiredValidUntil && (
+                      <Chip size="small" label={`Buyer: ${shortDay(requiredValidUntil)}`}
+                        variant={validUntil === requiredValidUntil ? "filled" : "outlined"}
+                        color={validUntil === requiredValidUntil ? "primary" : "default"} onClick={() => setValidUntil(requiredValidUntil)} />
+                    )}
                     {[15, 30, 60].map((days) => (
                       <Chip key={days} size="small" label={`${days} days`} variant={validUntil === daysFromToday(days) ? "filled" : "outlined"}
                         color={validUntil === daysFromToday(days) ? "primary" : "default"} onClick={() => setValidUntil(daysFromToday(days))} />
@@ -504,12 +610,15 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
                       <Typography variant="caption" color="warning.main">A price changed since the last confirmation, so confirm again.</Typography>
                     )}
                     <RadioGroup row value={source} onChange={(event) => setSource(event.target.value as PriceAttestationSource)}>
-                      <FormControlLabel value="SALES_MANAGER" control={<Radio size="small" />} label="Approved by a sales manager" />
+                      <FormControlLabel value="SALES_MANAGER" control={<Radio size="small" />} label="Price list or a manager's price" />
                       <FormControlLabel value="SUPPLIER_QUOTE" control={<Radio size="small" />} label="From a supplier quote" />
                     </RadioGroup>
-                    <TextField size="small" fullWidth value={reference} onChange={(event) => setReference(event.target.value)}
-                      label={source === "SALES_MANAGER" ? "Manager's name" : "Supplier quote number"}
-                      placeholder={source === "SALES_MANAGER" ? "e.g. Ahmed Saleh" : "e.g. GST-Q-2026-118"} />
+                    {source !== "" && (
+                      <TextField size="small" fullWidth value={reference} onChange={(event) => setReference(event.target.value)}
+                        label={source === "SALES_MANAGER" ? "Which manager, or which price list" : "Supplier quote number"}
+                        placeholder={source === "SALES_MANAGER" ? "e.g. Ahmed Saleh, or Price list 2026" : "e.g. GST-Q-2026-118"}
+                        slotProps={{ htmlInput: { "aria-label": source === "SALES_MANAGER" ? "Manager or price list" : "Supplier quote number" } }} />
+                    )}
                   </>
                 )}
               </Box>
@@ -540,7 +649,7 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
           <Tooltip title="For a customer who takes quotes through their own portal: download the PDF, upload it there, then record it here." describeChild>
             <span>
               <Button variant="outlined" startIcon={download.isPending ? <CircularProgress size={16} color="inherit" /> : <Download />}
-                disabled={readyReasons.length > 0 || download.isPending || send.isPending} onClick={() => download.mutate()}>
+                disabled={readyReasons.length > 0 || download.isPending || send.isPending} onClick={() => guard("download")}>
                 Download PDF
               </Button>
             </span>
@@ -548,7 +657,7 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
         )}
         {quote && !alreadySent && (
           <Button variant="contained" startIcon={send.isPending ? <CircularProgress size={16} color="inherit" /> : <Send />}
-            disabled={reasons.length > 0 || send.isPending || download.isPending} onClick={() => (deadlinePassed ? setConfirmLate("email") : send.mutate())}>
+            disabled={reasons.length > 0 || send.isPending || download.isPending} onClick={() => guard("email")}>
             Send by email
           </Button>
         )}
@@ -568,11 +677,23 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
           <Button onClick={() => setPortalStep(false)} disabled={portal.isPending}>Not yet</Button>
           <Button variant="contained" disabled={portal.isPending}
             startIcon={portal.isPending ? <CircularProgress size={16} color="inherit" /> : undefined}
-            onClick={() => (deadlinePassed ? setConfirmLate("portal") : portal.mutate())}>
+            onClick={() => guard("portal")}>
             Mark as submitted
           </Button>
         </DialogActions>
       </Dialog>
+      <KeepAsQuotedDialog
+        open={revisionGate !== null}
+        mode={revisionGate === "keep" || revisionGate === null ? "keep" : "send"}
+        proceedLabel={revisionGate === "download" ? "Download anyway" : revisionGate === "portal" ? "Record anyway" : "Send anyway"}
+        message={revisionWarning?.message}
+        changes={revisionWarning?.revision?.changes}
+        canApply={revisionWarning?.canApply}
+        busy={keep.isPending || applyRevision.isPending}
+        onApply={() => applyRevision.mutate()}
+        onCancel={() => setRevisionGate(null)}
+        onKeep={(reason) => keep.mutate({ reason, next: revisionGate })}
+      />
       {/* Owner ruling 2026-09-26: a passed deadline informs, it never blocks. */}
       <Dialog open={confirmLate !== null} onClose={() => setConfirmLate(null)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontWeight: 800 }}>The deadline has passed</DialogTitle>

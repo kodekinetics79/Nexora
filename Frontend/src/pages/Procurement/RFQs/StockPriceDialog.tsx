@@ -1,4 +1,5 @@
 import React from "react";
+import { isBelowCost, saleFromCost } from "../../../utils/margin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -210,7 +211,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     setMargin(value);
     setMarginTouched(true);
     const n = Number(value);
-    if (cost && value.trim() !== "" && Number.isFinite(n)) setPrice(String(round2(cost * (1 + n / 100))));
+    if (cost && value.trim() !== "" && Number.isFinite(n)) setPrice(String(saleFromCost(cost, n)));
   };
   const usePrice = (value: number) => onPriceChange(String(round2(value)));
 
@@ -257,7 +258,7 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
     // back-calculated from an old hand-typed price.
     const m = marginTouched && marginNumber != null && Number.isFinite(marginNumber) ? marginNumber : companyMargin ?? marginNumber ?? 0;
     setMargin(String(m));
-    setPrice(String(round2(blend(option.cost) * (1 + m / 100))));
+    setPrice(String(saleFromCost(blend(option.cost), m)));
     if (option.leadTimeDays) setLead(option.leadTimeDays);
   };
   const unit = view?.unit ?? "";
@@ -462,6 +463,12 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                       </TextField>
                     )}
                   </Stack>
+                  {/* UX-11: said where the price is typed, not only in the total further down. */}
+                  {priceOk && isBelowCost(cost, priceNumber) && (
+                    <Typography variant="caption" color="error.main" sx={{ display: "block", mt: 0.5, fontWeight: 800 }}>
+                      Below cost ({formatMoney(cost, currencyCode)} per {unit || "unit"})
+                    </Typography>
+                  )}
                   {hint && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>{hint}</Typography>}
                   {sentPrice && todaysSuggestion != null && priceOk && todaysSuggestion !== priceNumber && (
                     <Stack direction="row" spacing={1} sx={{ alignItems: "center", mt: 0.5 }}>

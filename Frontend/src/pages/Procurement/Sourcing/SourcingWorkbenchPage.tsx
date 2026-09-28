@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { saleFromCost } from "../../../utils/margin";
 import { Link as RouterLink, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -463,6 +464,16 @@ function SourcingWorkbenchPage() {
     });
   };
   const workbench = workbenchQuery.data;
+  // UX-15: with no DRAFT on the RFQ, "Prepare the customer quote" was offered even when a quote
+  // had already gone to the customer — and answered 409. The latest quote says which case this is.
+  const latestQuoteQuery = useQuery({
+    queryKey: ["sourcing-latest-quote", rfqId],
+    queryFn: () => rfqService.getLatestQuote(rfqId as number),
+    enabled: Boolean(rfqId) && Boolean(workbench) && !workbench?.customerQuoteDraft,
+    retry: false,
+    meta: { silenceGlobalError: true },
+  });
+  const issuedQuote = latestQuoteQuery.data && latestQuoteQuery.data.state !== "DRAFT" ? latestQuoteQuery.data : null;
 
   const comparisonLineIds = useMemo(
     () => [...new Set((workbench?.offers ?? []).map((offer) => offer.rfqItemId))],
@@ -648,6 +659,11 @@ function SourcingWorkbenchPage() {
                       action: rfqId && canSolicit ? <Button variant="contained" startIcon={<Send />} onClick={() => openSourcingCase.mutate(shortNotAsked[0])}>Ask suppliers{shortNotAsked.length === 1 ? "" : " for the first line"}</Button> : undefined }
                   : awaitingSuppliers.length > 0 && unresolvedLines.some((line) => !awardedLineIds.has(line.id))
                     ? { tone: "info", sentence: `Waiting for ${awaitingSuppliers.length} supplier${awaitingSuppliers.length === 1 ? "" : "s"} to reply. When a reply arrives, capture it from the Solicitations tab.`, action: <Button variant="outlined" onClick={() => setTab(1)}>Open Solicitations</Button> }
+                    : approvedUnconverted.length > 0 && !workbench.customerQuoteDraft && issuedQuote
+                      // A submitted quote is final for SEC/Aramco-type buyers (owner ruling
+                      // 2026-09-26): open it; revising stays the rep's choice on the quote page.
+                      ? { tone: "info", sentence: `Quote ${issuedQuote.quoteNo} was already sent to the customer. Open it to see where it stands.`,
+                          action: <Button variant="contained" startIcon={<OpenInNew />} onClick={() => navigate(`/sales/quotes/view/${issuedQuote.quoteId}`)}>{`Open quote ${issuedQuote.quoteNo}`}</Button> }
                     : approvedUnconverted.length > 0 && !workbench.customerQuoteDraft
                       // D18: the draft is one call. Make it here and land on the pricing step,
                       // instead of sending the rep back to the RFQ to find the button.
@@ -2414,7 +2430,8 @@ function CustomerPricingDialog({ selection, onClose, onSaved }: any) {
   const [margin, setMargin] = useState(20);
   const [rationale, setRationale] = useState("Approved supplier award and target margin");
   const [idempotencyKey] = useState(() => commandKey(`customer-pricing:${selection.awardId}`));
-  const sellingPrice = margin >= 95 ? 0 : selection.landedUnitCost / (1 - margin / 100);
+  // Margin ON COST (owner ruling 2026-09-27): the same formula the server stores the price with.
+  const sellingPrice = margin < 0 || margin >= 95 ? 0 : saleFromCost(selection.landedUnitCost, margin);
   const mutation = useMutation({
     mutationFn: () => procurementService.applyCustomerQuotePricing({
       quoteItemId: selection.quoteItemId,
@@ -2433,7 +2450,7 @@ function CustomerPricingDialog({ selection, onClose, onSaved }: any) {
         <Stack spacing={2} sx={{ mt: 1 }}>
           <Alert severity="info">Supplier cost remains confidential and is preserved separately from the customer selling price.</Alert>
           <Typography>Approved landed cost: <strong>{money(selection.landedUnitCost, selection.currencyCode)}</strong></Typography>
-          <TextField type="number" label="Target margin (%)" value={margin}
+          <TextField type="number" label="Margin on cost %" value={margin}
             onChange={(event) => setMargin(number(event.target.value))}
             slotProps={{ htmlInput: { min: 0, max: 94.99, step: 0.25 } }}
             error={margin < 0 || margin >= 95} />

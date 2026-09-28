@@ -68,7 +68,7 @@ public sealed class CommercialPolicyValidationException(string message) : Invali
 ///
 /// <para><b>Why a reason is mandatory.</b> Input-tax recoverability re-bases every landed cost
 /// computed after it, and the output tax rate re-bases every derived tax. Both flow through
-/// <c>landed / (1 - margin)</c> into customer prices. A change of that reach with no author, no
+/// <c>landed × (1 + margin on cost)</c> into customer prices. A change of that reach with no author, no
 /// date and no stated reason cannot be explained to an auditor a year later, so the write refuses
 /// without one and records it in the tenant governance ledger alongside a before/after snapshot.</para>
 ///

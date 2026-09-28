@@ -18,7 +18,7 @@ namespace ERP_RFQ_Automation.SupplierQuotes;
 /// for freight and tax, and had no field for duty, other or discount at all. A document-ingested
 /// supplier quote therefore could not carry freight under any circumstances — landed cost equalled
 /// unit price on the platform's headline ingestion path, and every price derived from it was short
-/// by <c>freight / (1 - margin)</c>.</para>
+/// by <c>freight × (1 + margin on cost)</c>.</para>
 /// </summary>
 public sealed record SupplierQuoteDocumentIntakeCommand(
     long BusinessUnitId,

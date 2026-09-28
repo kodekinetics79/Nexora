@@ -45,7 +45,7 @@ namespace ERP_RFQ_Automation.SupplierQuotes;
 /// consumed. This formula used to fold it in, with three compounding consequences:
 ///
 ///   1. cost was overstated by the tax;
-///   2. the customer price is derived as <c>landed / (1 - margin)</c>, so the tax was not merely
+///   2. the customer price is derived as <c>landed × (1 + margin on cost)</c> (MarginFormula), so the tax was not merely
 ///      passed through — it was MARKED UP by the target margin;
 ///   3. output VAT is then added again on the customer quote (<c>QuoteItem.TaxAmount</c>), so the
 ///      customer was charged tax on tax, and every reported gross margin was wrong.
@@ -127,7 +127,7 @@ public static class LandedCostFormula
     /// 9% understated, because the second award was told to carry no charges at all. Both figures
     /// reach <c>SourcingAward.LandedUnitCost</c> and <c>TotalValue</c>, then the supplier purchase
     /// order line and the committed-spend total, and then the customer price by
-    /// <c>landed / (1 - margin)</c>.</para>
+    /// <c>landed × (1 + margin on cost)</c> (MarginFormula).</para>
     ///
     /// <para>Clamped at 1: the award path already refuses an award larger than the quoted quantity,
     /// and a share above 1 would invent charges the supplier never billed.</para>

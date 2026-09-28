@@ -131,6 +131,177 @@ public class QuoteRevisionImpactTests
         Assert.True(await LeadRevisionImpactQueries.OpenQuoteImpacts(context, Tenant, QuoteId).AnyAsync());
     }
 
+    // ------------------------------------------------------------ D-01 / D-04 / D-05 (pilot audit)
+
+    private sealed class StubConfig : IQuoteConfigurationRepository
+    {
+        public Task<QuoteConfiguration?> GetByBusinessUnitIdAsync(long businessUnitId)
+            => Task.FromResult<QuoteConfiguration?>(new QuoteConfiguration
+            {
+                BusinessUnitId = Tenant, CompanyAddress = "King Fahd Road, Al Khobar",
+                CompanyPhone = "+966 13 800 0000", CompanyEmail = "sales@example.invalid"
+            });
+        public Task<QuoteConfiguration> UpsertAsync(QuoteConfiguration configurationToSave) => Task.FromResult(configurationToSave);
+        public Task AddAsync(QuoteConfiguration configurationToSave) => Task.CompletedTask;
+        public Task UpdateAsync(QuoteConfiguration configurationToSave) => Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// D-01 / CB-04: QT-0926-0001 was built AFTER the buyer's revision 4 arrived, from an RFQ still
+    /// frozen on revision 3, so no impact row existed and readiness said nothing — 20 contactors
+    /// went out against the buyer's 35. The warning now compares with the buyer's latest document.
+    /// </summary>
+    [Fact]
+    public async Task A_quote_built_after_the_buyer_revision_warns_before_send_even_without_an_impact()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        SeedQuoteBuiltOnRevision3WithRevision4Arrived(context, withImpact: false);
+        var service = new QuoteService(context, null!, new StubConfig());
+
+        var readiness = await service.EvaluateSendReadinessAsync(QuoteId, Tenant);
+
+        var warning = Assert.Single(readiness.Warnings, w => w.Code == "BUYER_REVISION_NEWER");
+        Assert.StartsWith("The buyer sent a newer version (rev 4): 3 lines changed.", warning.Message);
+        Assert.Contains("line 10 20 → 35", warning.Message);
+        Assert.True(warning.CanApply);
+        Assert.Equal(3, warning.Revision!.FromRevision);
+        Assert.Contains(warning.Revision.Changes, c => c.Line == "30" && c.Field == "added");
+        // A warning, never a blocker: the rep decides.
+        Assert.DoesNotContain(readiness.Blockers, b => b.Code.Contains("REVISION"));
+    }
+
+    [Fact]
+    public async Task A_quote_built_on_the_buyers_latest_revision_has_no_revision_warning()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        SeedQuoteBuiltOnRevision3WithRevision4Arrived(context, withImpact: false, rfqFrozenOnRevision4: true);
+        var service = new QuoteService(context, null!, new StubConfig());
+
+        var readiness = await service.EvaluateSendReadinessAsync(QuoteId, Tenant);
+
+        Assert.True(!readiness.Warnings.Any(w => w.Code == "BUYER_REVISION_NEWER"),
+            string.Join(" | ", readiness.Warnings.Select(w => w.Message + " from " + w.Revision?.FromRevision)));
+    }
+
+    [Fact]
+    public async Task A_revision_the_rep_made_by_reviewing_or_linking_the_client_is_not_a_buyer_revision()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        SeedQuoteBuiltOnRevision3WithRevision4Arrived(context, withImpact: false, revision4FromBuyer: false);
+        var service = new QuoteService(context, null!, new StubConfig());
+
+        var readiness = await service.EvaluateSendReadinessAsync(QuoteId, Tenant);
+
+        Assert.DoesNotContain(readiness.Warnings, w => w.Code == "BUYER_REVISION_NEWER");
+    }
+
+    /// <summary>
+    /// D-05: "Apply the new quantities" used to update only the customer quote, so the customer was
+    /// quoted 10 while the supplier was asked — and asked again — for 8. The RFQ lines now take the
+    /// same quantities, open supplier requests are flagged, and the send warning clears.
+    /// </summary>
+    [Fact]
+    public async Task Applying_without_an_impact_updates_the_quote_the_RFQ_lines_and_flags_supplier_requests()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        SeedQuoteBuiltOnRevision3WithRevision4Arrived(context, withImpact: false);
+        context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = OFF");
+        context.Database.ExecuteSqlRaw("PRAGMA ignore_check_constraints = ON");
+        context.SourcingCases.Add(new ERP_RFQ_Automation.Procurement.SourcingCase
+        {
+            Id = 98_501, BusinessUnitId = Tenant, CommercialDemandLineId = 98_502, RfqId = 98_331, RfqItemId = 98_341,
+            NexoraSerial = "NXR-QA", Description = "Gasket", RequestedQuantity = 20m, StockQuantity = 0m,
+            UnfulfilledQuantity = 20m, Status = ERP_RFQ_Automation.Procurement.SourcingCaseStatuses.OutreachSent,
+            NextAction = "Wait for replies", ShortageDecisionKey = new string('c', 64), IdempotencyKey = "qa-case",
+            RequestHash = new string('d', 64), CreatedOn = DateTime.UtcNow, CreatedBy = "seed",
+            UpdatedOn = DateTime.UtcNow, UpdatedBy = "seed"
+        });
+        context.Suppliers.Add(new Supplier { Id = 98_511, Buid = Tenant, Name = "Gulf Gaskets", ImageUrl = "n/a", IsActive = true, CreatedBy = "seed", CreatedOn = DateTime.UtcNow });
+        context.Set<ERP_RFQ_Automation.Agent.Models.SupplierSolicitation>().Add(new ERP_RFQ_Automation.Agent.Models.SupplierSolicitation
+        {
+            Id = 98_521, BusinessUnitId = Tenant, RfqId = 98_331, SupplierId = 98_511, SourcingCaseId = 98_501,
+            SupplierRfqNumber = "SRFQ-0001", IdempotencyKey = "qa-sol", RequestHash = new string('e', 64),
+            RequestedRfqItemIdsJson = "[98341]", Status = ERP_RFQ_Automation.Agent.Models.SolicitationStatus.Sent,
+            SentOn = DateTime.UtcNow.AddDays(-1), CreatedOn = DateTime.UtcNow, UpdatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+        var service = new QuoteService(context, null!, new StubConfig());
+
+        var result = await service.ApplyRevisionQuantitiesAsync(QuoteId, Tenant, "rep@nexora.invalid", "apply-d01");
+
+        Assert.Equal(2, result.LinesUpdated);
+        Assert.Equal(new[] { "30" }, result.LinesNotOnQuote);
+        Assert.Collection(result.RfqLinesUpdated,
+            change => { Assert.Equal("10", change.Line); Assert.Equal("20", change.From); Assert.Equal("35", change.To); },
+            change => { Assert.Equal("20", change.Line); Assert.Equal("1500", change.From); Assert.Equal("2000", change.To); });
+        var outdated = Assert.Single(result.OutdatedSupplierRequests);
+        Assert.Equal("SRFQ-0001", outdated.SupplierRfqNumber);
+        Assert.Equal("Gulf Gaskets", outdated.SupplierName);
+        Assert.Equal(20m, outdated.AskedQuantity);
+        Assert.Equal(35m, outdated.NewQuantity);
+
+        context.ChangeTracker.Clear();
+        Assert.Equal(35m, (await context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == 98_341)).Quantity);
+        Assert.Equal(2000m, (await context.Rfqitems.AsNoTracking().SingleAsync(x => x.Id == 98_342)).Quantity);
+        var sourcingCase = await context.SourcingCases.AsNoTracking().SingleAsync(x => x.Id == 98_501);
+        Assert.Contains("Ask again", sourcingCase.NextAction);
+        Assert.Contains("35", sourcingCase.NextAction);
+
+        var after = await service.EvaluateSendReadinessAsync(QuoteId, Tenant);
+        Assert.DoesNotContain(after.Warnings, w => w.Code == "BUYER_REVISION_NEWER");
+    }
+
+    /// <summary>D-04: "Keep as quoted" must say why, and record the lines that still differ.</summary>
+    [Fact]
+    public async Task Keeping_the_old_quantities_requires_a_reason_and_records_it_with_the_differing_lines()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        SeedQuoteBuiltOnRevision3WithRevision4Arrived(context, withImpact: false);
+        var service = new QuoteService(context, null!, new StubConfig());
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.ResolveRevisionImpactAsync(QuoteId, Tenant, "rep@nexora.invalid", "keep-0", reason: "  "));
+
+        await service.ResolveRevisionImpactAsync(QuoteId, Tenant, "rep@nexora.invalid", "keep-1",
+            reason: "Buyer's planner confirmed 20 by phone");
+
+        var reviewed = await context.Set<LeadIdentityAuditEvent>().AsNoTracking()
+            .SingleAsync(x => x.EventType == QuoteService.BuyerRevisionReviewedEventType);
+        Assert.Contains("KEPT_AS_QUOTED", reviewed.PayloadJson);
+        Assert.Contains("Buyer's planner confirmed 20 by phone", System.Text.RegularExpressions.Regex.Unescape(reviewed.PayloadJson));
+        Assert.Contains("\"line\":\"10\"", reviewed.PayloadJson);
+        Assert.Contains("\"to\":\"35\"", reviewed.PayloadJson);
+        // The quote keeps its quantities and the warning clears.
+        Assert.Equal(20m, (await context.QuoteItems.AsNoTracking().SingleAsync(x => x.Id == 98_371)).Quantity);
+        var readiness = await service.EvaluateSendReadinessAsync(QuoteId, Tenant);
+        Assert.DoesNotContain(readiness.Warnings, w => w.Code == "BUYER_REVISION_NEWER");
+    }
+
+    [Fact]
+    public async Task Keeping_an_open_impact_records_the_reason_in_the_impact_resolution()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        SeedQuoteBuiltOnRevision3WithRevision4Arrived(context);
+        var service = new QuoteService(context, null!, new StubConfig());
+
+        await service.ResolveRevisionImpactAsync(QuoteId, Tenant, "rep@nexora.invalid", "keep-2",
+            reason: "Portal already closed for changes");
+
+        var resolved = await context.Set<LeadIdentityAuditEvent>().AsNoTracking()
+            .SingleAsync(x => x.EventType == LeadRevisionImpactQueries.ResolvedEventType);
+        Assert.Contains("KEPT_AS_QUOTED", resolved.PayloadJson);
+        Assert.Contains("Portal already closed for changes", resolved.PayloadJson);
+        Assert.Contains("buyerAsks", resolved.PayloadJson);
+        Assert.False(await LeadRevisionImpactQueries.OpenQuoteImpacts(context, Tenant, QuoteId).AnyAsync());
+    }
+
     // ------------------------------------------------------------------------ test plumbing
 
     /// <summary>
@@ -139,7 +310,8 @@ public class QuoteRevisionImpactTests
     /// 35, line 20 at 2,000 and a new line 30. The impact row is exactly what
     /// <c>LeadIdentityApplicationService.AddImpactsAsync</c> writes.
     /// </summary>
-    private static void SeedQuoteBuiltOnRevision3WithRevision4Arrived(ErpRfqAutomationContext context, bool sent = false)
+    private static void SeedQuoteBuiltOnRevision3WithRevision4Arrived(ErpRfqAutomationContext context, bool sent = false,
+        bool withImpact = true, bool revision4FromBuyer = true, bool rfqFrozenOnRevision4 = false)
     {
         Seed.EnsureBusinessUnit(context, Tenant);
         context.SetupMasters.Add(new SetupMaster
@@ -168,9 +340,11 @@ public class QuoteRevisionImpactTests
 
         // Revision 3: what the draft was built from.
         var revision3 = SeedRevision(context, 98_411, revisionNumber: 3, occurrenceId: 98_401,
+            LeadOccurrenceRecordKind.Ingestion,
             (98_361, 98_321, "10", 20m), (98_362, 98_322, "20", 1500m));
         // Revision 4: what the customer just sent.
         var revision4 = SeedRevision(context, 98_412, revisionNumber: 4, occurrenceId: 98_402,
+            revision4FromBuyer ? LeadOccurrenceRecordKind.Ingestion : LeadOccurrenceRecordKind.IdentityBaseline,
             (98_363, 98_321, "10", 35m), (98_364, 98_322, "20", 2000m), (98_365, 98_323, "30", 4m));
         revision4.Differences.Add(Difference(LeadRevisionChangeType.Unchanged, "Field", "$.rfq", "\"RFQ-1\"", "\"RFQ-1\""));
         revision4.Differences.Add(Difference(LeadRevisionChangeType.Modified, "Line", "$.items[\"10\"]",
@@ -189,13 +363,13 @@ public class QuoteRevisionImpactTests
         context.Rfqitems.Add(new Rfqitem
         {
             Id = 98_341, Rfqid = 98_331, LineItemNo = "10", Quantity = 20m, UnitOfMeasure = "EA",
-            SourceLeadRevisionId = 98_411, SourceLeadItemRevisionId = 98_361,
+            SourceLeadRevisionId = rfqFrozenOnRevision4 ? 98_412 : 98_411, SourceLeadItemRevisionId = rfqFrozenOnRevision4 ? 98_363 : 98_361,
             CreatedBy = "seed", CreatedDate = DateTime.UtcNow
         });
         context.Rfqitems.Add(new Rfqitem
         {
             Id = 98_342, Rfqid = 98_331, LineItemNo = "20", Quantity = 1500m, UnitOfMeasure = "EA",
-            SourceLeadRevisionId = 98_411, SourceLeadItemRevisionId = 98_362,
+            SourceLeadRevisionId = rfqFrozenOnRevision4 ? 98_412 : 98_411, SourceLeadItemRevisionId = rfqFrozenOnRevision4 ? 98_364 : 98_362,
             CreatedBy = "seed", CreatedDate = DateTime.UtcNow
         });
 
@@ -219,18 +393,19 @@ public class QuoteRevisionImpactTests
         quote.QuoteItems.Add(Line(98_373, null, null, 1m, 5m));
         context.Quotes.Add(quote);
 
-        context.Set<LeadRevisionImpact>().Add(new LeadRevisionImpact
-        {
-            BusinessUnitId = Tenant,
-            LeadId = LeadId,
-            LeadRevisionId = 98_412,
-            AggregateType = "QUOTE",
-            AggregateId = QuoteId,
-            ImpactType = sent ? "QUOTE_REVISION_REQUIRED" : "DRAFT_STALE_REVIEW_REQUIRED",
-            Status = "OPEN",
-            DetailsJson = "{\"fromRevision\":3,\"toRevision\":4,\"automaticMutation\":false}",
-            CreatedAtUtc = DateTimeOffset.UtcNow
-        });
+        if (withImpact)
+            context.Set<LeadRevisionImpact>().Add(new LeadRevisionImpact
+            {
+                BusinessUnitId = Tenant,
+                LeadId = LeadId,
+                LeadRevisionId = 98_412,
+                AggregateType = "QUOTE",
+                AggregateId = QuoteId,
+                ImpactType = sent ? "QUOTE_REVISION_REQUIRED" : "DRAFT_STALE_REVIEW_REQUIRED",
+                Status = "OPEN",
+                DetailsJson = "{\"fromRevision\":3,\"toRevision\":4,\"automaticMutation\":false}",
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            });
         context.SaveChanges();
         context.ChangeTracker.Clear();
     }
@@ -253,7 +428,7 @@ public class QuoteRevisionImpactTests
     };
 
     private static LeadRevision SeedRevision(ErpRfqAutomationContext context, long revisionId, int revisionNumber,
-        long occurrenceId, params (long ItemRevisionId, long LeadItemId, string Line, decimal Quantity)[] lines)
+        long occurrenceId, LeadOccurrenceRecordKind kind, params (long ItemRevisionId, long LeadItemId, string Line, decimal Quantity)[] lines)
     {
         var batch = new LeadIngestionBatch
         {
@@ -263,7 +438,7 @@ public class QuoteRevisionImpactTests
         context.Set<LeadIngestionBatch>().Add(batch);
         context.Set<LeadIngestionOccurrence>().Add(new LeadIngestionOccurrence
         {
-            Id = occurrenceId, BusinessUnitId = Tenant, BatchId = batch.Id, LeadId = LeadId,
+            Id = occurrenceId, RecordKind = kind, BusinessUnitId = Tenant, BatchId = batch.Id, LeadId = LeadId,
             SourceChannel = "Email", IdempotencyKey = $"occ-{occurrenceId}",
             LogicalInquiryFingerprint = new string('a', 64), Classification = LeadOccurrenceClassification.Revision,
             ActorId = "seed", CorrelationId = $"occ-{occurrenceId}",

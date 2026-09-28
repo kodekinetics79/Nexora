@@ -52,7 +52,7 @@ public sealed class CommercialMatchingPolicy
     /// VAT-registered business making taxable supplies reclaims its input VAT in full: the 15% the
     /// supplier adds to an invoice is a receivable from ZATCA, not money the goods consumed.
     /// Carrying it in landed cost overstated cost, and because a customer price is derived as
-    /// landed / (1 - margin), the overstatement was then MARKED UP by the margin before output VAT
+    /// landed × (1 + margin on cost), the overstatement was then MARKED UP by the margin before output VAT
     /// was added again on the customer quote — the same tax counted twice, once with profit on
     /// top.</para>
     ///

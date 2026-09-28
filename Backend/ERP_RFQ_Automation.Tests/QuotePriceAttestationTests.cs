@@ -168,16 +168,20 @@ public sealed class QuotePriceAttestationTests
             BusinessUnitId = Tenant, CompanyAddress = "King Fahd Road, Al Khobar 34423",
             CompanyPhone = "+966 13 800 0000", CompanyEmail = "sales@noorandsons.example"
         }));
-        Assert.Contains((await service.EvaluateSendReadinessAsync(QuoteId, Tenant)).Blockers,
-            b => b.Code == "CUSTOMER_REVISION_UNRESOLVED");
+        // Inform, don't obstruct: the open revision is a WARNING on readiness now; the sender
+        // itself still refuses until the rep keeps (with a reason) or applies.
+        var before = await service.EvaluateSendReadinessAsync(QuoteId, Tenant);
+        Assert.Contains(before.Warnings, w => w.Code == "BUYER_REVISION_NEWER");
+        Assert.DoesNotContain(before.Blockers, b => b.Code == "CUSTOMER_REVISION_UNRESOLVED");
 
-        await service.ResolveRevisionImpactAsync(QuoteId, Tenant, "reviewer@nexora.invalid", "resolve-once");
+        await service.ResolveRevisionImpactAsync(QuoteId, Tenant, "reviewer@nexora.invalid", "resolve-once",
+            reason: "Buyer confirmed by phone the old quantities stand.");
 
         // The row is untouched (append-only), the event exists, and every reader agrees.
         var row = await context.Set<LeadRevisionImpact>().AsNoTracking().SingleAsync(x => x.AggregateId == QuoteId);
         Assert.Equal("OPEN", row.Status);
-        Assert.DoesNotContain((await service.EvaluateSendReadinessAsync(QuoteId, Tenant)).Blockers,
-            b => b.Code == "CUSTOMER_REVISION_UNRESOLVED");
+        Assert.DoesNotContain((await service.EvaluateSendReadinessAsync(QuoteId, Tenant)).Warnings,
+            w => w.Code == "BUYER_REVISION_NEWER");
         var result = await service.SendQuoteEmailAsync(QuoteId, Tenant, "buyer@nexora.invalid");
         Assert.True(result.QueuedForDelivery);
         Assert.Single(context.QuoteDeliveryRequests.IgnoreQueryFilters());
