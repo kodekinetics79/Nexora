@@ -64,8 +64,9 @@ public sealed class LeadClientChangePostgreSqlTests(PostgreSqlTestDatabase datab
             await context.SaveChangesAsync();
 
             lead.ResolveCommercialIdentity(sec, null, LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
-            var refusal = await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
-            var postgres = Assert.IsType<PostgresException>(refusal.InnerException);
+            // The execution strategy may wrap the DbUpdateException; the database's answer is inside.
+            var refusal = await Assert.ThrowsAnyAsync<Exception>(() => context.SaveChangesAsync());
+            var postgres = Assert.IsType<PostgresException>(Innermost(refusal));
             Assert.Equal("55000", postgres.SqlState);
             Assert.Contains("once the lead has an RFQ", postgres.MessageText);
 
@@ -75,5 +76,11 @@ public sealed class LeadClientChangePostgreSqlTests(PostgreSqlTestDatabase datab
         await using var after = database.ContextFor(tenant);
         Assert.Equal(aramco, (await after.Leads.AsNoTracking().SingleAsync(l => l.Id == leadId)).CustomerId);
         Assert.False(await after.Rfqs.IgnoreQueryFilters().AnyAsync(r => r.Id == rfqId));
+    }
+
+    private static Exception Innermost(Exception exception)
+    {
+        while (exception.InnerException is not null) exception = exception.InnerException;
+        return exception;
     }
 }
