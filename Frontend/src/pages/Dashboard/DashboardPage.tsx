@@ -16,6 +16,7 @@ import TodayBand from './glance/TodayBand';
 import SixMonthsBand, { type SixMonthPoint } from './glance/SixMonthsBand';
 import KpiCard from './executive/KpiCard';
 import RepDesk from './RepDesk';
+import CustomisableGrid from './glance/CustomisableGrid';
 import { SCOPE_UNRESOLVED, scopeWords, type GlanceScopeWords, type GlanceWindow } from './glance/scopeWords';
 import { NEU_SURFACE, NEU_TRANSITION, clayInkOverrides, neuCssVariables, neuEmboss, neuFocus, neuInset, neuKey, neuRaised, neuWell } from './glance/neumorphic';
 import { glanceCssVariables } from './glance/tokens';
@@ -161,6 +162,8 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
   const today = useMemo(() => dayjs().startOf('day'), []);
 
   const [period, setPeriod] = useState<PeriodKey>('30d');
+  // Arranging the bands: move, resize, hide. Saved per reader as they go (see CustomisableGrid).
+  const [customising, setCustomising] = useState(false);
   const [applied, setApplied] = useState<GlanceWindow>(() => presetRange('30d', today));
   const [customFrom, setCustomFrom] = useState(applied.from);
   const [customTo, setCustomTo] = useState(applied.to);
@@ -175,6 +178,16 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
     // first thing a reader sees in the fields is the window they are already looking at.
     setCustomFrom(range.from);
     setCustomTo(range.to);
+  };
+
+  // A month clicked (or a run of months dragged) on the six-month chart becomes the period for the
+  // whole screen. The current month stops at today, as the presets do.
+  const pickMonths = (from: string, to: string) => {
+    const end = dayjs(to).isAfter(today) ? today.format('YYYY-MM-DD') : to;
+    setPeriod('custom');
+    setApplied({ from, to: end });
+    setCustomFrom(from);
+    setCustomTo(end);
   };
 
   // A half-typed date is not a window. The bands keep the last window that was actually valid, and
@@ -469,6 +482,17 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
                 Documents to check
               </Button>
             )}
+            <Button
+              size="small"
+              aria-pressed={customising}
+              onClick={() => setCustomising(c => !c)}
+              sx={(theme) => ({
+                ...neuKey(theme.palette.mode), ...neuFocus, fontWeight: 700, px: 1.5,
+                ...(customising ? { boxShadow: neuInset(theme.palette.mode, 2), color: 'var(--nx-glance-seal-ink)' } : {}),
+              })}
+            >
+              {customising ? 'Done' : 'Edit layout'}
+            </Button>
           </Stack>
           {verified.length > 0 && notYetMeasurable > 0 && (
             <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.3 }}>
@@ -479,47 +503,32 @@ function TeamDashboard({ switcher }: { switcher?: ReactNode }) {
       </Box>
 
       {/*
-        The six bands as one grid, read left to right and then down — the same sentence as before,
-        1 → 6, laid out so the whole of it fits one glance on a laptop instead of a long scroll.
-        Columns are at least 380px so every band keeps a legible chart; below that the grid drops
-        to two columns, then one, and the order never changes.
+        The six bands as one grid, read left to right and then down, 1 → 6 until the reader
+        rearranges them. Edit layout lets each reader move, widen or hide bands; the arrangement is
+        theirs and follows them to any browser. Columns are at least 380px so every band keeps a
+        legible chart; below that the grid drops to two columns, then one.
       */}
-      <Box
-        sx={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 380px), 1fr))',
-          gap: 2.5,
-          alignItems: 'stretch',
+      <CustomisableGrid
+        editing={customising}
+        bands={{
+          verdict: <VerdictBand from={applied.from} to={applied.to} index={1} />,
+          outstanding: <OutstandingBand from={applied.from} to={applied.to} index={2} />,
+          losses: <LossesBand from={applied.from} to={applied.to} index={3} />,
+          closing: <ClosingBand step="4" index={4} />,
+          today: <TodayBand index={5} />,
+          sixmonths: (
+            <SixMonthsBand
+              points={points}
+              loading={canRequestSeries && series.isLoading}
+              error={seriesError}
+              onRetry={canRequestSeries ? () => void series.refetch() : undefined}
+              index={6}
+              picked={applied}
+              onPickPeriod={pickMonths}
+            />
+          ),
         }}
-      >
-        <VerdictBand from={applied.from} to={applied.to} index={1} />
-
-        {/*
-          Bands 2 and 3 read ONE aggregate between them — /pipeline-analytics, under a single
-          react-query key — because they are two readings of the same figures over the same scope
-          and the same freshness. They still hold their own states and print their own failure, so
-          the pair behaves like every other band on the screen from the reader's side.
-
-          What that endpoint publishes and this screen still refuses to draw is `weightedForecast`:
-          an unmeasured 0.3/0.5 probability heuristic presented as an instruction. It was removed
-          from the product rather than relabelled, and neither band reads it.
-        */}
-        <OutstandingBand from={applied.from} to={applied.to} index={2} />
-
-        <LossesBand from={applied.from} to={applied.to} index={3} />
-
-        <ClosingBand step="4" index={4} />
-
-        <TodayBand index={5} />
-
-        <SixMonthsBand
-          points={points}
-          loading={canRequestSeries && series.isLoading}
-          error={seriesError}
-          onRetry={canRequestSeries ? () => void series.refetch() : undefined}
-          index={6}
-        />
-      </Box>
+      />
 
       {/*
         The measured half of the Release 01 snapshot, and only that half.

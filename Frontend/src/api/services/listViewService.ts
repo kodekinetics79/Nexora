@@ -14,7 +14,9 @@ export type ListViewKey =
   | 'customers.list'
   | 'suppliers.list'
   | 'lead.items'
-  | 'sales.performance.chart';
+  | 'sales.performance.chart'
+  | 'dashboard.layout'
+  | 'dashboard.charts';
 
 export type CustomFieldDataType =
   | 'Text' | 'Integer' | 'Decimal' | 'Boolean' | 'Date'

@@ -34,3 +34,35 @@ public sealed class TeamChartPreferenceWiringTests
         Assert.Equal(["quoteSent", "wonQuotes"], visible);
     }
 }
+
+/// <summary>
+/// The reader's own dashboard (Frontend/src/pages/Dashboard/glance/chartPrefs.ts): band order and
+/// visibility in `dashboard.layout`, chart options and band widths in `dashboard.charts`. The client
+/// reads these keys by name.
+/// </summary>
+public sealed class DashboardPreferenceWiringTests
+{
+    private static readonly string[] Bands = ["verdict", "outstanding", "losses", "closing", "today", "sixmonths"];
+
+    [Fact]
+    public void Layout_lists_every_band_visible_in_reading_order()
+    {
+        var view = ListViewCatalog.Find("dashboard.layout");
+        Assert.NotNull(view);
+        Assert.Equal(Bands, view!.Columns.Select(c => c.Key));
+        Assert.All(view.Columns, c => Assert.True(c.DefaultVisible));
+    }
+
+    [Fact]
+    public void Each_chart_group_has_exactly_one_default_choice()
+    {
+        var view = ListViewCatalog.Find("dashboard.charts");
+        Assert.NotNull(view);
+        var groups = view!.Columns.GroupBy(c => c.Key[..c.Key.LastIndexOf('.')]).ToList();
+        foreach (var band in Bands) Assert.Contains(groups, g => g.Key == $"size.{band}");
+        Assert.Contains(groups, g => g.Key == "outstanding");
+        Assert.Contains(groups, g => g.Key == "losses");
+        Assert.Contains(groups, g => g.Key == "closing");
+        Assert.All(groups, g => Assert.Single(g, c => c.DefaultVisible));
+    }
+}
