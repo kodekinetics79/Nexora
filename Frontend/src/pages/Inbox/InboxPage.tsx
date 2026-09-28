@@ -251,6 +251,7 @@ const InboxPage: React.FC = () => {
           ))}
           {pending.length > 0 && (
             <Box
+              role="status"
               aria-label="Loading your queues"
               sx={{ px: 2.5, py: 1.5, borderTop: withWork.length > 0 ? '1px solid' : 'none', borderColor: 'divider' }}
             >
