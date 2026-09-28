@@ -97,6 +97,69 @@ describe('SixMonthsBand populated', () => {
   });
 });
 
+describe('SixMonthsBand headline', () => {
+  it('states the six-month RFQ total and order value total in the server currency', () => {
+    render(<SixMonthsBand points={populated} />);
+
+    expect(screen.getByTestId('six-months-total-count')).toHaveTextContent(/^42$/);
+    expect(screen.getByTestId('six-months-total-value')).toHaveTextContent(/110,250/);
+    expect(screen.getByTestId('six-months-total-value')).toHaveTextContent(/SAR|\uFDFC|ر\.س/);
+    expect(screen.getByTestId('six-months-total-value')).not.toHaveAttribute('title');
+  });
+
+  // One unstated month makes any sum a partial wearing a whole-period label: never total it.
+  it('says "Not stated", with the server reason, when any month value is null', () => {
+    const gapped = populated.map((p, i) => (
+      i === 2 ? { ...p, value: null, valueUnavailableReason: 'June contains an order in a currency with no approved rate.' } : p
+    ));
+    render(<SixMonthsBand points={gapped} />);
+
+    const total = screen.getByTestId('six-months-total-value');
+    expect(total).toHaveTextContent(/^Not stated$/);
+    expect(total).toHaveAttribute('title', 'June contains an order in a currency with no approved rate.');
+    // The count is still a measured total: nulls only ever touch money.
+    expect(screen.getByTestId('six-months-total-count')).toHaveTextContent(/^42$/);
+  });
+
+  it('says "Not stated" rather than 0 for a currency-less tenant with nothing yet', () => {
+    render(<SixMonthsBand points={nothingYet} />);
+
+    expect(screen.getByTestId('six-months-total-value')).toHaveTextContent(/^Not stated$/);
+    expect(screen.getByTestId('six-months-total-count')).toHaveTextContent(/^0$/);
+  });
+
+  it('compares this month with last month in words: more', () => {
+    render(<SixMonthsBand points={populated} />);
+
+    expect(screen.getByTestId('six-months-this-month')).toHaveTextContent(/^11$/);
+    expect(screen.getByTestId('six-months-this-month-comparison')).toHaveTextContent('· 5 more than Aug');
+    expect(screen.getByTestId('six-months-headline')).not.toHaveTextContent(/%/);
+  });
+
+  it('compares this month with last month in words: fewer', () => {
+    const fewer = populated.map((p, i) => (i === 5 ? { ...p, count: 3 } : p));
+    render(<SixMonthsBand points={fewer} />);
+
+    expect(screen.getByTestId('six-months-this-month-comparison')).toHaveTextContent('· 3 fewer than Aug');
+  });
+
+  it('compares this month with last month in words: same', () => {
+    const same = populated.map((p, i) => (i === 5 ? { ...p, count: 6 } : p));
+    render(<SixMonthsBand points={same} />);
+
+    expect(screen.getByTestId('six-months-this-month-comparison')).toHaveTextContent('· same as Aug');
+  });
+
+  it('draws the value line as an area with markers only at the latest point until hovered', () => {
+    render(<SixMonthsBand points={populated} />);
+
+    const value = screen.getByTestId('six-months-value');
+    expect(value.querySelector('path[fill="url(#nx-six-months-value-fill)"]')).not.toBeNull();
+    expect(within(value).queryByTestId('six-months-active-point')).not.toBeInTheDocument();
+    expect(within(value).getByTestId('six-months-endpoint')).toBeInTheDocument();
+  });
+});
+
 describe('SixMonthsBand empty', () => {
   it('keeps six labelled month slots and both axes when nothing has happened', () => {
     render(<SixMonthsBand points={nothingYet} />);

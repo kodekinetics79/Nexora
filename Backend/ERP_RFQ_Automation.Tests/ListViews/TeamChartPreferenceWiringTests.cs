@@ -42,7 +42,7 @@ public sealed class TeamChartPreferenceWiringTests
 /// </summary>
 public sealed class DashboardPreferenceWiringTests
 {
-    private static readonly string[] Bands = ["verdict", "outstanding", "losses", "closing", "today", "sixmonths"];
+    private static readonly string[] Bands = ["verdict", "outstanding", "losses", "closing", "today", "sixmonths", "brands", "customers"];
 
     [Fact]
     public void Layout_lists_every_band_visible_in_reading_order()
@@ -63,6 +63,7 @@ public sealed class DashboardPreferenceWiringTests
         Assert.Contains(groups, g => g.Key == "outstanding");
         Assert.Contains(groups, g => g.Key == "losses");
         Assert.Contains(groups, g => g.Key == "closing");
+        Assert.Contains(groups, g => g.Key == "customers");
         Assert.All(groups, g => Assert.Single(g, c => c.DefaultVisible));
     }
 }

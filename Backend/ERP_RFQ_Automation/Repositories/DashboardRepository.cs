@@ -243,6 +243,8 @@ namespace ERP_RFQ_Automation.Repositories
             // because untriaged is precisely the state the deadline board exists to surface.
             var query = _context.Leads.AsNoTracking()
                 .Where(l => l.BusinessUnitId == businessUnitId);
+            // InCommercialScope reads a lead through its AssignTo only, so a single-rep scope
+            // (ownerUserId filter, UserIds = [rep]) already means "leads assigned to that rep".
             if (accessScope != null)
                 query = query.InCommercialScope(_context, businessUnitId, accessScope, now);
             var rows = await query
@@ -657,7 +659,14 @@ namespace ERP_RFQ_Automation.Repositories
             // Taken in C#, not inside the expression tree: a null check on a subquery does not
             // translate to SQL and would drop the whole query to client evaluation — which on a
             // lead table means loading the tenant into memory to decide who may see it.
-            if (accountCustomerIds is not null)
+            //
+            // Single-rep filter (ownerUserId): "a rep's lead" is one whose AssignTo is that rep —
+            // nothing else. The account branch is skipped because a rep's accounts can carry
+            // other reps' leads, and those must not appear under this rep's name.
+            if (scope.IsSingleRep)
+                scopedLeads = scopedLeads.Where(l =>
+                    l.AssignTo != null && scopeUserIds.Contains(l.AssignTo.Value));
+            else if (accountCustomerIds is not null)
                 scopedLeads = scopedLeads.Where(l =>
                     (l.AssignTo != null && scopeUserIds.Contains(l.AssignTo.Value))
                     || (l.CustomerId != null && accountCustomerIds.Contains(l.CustomerId.Value)));
@@ -671,7 +680,8 @@ namespace ERP_RFQ_Automation.Repositories
             // A quote belongs to the person named on it. Ownership is NOT inferred from the
             // customer's account team here: an account can carry work from several reps, and
             // reading one rep's revenue under another's heading is the exact failure this scope
-            // exists to prevent. Unowned quotes are handled explicitly below.
+            // exists to prevent. Unowned quotes are handled explicitly below. Under the single-rep
+            // filter "a rep's quote" is one whose OwnerUserId is that rep (scopeUserIds = [rep]).
             if (!scope.IsTenantWide)
                 scopedQuotes = scopedQuotes.Where(q =>
                     q.OwnerUserId != null && scopeUserIds.Contains(q.OwnerUserId.Value));
@@ -738,8 +748,10 @@ namespace ERP_RFQ_Automation.Repositories
             // visible: "some of your book is unattributed" is the actionable form of it, and the
             // fix is to name an owner, not to fold the money in silently. Zero at tenant scope,
             // where nothing is excluded.
+            // Not stated for a single-rep view: unowned quotes are nobody's, so they are not this
+            // rep's exclusion to report either.
             var unownedQuotesExcluded = 0;
-            if (accountCustomerIds is not null)
+            if (accountCustomerIds is not null && !scope.IsSingleRep)
             {
                 var unownedInScope = _context.Quotes.AsNoTracking()
                     .Where(q => q.BusinessUnitId == businessUnitId
@@ -945,7 +957,14 @@ namespace ERP_RFQ_Automation.Repositories
             // subquery cannot be translated to SQL, and leaving it in the predicate makes the
             // whole query fall back to client evaluation — which on a lead table means loading
             // the tenant into memory to decide who may see it.
-            if (accountCustomerIds is not null)
+            //
+            // Single-rep filter (ownerUserId): "a rep's lead" is one whose AssignTo is that rep.
+            // The account clause is skipped so another rep's lead on this rep's account is not
+            // counted as this rep's work.
+            if (scope.IsSingleRep)
+                scopedLeads = scopedLeads.Where(lead =>
+                    lead.AssignTo != null && scopeUserIds.Contains(lead.AssignTo.Value));
+            else if (accountCustomerIds is not null)
                 scopedLeads = scopedLeads.Where(lead =>
                     (lead.AssignTo != null && scopeUserIds.Contains(lead.AssignTo.Value))
                     || (lead.CustomerId != null && accountCustomerIds.Contains(lead.CustomerId.Value)));

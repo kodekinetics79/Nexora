@@ -35,6 +35,10 @@ import { useChartChoice } from './chartPrefs';
  * The type sizes say which is which.</p>
  */
 export interface LossesBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
+  /** A manager's rep filter: only this rep's own work. Absent = everyone the reader can see. */
+  ownerUserId?: number;
   /** Inclusive first day of the selected window, YYYY-MM-DD. */
   from: string;
   /** Inclusive last day of the selected window, YYYY-MM-DD. */
@@ -265,8 +269,8 @@ const drillSentence = (row: PipelineLossReasonDTO, above: boolean, total: number
     + `. ${above ? 'A reason the customer gave.' : 'We never found out why.'}`;
 };
 
-export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
-  const analytics = usePipelineAnalytics(from, to, 'the loss reasons');
+export default function LossesBand({ from, to, index = 3, detailsTo, ownerUserId }: LossesBandProps) {
+  const analytics = usePipelineAnalytics(from, to, 'the loss reasons', ownerUserId);
   const [measure, setMeasure] = useChartChoice('losses', MEASURES, 'count');
   const [open, setOpen] = useState<string | null>(null);
 
@@ -303,6 +307,7 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       title="Why we lost"
       step="3"
       index={index}

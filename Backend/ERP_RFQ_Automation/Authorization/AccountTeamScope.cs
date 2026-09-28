@@ -39,9 +39,17 @@ public sealed record AccountTeamScope(
 {
     public bool IsTenantWide => Tier == AccountScopeTier.Tenant;
 
+    /// <summary>
+    /// True when a dashboard caller narrowed their own scope to ONE rep (the <c>ownerUserId</c>
+    /// filter). Such a scope is strictly per-rep: it counts only work assigned to or owned by
+    /// <see cref="UserId"/>, and read paths must NOT widen it through the account-team / named
+    /// customer-ownership branch, because a rep's accounts can carry other reps' work.
+    /// </summary>
+    public bool IsSingleRep { get; init; }
+
     /// <summary>The wire name of the tier, carried on every scoped payload so a reader can see
     /// which scope produced the figure rather than guessing from its size.</summary>
-    public string ScopeName => Tier switch
+    public string ScopeName => IsSingleRep ? SingleRepScopeName : Tier switch
     {
         AccountScopeTier.Tenant => "tenant",
         AccountScopeTier.ManagedScope => "managed_scope",
@@ -55,6 +63,26 @@ public sealed record AccountTeamScope(
     /// </summary>
     public static AccountTeamScope TenantWide(long userId) =>
         new(AccountScopeTier.Tenant, userId, [], [userId]);
+
+    /// <summary>Wire name of a scope narrowed to one rep by the dashboard filter.</summary>
+    public const string SingleRepScopeName = "single_rep";
+
+    /// <summary>
+    /// Narrows this (already resolved) scope to exactly one rep. NEVER widens: allowed only when
+    /// the caller is tenant-wide or <paramref name="ownerUserId"/> is already one of the people in
+    /// their scope; otherwise returns false and the caller must answer 403.
+    /// </summary>
+    public bool TryNarrowToRep(long ownerUserId, out AccountTeamScope narrowed)
+    {
+        narrowed = this;
+        if (ownerUserId <= 0) return false;
+        if (!IsTenantWide && !UserIds.Contains(ownerUserId)) return false;
+        narrowed = new AccountTeamScope(AccountScopeTier.AssignedAccounts, ownerUserId, [], [ownerUserId])
+        {
+            IsSingleRep = true
+        };
+        return true;
+    }
 }
 
 public interface IAccountTeamScopeResolver

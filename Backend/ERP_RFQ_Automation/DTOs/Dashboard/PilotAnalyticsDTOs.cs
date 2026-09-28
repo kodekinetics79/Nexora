@@ -57,7 +57,17 @@ public sealed record DeadlineBoardDTO(
     int LeadsWithoutClosingDate,
     int LateIngestedExcludedLeads,
     IReadOnlyList<DeadlineBucketDTO> Buckets,
-    IReadOnlyList<DeadlineLeadDTO> Leads);
+    IReadOnlyList<DeadlineLeadDTO> Leads)
+{
+    /// <summary>"single_rep" when the caller narrowed the board to one rep with ownerUserId;
+    /// omitted from the payload otherwise, so the unfiltered contract is unchanged.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Scope { get; init; }
+
+    /// <summary>The rep the board was narrowed to; omitted when unfiltered.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public long? OwnerUserId { get; init; }
+}
 
 // ---------------------------------------------------------------- brand demand
 

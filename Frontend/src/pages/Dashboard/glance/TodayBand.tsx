@@ -217,20 +217,24 @@ function RowBody({ item, due }: { item: CommercialAttentionItem; due: DueReading
 }
 
 export interface TodayBandProps {
+  /** Where "details →" opens; the page passes it only when the reader may open that page. */
+  detailsTo?: string;
+  /** A manager's rep filter: only this rep's own work. Absent = everyone the reader can see. */
+  ownerUserId?: number;
   /** Position in the screen's entrance stagger. */
   index?: number;
   /** The band's numeral on a numbered screen; empty on a screen that does not number its bands. */
   step?: string;
 }
 
-export default function TodayBand({ index = 0, step = '5' }: TodayBandProps) {
+export default function TodayBand({ index = 0, step = '5', detailsTo, ownerUserId }: TodayBandProps) {
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   // Its own query, its own failure. A band that cannot load must not blank its neighbours, so
   // there is no composite endpoint and nothing here is shared with another band's fetch.
   const query = useQuery({
-    queryKey: ['commercial-intelligence', 'sales-today'],
-    queryFn: commercialIntelligenceService.getSalesToday,
+    queryKey: ['commercial-intelligence', 'sales-today', ownerUserId ?? 'all'],
+    queryFn: () => commercialIntelligenceService.getSalesToday(ownerUserId),
     refetchInterval: 60_000,
     retry: 1,
     // The band renders its own failure; a background re-read must not raise a toast as well.
@@ -252,6 +256,7 @@ export default function TodayBand({ index = 0, step = '5' }: TodayBandProps) {
 
   return (
     <BandShell
+      detailsTo={detailsTo}
       step={step}
       title="What needs you today"
       index={index}

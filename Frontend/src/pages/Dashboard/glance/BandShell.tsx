@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { Alert, AlertTitle, Box, Button, Paper, Stack, Tooltip, Typography } from '@mui/material';
+import { Alert, AlertTitle, Box, Button, Link, Paper, Stack, Tooltip, Typography } from '@mui/material';
+import { Link as RouterLink, useInRouterContext } from 'react-router-dom';
 import { InfoOutlined as HintIcon, LockOutlined as ForbiddenIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { glanceCssVariables } from './tokens';
@@ -68,6 +69,8 @@ export interface BandShellProps {
   /** The band's reserved height. It is held in every state, empty included. */
   minHeight?: number;
   index?: number;
+  /** Where "details →" opens this band's own deeper page. Absent when there is none for this reader. */
+  detailsTo?: string;
 }
 
 const sealFreshness = (generatedAt?: string | null): string => {
@@ -77,8 +80,10 @@ const sealFreshness = (generatedAt?: string | null): string => {
 };
 
 export default function BandShell({
-  title, seal, children, step, hint, emphasis = false, loading = false, error = null, forbidden = null, onRetry, refreshFailedAt = null, minHeight = 240, index = 0,
+  title, seal, children, step, hint, emphasis = false, loading = false, error = null, forbidden = null, onRetry, refreshFailedAt = null, minHeight = 240, index = 0, detailsTo,
 }: BandShellProps) {
+  // A band rendered outside the app (a test, a preview) still shows the link, as a plain href.
+  const inRouter = useInRouterContext();
   const scopeText = seal.scope ?? SCOPE_UNRESOLVED;
   const sealText = `${scopeText} · ${seal.window} · ${sealFreshness(seal.generatedAt)}`;
   const sealExplanation = seal.governed
@@ -186,6 +191,16 @@ export default function BandShell({
           >
             {title}
           </Typography>
+          {detailsTo && (
+            <Link
+              {...(inRouter ? { component: RouterLink, to: detailsTo } : { href: detailsTo })}
+              aria-label={`${title}: details`}
+              underline="hover"
+              sx={{ fontSize: 12, fontWeight: 700, color: 'var(--nx-glance-seal-ink)', whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              details →
+            </Link>
+          )}
         </Stack>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', maxWidth: '100%', minWidth: 0 }}>
         <Tooltip title={sealExplanation} placement="top-end">

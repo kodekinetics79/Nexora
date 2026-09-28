@@ -25,7 +25,8 @@ public sealed class DashboardRelease01FilterDTO
 
 public sealed class DashboardRelease01RoleScopeDTO
 {
-    /// <summary>FR-DSH-05: "tenant" | "managed_scope" | "assigned_accounts". The middle value is
+    /// <summary>FR-DSH-05: "tenant" | "managed_scope" | "assigned_accounts", or "single_rep" when a
+    /// caller narrowed to one rep with ownerUserId (then OwnerUserId is that rep). The middle value is
     /// new; the contract previously admitted only the two extremes.</summary>
     public string Scope { get; set; } = string.Empty;
 
