@@ -393,6 +393,28 @@ describe('DecidePage', () => {
     expect(await screen.findByRole('dialog', { name: 'Choose customer' })).toHaveTextContent('customer picker for Al Jazirah');
   });
 
+  it('asks the closing-date question in the header and lets the customer be changed before the RFQ', async () => {
+    // Pilot audit CP-02 / HT-02: the guess about "9/8/2026" never reached the rep, and a customer
+    // linked by mistake could not be changed from here.
+    getLead.mockResolvedValue({
+      id: 501, assignedToId: 7, assignedToFullName: 'Golden Salesperson', assignmentMethod: 'MANUAL', assignmentVersion: 1,
+      bidClosingDate: '2026-08-09T17:00:00',
+      closingDateQuestion: { documentText: '9/8/2026 5:00 PM', currentReading: '2026-08-09T17:00:00', otherReading: '2026-09-08T17:00:00' },
+    });
+    renderPage();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Saudi Electricity Company' })).toBeInTheDocument();
+    const question = await screen.findByRole('region', { name: 'Closing date question' });
+    expect(within(question).getByText('Closes 9 Aug or 8 Sep?')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
+  });
+
+  it('offers no customer change once the request is an RFQ', async () => {
+    record = promotedRecord();
+    renderPage();
+    expect(await screen.findByText('Became an RFQ: RFQ-2026-0417')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Change' })).not.toBeInTheDocument();
+  });
+
   it('says an already promoted request is done and offers no second RFQ', async () => {
     record = promotedRecord();
     renderPage();
