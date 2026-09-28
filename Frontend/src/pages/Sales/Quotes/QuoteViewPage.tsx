@@ -34,6 +34,7 @@ import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
 import { summariseStoredQuote } from './quoteTotals';
 import { describeRevisionImpact } from './revisionImpactText';
+import { buyerIdentityLine, buyerNotes, isUnpricedByChoice, lineTotalExVat, pricingStatusText } from './quoteLineText';
 import { alpha } from '@mui/material/styles';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
@@ -831,13 +832,21 @@ const QuoteViewPage: React.FC = () => {
           <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'action.hover' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
           <Box sx={{ overflowX: 'auto' }}>
             <Table size="small">
-              <TableHead><TableRow sx={{ bgcolor: 'action.hover' }}><TableCell sx={{ fontWeight: 700 }}>Ref</TableCell><TableCell sx={{ fontWeight: 700 }}>Description</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell><TableCell sx={{ fontWeight: 700 }}>UOM</TableCell><TableCell sx={{ fontWeight: 700 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Total</TableCell></TableRow></TableHead>
+              <TableHead><TableRow sx={{ bgcolor: 'action.hover' }}><TableCell sx={{ fontWeight: 700 }}>Ref</TableCell><TableCell sx={{ fontWeight: 700 }}>Description</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell><TableCell sx={{ fontWeight: 700 }}>UOM</TableCell><TableCell sx={{ fontWeight: 700 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Total excl. VAT</TableCell></TableRow></TableHead>
               <TableBody>
                 {quote.quoteItems.map((item, idx) => (
                   <TableRow key={item.id} hover>
                     {/* The buyer's own line reference (their RFQ line, e.g. SAP "00010"); synthetic index only for legacy lines */}
                     <TableCell>{item.customerLineRef || idx + 1}</TableCell>
-                    <TableCell><Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography><Typography variant="caption" color="text.secondary">{item.itemDescription}</Typography></TableCell>
+                    {/* The same line the customer's PDF prints: description, what the buyer calls it
+                        (material, maker, part no.), what is offered, and how it is priced. */}
+                    <TableCell>
+                      <Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{item.itemDescription}</Typography>
+                      {buyerIdentityLine(item) && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{buyerIdentityLine(item)}</Typography>}
+                      {item.offeredNote && <Typography variant="caption" color="info.main" sx={{ display: 'block', fontWeight: 700 }}>{item.offeredNote}</Typography>}
+                      {pricingStatusText(item) && <Typography variant="caption" color={item.pricingStatus === 'NOT_QUOTED' ? 'error.main' : 'warning.main'} sx={{ display: 'block', fontWeight: 700 }}>{pricingStatusText(item)}</Typography>}
+                    </TableCell>
                     <TableCell align="right">{item.quantity}</TableCell>
                     <TableCell>{item.unitOfMeasure || '—'}</TableCell>
                     <TableCell>
@@ -850,7 +859,7 @@ const QuoteViewPage: React.FC = () => {
                         </Stack>;
                       })()}
                     </TableCell>
-                    <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
+                    <TableCell align="right">{item.pricingStatus === 'TO_FOLLOW' ? 'To follow' : item.pricingStatus === 'NOT_QUOTED' ? 'Not quoted' : Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
                     <TableCell align="right">
                       {(item.discount ?? 0) > 0 ? (
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
@@ -860,7 +869,9 @@ const QuoteViewPage: React.FC = () => {
                         </Typography>
                       ) : '—'}
                     </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(item.totalAmount, quote.currencyCode)}</TableCell>
+                    {/* Ex-VAT, as the PDF prints it: the stored totalAmount carries the line's VAT, so
+                        showing it here put 2,876.15 on screen where the customer reads 2,501.00. */}
+                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : isUnpricedByChoice(item) ? '—' : formatMoney(lineTotalExVat(item), quote.currencyCode)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -893,7 +904,8 @@ const QuoteViewPage: React.FC = () => {
           </Box>
         </Paper>
 
-        {quote.headerRemarks && <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
+        {/* The rep's notes print on the customer's PDF and e-mail; the internal draft marker does not, so it is not shown as if it would. */}
+        {buyerNotes(quote.headerRemarks) && <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>NOTES TO CUSTOMER</Typography><Typography variant="body2">{buyerNotes(quote.headerRemarks)}</Typography></Box>}
 
         {/* Evidence and record, folded. Nothing is removed; it is simply not in the rep's way. */}
         <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>

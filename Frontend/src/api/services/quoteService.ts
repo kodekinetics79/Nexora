@@ -59,6 +59,17 @@ export interface QuoteLineDTO {
   /** ESTIMATE (priced, subject to confirmation), TO_FOLLOW (price follows), NOT_QUOTED (with a reason), or null for a plain price. */
   pricingStatus?: 'ESTIMATE' | 'TO_FOLLOW' | 'NOT_QUOTED' | null;
   pricingNote?: string | null;
+  /** "Offered: GE THQL32010, replaces ABB AF96" when the part offered is not the one asked for. */
+  offeredNote?: string | null;
+  offeredSpecs?: string | null;
+  /**
+   * What the buyer calls this line, as the QUOTE stores and prints it (their material number, the
+   * maker and part number they asked for). Null on hand-typed and older lines; screens then fall
+   * back to the requested* values below.
+   */
+  customerMaterialCode?: string | null;
+  manufacturerName?: string | null;
+  manufacturerPartNumber?: string | null;
   // What the customer asked for, read through the linked RFQ line. Null when the quote has no RFQ.
   requestedManufacturerName?: string | null;
   requestedManufacturerPartNumber?: string | null;

@@ -80,7 +80,7 @@ describe('EditQuotePage — the quote is read again while the rep is editing', (
     getById.mockResolvedValueOnce(quote).mockResolvedValue(changedOnServer);
     const client = renderEdit();
 
-    const remarks = await screen.findByLabelText(/remarks \/ terms/i);
+    const remarks = await screen.findByLabelText(/notes to customer/i);
     expect(remarks).toHaveValue('Saved terms');
     fireEvent.change(remarks, { target: { value: 'Delivery ex-works Dammam, 6 weeks' } });
 
@@ -91,7 +91,7 @@ describe('EditQuotePage — the quote is read again while the rep is editing', (
     expect(client.getQueryData(['quote-edit', '9'])).toEqual(changedOnServer);
 
     expect(getById).toHaveBeenCalledTimes(2);
-    expect(screen.getByLabelText(/remarks \/ terms/i)).toHaveValue('Delivery ex-works Dammam, 6 weeks');
+    expect(screen.getByLabelText(/notes to customer/i)).toHaveValue('Delivery ex-works Dammam, 6 weeks');
   });
 
   it('keeps a restored draft when the quote is read again', async () => {
@@ -101,7 +101,7 @@ describe('EditQuotePage — the quote is read again while the rep is editing', (
 
     await screen.findByText(/unsaved pricing recovered/i);
     fireEvent.click(screen.getByRole('button', { name: /restore/i }));
-    expect(screen.getByLabelText(/remarks \/ terms/i)).toHaveValue('Terms typed before the browser died');
+    expect(screen.getByLabelText(/notes to customer/i)).toHaveValue('Terms typed before the browser died');
 
     await act(async () => {
       await client.refetchQueries({ queryKey: ['quote-edit', '9'] });
@@ -110,6 +110,6 @@ describe('EditQuotePage — the quote is read again while the rep is editing', (
     expect(client.getQueryData(['quote-edit', '9'])).toEqual(changedOnServer);
 
     expect(getById).toHaveBeenCalledTimes(2);
-    expect(screen.getByLabelText(/remarks \/ terms/i)).toHaveValue('Terms typed before the browser died');
+    expect(screen.getByLabelText(/notes to customer/i)).toHaveValue('Terms typed before the browser died');
   });
 });

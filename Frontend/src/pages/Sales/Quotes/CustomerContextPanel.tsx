@@ -2,16 +2,24 @@ import React from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Box, Card, CardContent, Chip, Divider, Skeleton, Stack, Typography } from '@mui/material';
 import { History as HistoryIcon } from '@mui/icons-material';
-import intelligenceService from '../../../api/services/intelligenceService';
+import intelligenceService, { type CustomerCurrencyAggregateDTO } from '../../../api/services/intelligenceService';
 import { statusLabel } from '../../../utils/statusLabels';
+import { formatMoney } from '../../../utils/currency';
 
 interface CustomerContextPanelProps {
   /** The customer currently selected on the quote form; null hides the panel. */
   customerId: number | null;
+  /**
+   * The quote's own currency: the unit these figures are shown in when the history does not name
+   * one. This panel printed a literal "$" on a SAR tenant ("Typical quote size $12,025") — pilot
+   * audit UX-23. With neither, a bare number is the honest rendering.
+   */
+  currencyCode?: string | null;
 }
 
-const money = (n: number) =>
-  `$${n.toLocaleString(undefined, { maximumFractionDigits: n >= 1000 ? 0 : 2 })}`;
+/** The one currency an aggregate is in, when the history holds exactly one. */
+const singleCurrency = (rows?: CustomerCurrencyAggregateDTO[] | null): string | null =>
+  rows && rows.length === 1 ? rows[0].currencyCode ?? null : null;
 
 const agoLabel = (monthsAgo: number | null): string => {
   if (monthsAgo === null) return '';
@@ -28,7 +36,7 @@ const agoLabel = (monthsAgo: number | null): string => {
  * nothing until a customer is picked; fails silent if the endpoint errors so
  * quoting is never blocked by analytics.
  */
-const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId }) => {
+const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId, currencyCode = null }) => {
   const context = useQuery({
     queryKey: ['customer-context', customerId],
     queryFn: () => intelligenceService.getCustomerContext(customerId!),
@@ -118,7 +126,7 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
                 <Typography variant="body2" sx={{ fontWeight: 700 }}>
                   {data.ordersLast24Months} · {data.orderValueLast24Months == null
                     ? statusLabel(data.orderValueStatus)
-                    : money(data.orderValueLast24Months)}
+                    : formatMoney(data.orderValueLast24Months, singleCurrency(data.orderValueByCurrency) ?? currencyCode)}
                 </Typography>
               </Box>
             )}
@@ -138,7 +146,7 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
                   Typical quote size
                 </Typography>
                 <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                  {money(data.avgQuoteTotal)}
+                  {formatMoney(data.avgQuoteTotal, singleCurrency(data.quoteValueByCurrency) ?? currencyCode)}
                 </Typography>
               </Box>
             )}
@@ -171,7 +179,7 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
                           {item.description ?? 'Item'}
                         </Typography>
                         <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                          Last sold at {money(item.unitPrice)}
+                          Last sold at {formatMoney(item.unitPrice, item.currencyCode ?? currencyCode)}
                           {item.monthsAgo !== null ? `, ${agoLabel(item.monthsAgo)}` : ''}
                         </Typography>
                       </Box>
