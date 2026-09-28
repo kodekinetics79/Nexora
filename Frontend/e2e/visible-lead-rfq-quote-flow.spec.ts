@@ -55,7 +55,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await page.goto('/procurement/leads/intelligence');
     await page.screenshot({ path: path.join(evidenceDir, '02-bulk-upload.png'), fullPage: true });
     await page.locator('input[type="file"]').setInputFiles(initialUpload);
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     await waitForBatch(page);
     await expect(page.getByRole('button', { name: /Files received/i })).toBeVisible();
     await page.screenshot({ path: path.join(evidenceDir, '03-reconciliation-summary.png'), fullPage: true });
@@ -85,7 +85,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     const beforeQuotes = await (await request.get(`${apiUrl}/api/Quote?pageNumber=1&pageSize=100`, { headers: auth })).json();
     await page.goto('/procurement/leads/intelligence');
     await page.locator('input[type="file"]').setInputFiles(initialUpload);
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     await waitForBatch(page);
     await expect(page.getByRole('button', { name: /1 Exact duplicates/i })).toBeVisible();
     const afterRfqs = await (await request.get(`${apiUrl}/api/Rfq?pageNumber=1&pageSize=100`, { headers: auth })).json();
@@ -98,7 +98,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await login(page);
     await page.goto('/procurement/leads/intelligence');
     await page.locator('input[type="file"]').setInputFiles(postQuoteRevision);
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     await waitForBatch(page);
     await expect(page.getByRole('button', { name: /1 Revisions/i })).toBeVisible();
     await page.goto('/procurement/leads/view/1');
@@ -113,7 +113,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await login(page);
     await page.goto('/procurement/leads/intelligence');
     await page.locator('input[type="file"]').setInputFiles(postQuoteRevisionTwo);
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     await waitForBatch(page);
     await expect(page.getByRole('button', { name: /1 Revisions/i })).toBeVisible();
     await page.goto('/procurement/leads/view/1');
@@ -125,7 +125,7 @@ test.describe.serial('Visible Lead intelligence and governed-decision entry jour
     await login(page);
     await page.goto('/procurement/leads/intelligence');
     await page.locator('input[type="file"]').setInputFiles(possibleMatch);
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     await waitForBatch(page);
     await page.goto('/procurement/leads/possible-matches');
     const queueItem = page.locator('.MuiPaper-root').filter({ hasText: 'release-visible-possible-match.csv' }).first();

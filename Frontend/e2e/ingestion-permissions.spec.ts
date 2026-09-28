@@ -125,7 +125,7 @@ test('upload selection and filename-specific removal are disabled in flight', as
   await page.locator('input[type=file]').setInputFiles(fixture.uploadFile!);
   const remove = page.getByRole('button', { name: `Remove ${fixture.uploadFile!.split('/').pop()}` });
   await expect(remove).toBeEnabled();
-  await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+  await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
   await expect(remove).toBeDisabled();
   await expect(page.locator('input[type=file]')).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Select RFQ documents' })).toHaveAttribute('aria-disabled', 'true');

@@ -4,22 +4,23 @@ import { useNavigate } from 'react-router-dom';
 import {
   Box,
   Button,
-  CircularProgress,
   IconButton,
   Paper,
+  Skeleton,
   Stack,
   Tooltip,
   Typography,
 } from '@mui/material';
-import { visuallyHidden } from '@mui/utils';
+import { alpha } from '@mui/material/styles';
 import {
   ArrowForward as ArrowIcon,
   CheckCircleOutlined as ClearIcon,
+  ChevronRight as ChevronIcon,
+  Done as DoneIcon,
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
-import ViewTabs from '../../components/layout/ViewTabs';
-import GlanceStrip from './GlanceStrip';
+import InboxFrame, { INBOX_CARD_SX } from './InboxFrame';
 import { useAuth } from '../../context/AuthContext';
 import { formatDateSafe } from '../../utils/dates';
 import emailTriageService, {
@@ -83,17 +84,20 @@ const byDateAscending = (a: InboxItem, b: InboxItem) => {
   return a.sortKey.localeCompare(b.sortKey);
 };
 
-/** Whole days between now and a deadline, as a phrase a person would say. */
-const deadlinePhrase = (dateStr: string | null | undefined): string | undefined => {
+/** Whole days between now and a deadline, as a phrase a person would say, and how urgent it is. */
+const deadline = (dateStr: string | null | undefined): Pick<InboxItem, 'detail' | 'tone'> | undefined => {
   if (!dateStr) return undefined;
   const due = new Date(dateStr);
   if (Number.isNaN(due.getTime())) return undefined;
   const days = Math.ceil((due.getTime() - Date.now()) / 86_400_000);
-  if (days < 0) return `Closed ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago`;
-  if (days === 0) return 'Closes today';
-  if (days === 1) return 'Closes tomorrow';
-  return `Closes in ${days} days`;
+  if (days < 0) return { detail: `Closed ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago`, tone: 'late' };
+  if (days === 0) return { detail: 'Closes today', tone: 'soon' };
+  if (days === 1) return { detail: 'Closes tomorrow', tone: 'soon' };
+  return { detail: `Closes in ${days} days` };
 };
+
+const lineCount = (count: number | null | undefined): string | undefined =>
+  count ? `${count} line${count === 1 ? '' : 's'}` : undefined;
 
 const ageInHoursPhrase = (hours: number | null | undefined): string | undefined => {
   if (hours == null) return undefined;
@@ -102,6 +106,10 @@ const ageInHoursPhrase = (hours: number | null | undefined): string | undefined 
   const days = Math.round(hours / 24);
   return `Waiting ${days} day${days === 1 ? '' : 's'}`;
 };
+
+/** A date for a row's detail, or nothing — never the "—" placeholder a table cell uses. */
+const dateOrNothing = (dateStr: string | null | undefined): string | undefined =>
+  formatDateSafe(dateStr, '') || undefined;
 
 /**
  * SearchPurchaseOrders is deliberately a historical search endpoint, not an open-work endpoint.
@@ -157,9 +165,9 @@ const InboxPage: React.FC = () => {
   /**
    * "Enquiries without an owner" is the ROUTING queue: accepted enquiries nobody has claimed. An
    * enquiry that is unowned because nobody has accepted it yet is not in that queue, but it is
-   * still unowned — the Leads list (Owner = Unassigned) and Sales today both count it. Saying
-   * "Every enquiry has an owner" over two such enquiries was a lie by omission, so the same list
-   * the Leads page reads is asked for its count and the empty state says what is really true.
+   * still unowned — the Leads list (Owner = Unassigned) and Sales today both count it. Calling the
+   * queue clear over two such enquiries was a lie by omission, so the same list the Leads page
+   * reads is asked for its count and the clear line says what is really true.
    */
   const asksForUnowned = visibleQueues.some((queue) => queue.key === 'leads-to-own');
   const unownedOpen = useQuery({
@@ -180,35 +188,29 @@ const InboxPage: React.FC = () => {
   );
   const allClear = !anyLoading && failedCount === 0 && waitingCount === 0 && unownedStillChecking === 0 && queues.length > 0;
 
+  // Null is "this tenant does not have this channel" — not zero work, no such queue here.
+  const present = queues.filter((entry) => entry.query.data !== null);
+  const withWork = present.filter((entry) => entry.query.isError || (entry.query.data?.length ?? 0) > 0);
+  const clear = present.filter((entry) => entry.query.isSuccess && entry.query.data?.length === 0);
+  const pending = present.filter((entry) => entry.query.isLoading);
+
   const refreshAll = () => queues.forEach((entry) => void entry.query.refetch());
 
+  const status = queues.length === 0
+    ? 'Your role does not have any Inbox work queues.'
+    : anyLoading
+      ? 'Checking what is waiting on you…'
+      : failedCount > 0 && waitingCount === 0
+        ? 'Some of your queues could not be read. What is shown below is not the whole picture.'
+        : waitingCount === 0
+          ? 'Nothing is waiting on you right now.'
+          : `${waitingCount} ${waitingCount === 1 ? 'thing needs' : 'things need'} you`;
+
   return (
-    <Box sx={{ p: { xs: 1, sm: 2 } }}>
-      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', rowGap: 0.5 }}>
-        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em' }}>
-          Inbox
-          {!anyLoading && queues.length > 0 && (
-            <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }}> · {waitingCount}</Box>
-          )}
-        </Typography>
-        {/* The count is in the title; the sentence is for screen readers, and shown only when it
-            says something the count cannot (a queue failed, or the role has none). */}
-        <Typography
-          variant="body2"
-          aria-live="polite"
-          sx={failedCount > 0 || queues.length === 0 ? { color: 'warning.dark', fontWeight: 600 } : visuallyHidden}
-        >
-            {queues.length === 0
-              ? 'Your role does not have any Inbox work queues.'
-              : anyLoading
-              ? 'Checking what is waiting on you…'
-              : failedCount > 0 && waitingCount === 0
-                ? 'Some of your queues could not be read. What is shown below is not the whole picture.'
-                : waitingCount === 0
-                  ? 'Nothing is waiting on you right now.'
-                  : `${waitingCount} ${waitingCount === 1 ? 'thing needs' : 'things need'} you.`}
-        </Typography>
-        <Box sx={{ flex: 1 }} />
+    <InboxFrame
+      summary={status}
+      summaryWarning={failedCount > 0 || queues.length === 0}
+      actions={(
         <Tooltip title="Refresh">
           <span>
             <IconButton aria-label="Refresh" onClick={refreshAll} disabled={queues.length === 0} sx={{ width: 36, height: 36 }}>
@@ -216,12 +218,8 @@ const InboxPage: React.FC = () => {
             </IconButton>
           </span>
         </Tooltip>
-      </Stack>
-
-      <GlanceStrip />
-
-      <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
-
+      )}
+    >
       {queues.length === 0 && (
         <Paper variant="outlined" sx={{ p: 4, borderRadius: 3, textAlign: 'center' }}>
           <Typography variant="h6" sx={{ fontWeight: 700 }}>
@@ -240,140 +238,196 @@ const InboxPage: React.FC = () => {
         </Paper>
       )}
 
-      {allClear && (
-        <Paper
-          variant="outlined"
-          sx={{ px: 2, py: 1.25, borderRadius: 2, mt: 1.5, display: 'flex', gap: 1.25, alignItems: 'center' }}
-        >
-          <ClearIcon sx={{ fontSize: 22, color: 'success.main' }} aria-hidden />
-          <Typography sx={{ fontWeight: 700 }}>You are clear.</Typography>
+      {queues.length > 0 && (
+        <Paper variant="outlined" sx={INBOX_CARD_SX}>
+          {allClear && (
+            <Stack sx={{ alignItems: 'center', gap: 1, py: 5 }}>
+              <ClearIcon sx={{ fontSize: 36, color: 'success.main' }} aria-hidden />
+              <Typography sx={{ fontWeight: 700, fontSize: '1.05rem' }}>You are clear.</Typography>
+            </Stack>
+          )}
+          {withWork.map(({ definition, query }, index) => (
+            <QueueGroup key={definition.key} definition={definition} query={query} first={index === 0} />
+          ))}
+          {pending.length > 0 && (
+            <Box
+              aria-label="Loading your queues"
+              sx={{ px: 2.5, py: 1.5, borderTop: withWork.length > 0 ? '1px solid' : 'none', borderColor: 'divider' }}
+            >
+              {[0, 1, 2].map((row) => (
+                <Skeleton key={row} variant="text" sx={{ fontSize: '1.1rem', my: 0.5, width: `${90 - row * 12}%` }} />
+              ))}
+            </Box>
+          )}
+          {clear.length > 0 && (
+            <ClearLine
+              entries={clear}
+              unownedStillChecking={unownedStillChecking}
+              divided={withWork.length > 0 || pending.length > 0 || allClear}
+            />
+          )}
         </Paper>
       )}
-
-      {/* The theme's 44px touch floor made every row a tall block; inside a dense row buttons are 30px. */}
-      <Stack spacing={1.25} sx={{ mt: 1.5, '& .MuiButton-root': { minHeight: 30, py: 0.25 } }}>
-        {queues.map(({ definition, query }) => (
-          <QueueSection
-            key={definition.key}
-            definition={definition}
-            query={query}
-            emptyOverride={definition.key === 'leads-to-own' ? unownedEmptyState(unownedStillChecking) : undefined}
-          />
-        ))}
-      </Stack>
-    </Box>
+    </InboxFrame>
   );
 };
 
 /**
- * One queue: heading with a count, up to five rows each ending in a verb, and a link to the rest.
+ * The queues at zero, on one line at the foot of the list: each is its name and a tick, and each
+ * opens the place that queue lives. Eight boxes that each said "nothing here" in their own sentence
+ * was what made this screen look like a pile — a clear queue is not work and gets no box.
  *
- * The four states are all handled here and none of them can be mistaken for another — loading is a
- * spinner, failure is an `ApiErrorNotice` with a retry, zero is a stated reason plus a button, and
- * rows are rows.
+ * "Enquiries without an owner" is the exception that is not really clear — see `unownedOpen`.
  */
-/** What a clear queue says when it is not clear at all — see `unownedOpen` above. */
-export interface EmptyStateOverride {
-  title: string;
-  message: string;
-  action: QueueDefinition['emptyAction'];
-}
-
-/**
- * The truthful empty state for "Enquiries without an owner" when the routing queue is empty but
- * unowned enquiries exist upstream of it. Undefined when there are none, so the definition's own
- * "Every enquiry has an owner" stands.
- */
-export const unownedEmptyState = (stillChecking: number): EmptyStateOverride | undefined => {
-  if (stillChecking <= 0) return undefined;
-  const noun = stillChecking === 1 ? 'enquiry is' : 'enquiries are';
-  return {
-    title: `${stillChecking} unowned ${noun} still being checked — see Documents to check`,
-    message: stillChecking === 1
-      ? 'It has no owner because nobody has accepted it yet, so it is not in the routing queue. Check the document, or open it from the unassigned list.'
-      : 'They have no owner because nobody has accepted them yet, so they are not in the routing queue. Check the documents, or open them from the unassigned list.',
-    action: { label: 'Open Documents to check', path: '/procurement/extraction/review', moduleName: 'Leads' },
-  };
+const ClearLine: React.FC<{
+  entries: QueueResult[];
+  unownedStillChecking: number;
+  divided: boolean;
+}> = ({ entries, unownedStillChecking, divided }) => {
+  const navigate = useNavigate();
+  return (
+    <Stack
+      direction="row"
+      sx={{
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 0.75,
+        px: 2.5,
+        py: 1.5,
+        bgcolor: 'action.hover',
+        borderTop: divided ? '1px solid' : 'none',
+        borderColor: 'divider',
+      }}
+    >
+      <Typography sx={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'text.secondary', mr: 1 }}>
+        Clear
+      </Typography>
+      {entries.map(({ definition }) => {
+        const headingId = `inbox-queue-${definition.key}`;
+        const note = definition.key === 'leads-to-own' ? unownedNote(unownedStillChecking) : undefined;
+        return (
+          <Box component="section" aria-labelledby={headingId} key={definition.key}>
+            <Button
+              id={headingId}
+              size="small"
+              startIcon={note
+                ? <Box component="span" aria-hidden sx={(theme) => ({ width: 8, height: 8, borderRadius: '50%', bgcolor: soonDot(theme.palette.mode) })} />
+                : <DoneIcon sx={{ fontSize: '16px !important', color: 'success.main' }} />}
+              onClick={() => navigate(note ? note.path : definition.seeAllPath)}
+              sx={{
+                color: 'text.secondary',
+                fontWeight: 600,
+                borderRadius: 99,
+                px: 1.25,
+                minHeight: 30,
+                '&:hover': { color: 'text.primary' },
+              }}
+            >
+              {definition.title}
+              {note && (
+                <Box component="span" sx={{ ml: 0.75, color: 'text.primary', fontWeight: 700 }}>
+                  · {note.label}
+                </Box>
+              )}
+            </Button>
+          </Box>
+        );
+      })}
+    </Stack>
+  );
 };
 
-const QueueSection: React.FC<{
+/**
+ * What "Enquiries without an owner" says when its routing queue is empty but unowned enquiries
+ * exist upstream of it (nobody has accepted them yet, so they are in Documents to check).
+ * Undefined when there are none, so the queue stands as clear.
+ */
+export const unownedNote = (stillChecking: number): { label: string; path: string } | undefined => {
+  if (stillChecking <= 0) return undefined;
+  return { label: `${stillChecking} still being checked`, path: '/procurement/extraction/review' };
+};
+
+/**
+ * The "closes soon" dot. The theme's warning is a rust tuned for 4.5:1 small TEXT, and beside the
+ * red "closed" dot it read as the same colour; a dot only needs 3:1, so it can be a true amber.
+ */
+const soonDot = (mode: 'light' | 'dark') => (mode === 'dark' ? '#fbbf24' : '#d97706');
+
+const QUEUE_ROW_COLUMNS = {
+  xs: 'minmax(0, 1fr) auto',
+  md: 'minmax(170px, 1fr) minmax(0, 1.4fr) minmax(170px, 1fr) 140px',
+};
+
+const QUEUE_ROW_AREAS = {
+  xs: '"ref act" "party act" "when act"',
+  md: '"ref party when act"',
+};
+
+/**
+ * One queue with work in it: a quiet heading with its count, up to five rows, and "See all".
+ *
+ * Every row is the same four columns across every queue — the reference, who it is for or from,
+ * the one fact that decides urgency, and the verb — so the eye runs down one set of edges instead
+ * of a different shape per box. Failure is an `ApiErrorNotice` with a retry and never an empty list.
+ */
+const QueueGroup: React.FC<{
   definition: QueueDefinition;
   query: UseQueryResult<InboxItem[] | null>;
-  emptyOverride?: EmptyStateOverride;
-}> = ({
-  definition,
-  query,
-  emptyOverride,
-}) => {
+  first: boolean;
+}> = ({ definition, query, first }) => {
   const navigate = useNavigate();
-  const { hasPermission } = useAuth();
   const items = query.data ?? [];
   const headingId = `inbox-queue-${definition.key}`;
 
-  // Null is "this tenant does not have this channel", which is not the same claim as "this queue
-  // is empty" and must not be dressed as one. Rendering the section's own empty state here would
-  // tell a tenant with no Email Intake that their mail is all handled.
-  if (query.data === null) return null;
-
-  const empty = emptyOverride ?? { title: definition.emptyTitle, message: definition.emptyMessage, action: definition.emptyAction };
-  const emptyActionAllowed = !empty.action.moduleName || hasPermission(empty.action.moduleName);
-
-  const title = (
-    <Typography id={headingId} component="h2" sx={{ fontWeight: 800, fontSize: '1rem', whiteSpace: 'nowrap' }}>
-      {definition.title}
-      {!query.isLoading && !query.isError && (
-        <Box component="span" className="tabular-nums" sx={{ ml: 0.75, color: items.length > 0 ? 'primary.dark' : 'text.disabled' }}>
-          {items.length}
-        </Box>
-      )}
-    </Typography>
-  );
-
-  // A clear queue is one line: its name, 0, what that means, and the one way forward.
-  if (!query.isLoading && !query.isError && items.length === 0) {
-    return (
-      <Paper
-        component="section"
-        aria-labelledby={headingId}
-        variant="outlined"
-        sx={{ borderRadius: 2, px: 2, py: 0.75, display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap', minHeight: 44 }}
-      >
-        {title}
-        <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 200 }}>
-          {empty.title}
-        </Typography>
-        {emptyActionAllowed && (
-          <Button size="small" onClick={() => navigate(empty.action.path)} sx={{ fontWeight: 700, minHeight: 30 }}>
-            {empty.action.label}
-          </Button>
-        )}
-      </Paper>
-    );
-  }
-
   return (
-    <Paper
+    <Box
       component="section"
       aria-labelledby={headingId}
-      variant="outlined"
-      sx={{ borderRadius: 2, overflow: 'hidden' }}
+      sx={{ borderTop: first ? 'none' : '1px solid', borderColor: 'divider' }}
     >
-      <Stack direction="row" spacing={1.5} sx={{ px: 2, py: 1, alignItems: 'center', justifyContent: 'space-between', bgcolor: 'action.hover' }}>
-        {title}
-        {!query.isError && items.length > 0 && (
-          <Button size="small" endIcon={<ArrowIcon />} onClick={() => navigate(definition.seeAllPath)} sx={{ fontWeight: 700, minHeight: 30 }}>
-            {definition.seeAllLabel}
+      <Stack direction="row" sx={{ alignItems: 'center', gap: 1, px: 2.5, pt: 2, pb: 0.75 }}>
+        <Typography
+          id={headingId}
+          component="h2"
+          sx={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'text.secondary' }}
+        >
+          {definition.title}
+        </Typography>
+        {!query.isError && (
+          <Box
+            component="span"
+            className="tabular-nums"
+            sx={(theme) => ({
+              fontSize: 12,
+              fontWeight: 700,
+              lineHeight: '20px',
+              minWidth: 20,
+              px: 0.75,
+              textAlign: 'center',
+              borderRadius: 99,
+              color: 'primary.dark',
+              bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.2 : 0.12),
+            })}
+          >
+            {items.length}
+          </Box>
+        )}
+        <Box sx={{ flex: 1 }} />
+        {!query.isError && (
+          <Button
+            size="small"
+            endIcon={<ArrowIcon sx={{ fontSize: '16px !important' }} />}
+            onClick={() => navigate(definition.seeAllPath)}
+            sx={{ fontWeight: 600, minHeight: 28 }}
+          >
+            {items.length > INBOX_PREVIEW_ROWS ? `See all ${items.length}` : 'See all'}
           </Button>
         )}
       </Stack>
 
-      {query.isLoading ? (
-        <Box sx={{ display: 'grid', placeItems: 'center', py: 2 }}>
-          <CircularProgress size={22} aria-label={`Loading ${definition.title}`} />
-        </Box>
-      ) : query.isError ? (
+      {query.isError ? (
         // Never an empty list on a failure: the rep would read it as a clear queue.
-        <Box sx={{ p: 1.5 }}>
+        <Box sx={{ px: 2.5, pb: 2 }}>
           <ApiErrorNotice
             error={query.error}
             context="list"
@@ -382,52 +436,75 @@ const QueueSection: React.FC<{
           />
         </Box>
       ) : (
-        <Box>
+        <Box sx={{ pb: 1 }}>
           {items.slice(0, INBOX_PREVIEW_ROWS).map((item) => (
             // The whole row is a larger mouse target; the button in it is the keyboard route.
             // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
-            <Stack
+            <Box
               key={`${definition.key}-${item.id}`}
-              direction="row"
-              spacing={1.5}
               onClick={() => navigate(item.path)}
               sx={{
-                px: 2,
-                minHeight: 44,
+                display: 'grid',
+                gridTemplateColumns: QUEUE_ROW_COLUMNS,
+                gridTemplateAreas: QUEUE_ROW_AREAS,
+                columnGap: 2,
                 alignItems: 'center',
-                borderTop: '1px solid',
-                borderColor: 'divider',
+                mx: 1,
+                px: 1.5,
+                py: { xs: 1, md: 0.25 },
+                minHeight: 42,
+                borderRadius: 2,
                 cursor: 'pointer',
+                transition: 'background-color 120ms ease',
                 '&:hover': { bgcolor: 'action.hover' },
+                '&:hover .inbox-row-action': { color: 'primary.dark' },
               }}
             >
-              <Typography noWrap sx={{ fontWeight: 700, fontSize: '0.9rem', flexShrink: 0, maxWidth: '40%' }} title={item.reference}>
+              <Typography noWrap title={item.reference} sx={{ gridArea: 'ref', fontWeight: 700, fontSize: '0.9rem', fontVariantNumeric: 'tabular-nums' }}>
                 {item.reference}
               </Typography>
-              <Typography noWrap variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 0 }}>
+              <Typography noWrap variant="body2" title={item.party} sx={{ gridArea: 'party', color: 'text.primary', minWidth: 0 }}>
                 {item.party}
-                {item.detail ? ` · ${item.detail}` : ''}
               </Typography>
+              <Stack direction="row" sx={{ gridArea: 'when', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                {item.tone && (
+                  <Box
+                    component="span"
+                    aria-hidden
+                    sx={(theme) => ({
+                      width: 7,
+                      height: 7,
+                      borderRadius: '50%',
+                      flexShrink: 0,
+                      bgcolor: item.tone === 'late' ? theme.palette.error.main : soonDot(theme.palette.mode),
+                    })}
+                  />
+                )}
+                <Typography
+                  noWrap
+                  variant="body2"
+                  sx={{
+                    color: item.tone === 'late' ? 'error.main' : item.tone === 'soon' ? 'text.primary' : 'text.secondary',
+                    fontWeight: item.tone ? 600 : 400,
+                  }}
+                >
+                  {item.detail ?? ''}
+                </Typography>
+              </Stack>
               <Button
-                variant="outlined"
+                className="inbox-row-action"
                 size="small"
+                endIcon={<ChevronIcon />}
                 onClick={(event) => { event.stopPropagation(); navigate(item.path); }}
-                sx={{ flexShrink: 0, fontWeight: 700, minHeight: 30, minWidth: 96 }}
+                sx={{ gridArea: 'act', justifySelf: 'end', fontWeight: 700, whiteSpace: 'nowrap', '&&': { minHeight: 32, py: 0.25 } }}
               >
                 {item.actionLabel}
               </Button>
-            </Stack>
-          ))}
-          {items.length > INBOX_PREVIEW_ROWS && (
-            <Box sx={{ px: 2, py: 0.5, borderTop: '1px solid', borderColor: 'divider' }}>
-              <Button size="small" endIcon={<ArrowIcon />} onClick={() => navigate(definition.seeAllPath)} sx={{ fontWeight: 700, minHeight: 30 }}>
-                {`${items.length - INBOX_PREVIEW_ROWS} more`}
-              </Button>
             </Box>
-          )}
+          ))}
         </Box>
       )}
-    </Paper>
+    </Box>
   );
 };
 
@@ -488,9 +565,7 @@ export async function loadQueue(
           id: row.id,
           reference: row.rfqno || `Document ${row.id}`,
           party: row.buyersName || 'Buyer not read yet',
-          detail:
-            deadlinePhrase(row.bidClosingDate) ??
-            (row.itemCount ? `${row.itemCount} line${row.itemCount === 1 ? '' : 's'}` : undefined),
+          ...(deadline(row.bidClosingDate) ?? { detail: lineCount(row.itemCount) }),
           path: `/procurement/extraction/review/${row.id}`,
           actionLabel: 'Check it',
           sortKey: row.bidClosingDate ?? row.receivedOn ?? row.recDate,
@@ -509,7 +584,7 @@ export async function loadQueue(
           id: row.id,
           reference: row.rfqno || `Enquiry ${row.id}`,
           party: row.customerName || row.buyersName || 'Customer not resolved',
-          detail: ageInHoursPhrase(row.unassignedHours) ?? formatDateSafe(row.acceptedDate),
+          detail: ageInHoursPhrase(row.unassignedHours) ?? dateOrNothing(row.acceptedDate),
           path: `/procurement/leads/view/${row.id}`,
           actionLabel: 'Open it',
           sortKey: row.acceptedDate,
@@ -536,7 +611,7 @@ export async function loadQueue(
           party: row.customerName || row.buyersName || 'Customer not resolved',
           detail: [
             teamScope && row.assignedToFullName ? `Assigned to ${row.assignedToFullName}` : null,
-            formatDateSafe(row.acceptedDate),
+            dateOrNothing(row.acceptedDate),
           ].filter(Boolean).join(' · ') || undefined,
           path: `/procurement/leads/${row.id}/workbench`,
           actionLabel: 'Make decision',
@@ -557,9 +632,7 @@ export async function loadQueue(
           id: row.id,
           reference: row.rfqno || `RFQ-${row.id}`,
           party: row.buyersName || 'Buyer not recorded',
-          detail:
-            deadlinePhrase(row.bidClosingDate) ??
-            (row.noOfLineItems ? `${row.noOfLineItems} line${row.noOfLineItems === 1 ? '' : 's'}` : undefined),
+          ...(deadline(row.bidClosingDate) ?? { detail: lineCount(row.noOfLineItems) }),
           path: `/procurement/rfqs/view/${row.id}`,
           actionLabel: 'Open RFQ',
           sortKey: row.bidClosingDate ?? row.recDate,
@@ -600,7 +673,7 @@ export async function loadQueue(
           id: row.id,
           reference: row.quoteNo || `Quote ${row.id}`,
           party: row.customerName || 'Customer not linked',
-          detail: row.itemCount ? `${row.itemCount} line${row.itemCount === 1 ? '' : 's'}` : undefined,
+          detail: lineCount(row.itemCount),
           path: `/sales/quotes/view/${row.id}`,
           actionLabel: 'Open quote',
           sortKey: row.quoteDate,

@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
-  Box, Typography, Paper, Button, IconButton, Stack, Tooltip, Alert,
+  Box, Typography, Paper, Button, IconButton, Tooltip, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel,
 } from '@mui/x-data-grid';
 import {
+  ChevronRight as ChevronIcon,
   Refresh as RefreshIcon,
   TaskAlt as CaughtUpIcon,
 } from '@mui/icons-material';
@@ -15,7 +16,7 @@ import extractionReviewService from '../../api/services/extractionReviewService'
 import type { NeedsReviewItem } from '../../api/services/extractionReviewService';
 import operationalReadinessService from '../../api/services/operationalReadinessService';
 import SearchField from '../../components/common/SearchField';
-import ViewTabs from '../../components/layout/ViewTabs';
+import InboxFrame, { INBOX_CARD_SX } from '../Inbox/InboxFrame';
 import { useAuth } from '../../context/AuthContext';
 import { formatDateSafe, formatRelativeReceived } from '../../utils/dates';
 
@@ -82,7 +83,7 @@ const ExtractionReviewPage: React.FC = () => {
       headerName: 'RFQ #',
       width: 170,
       renderCell: (p) => (
-        <Typography noWrap title={p.row.rfqno ?? ''} sx={{ fontWeight: 600, fontSize: '0.82rem', fontFamily: 'monospace', color: p.row.rfqno ? 'text.primary' : 'text.disabled' }}>
+        <Typography noWrap title={p.row.rfqno ?? ''} sx={{ fontWeight: 700, fontSize: '0.9rem', fontVariantNumeric: 'tabular-nums', color: p.row.rfqno ? 'text.primary' : 'text.disabled' }}>
           {p.row.rfqno || 'No RFQ # yet'}
         </Typography>
       ),
@@ -93,8 +94,8 @@ const ExtractionReviewPage: React.FC = () => {
       flex: 1,
       minWidth: 180,
       renderCell: (p) => (
-        <Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>
-          {p.row.buyersName || 'Unknown Buyer'}
+        <Typography noWrap sx={{ fontSize: '0.875rem' }}>
+          {p.row.buyersName || 'Buyer not read yet'}
         </Typography>
       ),
     },
@@ -152,7 +153,7 @@ const ExtractionReviewPage: React.FC = () => {
         if (!reason) return <Typography sx={{ color: 'text.disabled', fontSize: '0.8rem' }}>—</Typography>;
         return (
           <Tooltip title={reason}>
-            <Typography sx={{ fontSize: '0.8rem', color: 'warning.dark', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <Typography sx={{ fontSize: '0.85rem', color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {reason}
             </Typography>
           </Tooltip>
@@ -162,19 +163,19 @@ const ExtractionReviewPage: React.FC = () => {
     {
       field: 'actions',
       headerName: '',
-      width: 120,
+      width: 130,
       sortable: false,
       filterable: false,
-      align: 'center',
-      headerAlign: 'center',
+      align: 'right',
+      headerAlign: 'right',
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', height: '100%', width: '100%' }}>
           <Button
-            variant="outlined"
             size="small"
+            endIcon={<ChevronIcon />}
             onClick={(event) => { event.stopPropagation(); openReview(p.row); }}
             aria-label={`Review extraction for ${p.row.rfqno || 'document'} ${p.row.id}`}
-            sx={{ fontWeight: 700, width: 96 }}
+            sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
           >
             Check it
           </Button>
@@ -184,14 +185,10 @@ const ExtractionReviewPage: React.FC = () => {
   ];
 
   return (
-    <Box sx={{ p: 2 }}>
-      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', rowGap: 1 }}>
-        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em' }}>
-          Documents to check
-          {data && <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }}> · {totalCount}</Box>}
-        </Typography>
-        <SearchField width={320} value={search} onChange={setSearch} placeholder="Search RFQ # or buyer" />
-        <Box sx={{ flex: 1 }} />
+    <InboxFrame
+      summary={data ? `${totalCount} document${totalCount === 1 ? '' : 's'} to check` : undefined}
+      tools={<SearchField width={320} value={search} onChange={setSearch} placeholder="Search RFQ # or buyer" />}
+      actions={(
         <Tooltip title="Refresh">
           <span>
             <IconButton aria-label="Refresh" onClick={() => refetch()} disabled={isFetching} sx={{ width: 36, height: 36 }}>
@@ -199,12 +196,8 @@ const ExtractionReviewPage: React.FC = () => {
             </IconButton>
           </span>
         </Tooltip>
-      </Stack>
-
-      {/* The four intake doors — the work queue, this review queue, inbound mail and upload — as
-          one level of tabs. They were four separate rail rows under "Lead Management". */}
-      <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
-
+      )}
+    >
       {extractionDeadLetterCount > 0 && (
         <Alert
           severity="warning"
@@ -219,8 +212,7 @@ const ExtractionReviewPage: React.FC = () => {
         </Alert>
       )}
 
-      {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 196px)', minHeight: 360, width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      <Paper variant="outlined" sx={{ ...INBOX_CARD_SX, height: 'calc(100vh - 260px)', minHeight: 360, width: '100%' }}>
         {isError ? (
           <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
             <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
@@ -242,7 +234,7 @@ const ExtractionReviewPage: React.FC = () => {
             onPaginationModelChange={setPaginationModel}
             disableRowSelectionOnClick
             getRowId={(r) => r.id}
-            rowHeight={48}
+            rowHeight={46}
             columnHeaderHeight={40}
             onRowClick={(p) => openReview(p.row)}
             onCellKeyDown={(p, event) => { if (event.key === 'Enter') openReview(p.row); }}
@@ -250,7 +242,7 @@ const ExtractionReviewPage: React.FC = () => {
               border: 0,
               '& .MuiDataGrid-row': { cursor: 'pointer' },
               '& .MuiDataGrid-cell': { display: 'flex', alignItems: 'center' },
-              '& .MuiDataGrid-columnHeaderTitle': { fontWeight: 700 },
+              '& .MuiDataGrid-columnHeaderTitle': { fontWeight: 700, fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'text.secondary' },
               '& .MuiDataGrid-cell .MuiButton-root': { minHeight: 30, py: 0.25 },
             }}
             slots={{
@@ -267,7 +259,7 @@ const ExtractionReviewPage: React.FC = () => {
           />
         )}
       </Paper>
-    </Box>
+    </InboxFrame>
   );
 };
 

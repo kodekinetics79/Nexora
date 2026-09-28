@@ -186,7 +186,7 @@ test.describe.serial('Production smoke — live customer journey', () => {
     const uploadResponse = page.waitForResponse((candidate) =>
       candidate.request().method() === 'POST'
       && candidate.url().includes('/api/Extraction/upload'));
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     const upload = await uploadResponse;
     expect(upload.status(), 'governed upload is accepted for processing').toBe(202);
 
