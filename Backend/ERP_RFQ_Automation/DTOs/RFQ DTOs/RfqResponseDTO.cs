@@ -56,6 +56,12 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? AccountOwnerName { get; set; }
         public string? OpportunityOwnerName { get; set; }
         public int ItemCount { get; set; } // Optimized: Item count for list views
+        /// <summary>List view: who the RFQ's lead is assigned to.</summary>
+        public string? OwnerName { get; set; }
+        /// <summary>List view: the newest quote raised on this RFQ, and when it went to the customer.</summary>
+        public long? LatestQuoteId { get; set; }
+        public string? LatestQuoteNo { get; set; }
+        public DateTime? LatestQuoteSentOn { get; set; }
         public string Readiness => CustomerId.HasValue && LeadId.HasValue && ItemCount > 0 ? "Ready for Quote" : "Review Required";
         public List<RfqitemResponseDTO> Rfqitems { get; set; } = new List<RfqitemResponseDTO>();
     }
