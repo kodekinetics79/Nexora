@@ -307,10 +307,14 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = QuoteLineTaxCategories.Normalize(i.TaxCategory),
                     TaxCategoryReason = i.TaxCategoryReason?.Trim(),
                     DeliveryLeadTime = i.DeliveryLeadTime,
+                    CustomerMaterialCode = QuoteItem.Clean(i.CustomerMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                    ManufacturerName = QuoteItem.Clean(i.ManufacturerName, QuoteItem.MaxManufacturerName),
+                    ManufacturerPartNumber = QuoteItem.Clean(i.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                     CreatedBy = Actor(request.CreatedBy),
                     CreatedDate = DateTime.UtcNow
                 }).ToList()
             };
+            await CarryBuyerIdentityFromRfqLinesAsync(quote.QuoteItems, request.BusinessUnitId);
 
             // The controller validates access and customer consistency; the service owns the
             // atomic persistence invariant. Every RFQ-origin quote therefore receives the case
@@ -550,6 +554,9 @@ namespace ERP_RFQ_Automation.Services
                     }).ToList()
                 };
                 quote.InheritCommercialIdentity(rfq);
+                // The buyer's material number, maker and part number travel with the line (UX-03).
+                foreach (var line in quote.QuoteItems)
+                    line.CarryBuyerIdentityFrom(markedForQuote.FirstOrDefault(item => item.Id == line.RfqitemId));
                 _context.Quotes.Add(quote);
                 await _context.SaveChangesAsync(ct);
                 await transaction.CommitAsync(ct);
@@ -777,6 +784,9 @@ namespace ERP_RFQ_Automation.Services
                 if (line.Quantity <= 0m) throw new InvalidOperationException("This RFQ line has no quantity to quote.");
                 quote.QuoteItems.Add(line);
             }
+            // New lines take the buyer's material number, maker and part number; a line made
+            // before those columns existed is filled now, and one that has them keeps them.
+            line.CarryBuyerIdentityFrom(rfqLine, onlyWhenMissing: true);
             if (quote.CurrencyId is null && currencyId is not null)
             {
                 var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId, ct);
@@ -838,6 +848,27 @@ namespace ERP_RFQ_Automation.Services
             if (unlinked.Count != 1) return null;
             unlinked[0].RfqitemId = rfqLine.Id;
             return unlinked[0];
+        }
+
+        /// <summary>
+        /// Fills the buyer's material number, maker and maker part number on every line that points
+        /// at an RFQ line and does not carry them yet. Tenant-scoped through the RFQ, so a line id
+        /// from another tenant resolves to nothing rather than to someone else's part.
+        /// </summary>
+        private async Task CarryBuyerIdentityFromRfqLinesAsync(IEnumerable<QuoteItem> lines, long businessUnitId)
+        {
+            var wanting = lines.Where(line => line.RfqitemId is not null
+                    && (string.IsNullOrWhiteSpace(line.CustomerMaterialCode)
+                        || string.IsNullOrWhiteSpace(line.ManufacturerName)
+                        || string.IsNullOrWhiteSpace(line.ManufacturerPartNumber)))
+                .ToList();
+            if (wanting.Count == 0) return;
+            var ids = wanting.Select(line => line.RfqitemId!.Value).Distinct().ToList();
+            var rfqLines = await _context.Rfqitems.AsNoTracking()
+                .Where(item => ids.Contains(item.Id) && item.Rfq.BusinessUnitId == businessUnitId)
+                .ToDictionaryAsync(item => item.Id);
+            foreach (var line in wanting)
+                line.CarryBuyerIdentityFrom(rfqLines.GetValueOrDefault(line.RfqitemId!.Value), onlyWhenMissing: true);
         }
 
         public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
@@ -933,6 +964,13 @@ namespace ERP_RFQ_Automation.Services
                                 ? existingItem.TaxCategoryReason
                                 : itemDto.TaxCategoryReason?.Trim();
                             existingItem.DeliveryLeadTime = itemDto.DeliveryLeadTime;
+                            // Preserve-when-absent, like the unit and line reference above.
+                            existingItem.CustomerMaterialCode = QuoteItem.Clean(itemDto.CustomerMaterialCode, QuoteItem.MaxCustomerMaterialCode)
+                                ?? existingItem.CustomerMaterialCode;
+                            existingItem.ManufacturerName = QuoteItem.Clean(itemDto.ManufacturerName, QuoteItem.MaxManufacturerName)
+                                ?? existingItem.ManufacturerName;
+                            existingItem.ManufacturerPartNumber = QuoteItem.Clean(itemDto.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber)
+                                ?? existingItem.ManufacturerPartNumber;
                             existingItem.ModifiedBy = request.ModifiedBy;
                             existingItem.ModifiedDate = DateTime.UtcNow;
                         }
@@ -955,12 +993,16 @@ namespace ERP_RFQ_Automation.Services
                         TaxCategory = QuoteLineTaxCategories.Normalize(itemDto.TaxCategory),
                         TaxCategoryReason = itemDto.TaxCategoryReason?.Trim(),
                         DeliveryLeadTime = itemDto.DeliveryLeadTime,
+                        CustomerMaterialCode = QuoteItem.Clean(itemDto.CustomerMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                        ManufacturerName = QuoteItem.Clean(itemDto.ManufacturerName, QuoteItem.MaxManufacturerName),
+                        ManufacturerPartNumber = QuoteItem.Clean(itemDto.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                         CreatedBy = request.ModifiedBy,
                         CreatedDate = DateTime.UtcNow
                     });
                 }
             }
 
+            await CarryBuyerIdentityFromRfqLinesAsync(quote.QuoteItems, quote.BusinessUnitId);
             await CalculateQuoteTotals(quote);
 
             await _context.SaveChangesAsync();
@@ -1017,6 +1059,12 @@ namespace ERP_RFQ_Automation.Services
             for (var index = 0; index < items.Count; index++)
             {
                 var item = items[index];
+
+                // D-11 / CB-10: the unit price is stored at the scale it is printed at, so the
+                // buyer's "qty x unit price" on paper is the line total on paper. A 6-decimal price
+                // printed as 2,338.54 against a total built from 2,338.541625 read 12 x 2,338.54 =
+                // 28,062.50, and an Ariba portal that recomputes the extended price drifted from it.
+                item.UnitPrice = RoundUnitPrice(item.UnitPrice);
 
                 // FIN-09: round the gross line value to currency scale before applying discount.
                 decimal itemTotal = RoundCurrency(item.Quantity * item.UnitPrice);
@@ -1175,6 +1223,16 @@ namespace ERP_RFQ_Automation.Services
         // Rounds a monetary value to the 2-decimal currency scale used on printed documents
         // (FIN-09). Half-away-from-zero matches standard commercial/accounting rounding.
         private static decimal RoundCurrency(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+        /// <summary>
+        /// A customer unit price at the currency scale it is printed at (D-11). A positive price
+        /// below half a halala is left as it is rather than turned into a zero price.
+        /// </summary>
+        internal static decimal RoundUnitPrice(decimal unitPrice)
+        {
+            var rounded = Math.Round(unitPrice, 2, MidpointRounding.AwayFromZero);
+            return rounded == 0m && unitPrice > 0m ? unitPrice : rounded;
+        }
 
         /// <summary>
         /// Deterministic line order for every read surface (PDF + DTO): lines carrying the
@@ -1562,6 +1620,10 @@ namespace ERP_RFQ_Automation.Services
                     PricingNote = i.PricingNote,
                     OfferedNote = i.OfferedNote,
                     OfferedSpecs = i.OfferedSpecs,
+                    // What the quote itself carries and prints (QuoteItem.BuyerIdentity).
+                    CustomerMaterialCode = i.CustomerMaterialCode,
+                    ManufacturerName = i.ManufacturerName,
+                    ManufacturerPartNumber = i.ManufacturerPartNumber,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
                     RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
@@ -1668,14 +1730,20 @@ namespace ERP_RFQ_Automation.Services
 
             string logoBase64 = config?.Logo;
             string primaryColor = config?.PrimaryColor ?? "#1e3a8a";
-            string termsContent = config?.TermsAndConditions ??
-                                "1. Prices are valid for 30 days from the date of the quote.\n" +
-                                "2. Payment terms: Net 30 days from invoice date.\n" +
-                                "3. Delivery dates are estimates and subject to confirmation.\n" +
-                                "4. All products remain the property of the seller until fully paid.\n" +
-                                "5. Any applicable taxes or duties are not included unless specified.\n" +
-                                "6. Warranty and liability are as per the manufacturer's standard terms.\n" +
-                                "7. This quote is confidential and intended solely for the recipient.";
+            // CB-01 / UX-02 / D-12. The terms the buyer reads first are GENERATED from this quote
+            // (QuoteDocumentText.CommercialTerms), so they cannot contradict its validity date or its
+            // VAT line. The tenant's own text prints after them as "Additional terms"; the stock seven
+            // clauses every tenant was seeded with ("valid for 30 days", "taxes not included", "Net
+            // 30") count as none. There is no hard-coded fallback any more: a tenant with no terms
+            // prints only what its quote states.
+            string? additionalTerms = QuoteDocumentText.AdditionalTerms(config?.TermsAndConditions);
+
+            // P0 #3: the rep's own "Notes to customer" field now reaches the buyer. The internal
+            // draft marker ("Commercial Review Required: …") never does.
+            string? buyerNotes = QuoteDocumentText.BuyerNotes(quote.HeaderRemarks);
+
+            // Signer (quote owner) and the quotation this one replaces (CB-06, CB-12).
+            var facts = await LoadDocumentFactsAsync(quote, config?.CompanyPhone, ct);
 
             // THE ISSUER, read from the tenant's own records and nowhere else — the same rule the
             // delivery note already operates under (DeliveryNoteReadService.IssuerIdentity): every
@@ -1764,14 +1832,25 @@ namespace ERP_RFQ_Automation.Services
                 ? $" {decimal.Round(appliedRates[0], 2).ToString("0.##")}%"
                 : string.Empty;
 
-            // The buyer's own RFQ number: Lead.Rfqno is the value the customer sent us;
-            // Rfq.Rfqno equals it when it existed and is a synthetic internal serial otherwise,
-            // so it is only a fallback. A procurement buyer files our quote under THEIR number.
-            string customerRfqReference = quote.Rfq?.Lead?.Rfqno ?? quote.Rfq?.Rfqno;
+            // The buyer's own RFQ number, from one source for the PDF and the e-mail (CB-14):
+            // never Rfq.Rfqno, which is Nexora's serial when the buyer gave none. "—" when unknown,
+            // so the line is visibly empty rather than filled with our number.
+            string customerRfqReference = QuoteDocumentText.BuyerRfqReference(quote) ?? QuoteDocumentText.UnknownReference;
 
             // Deterministic print order: buyer's line references first (numeric-aware), then
             // unreferenced lines by insertion order. See OrderQuoteLines.
             var orderedItems = OrderQuoteLines(quote.QuoteItems);
+
+            var deliveryPlace = QuoteDocumentText.DeliveryPlace(quote);
+            var commercialTerms = QuoteDocumentText.CommercialTerms(quote.ValidUntil, currencyCode, orderedItems,
+                deliveryPlace, supersedesQuoteNo: facts.SupersedesQuoteNo, supersedesDate: facts.SupersedesDate);
+            var supersedes = string.IsNullOrWhiteSpace(facts.SupersedesQuoteNo) ? null
+                : facts.SupersedesDate is DateTime supersededOn
+                    ? $"{facts.SupersedesQuoteNo} dated {QuoteDocumentText.Date(supersededOn)}"
+                    : facts.SupersedesQuoteNo;
+            var signerLine = string.IsNullOrWhiteSpace(facts.SignerName)
+                ? "Name: ______________________________"
+                : string.IsNullOrWhiteSpace(facts.SignerTitle) ? facts.SignerName! : $"{facts.SignerName}, {facts.SignerTitle}";
 
             QuestPDF.Settings.License = LicenseType.Community;
 
@@ -1788,7 +1867,7 @@ namespace ERP_RFQ_Automation.Services
                     page.Header().Column(col =>
                     {
                         col.Item().Height(3).Background(primaryColor);
-                        col.Item().PaddingBottom(20).PaddingTop(20).Row(row =>
+                        col.Item().PaddingBottom(12).PaddingTop(12).Row(row =>
                         {
                             // Company Info (Left)
                             row.RelativeItem().Column(c =>
@@ -1840,8 +1919,9 @@ namespace ERP_RFQ_Automation.Services
                                 });
                             });
 
-                            // Quote Info (Right)
-                            row.ConstantItem(180).AlignRight().Column(c =>
+                            // Quote Info (Right). 220 wide so a buyer reference such as
+                            // "AJP-RFQ-2026-0917" does not wrap mid-number (CB-23).
+                            row.ConstantItem(220).AlignRight().Column(c =>
                             {
                                 c.Item().Text("QUOTATION")
                                     .FontSize(22).ExtraBold().FontColor(Colors.Grey.Lighten2);
@@ -1850,8 +1930,10 @@ namespace ERP_RFQ_Automation.Services
                                 {
                                     info.Spacing(2);
                                     info.Item().Text(t => { t.Span("Reference No: ").SemiBold(); t.Span(quote.QuoteNo); });
-                                    if (!string.IsNullOrWhiteSpace(customerRfqReference))
-                                        info.Item().Text(t => { t.Span("Your RFQ Reference: ").SemiBold(); t.Span(customerRfqReference); });
+                                    // CB-12: a revision says which offer it withdraws.
+                                    if (supersedes is not null)
+                                        info.Item().Text(t => { t.Span("Supersedes: ").SemiBold(); t.Span(supersedes); });
+                                    info.Item().Text(t => { t.Span("Your RFQ Reference: ").SemiBold(); t.Span(customerRfqReference); });
                                     info.Item().Text(t => { t.Span("Quote Date: ").SemiBold(); t.Span($"{quote.QuoteDate:MMM dd, yyyy}"); });
                                     info.Item().Text(t => { t.Span("Valid Until: ").SemiBold(); t.Span($"{quote.ValidUntil:MMM dd, yyyy}"); });
                                 });
@@ -1864,7 +1946,9 @@ namespace ERP_RFQ_Automation.Services
                     // 2. Content
                     page.Content().PaddingVertical(10).Column(col =>
                     {
-                        col.Spacing(30);
+                        // Tight enough that a short quote, with its terms and the signature block
+                        // every page now carries, still fits on one page.
+                        col.Spacing(16);
 
                         // Address Section
                         col.Item().Row(row =>
@@ -1892,19 +1976,12 @@ namespace ERP_RFQ_Automation.Services
 
                             row.ConstantItem(30); // Gap
 
-                            // The shipping address falls back to billing as a WHOLE, never field by
-                            // field: a shipping street paired with a billing city is an address
-                            // nobody has.
-                            var hasShipping = !string.IsNullOrWhiteSpace(customer?.ShippingAddressLine1)
-                                || !string.IsNullOrWhiteSpace(customer?.ShippingCity)
-                                || !string.IsNullOrWhiteSpace(customer?.ShippingCountry);
-                            AddressBlock("SHIP TO",
-                                customer?.Name ?? "Customer",
-                                hasShipping
-                                    ? AddressLines(customer?.ShippingAddressLine1, customer?.ShippingAddressLine2,
-                                        customer?.ShippingCity, customer?.ShippingCountry)
-                                    : AddressLines(customer?.BillingAddressLine1, customer?.BillingAddressLine2,
-                                        customer?.BillingCity, customer?.BillingCountry));
+                            // HT-10: the delivery point the buyer named on THIS enquiry ("SEC Materials
+                            // East Plant"), then the customer's shipping address, then billing — each
+                            // as a WHOLE, never field by field (a shipping street with a billing city
+                            // is an address nobody has).
+                            AddressBlock("SHIP TO", customer?.Name ?? "Customer",
+                                QuoteDocumentText.ShipToLines(deliveryPlace, customer));
                         });
 
                         // Items Table
@@ -1928,8 +2005,8 @@ namespace ERP_RFQ_Automation.Services
                                 header.Cell().Element(CellStyle).Text("Description");
                                 header.Cell().Element(CellStyle).AlignRight().Text("Qty");
                                 header.Cell().Element(CellStyle).Text("UOM");
-                                header.Cell().Element(CellStyle).AlignRight().Text("Unit Price");
-                                header.Cell().Element(CellStyle).AlignRight().Text("Total");
+                                header.Cell().Element(CellStyle).AlignRight().Text($"Unit Price ({currencyCode})");
+                                header.Cell().Element(CellStyle).AlignRight().Text($"Total ({currencyCode})");
                             });
 
                             foreach (var item in orderedItems.Select((x, i) => new { x, i }))
@@ -1945,6 +2022,11 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
+                                    // UX-03 / CB-08: what the BUYER calls this line, so their
+                                    // evaluator can match it to their material and part.
+                                    if (QuoteDocumentText.BuyerIdentityLine(item.x.CustomerMaterialCode, item.x.ManufacturerName,
+                                            item.x.ManufacturerPartNumber, item.x.ItemDescription) is { } buyerIdentity)
+                                        c.Item().Text(buyerIdentity).FontSize(8).FontColor(Colors.Grey.Darken2);
                                     if (!string.IsNullOrWhiteSpace(item.x.OfferedNote))
                                         c.Item().Text(item.x.OfferedNote).FontSize(8).SemiBold().FontColor(Colors.Blue.Darken2);
                                     if (!string.IsNullOrWhiteSpace(item.x.OfferedSpecs))
@@ -1966,13 +2048,14 @@ namespace ERP_RFQ_Automation.Services
                                     if (item.x.Discount > 0)
                                         c.Item().Text($"Discount: {quote.Currency?.Code} {item.x.Discount:N2}").FontSize(8).Italic().FontColor(Colors.Red.Medium);
                                 });
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
+                                // CB-11: 2.5 M prints as 2.5, not 3.
+                                table.Cell().Element(RowStyle).AlignRight().Text(QuoteDocumentText.QuantityText(item.x.Quantity));
                                 table.Cell().Element(RowStyle).Text(item.x.UnitOfMeasure ?? string.Empty);
                                 var unpricedByChoice = QuoteLinePricing.IsUnpricedByChoice(item.x.PricingStatus);
                                 table.Cell().Element(RowStyle).AlignRight().Text(
                                     item.x.PricingStatus == QuoteLinePricing.ToFollow ? "To follow"
                                     : item.x.PricingStatus == QuoteLinePricing.NotQuoted ? "Not quoted"
-                                    : item.x.UnitPrice.ToString("N2"));
+                                    : QuoteDocumentText.UnitPriceText(item.x.UnitPrice));
                                 // The line's own consideration, tax EXCLUDED. The stored TotalAmount
                                 // carries the line's tax inside it (calculation version 2), so
                                 // printing it here put VAT in the line column and then added the
@@ -1982,78 +2065,96 @@ namespace ERP_RFQ_Automation.Services
                             }
                         });
 
-                        // Lower Section: Terms and Financials
-                        col.Item().Row(row =>
+                        // Totals, directly under the lines they add up. Read top to bottom this is
+                        // the arithmetic itself: gross, what came off it, the net the tax is charged
+                        // on, the tax, then the grand total (CB-09: the rows used to be written to
+                        // the OUTER column, after the grand-total bar, so the total printed above its
+                        // own arithmetic). Kept on one page, so "VAT 15%" never sits alone on the
+                        // next one. No currency fallback: the gate above refuses a quote without one.
+                        col.Item().PreventPageBreak().AlignRight().Width(270).Column(totals =>
                         {
-                            // Terms (Left)
-                            row.RelativeItem(1.5f).Column(c =>
+                            void FinancialRow(string label, decimal value)
                             {
-                                c.Item().PaddingTop(10).Text("Terms & Conditions").Bold().FontSize(10).FontColor(primaryColor);
-                                c.Item().PaddingTop(5).Text(termsContent).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
-                                if (orderedItems.Any(x => x.DeliveryLeadTime == 0 || x.ExStockQuantity > 0))
-                                    c.Item().PaddingTop(5).Text("Items marked ex stock are offered subject to prior sale. Stock is held for you once we receive your purchase order.").FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
-
-                                c.Item().PaddingTop(30).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
-                            });
-
-                            row.ConstantItem(40);
-
-                            // Financials (Right)
-                            row.RelativeItem(1f).Column(c =>
-                            {
-                                // No fallback. This used to be `quote.Currency?.Code ?? "USD"`,
-                                // which printed a US-dollar grand total on every currency-less
-                                // quote — a 3.75x misstatement of a SAR price. The gate above now
-                                // refuses the document instead, so currencyCode is never blank here.
-                                var currency = currencyCode;
-
-                                void FinancialRow(string label, decimal value, bool isTotal = false)
+                                totals.Item().PaddingVertical(3).Row(r =>
                                 {
-                                    c.Item().PaddingVertical(isTotal ? 8 : 3).Row(r =>
-                                    {
-                                        var text = r.RelativeItem().Text(label).FontSize(isTotal ? 11 : 9);
-                                        if (isTotal) text.Bold();
-
-                                        var valueText = r.RelativeItem().AlignRight().Text($"{currency} {value:N2}").FontSize(isTotal ? 12 : 9);
-                                        if (isTotal) valueText.Bold();
-                                    });
-                                }
-
-                                c.Item().PaddingTop(10).Column(inner =>
-                                {
-                                    // Read top to bottom this is the arithmetic itself: gross, what
-                                    // came off it, the net the tax is charged on, the tax, the total.
-                                    // "Total excluding VAT" is the line column's own sum, so a buyer
-                                    // can add up the page and arrive here.
-                                    FinancialRow("Subtotal", subTotal);
-                                    if (totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
-                                    if (headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
-                                    FinancialRow("Total excluding VAT", netExcludingTax);
-                                    if (totalTax > 0) FinancialRow($"VAT{taxRateLabel}", totalTax);
-
-                                    inner.Item().PaddingVertical(5).LineHorizontal(1).LineColor(Colors.Grey.Lighten3);
-
-                                    inner.Item().Background(primaryColor).Padding(10).Row(r =>
-                                    {
-                                        r.RelativeItem().Text("GRAND TOTAL").FontSize(12).Bold().FontColor(Colors.White);
-                                        r.RelativeItem().AlignRight().Text($"{currency} {(quote.TotalAmount ?? 0):N2}").FontSize(14).Bold().FontColor(Colors.White);
-                                    });
+                                    r.RelativeItem().Text(label).FontSize(9);
+                                    r.RelativeItem().AlignRight().Text($"{currencyCode} {value:N2}").FontSize(9);
                                 });
+                            }
+
+                            FinancialRow("Subtotal", subTotal);
+                            if (totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
+                            if (headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
+                            // "Total excluding VAT" is the line column's own sum, so a buyer can add
+                            // up the page and arrive here.
+                            FinancialRow("Total excluding VAT", netExcludingTax);
+                            if (totalTax > 0) FinancialRow($"VAT{taxRateLabel}", totalTax);
+
+                            totals.Item().PaddingVertical(5).LineHorizontal(1).LineColor(Colors.Grey.Lighten3);
+
+                            totals.Item().Background(primaryColor).Padding(10).Row(r =>
+                            {
+                                r.RelativeItem().Text("GRAND TOTAL").FontSize(12).Bold().FontColor(Colors.White);
+                                r.RelativeItem().AlignRight().Text($"{currencyCode} {(quote.TotalAmount ?? 0):N2}").FontSize(14).Bold().FontColor(Colors.White);
                             });
+                        });
+
+                        // Terms. First what THIS quote states (generated, CB-01), then the rep's
+                        // notes (P0 #3), then the tenant's own clauses as "Additional terms".
+                        // Each heading stays with its text (PreventPageBreak), so "Notes" never
+                        // closes one page with its words on the next.
+                        col.Item().Column(c =>
+                        {
+                            c.Item().PreventPageBreak().Column(section =>
+                            {
+                                section.Item().Text("Commercial terms").Bold().FontSize(10).FontColor(primaryColor);
+                                for (var index = 0; index < commercialTerms.Count; index++)
+                                    section.Item().PaddingTop(3).Text($"{index + 1}. {commercialTerms[index]}").FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken2);
+                            });
+
+                            if (buyerNotes is not null)
+                                c.Item().PaddingTop(10).PreventPageBreak().Column(section =>
+                                {
+                                    section.Item().Text("Notes").Bold().FontSize(10).FontColor(primaryColor);
+                                    section.Item().PaddingTop(3).Text(buyerNotes).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken2);
+                                });
+
+                            if (additionalTerms is not null)
+                                c.Item().PaddingTop(10).PreventPageBreak().Column(section =>
+                                {
+                                    section.Item().Text("Additional terms").Bold().FontSize(10).FontColor(primaryColor);
+                                    section.Item().PaddingTop(3).Text(additionalTerms).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
+                                });
+
+                            c.Item().PaddingTop(12).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
                         });
                     });
 
-                    // 3. Footer
-                    page.Footer().PaddingTop(20).Column(col =>
+                    // 3. Footer. The signature and stamp block sits on EVERY page, because every
+                    // page of a quotation carries prices and Marafiq-type buyers reject a proposal
+                    // whose price pages are not signed and stamped (CB-06).
+                    page.Footer().PaddingTop(8).Column(col =>
                     {
-                        col.Item().LineHorizontal(0.5f).LineColor(Colors.Grey.Lighten2);
-                        col.Item().PaddingTop(10).Row(row =>
+                        col.Item().Row(row =>
                         {
+                            row.RelativeItem().Column(sign =>
+                            {
+                                sign.Spacing(2);
+                                sign.Item().Text($"For and on behalf of {sellerLegalName}").FontSize(8).SemiBold();
+                                sign.Item().Text(signerLine).FontSize(8);
+                                sign.Item().PaddingTop(10).Text("Authorised signature: ______________________     Date: ______________").FontSize(8);
+                            });
+                            row.ConstantItem(130).Height(46).Border(0.75f).BorderColor(Colors.Grey.Lighten1)
+                                .AlignCenter().AlignMiddle().Text("Company stamp").FontSize(7).FontColor(Colors.Grey.Medium);
+                        });
+                        col.Item().PaddingTop(6).LineHorizontal(0.5f).LineColor(Colors.Grey.Lighten2);
+                        col.Item().PaddingTop(4).Row(row =>
+                        {
+                            // CB-21: who prepared it, not "Generated by System" at a server-local time.
                             row.RelativeItem().Text(x =>
                             {
-                                x.Span("Generated by ").FontSize(8).FontColor(Colors.Grey.Medium);
-                                x.Span("System").FontSize(8).SemiBold().FontColor(Colors.Grey.Medium);
-                                x.Span($" | {DateTime.Now:MMMM dd, yyyy HH:mm}").FontSize(8).FontColor(Colors.Grey.Medium);
+                                if (!string.IsNullOrWhiteSpace(facts.SignerName))
+                                    x.Span($"Prepared by {facts.SignerName}").FontSize(8).FontColor(Colors.Grey.Medium);
                             });
 
                             row.RelativeItem().AlignRight().Text(x =>
@@ -2261,30 +2362,69 @@ namespace ERP_RFQ_Automation.Services
         /// CustomerRfqReference is the buyer's OWN number for the enquiry; it matters more than
         /// ours, because it is how they match this quote to the request they raised.</para>
         /// </summary>
-        internal static (string Subject, string PlainBody) ComposeDefaultQuoteEmail(Quote quote)
+        internal static (string Subject, string PlainBody) ComposeDefaultQuoteEmail(Quote quote, QuoteDocumentFacts? facts = null)
+            => QuoteDocumentText.Email(quote, facts ?? QuoteDocumentFacts.None);
+
+        /// <summary>
+        /// The facts the PDF and the e-mail both print that live outside the quote row: the signer
+        /// (the quote's owner — name, and the role name as a title unless it is an administrator
+        /// role, which is not a job title), the company phone as the contact number, and the
+        /// quotation this revision replaces with the date the buyer received it.
+        /// </summary>
+        internal async Task<QuoteDocumentFacts> LoadDocumentFactsAsync(Quote quote, string? companyPhone,
+            CancellationToken ct = default)
         {
-            var subject = $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
-
-            var greetingName = quote.Customer?.Name;
-            var greeting = string.IsNullOrWhiteSpace(greetingName) ? "Dear Customer" : $"Dear {greetingName}";
-
-            var facts = new List<string> { $"Please find attached our quotation #{quote.QuoteNo}." };
-            if (!string.IsNullOrWhiteSpace(quote.Rfq?.CustomerRfqReference))
-                facts.Add($"Your reference: {quote.Rfq!.CustomerRfqReference}");
-            if (quote.TotalAmount is decimal total && !string.IsNullOrWhiteSpace(quote.Currency?.Code))
-                facts.Add($"Total: {quote.Currency!.Code} {total:N2}");
-            if (quote.ValidUntil is DateTime validUntil)
-                facts.Add($"Valid until: {validUntil:d MMMM yyyy}");
-
-            var body = string.Join("\n\n", new[]
+            string? signerName = null, signerTitle = null, signerEmail = null;
+            if (quote.OwnerUserId is long ownerId)
             {
-                $"{greeting},",
-                string.Join("\n", facts),
-                "If anything here needs revisiting, reply to this message and we will pick it up.",
-                $"Kind regards,\n{quote.BusinessUnit?.BusinessUnitName}"
-            });
-            return (subject, body);
+                var owner = await _context.Users.AsNoTracking()
+                    .Where(user => user.Id == ownerId && user.Buid == quote.BusinessUnitId)
+                    .Select(user => new
+                    {
+                        user.FirstName, user.LastName, user.Email,
+                        RoleCode = user.Role != null ? user.Role.SetupCode : null,
+                        RoleName = user.Role != null ? user.Role.SetupValue : null
+                    })
+                    .FirstOrDefaultAsync(ct);
+                if (owner is not null)
+                {
+                    var name = $"{owner.FirstName} {owner.LastName}".Trim();
+                    signerName = name.Length == 0 ? null : name;
+                    signerTitle = SignerTitle(owner.RoleCode, owner.RoleName);
+                    signerEmail = string.IsNullOrWhiteSpace(owner.Email) ? null : owner.Email.Trim();
+                }
+            }
+
+            string? supersedesNo = null;
+            DateTime? supersedesOn = null;
+            if (quote.RevisionOfQuoteId is long previousId)
+            {
+                var previous = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.Id == previousId && q.BusinessUnitId == quote.BusinessUnitId)
+                    .Select(q => new { q.QuoteNo, q.SentOn, q.QuoteDate })
+                    .FirstOrDefaultAsync(ct);
+                supersedesNo = previous?.QuoteNo;
+                supersedesOn = previous?.SentOn ?? previous?.QuoteDate;
+            }
+
+            return new QuoteDocumentFacts(signerName, signerTitle, signerEmail,
+                string.IsNullOrWhiteSpace(companyPhone) ? null : companyPhone.Trim(), supersedesNo, supersedesOn);
         }
+
+        private async Task<QuoteDocumentFacts> LoadEmailFactsAsync(Quote quote, CancellationToken ct = default)
+        {
+            var companyPhone = await _context.QuoteConfigurations.AsNoTracking()
+                .Where(x => x.BusinessUnitId == quote.BusinessUnitId)
+                .Select(x => x.CompanyPhone)
+                .FirstOrDefaultAsync(ct);
+            return await LoadDocumentFactsAsync(quote, companyPhone, ct);
+        }
+
+        internal static string? SignerTitle(string? roleCode, string? roleName) =>
+            string.IsNullOrWhiteSpace(roleName)
+            || (roleCode?.Contains("ADMIN", StringComparison.OrdinalIgnoreCase) ?? false)
+                ? null
+                : roleName.Trim();
 
         /// <summary>
         /// Plain text → the HTML the mail carries: blank lines become paragraphs, single line
@@ -2313,11 +2453,13 @@ namespace ERP_RFQ_Automation.Services
                 .Include(q => q.BusinessUnit)
                 .Include(q => q.Currency)
                 .Include(q => q.Customer)
+                .Include(q => q.QuoteItems)
                 .Include(q => q.Rfq)
+                    .ThenInclude(r => r.Lead)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
                 ?? throw new KeyNotFoundException("Quote not found");
 
-            var composed = ComposeDefaultQuoteEmail(quote);
+            var composed = ComposeDefaultQuoteEmail(quote, await LoadEmailFactsAsync(quote, ct));
             // No address on the customer's record: offer the one their last quote actually went to,
             // so the rep does not retype it for every quote and every revision.
             var recipient = string.IsNullOrWhiteSpace(quote.Customer?.ContactEmail) ? null : quote.Customer!.ContactEmail!.Trim();
@@ -2356,6 +2498,7 @@ namespace ERP_RFQ_Automation.Services
                 // note, not a quotation.
                 .Include(q => q.Currency)
                 .Include(q => q.Customer)
+                .Include(q => q.QuoteItems) // the ex-VAT / VAT / incl. VAT figures in the body (CB-17)
                 .Include(q => q.Rfq)
                     .ThenInclude(r => r.Lead)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
@@ -2420,7 +2563,7 @@ namespace ERP_RFQ_Automation.Services
             // whatever goes out (PlainTextToHtml), so the draft the rep reviews in the send dialog
             // IS the mail the customer receives — edited or not. A blank custom field means "use
             // the default", which is what the callers that post no body at all rely on.
-            var composed = ComposeDefaultQuoteEmail(quote);
+            var composed = ComposeDefaultQuoteEmail(quote, await LoadEmailFactsAsync(quote));
             var subject = !string.IsNullOrWhiteSpace(customSubject) ? customSubject.Trim() : composed.Subject;
             var body = PlainTextToHtml(!string.IsNullOrWhiteSpace(customBody) ? customBody : composed.PlainBody);
 
@@ -2851,6 +2994,14 @@ namespace ERP_RFQ_Automation.Services
                         : OfferedPartKinds.Sentence(i.Rfqitem.OfferedKind, i.Rfqitem.OfferedMakerName, i.Rfqitem.OfferedPartNumber,
                             i.Rfqitem.ManufacturerPartNumber, i.Rfqitem.OfferedNote),
                     OfferedSpecs = i.Rfqitem is null ? i.OfferedSpecs : i.Rfqitem.OfferedSpecs,
+                    // What the buyer calls the line stays what the sent quote said it was; only a
+                    // line that never carried it is filled from its RFQ line.
+                    CustomerMaterialCode = i.CustomerMaterialCode
+                        ?? QuoteItem.Clean(i.Rfqitem?.ItemMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                    ManufacturerName = i.ManufacturerName
+                        ?? QuoteItem.Clean(i.Rfqitem?.ManufacturerName, QuoteItem.MaxManufacturerName),
+                    ManufacturerPartNumber = i.ManufacturerPartNumber
+                        ?? QuoteItem.Clean(i.Rfqitem?.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                     CreatedBy = actor,
                     CreatedDate = now
                 }).ToList()

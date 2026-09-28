@@ -15442,6 +15442,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<string>("CustomerMaterialCode")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
                     b.Property<int?>("DeliveryLeadTime")
                         .HasColumnType("integer");
 
@@ -15481,6 +15485,14 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<string>("ItemDescription")
                         .HasColumnType("text");
+
+                    b.Property<string>("ManufacturerName")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<string>("ManufacturerPartNumber")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
 
                     b.Property<string>("ModifiedBy")
                         .HasMaxLength(255)

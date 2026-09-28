@@ -188,8 +188,9 @@ public sealed class QuoteDraftHandoffTests
         var text = PdfText(pdf);
         Assert.Contains("Legacy line one", text);
         Assert.Contains("Legacy line two", text);
-        // No buyer reference exists, so no customer RFQ header line is invented.
-        Assert.DoesNotContain("Your RFQ Reference", text);
+        // No buyer reference exists. The line prints visibly empty ("—") rather than being filled
+        // with a number that is not the buyer's (pilot audit CB-14).
+        Assert.Contains("Your RFQ Reference: —", text);
     }
 
     /// <summary>

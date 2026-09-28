@@ -157,6 +157,21 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public string? DiscountTypeName { get; set; }
         public decimal? DiscountValue { get; set; }
 
+        // ---- What the buyer calls this line, as the QUOTE carries it (and prints it) ----
+        //
+        // Stored on the quote line when it is made from the RFQ line (QuoteItem.BuyerIdentity),
+        // because the quote is a document and must print what it said when it went out. Null on
+        // hand-typed and pre-2026-09-29 lines; screens fall back to the Requested* values below.
+
+        /// <summary>The buyer's own material number, as printed on the quote.</summary>
+        public string? CustomerMaterialCode { get; set; }
+
+        /// <summary>The maker the buyer asked for, as printed on the quote.</summary>
+        public string? ManufacturerName { get; set; }
+
+        /// <summary>The maker part number the buyer asked for, as printed on the quote.</summary>
+        public string? ManufacturerPartNumber { get; set; }
+
         // ---- What the customer actually asked for, read through the linked RFQ line ----
         //
         // These are NOT stored on QuoteItem. Rfqitem already carries every one of them and
@@ -295,6 +310,16 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public int? DeliveryLeadTime { get; set; }
         public long? DiscountTypeId { get; set; }
         public decimal? DiscountValue { get; set; }
+
+        /// <summary>The buyer's material number. Taken from the RFQ line instead when RfqItemId is set and this is blank.</summary>
+        [StringLength(200)]
+        public string? CustomerMaterialCode { get; set; }
+        /// <summary>The maker the buyer asked for. Same fallback as CustomerMaterialCode.</summary>
+        [StringLength(400)]
+        public string? ManufacturerName { get; set; }
+        /// <summary>The maker part number the buyer asked for. Same fallback as CustomerMaterialCode.</summary>
+        [StringLength(200)]
+        public string? ManufacturerPartNumber { get; set; }
     }
 
     public class QuoteUpdateRequestDTO
@@ -356,5 +381,14 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public bool IsDeleted { get; set; } = false; // Flag to delete item
         public long? DiscountTypeId { get; set; }
         public decimal? DiscountValue { get; set; }
+
+        // Null means "not supplied" and PRESERVES the stored value, like UnitOfMeasure above: the
+        // edit screen shows these read-only, so an older client must not strip them on save.
+        [StringLength(200)]
+        public string? CustomerMaterialCode { get; set; }
+        [StringLength(400)]
+        public string? ManufacturerName { get; set; }
+        [StringLength(200)]
+        public string? ManufacturerPartNumber { get; set; }
     }
 }

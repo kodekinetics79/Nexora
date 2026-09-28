@@ -423,7 +423,9 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 CreatedBy = Required(command.Actor, nameof(command.Actor)),
                 CorrelationId = Required(command.CorrelationId, nameof(command.CorrelationId))
             };
-            quoteItem.UnitPrice = customerUnitPrice;
+            // D-11: the quote line holds the price at the scale it is printed at, so qty x unit
+            // price on the customer's copy equals the printed line total.
+            quoteItem.UnitPrice = ERP_RFQ_Automation.Services.QuoteService.RoundUnitPrice(customerUnitPrice);
 
             // R17: the price just moved, so the tax on it must move with it. This line used to
             // recompute TotalAmount from the STALE quoteItem.TaxAmount — a figure derived, if it
@@ -438,7 +440,7 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
             var outputTaxRatePercent = await context.ResolveOutputTaxRatePercentAsync(
                 command.BusinessUnitId, cancellationToken);
             var taxableBase = OutputTaxFormula.TaxableBase(
-                quoteItem.Quantity * customerUnitPrice, quoteItem.Discount ?? 0m);
+                quoteItem.Quantity * quoteItem.UnitPrice, quoteItem.Discount ?? 0m);
             var derivedTax = OutputTaxFormula.Derive(taxableBase, outputTaxRatePercent, taxCategory);
             quoteItem.TaxAmount = derivedTax;
             quoteItem.TaxRatePercentApplied = derivedTax is null
