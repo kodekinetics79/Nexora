@@ -52,7 +52,7 @@ public class LinesWorkbookTests
     private static int HeaderRow(ExcelWorksheet sheet)
     {
         for (var r = 1; r <= sheet.Dimension.End.Row; r++)
-            if (sheet.Cells[r, 1].Text == "Line" && sheet.Cells[r, 2].Text == "Item") return r;
+            if (sheet.Cells[r, 1].Text == "Line" && sheet.Cells[r, 2].Text == "Description") return r;
         throw new Xunit.Sdk.XunitException("Column heading row not found.");
     }
 
@@ -68,18 +68,17 @@ public class LinesWorkbookTests
 
         var first = header + 1;
         Assert.Equal("00010", sheet.Cells[first, 1].Text);
-        Assert.Equal("VALVE 1", sheet.Cells[first, 2].Text);
-        Assert.Equal("Gate valve 2in class 1", sheet.Cells[first, 3].Text);
-        Assert.Equal("TELEDYNE", sheet.Cells[first, 4].Text);
-        Assert.Equal("MPN-1", sheet.Cells[first, 5].Text);
-        Assert.Equal(2.5m, Convert.ToDecimal(sheet.Cells[first, 6].Value));
-        Assert.Equal("PC", sheet.Cells[first, 7].Text);
-        Assert.Equal("Yes", sheet.Cells[first, 8].Text);
+        Assert.Equal("VALVE 1 — Gate valve 2in class 1", sheet.Cells[first, 2].Text);
+        Assert.Equal("TELEDYNE", sheet.Cells[first, 3].Text);
+        Assert.Equal("MPN-1", sheet.Cells[first, 4].Text);
+        Assert.Equal(2.5m, Convert.ToDecimal(sheet.Cells[first, 5].Value));
+        Assert.Equal("PC", sheet.Cells[first, 6].Text);
+        Assert.Equal("Yes", sheet.Cells[first, 7].Text);
 
-        Assert.Equal("EA", sheet.Cells[first + 1, 7].Text);
-        Assert.Equal("No", sheet.Cells[first + 1, 8].Text);
-        Assert.Equal("Obsolete part", sheet.Cells[first + 1, 9].Text);
-        Assert.Equal("Not decided", sheet.Cells[first + 2, 8].Text);
+        Assert.Equal("EA", sheet.Cells[first + 1, 6].Text);
+        Assert.Equal("No", sheet.Cells[first + 1, 7].Text);
+        Assert.Equal("Obsolete part", sheet.Cells[first + 1, 8].Text);
+        Assert.Equal("Not decided", sheet.Cells[first + 2, 7].Text);
     }
 
     [Fact]
@@ -106,9 +105,10 @@ public class LinesWorkbookTests
     public void Customer_text_that_looks_like_a_formula_stays_text()
     {
         var rfq = Rfq(1);
+        rfq.Rfqitems[0].ProductName = null;
         rfq.Rfqitems[0].ProductShortDescription = "=HYPERLINK(\"http://x\",\"click\")";
         var sheet = Read(LinesWorkbook.ForRfq(rfq));
-        var cell = sheet.Cells[HeaderRow(sheet) + 1, 3];
+        var cell = sheet.Cells[HeaderRow(sheet) + 1, 2];
 
         Assert.True(string.IsNullOrEmpty(cell.Formula));
         Assert.Equal("=HYPERLINK(\"http://x\",\"click\")", cell.Text);
@@ -137,13 +137,23 @@ public class LinesWorkbookTests
         Assert.Equal("", sheet.Cells[header, LinesWorkbook.LeadColumns.Length + 1].Text);
 
         Assert.Equal("10", sheet.Cells[header + 1, 1].Text);
-        Assert.Equal("CABLE", sheet.Cells[header + 1, 2].Text);
-        Assert.Equal(500m, Convert.ToDecimal(sheet.Cells[header + 1, 6].Value));
-        Assert.Equal("M", sheet.Cells[header + 1, 7].Text);
+        Assert.Equal("CABLE — Cu 4c 16mm", sheet.Cells[header + 1, 2].Text);
+        Assert.Equal(500m, Convert.ToDecimal(sheet.Cells[header + 1, 5].Value));
+        Assert.Equal("M", sheet.Cells[header + 1, 6].Text);
 
         // No line number on the document: position. Quantity never stated: blank, not 0.
         Assert.Equal("2", sheet.Cells[header + 2, 1].Text);
-        Assert.Null(sheet.Cells[header + 2, 6].Value);
-        Assert.Equal("EA", sheet.Cells[header + 2, 7].Text);
+        Assert.Null(sheet.Cells[header + 2, 5].Value);
+        Assert.Equal("EA", sheet.Cells[header + 2, 6].Text);
+    }
+
+    [Theory]
+    [InlineData("CABLE", "Cu 4c 16mm", "CABLE — Cu 4c 16mm")]
+    [InlineData("CIRCUIT BREAKER, MCCB", "CIRCUIT BREAKER, MCCB, 3P, 250A", "CIRCUIT BREAKER, MCCB, 3P, 250A")]
+    [InlineData("GLAND", null, "GLAND")]
+    [InlineData(null, "Gland 20mm", "Gland 20mm")]
+    public void A_line_has_one_description_without_repeating_itself(string? name, string? description, string expected)
+    {
+        Assert.Equal(expected, LinesWorkbook.Describe(name, description));
     }
 }
