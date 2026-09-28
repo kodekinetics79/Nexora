@@ -17,8 +17,8 @@ namespace ERP_RFQ_Automation.Services
             if (string.IsNullOrWhiteSpace(headerText))
                 return null;
 
-            var processedText = PrepareProviderInput(headerText);
             var instructions = BuildHeaderCompletionInstructions();
+            var processedText = PrepareProviderInput(headerText, instructions);
             var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
             var governedContext = context with { ProviderClass = _providerClass };
             var reservation = await _governance.ReserveAsync(
@@ -143,7 +143,8 @@ namespace ERP_RFQ_Automation.Services
                 Stream: false,
                 Format: "json",
                 Think: false,
-                Options: new OllamaOptions(Temperature: TEMPERATURE, NumPredict: _maximumOutputTokens)
+                Options: RequestOptions(),
+                KeepAlive: _keepAlive
             );
 
             using var response = await _http.PostAsJsonAsync("api/chat", payload, _jsonOptions, ct);

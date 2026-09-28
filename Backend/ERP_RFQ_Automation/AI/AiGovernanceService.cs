@@ -68,8 +68,19 @@ public static class AiPromptVersions
     /// contactor") or a part-number family that belongs to one maker came back null whenever
     /// the document had no manufacturer heading — which is most bid lists. The model may now
     /// fill it from the line itself, at lowered item confidence, and never between two makers.
+    ///
+    /// v7 -> v8 (2026-09-28): line items omit null keys (rule 17) and every quote-critical value
+    /// must be copied from the line itself (rule 18) — each is now checked against the page text
+    /// after the call. Line breaks reach the model instead of being flattened to spaces.
     /// </summary>
-    public const string StructuredRfqExtraction = "rfq-extraction-v7";
+    public const string StructuredRfqExtraction = "rfq-extraction-v8";
+
+    /// <summary>
+    /// The same v8 rules and item schema without the document-header keys
+    /// (<c>OllamaLlmService.BuildItemsOnlyExtractionInstructions</c>), sent for a later chunk of a
+    /// document whose header an earlier chunk already returned.
+    /// </summary>
+    public const string StructuredRfqItemsOnly = "rfq-extraction-v8-items";
 
     /// <summary>
     /// The header-only prompt (<c>OllamaLlmService.BuildHeaderCompletionInstructions</c>) sent

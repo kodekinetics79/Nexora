@@ -146,7 +146,8 @@ public sealed class ExtractionSchemaClientFieldsTests
     {
         // The ledger attributes every call to the prompt that produced it. Changing the
         // instructions without moving the label would file v4 answers under v3.
-        Assert.Equal("rfq-extraction-v7", AiPromptVersions.StructuredRfqExtraction);
+        Assert.Equal("rfq-extraction-v8", AiPromptVersions.StructuredRfqExtraction);
+        Assert.Equal("rfq-extraction-v8-items", AiPromptVersions.StructuredRfqItemsOnly);
     }
 
     [Fact]
@@ -189,14 +190,17 @@ public sealed class ExtractionSchemaClientFieldsTests
         Assert.Equal(6, CommercialHeaderKeys.Length);
         Assert.Equal(650, ExtractionOutputBudget.EstimatedHeaderOutputTokens);
 
-        // The documented consequence, asserted rather than assumed. 23/10 (was 11/5) since
-        // rfq-extraction-v2 stopped paying for 24 discarded per-field confidences per item.
+        // The documented consequence, asserted rather than assumed. 450 tokens per item is the
+        // cost measured in the AiRequests ledger on real Aramco and Marafiq lines (1,962 tokens
+        // for 3 items + header; 1,101–1,184 for 1 item + header), not the 225 the old
+        // ten-characters-a-value arithmetic assumed — with 225 the planner packed 3 items into a
+        // 2,048-token call and 47 of 48 calls on one document were cut off.
         Assert.Equal(24, ItemValueFields.Length);
-        Assert.Equal(225, ExtractionOutputBudget.EstimatedOutputTokensPerItem);
-        Assert.Equal(22, ExtractionOutputBudget.MaxItemsPerChunk(8192));
-        Assert.Equal(9, ExtractionOutputBudget.MaxItemsPerChunk(4096));
-        Assert.True(ExtractionOutputBudget.FitsBudget(22, 8192));
-        Assert.False(ExtractionOutputBudget.FitsBudget(23, 8192));
+        Assert.Equal(450, ExtractionOutputBudget.EstimatedOutputTokensPerItem);
+        Assert.Equal(11, ExtractionOutputBudget.MaxItemsPerChunk(8192));
+        Assert.Equal(4, ExtractionOutputBudget.MaxItemsPerChunk(4096));
+        Assert.True(ExtractionOutputBudget.FitsBudget(11, 8192));
+        Assert.False(ExtractionOutputBudget.FitsBudget(12, 8192));
     }
 
     /// <summary>

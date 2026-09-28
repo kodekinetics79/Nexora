@@ -81,7 +81,8 @@ public sealed class AiProviderPrivacySurfaceTests
         Assert.Equal(AiTokenSources.ProviderExact, attempt.TokenSource);
         Assert.Equal("ollama-request-1", attempt.ProviderRequestId);
         using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
-        Assert.Equal(4096, request.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+        // Unconfigured, the ceiling is 8,192 — the value appsettings.json ships (it was 4,096).
+        Assert.Equal(8192, request.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
     }
 
     [Fact]
