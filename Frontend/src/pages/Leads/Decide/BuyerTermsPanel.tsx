@@ -12,8 +12,8 @@ const termSources = (evidence: LeadDecisionEvidenceDTO[]): LeadDecisionEvidenceD
  * What the buyer requires, as the document states it: when bidding closes, delivery terms, where
  * to deliver, the agreement length, the currencies a quote may use, how long the price must hold,
  * VAT, and what must be accepted or attached. A quote that ignores these is rejected, so they sit
- * above the lines the rep decides on — folded to one line of the terms that decide the bid, so the
- * lines keep the screen; one click opens them all. Each value shows the buyer's own sentence on
+ * above the lines the rep decides on — folded to one row of the terms that decide the bid, laid
+ * out like the header strip (label over value), so the lines keep the screen; one click opens them all. Each value shows the buyer's own sentence on
  * hover. Nothing renders when the document states no terms.
  */
 /** The terms that decide the bid, in the one folded line. */
@@ -34,26 +34,31 @@ const BuyerTermsPanel: React.FC<{ evidence: LeadDecisionEvidenceDTO[] }> = ({ ev
 
   const headline = list.filter((term) => HEADLINE.includes(term.key));
 
+  // Folded, the terms read like the header strip above them: a small label over each value, one
+  // column per term, so the eye lands on "8 Oct 2026" rather than hunting through one run-on line.
+  const labelSx = { display: 'block', fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'text.secondary', whiteSpace: 'nowrap' } as const;
+
   return (
-    <Box component="section" aria-labelledby="decide-buyer-terms" sx={{ px: { xs: 2, sm: 3 }, pt: 1.5, pb: open ? 1.5 : 1 }}>
-      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', minWidth: 0 }}>
-        <Typography id="decide-buyer-terms" component="h2" variant="subtitle2" sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+    <Box component="section" aria-labelledby="decide-buyer-terms" sx={{ px: { xs: 2, sm: 3 }, pt: 1.25, pb: open ? 1.5 : 1.25 }}>
+      <Stack direction="row" sx={{ alignItems: 'center', minWidth: 0, gap: 2 }}>
+        <Typography id="decide-buyer-terms" component="h2" variant="subtitle2" sx={{ fontWeight: 800, whiteSpace: 'nowrap', flexShrink: 0 }}>
           Buyer requires
         </Typography>
         {open ? (
           <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, minWidth: 0 }}>From {source.name}</Typography>
         ) : (
-          <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }} data-testid="buyer-terms-headline">
-            {headline.map((term, index) => (
-              <React.Fragment key={term.key}>
-                {index > 0 ? <Box component="span" sx={{ color: 'text.disabled', mx: 1 }}>·</Box> : null}
-                <Box component="span" sx={{ color: 'text.secondary' }}>{term.label} </Box>
+          <Stack direction="row" data-testid="buyer-terms-headline" sx={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+            {headline.map((term) => (
+              <Box key={term.key} sx={{ minWidth: 0, flex: '0 1 auto', maxWidth: 360, px: 2, borderLeft: 1, borderColor: 'divider' }}>
+                <Box component="span" sx={labelSx}>{term.label}</Box>
                 <Tooltip title={`“${term.quote}”`} placement="bottom-start" enterDelay={300}>
-                  <Box component="span" tabIndex={0} sx={{ fontWeight: 600, cursor: 'help' }}>{term.value}</Box>
+                  <Typography tabIndex={0} noWrap sx={{ fontSize: '0.9rem', fontWeight: 600, cursor: 'help', lineHeight: 1.4 }}>
+                    {term.value}
+                  </Typography>
                 </Tooltip>
-              </React.Fragment>
+              </Box>
             ))}
-          </Typography>
+          </Stack>
         )}
         <Button size="small" onClick={() => setOpen((value) => !value)} aria-expanded={open} sx={{ fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0 }}>
           {open ? 'Fewer' : `All ${list.length}`}
@@ -78,9 +83,9 @@ const BuyerTermsPanel: React.FC<{ evidence: LeadDecisionEvidenceDTO[] }> = ({ ev
               <Box component="dt">{term.label}</Box>
               <Box component="dd">
                 <Tooltip title={`“${term.quote}”`} placement="bottom-start" enterDelay={300}>
-                  <Box component="span" tabIndex={0} data-term={term.key} sx={{ cursor: 'help', borderBottom: 1, borderColor: 'divider', borderBottomStyle: 'dotted' }}>
+                  <Typography component="span" tabIndex={0} data-term={term.key} sx={{ font: 'inherit', cursor: 'help', borderBottom: 1, borderColor: 'divider', borderBottomStyle: 'dotted' }}>
                     {term.value}
-                  </Box>
+                  </Typography>
                 </Tooltip>
               </Box>
             </React.Fragment>

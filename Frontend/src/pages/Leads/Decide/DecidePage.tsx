@@ -12,11 +12,10 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
+  Divider,
   FormControlLabel,
   FormGroup,
   Link,
-  Menu,
-  MenuItem,
   Paper,
   Stack,
   TextField,
@@ -25,7 +24,9 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { ExpandMore as ExpandIcon, FileDownloadOutlined as DownloadIcon } from '@mui/icons-material';
+import { alpha } from '@mui/material/styles';
+import { visuallyHidden } from '@mui/utils';
+import { CompareOutlined as CompareIcon, ExpandMore as ExpandIcon, FileDownloadOutlined as DownloadIcon } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import leadDecisionService, {
   type LeadDecisionWorkbenchDTO,
@@ -153,14 +154,21 @@ const useSteadyGrants = <T extends Record<string, boolean>>(live: T, revalidatin
   return Object.fromEntries(Object.entries(live).map(([key, value]) => [key, value || held[key] === true])) as T;
 };
 
-const Fact: React.FC<{ label: string; value: React.ReactNode; tone?: 'default' | 'due' | 'late' }> = ({ label, value, tone = 'default' }) => (
+const Fact: React.FC<{ label: string; value: React.ReactNode; tone?: 'default' | 'due' | 'late'; labelColor?: string }> = ({ label, value, tone = 'default', labelColor = 'text.secondary' }) => (
   <Box sx={{ minWidth: 0 }}>
-    <Typography variant="caption" color="text.secondary" sx={{ letterSpacing: '.06em', textTransform: 'uppercase', fontWeight: 700 }}>
+    <Typography variant="caption" sx={{ display: 'block', color: labelColor, letterSpacing: '.07em', textTransform: 'uppercase', fontWeight: 700, fontSize: '0.68rem', lineHeight: 1.5, mb: 0.25, whiteSpace: 'nowrap' }}>
       {label}
     </Typography>
     <Typography
+      variant="body2"
+      component="div"
       sx={{
         fontWeight: 600,
+        fontSize: '0.9rem',
+        lineHeight: 1.45,
+        minHeight: 30,
+        display: 'flex',
+        alignItems: 'center',
         fontVariantNumeric: 'tabular-nums',
         overflowWrap: 'anywhere',
         color: tone === 'late' ? 'error.main' : tone === 'due' ? 'warning.main' : 'text.primary',
@@ -267,6 +275,25 @@ const DecidePage: React.FC = () => {
 
   const workbench = workbenchQuery.data;
 
+  // The lines card fills the window from wherever it starts down to the bottom edge, so its
+  // headings and the decision bar stay on screen and only the lines scroll (owner 2026-09-28).
+  // Measured from the top of the document, not the window, so a re-render while the page is
+  // scrolled (to the history below) does not stretch it.
+  const cardRef = React.useRef<HTMLDivElement>(null);
+  const [cardHeight, setCardHeight] = React.useState<number | null>(null);
+  React.useLayoutEffect(() => {
+    const fit = () => {
+      const card = cardRef.current;
+      if (!card) return;
+      const top = card.getBoundingClientRect().top + window.scrollY;
+      const next = Math.max(480, Math.floor(window.innerHeight - top - 12));
+      setCardHeight((current) => (current !== null && Math.abs(current - next) < 3 ? current : next));
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  });
+
   React.useEffect(() => {
     if (!workbench) return;
     linesRef.current = workbench.lines;
@@ -349,17 +376,17 @@ const DecidePage: React.FC = () => {
     });
   }, [workbench]);
 
-  // One decision for the whole request. A real bid list runs to 1,500 lines; nobody presses
-  // 1,500 buttons. "Quote all" says yes to everything and the rep then skips the exceptions;
-  // "Skip all" needs one reason, which every skipped line carries.
-  const [skipAllAnchor, setSkipAllAnchor] = React.useState<HTMLElement | null>(null);
-  // One currency for every line (the request is USD, we quote in SAR): one pick, not 1,500.
-  const [currencyAllAnchor, setCurrencyAllAnchor] = React.useState<HTMLElement | null>(null);
-  const updateEveryLine = React.useCallback((patch: Partial<EditableLineDecision>) => {
+  // One decision for many lines. A real bid list runs to 1,500 lines; nobody presses 1,500
+  // buttons. The list's bulk buttons act on the ticked lines, or on every line when none is
+  // ticked: "Quote all" says yes to everything and the rep then skips the exceptions; a skip
+  // needs one reason, which every skipped line carries; one currency is one pick, not 1,500.
+  const updateLines = React.useCallback((ids: number[] | null, patch: Partial<EditableLineDecision>) => {
     if (!workbench) return;
+    const only = ids ? new Set(ids) : null;
     setDecisions((current) => {
       const next: DecisionMap = { ...current };
       for (const line of workbench.lines) {
+        if (only && !only.has(line.revisionLineId)) continue;
         const existing = current[line.revisionLineId];
         const merged: EditableLineDecision = { ...(existing ?? { decision: 'Pending' }), ...patch };
         // Quoting a warned line needs an acknowledgement; "Quote all" is that acknowledgement,
@@ -726,6 +753,8 @@ const DecidePage: React.FC = () => {
   // request's sentence would name a control that is not there.
   const panel: StepCopy = stepCopy ?? (showDecision ? openStep : lockedStepCopy(leadId));
 
+  const canCompare = !locked && canEdit && (workbench.evidence ?? []).some((item) => item.sourceAvailable);
+
   // What the counter beside the lines says: a running tally while there are choices to make, the
   // skipped total on a declined request, and nothing once the lines are the RFQ's.
   const draftSeenReadOnly = !locked && (!canEdit || unowned) && workbench.participationStatus === 'DRAFT';
@@ -773,7 +802,6 @@ const DecidePage: React.FC = () => {
   const primaryButton = primary ? (
     <Button
       variant="contained"
-      size="large"
       disabled={primary.disabled}
       onClick={primary.onClick}
       sx={{ fontWeight: 800, px: 3 }}
@@ -782,16 +810,132 @@ const DecidePage: React.FC = () => {
     </Button>
   ) : null;
 
+  const factsRow = (
+    // One soft box, thin dividers, every label on the same line (owner 2026-09-28: neater, easier to read).
+    <Stack
+      direction="row"
+      spacing={{ xs: 1.5, sm: 1.25, xl: 2 }}
+      useFlexGap
+      divider={<Divider orientation="vertical" flexItem sx={{ display: { xs: 'none', sm: 'block' } }} />}
+      sx={{
+        flex: 1,
+        flexWrap: 'wrap',
+        rowGap: 1,
+        alignItems: 'flex-start',
+        minWidth: 0,
+        px: { xs: 1.5, sm: 2 },
+        py: 0.75,
+        borderRadius: 2.5,
+        border: 1,
+        borderColor: 'divider',
+        bgcolor: 'background.paper',
+      }}
+    >
+      <Fact label="Their reference" value={workbench.customerRfqReference || 'Not stated'} />
+      {/* An uploaded document has no received time of its own; who uploaded it and when is
+          what is known, when the server says so. */}
+      {uploaded ? (
+        <Fact
+          label="Uploaded"
+          // Who uploaded it is said on wide screens and on hover, so the strip stays one line on a laptop.
+          value={(
+            <Tooltip title={uploader ? `Uploaded by ${uploader}` : ''}>
+              <span>
+                {formatDateSafe(workbench.uploadedAtUtc, 'Not recorded')}
+                {uploader ? <Box component="span" sx={{ display: { xs: 'none', xl: 'inline' } }}>{` by ${uploader}`}</Box> : null}
+              </span>
+            </Tooltip>
+          )}
+        />
+      ) : (
+        <Fact label="Received" value={formatDateSafe(workbench.receivedAtUtc, 'Not recorded')} />
+      )}
+      <Fact
+        label="Quote due"
+        tone={dueTone}
+        value={workbench.bidClosingDate ? (
+          <>
+            {formatDateSafe(workbench.bidClosingDate)}
+            <Box
+              component="span"
+              sx={{
+                ml: 0.75,
+                px: 0.75,
+                borderRadius: 1,
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                lineHeight: 1.7,
+                whiteSpace: 'nowrap',
+                color: dueTone === 'late' ? 'error.main' : dueTone === 'due' ? 'warning.dark' : 'text.secondary',
+                bgcolor: (t) => alpha(dueTone === 'late' ? t.palette.error.main : dueTone === 'due' ? t.palette.warning.main : t.palette.text.primary, 0.08),
+              }}
+            >
+              {dueSentence(days)}
+            </Box>
+          </>
+        ) : 'No deadline stated'}
+      />
+      <Fact label="Deliver to" value={workbench.deliveryLocation || 'Not stated'} />
+      <Fact label="Needed by" value={workbench.requiredDeliveryDate ? formatDateSafe(workbench.requiredDeliveryDate) : 'Not stated'} />
+      {ownerKnown ? (
+        <Box data-testid="decide-owner" sx={{ minWidth: 0 }}>
+          <Fact
+            label={unowned ? "Who's on it — nobody yet" : "Who's on it"}
+            labelColor={unowned && showDecision ? 'warning.dark' : 'text.secondary'}
+            value={(
+              <LeadOwnerControl
+                compact
+                leadId={leadId}
+                assignedToId={leadQuery.data!.assignedToId}
+                assignedToName={leadQuery.data!.assignedToFullName}
+                assignmentMethod={leadQuery.data!.assignmentMethod}
+                assignmentVersion={leadQuery.data!.assignmentVersion ?? 1}
+                canEdit={canEdit && !locked}
+                lockedReason={!canEdit
+                  ? "Your role can't change the owner."
+                  : locked ? 'This request is decided, so its owner is changed on the lead page.' : null}
+              />
+            )}
+          />
+        </Box>
+      ) : null}
+    </Stack>
+  );
+
   return (
-    <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, maxWidth: 1120, mx: 'auto', minWidth: 0 }}>
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1.5, flexWrap: 'wrap' }}>
-        <Link component="button" type="button" variant="caption" onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700, textTransform: 'uppercase', textDecoration: 'none', color: 'text.secondary' }}>
-          Leads
-        </Link>
-        <Typography variant="caption" color="text.disabled">›</Typography>
-        <Link component="button" type="button" variant="caption" onClick={() => navigate(`/procurement/leads/view/${leadId}`)} sx={{ fontWeight: 700, textTransform: 'uppercase', textDecoration: 'none', color: 'text.secondary' }}>
-          {reference}
-        </Link>
+    <Box sx={{ p: { xs: 0.5, sm: 1 }, minWidth: 0 }}>
+      {/* WHO IS ASKING: the way back, the customer, the facts and the owner in one band. */}
+      <Stack
+        component="section"
+        aria-labelledby="decide-customer"
+        direction={{ xs: 'column', lg: 'row' }}
+        spacing={{ xs: 1, lg: 2.5 }}
+        sx={{ alignItems: { lg: 'center' }, mb: 1.25, px: 0.5 }}
+      >
+        <Box sx={{ minWidth: 0, flexShrink: 1, maxWidth: { lg: 420 } }}>
+          <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center' }}>
+            <Link component="button" type="button" variant="caption" onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700, textTransform: 'uppercase', textDecoration: 'none', color: 'text.secondary' }}>
+              Leads
+            </Link>
+            <Typography variant="caption" color="text.disabled">›</Typography>
+            <Link component="button" type="button" variant="caption" onClick={() => navigate(`/procurement/leads/view/${leadId}`)} sx={{ fontWeight: 700, textTransform: 'uppercase', textDecoration: 'none', color: 'text.secondary' }}>
+              {reference}
+            </Link>
+          </Stack>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
+            <Typography id="decide-customer" component="h1" variant="h5" sx={{ fontWeight: 800, fontSize: { xs: '1.3rem', md: '1.45rem', xl: '1.6rem' }, letterSpacing: '-0.015em', lineHeight: 1.2 }}>
+              {workbench.customerName || 'Customer not matched yet'}
+            </Typography>
+            {/* A resolved customer is immutable on the server (a database rule refuses any change),
+                so the picker is offered only while the request has none. */}
+            {!locked && commercialAccess.canLinkLeadClient && !workbench.customerId ? (
+              <Link component="button" type="button" onClick={() => setCustomerDialogOpen(true)} sx={{ fontWeight: 700 }}>
+                Choose the customer
+              </Link>
+            ) : null}
+          </Stack>
+        </Box>
+        {factsRow}
       </Stack>
 
       {/* Banners carry facts. The control for the next move is in the Next step panel, so each
@@ -855,150 +999,36 @@ const DecidePage: React.FC = () => {
       {/* The next step, first. While the request can be decided, the same sentence repeats beside
           the one button in the sticky bar under the lines, and that copy is the one named "Next
           step". Once there is no bar, this panel carries the name and the one control. */}
-      <NextStepPanel
-        tone={panel.tone}
-        title="Next step"
-        sentence={panel.sentence}
-        ariaLabel={showDecision ? undefined : 'Next step'}
-        action={!showDecision && panel.action
-          ? <Button variant="contained" onClick={() => runStepAction(panel.action!)} sx={{ fontWeight: 800 }}>{panel.action.label}</Button>
-          : undefined}
-        testId="decide-next-step"
-      />
-
-      <Paper variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
-        {/* WHO IS ASKING */}
-        <Box component="section" aria-labelledby="decide-customer" sx={{ p: { xs: 2, sm: 3 }, borderBottom: 1, borderColor: 'divider' }}>
-          <Typography variant="caption" color="text.secondary" sx={{ letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 700 }}>
-            Request
-          </Typography>
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
-            <Typography id="decide-customer" component="h1" variant="h5" sx={{ fontWeight: 700, letterSpacing: '-0.01em' }}>
-              {workbench.customerName || 'Customer not matched yet'}
-            </Typography>
-            {/* A resolved customer is immutable on the server (a database rule refuses any change),
-                so the picker is offered only while the request has none. */}
-            {!locked && commercialAccess.canLinkLeadClient && !workbench.customerId ? (
-              <Link component="button" type="button" onClick={() => setCustomerDialogOpen(true)} sx={{ fontWeight: 700 }}>
-                Choose the customer
-              </Link>
-            ) : null}
-          </Stack>
-          <Stack direction="row" spacing={{ xs: 2.5, sm: 4 }} sx={{ mt: 2, flexWrap: 'wrap', rowGap: 1.5 }}>
-            <Fact label="Their reference" value={workbench.customerRfqReference || 'Not stated'} />
-            {/* An uploaded document has no received time of its own; who uploaded it and when is
-                what is known, when the server says so. */}
-            {uploaded ? (
-              <Fact
-                label="Uploaded"
-                value={`${formatDateSafe(workbench.uploadedAtUtc, 'Not recorded')}${uploader ? ` by ${uploader}` : ''}`}
-              />
-            ) : (
-              <Fact label="Received" value={formatDateSafe(workbench.receivedAtUtc, 'Not recorded')} />
-            )}
-            <Fact
-              label="Quote due"
-              tone={dueTone}
-              value={workbench.bidClosingDate ? `${formatDateSafe(workbench.bidClosingDate)} · ${dueSentence(days)}` : 'No deadline stated'}
-            />
-            <Fact label="Deliver to" value={workbench.deliveryLocation || 'Not stated'} />
-            <Fact label="Needed by" value={workbench.requiredDeliveryDate ? formatDateSafe(workbench.requiredDeliveryDate) : 'Not stated'} />
-          </Stack>
-          {ownerKnown ? (
-            <Box sx={{ mt: 2 }} data-testid="decide-owner">
-              <Typography variant="overline" sx={{ color: unowned && showDecision ? 'warning.dark' : 'text.secondary', fontWeight: 700, letterSpacing: '0.08em' }}>
-                {unowned ? "Who's on it — nobody yet" : "Who's on it"}
-              </Typography>
-              <LeadOwnerControl
-                leadId={leadId}
-                assignedToId={leadQuery.data!.assignedToId}
-                assignedToName={leadQuery.data!.assignedToFullName}
-                assignmentMethod={leadQuery.data!.assignmentMethod}
-                assignmentVersion={leadQuery.data!.assignmentVersion ?? 1}
-                canEdit={canEdit && !locked}
-                lockedReason={!canEdit
-                  ? "Your role can't change the owner."
-                  : locked ? 'This request is decided, so its owner is changed on the lead page.' : null}
-              />
-            </Box>
-          ) : null}
+      {/* A request that can still be decided says its next step in the bar under the lines, beside
+          the one button; that bar is always on screen. Once there is no bar, this panel carries
+          the name and the one control. */}
+      {showDecision ? null : (
+        <Box sx={{ mb: 1.25 }}>
+          <NextStepPanel
+            dense
+            tone={panel.tone}
+            title="Next step"
+            sentence={panel.sentence}
+            ariaLabel="Next step"
+            action={panel.action
+              ? <Button variant="contained" size="small" onClick={() => runStepAction(panel.action!)} sx={{ fontWeight: 800 }}>{panel.action.label}</Button>
+              : undefined}
+            testId="decide-next-step"
+          />
         </Box>
+      )}
 
+      <Paper
+        ref={cardRef}
+        variant="outlined"
+        sx={{ borderRadius: 3, overflow: 'hidden', display: 'flex', flexDirection: 'column', height: cardHeight ?? 'calc(100vh - 160px)', minHeight: 480 }}
+      >
         {/* WHAT THE BUYER REQUIRES — the terms a quote must meet, above the lines */}
         <BuyerTermsPanel evidence={workbench.evidence ?? []} />
 
         {/* WHAT THEY WANT */}
-        <Box component="section" aria-labelledby="decide-lines" sx={{ pt: 2 }}>
-          <Stack direction="row" spacing={2} sx={{ alignItems: 'baseline', justifyContent: 'space-between', px: { xs: 2, sm: 3 }, pb: 1 }}>
-            <Typography id="decide-lines" component="h2" variant="subtitle1" sx={{ fontWeight: 700 }}>What they want</Typography>
-            <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
-              {!readOnly && workbench.lines.length > 1 ? (
-                <Stack direction="row" spacing={1}>
-                  <Button size="small" variant="outlined" onClick={() => updateEveryLine({ decision: 'Bid', reasonCode: undefined })} sx={{ fontWeight: 700 }}>
-                    Quote all
-                  </Button>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    aria-haspopup="menu"
-                    aria-expanded={skipAllAnchor ? 'true' : undefined}
-                    onClick={(event) => setSkipAllAnchor(event.currentTarget)}
-                    sx={{ fontWeight: 700 }}
-                  >
-                    Skip all…
-                  </Button>
-                  <Menu anchorEl={skipAllAnchor} open={Boolean(skipAllAnchor)} onClose={() => setSkipAllAnchor(null)} aria-label="Why skip every line">
-                    {workbench.reasonCodes.filter((reason) => reason.appliesTo.includes('NoBid')).map((reason) => (
-                      <MenuItem key={reason.code} onClick={() => { updateEveryLine({ decision: 'NoBid', reasonCode: reason.code }); setSkipAllAnchor(null); }}>
-                        {reason.label}
-                      </MenuItem>
-                    ))}
-                  </Menu>
-                  {(workbench.currencyOptions ?? []).length > 0 ? (
-                    <>
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        aria-haspopup="menu"
-                        aria-expanded={currencyAllAnchor ? 'true' : undefined}
-                        onClick={(event) => setCurrencyAllAnchor(event.currentTarget)}
-                        sx={{ fontWeight: 700 }}
-                      >
-                        Currency for all…
-                      </Button>
-                      <Menu anchorEl={currencyAllAnchor} open={Boolean(currencyAllAnchor)} onClose={() => setCurrencyAllAnchor(null)} aria-label="Currency for every line">
-                        {(workbench.currencyOptions ?? []).map((option) => (
-                          <MenuItem key={option.code} onClick={() => { updateEveryLine({ currency: option.code }); setCurrencyAllAnchor(null); }}>
-                            {option.code}
-                          </MenuItem>
-                        ))}
-                      </Menu>
-                    </>
-                  ) : null}
-                </Stack>
-              ) : null}
-              {!locked && canEdit && workbench.lines.some((line) => line.verificationStatus === 'NEEDS_CHECK') ? (
-                <Button size="small" variant="outlined" onClick={() => openDocument()} sx={{ fontWeight: 700 }}>
-                  Check against the document
-                </Button>
-              ) : null}
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={downloadingLines ? <CircularProgress size={14} color="inherit" /> : <DownloadIcon />}
-                onClick={() => { void downloadLines(); }}
-                disabled={downloadingLines}
-                sx={{ fontWeight: 700 }}
-              >
-                {downloadingLines ? 'Downloading…' : 'Download Excel'}
-              </Button>
-              {counter ? (
-                <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-                  {counter}
-                </Typography>
-              ) : null}
-            </Stack>
-          </Stack>
+        <Box component="section" aria-labelledby="decide-lines" sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+          <Typography id="decide-lines" component="h2" sx={visuallyHidden}>What they want</Typography>
           <LinesTable
             leadId={leadId}
             lines={workbench.lines}
@@ -1008,6 +1038,7 @@ const DecidePage: React.FC = () => {
             reasonCodes={workbench.reasonCodes}
             readOnly={readOnly}
             onChange={updateLine}
+            onApply={updateLines}
             onOpenDocument={openDocument}
             onBulkUnit={setUnitOnUnitless}
             focusUnit={unitFocus}
@@ -1015,117 +1046,150 @@ const DecidePage: React.FC = () => {
             rfqRef={rfqRef}
             currentRevisionNumber={workbench.leadRevisionNumber}
             promotedRevisionNumber={promotion?.leadRevisionNumber ?? null}
+            counter={counter}
+            toolbarEnd={(
+              <>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={downloadingLines ? <CircularProgress size={14} color="inherit" /> : <DownloadIcon />}
+                  onClick={() => { void downloadLines(); }}
+                  disabled={downloadingLines}
+                >
+                  {downloadingLines ? 'Downloading…' : 'Download Excel'}
+                </Button>
+              </>
+            )}
           />
         </Box>
 
-        {/* THE DECISION */}
+        {/* THE DECISION: always on screen under the lines, one row — the question, Nexora's read,
+            the next step and the one button. The right padding keeps the button clear of the
+            assistant bubble that floats over the bottom-right corner of every page. */}
         {showDecision ? (
-          <Box component="section" aria-labelledby="decide-question" sx={{ p: { xs: 2, sm: 3 }, bgcolor: 'action.hover', borderTop: 1, borderColor: 'divider' }}>
-            {brief ? (
-              <Paper variant="outlined" sx={{ p: 2, mb: 2, borderLeft: 3, borderLeftColor: 'primary.main', borderRadius: 2 }}>
-                <Stack direction="row" spacing={1.5} sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
-                  <Typography sx={{ fontWeight: 600 }}>
-                    Nexora&apos;s read: <Box component="b" sx={{ color: 'primary.main' }}>{decisionLabel(brief.recommendation)}</Box>
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">from the decision brief for this lead</Typography>
-                </Stack>
-                {brief.reasons?.length ? (
-                  <Stack component="ul" spacing={0.25} sx={{ m: 0, mt: 0.75, pl: 2.25 }}>
-                    {brief.reasons.slice(0, 4).map((reason) => (
-                      <Typography key={reason} component="li" variant="body2" color="text.secondary">{reason}</Typography>
+          <Box
+            component="section"
+            aria-labelledby="decide-question"
+            sx={{ flexShrink: 0, borderTop: 1, borderColor: 'divider', bgcolor: 'action.hover', pl: { xs: 1.5, sm: 2 }, pr: { xs: 1.5, sm: 9 }, py: 1, boxShadow: '0 -8px 20px -16px rgba(15,18,24,0.45)' }}
+          >
+              {concern.raised ? (
+                <Paper variant="outlined" sx={{ p: 1.5, mb: 1, borderRadius: 2, bgcolor: 'background.paper' }}>
+                  <FormGroup row aria-label="Which part concerns you" sx={{ gap: 1 }}>
+                    {codes.map((code) => (
+                      <FormControlLabel
+                        key={code}
+                        control={(
+                          <Checkbox
+                            size="small"
+                            checked={concern.codes.includes(code)}
+                            disabled={readOnly}
+                            onChange={(event) => setConcern((current) => ({
+                              ...current,
+                              codes: event.target.checked
+                                ? [...current.codes, code]
+                                : current.codes.filter((existing) => existing !== code),
+                            }))}
+                          />
+                        )}
+                        label={CONCERN_LABELS[code] ?? code}
+                      />
                     ))}
+                  </FormGroup>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    size="small"
+                    label="What is the concern?"
+                    placeholder="One or two lines is enough."
+                    value={concern.note}
+                    disabled={readOnly}
+                    onChange={(event) => setConcern((current) => ({ ...current, note: event.target.value.slice(0, 1000) }))}
+                    sx={{ mt: 1.5 }}
+                  />
+                </Paper>
+              ) : null}
+
+
+            <Stack direction="row" spacing={1.5} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}>
+              <Typography id="decide-question" component="h2" variant="body2" sx={{ fontWeight: 700 }}>
+                {concern.raised ? 'What concerns you about taking this job on?' : 'Any concern about taking this job on?'}
+              </Typography>
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={concern.raised ? 'some' : 'none'}
+                aria-labelledby="decide-question"
+                disabled={readOnly}
+                onChange={(_event, value: 'none' | 'some' | null) => {
+                  if (!value) return;
+                  setConcern((current) => value === 'none' ? { raised: false, codes: [], note: '' } : { ...current, raised: true });
+                }}
+                sx={{ '& .MuiToggleButton-root': { height: 32, minHeight: 32, py: 0, px: 1.5, fontWeight: 700, fontSize: '0.8rem' } }}
+              >
+                <ToggleButton value="none">No concerns</ToggleButton>
+                <ToggleButton value="some">Yes, raise a concern</ToggleButton>
+              </ToggleButtonGroup>
+              {brief ? (
+                // The read and its first reason on the line; the rest on hover, so the bar stays one row.
+                <Tooltip
+                  describeChild
+                  title={(brief.reasons?.length ?? 0) > 1
+                    ? <Box component="ul" sx={{ m: 0, pl: 2 }}>{brief.reasons!.slice(0, 4).map((reason) => <li key={reason}>{reason}</li>)}</Box>
+                    : 'From the decision brief for this lead'}
+                >
+                  <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', minWidth: 0, px: 1.25, py: 0.5, borderRadius: 5, border: 1, borderColor: 'divider', bgcolor: 'background.paper', cursor: 'default' }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                      Nexora&apos;s read: <Box component="b" sx={{ color: 'primary.main' }}>{decisionLabel(brief.recommendation)}</Box>
+                    </Typography>
+                    {brief.reasons?.[0] ? (
+                      <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: { xs: 160, xl: 320 } }}>{brief.reasons[0]}</Typography>
+                    ) : null}
                   </Stack>
-                ) : null}
-              </Paper>
-            ) : null}
-
-            <Typography id="decide-question" component="h2" sx={{ fontWeight: 700, mb: 1 }}>
-              {concern.raised ? 'What concerns you about taking this job on?' : 'Any concern about taking this job on?'}
-            </Typography>
-            <ToggleButtonGroup
-              exclusive
-              size="small"
-              value={concern.raised ? 'some' : 'none'}
-              aria-labelledby="decide-question"
-              disabled={readOnly}
-              onChange={(_event, value: 'none' | 'some' | null) => {
-                if (!value) return;
-                setConcern((current) => value === 'none' ? { raised: false, codes: [], note: '' } : { ...current, raised: true });
-              }}
-            >
-              <ToggleButton value="none" sx={{ px: 2, fontWeight: 700 }}>No concerns</ToggleButton>
-              <ToggleButton value="some" sx={{ px: 2, fontWeight: 700 }}>Yes, raise a concern</ToggleButton>
-            </ToggleButtonGroup>
-
-            {concern.raised ? (
-              <Paper variant="outlined" sx={{ p: 2, mt: 1.5, borderRadius: 2 }}>
-                <FormGroup row aria-label="Which part concerns you" sx={{ gap: 1 }}>
-                  {codes.map((code) => (
-                    <FormControlLabel
-                      key={code}
-                      control={(
-                        <Checkbox
-                          size="small"
-                          checked={concern.codes.includes(code)}
-                          disabled={readOnly}
-                          onChange={(event) => setConcern((current) => ({
-                            ...current,
-                            codes: event.target.checked
-                              ? [...current.codes, code]
-                              : current.codes.filter((existing) => existing !== code),
-                          }))}
-                        />
-                      )}
-                      label={CONCERN_LABELS[code] ?? code}
-                    />
-                  ))}
-                </FormGroup>
-                <TextField
-                  fullWidth
-                  multiline
-                  minRows={2}
+                </Tooltip>
+              ) : null}
+              {/* The original document beside the lines, always one click away while the lines can be
+                  changed — a customer requirement, not only a step for lines the reading doubted. */}
+              {canCompare ? (
+                <Button
                   size="small"
-                  label="What is the concern?"
-                  placeholder="One or two lines is enough."
-                  value={concern.note}
-                  disabled={readOnly}
-                  onChange={(event) => setConcern((current) => ({ ...current, note: event.target.value.slice(0, 1000) }))}
-                  sx={{ mt: 1.5 }}
-                />
-              </Paper>
-            ) : null}
-
-            {/* Pinned to the bottom of the window: a 32-line request must not hide its one
-                button under a scroll. The bar is part of the page, so it ends where the page ends. */}
-            <Box sx={{ position: 'sticky', bottom: 0, zIndex: 2, bgcolor: 'background.paper', borderTop: 1, borderColor: 'divider', boxShadow: '0 -8px 20px -16px rgba(15,18,24,0.55)', mt: 2, pt: 1.5, pb: 0.5, mx: { xs: -2, sm: -3 }, px: { xs: 2, sm: 3 } }}>
-            <Stack direction="row" spacing={2} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}>
+                  variant="outlined"
+                  startIcon={<CompareIcon />}
+                  onClick={() => openDocument()}
+                  sx={{ height: 32, minHeight: 32, py: 0, fontWeight: 700, whiteSpace: 'nowrap', bgcolor: 'background.paper' }}
+                >
+                  Compare with document
+                </Button>
+              ) : null}
+              {/* The sentence holds no link: the button beside it is the one control for the step.
+                  It takes the room left and wraps inside it, so the button stays on the row. */}
+              <Box sx={{ flex: '1 1 220px', minWidth: 0, textAlign: { md: 'right' } }}>
+                <Typography
+                  role="status"
+                  aria-label="Next step"
+                  variant="body2"
+                  sx={{ color: openStep.tone === 'warning' ? 'warning.dark' : 'text.secondary', fontWeight: next.kind === 'blocked' && !busy ? 600 : 400 }}
+                >
+                  {openStep.sentence}
+                </Typography>
+                {draftCaption ? (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                    {draftCaption}
+                  </Typography>
+                ) : null}
+              </Box>
+              {canPromote && canEdit && !unowned && !busy && next.kind === 'ready' && statusReadFailed ? (
+                <Button size="small" variant="outlined" onClick={() => { void lifecycleQuery.refetch(); }} sx={{ fontWeight: 700 }}>
+                  Check the status again
+                </Button>
+              ) : null}
               {primary?.hint && primaryButton ? (
                 // A disabled button takes no hover, so the call-out sits on a wrapper.
                 <Tooltip describeChild title={primary.hint}>
                   <Box component="span" sx={{ display: 'inline-flex' }}>{primaryButton}</Box>
                 </Tooltip>
               ) : primaryButton}
-              {/* The sentence holds no link: the button beside it is the one control for the step. */}
-              <Typography
-                role="status"
-                aria-label="Next step"
-                variant="body2"
-                sx={{ color: openStep.tone === 'warning' ? 'warning.dark' : 'text.secondary', fontWeight: next.kind === 'blocked' && !busy ? 600 : 400 }}
-              >
-                {openStep.sentence}
-              </Typography>
-              {canPromote && canEdit && !unowned && !busy && next.kind === 'ready' && statusReadFailed ? (
-                <Button size="small" variant="outlined" onClick={() => { void lifecycleQuery.refetch(); }} sx={{ fontWeight: 700 }}>
-                  Check the status again
-                </Button>
-              ) : null}
             </Stack>
-            {draftCaption ? (
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                {draftCaption}
-              </Typography>
-            ) : null}
-            </Box>
           </Box>
         ) : null}
       </Paper>

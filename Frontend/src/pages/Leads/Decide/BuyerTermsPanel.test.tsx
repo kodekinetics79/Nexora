@@ -36,7 +36,9 @@ describe('BuyerTermsPanel', () => {
     const section = await screen.findByRole('region', { name: 'Buyer requires' });
     expect(getBuyerTerms).toHaveBeenCalledWith(18);
     // Folded to one line of what decides the bid, so the lines keep the screen.
-    expect(within(section).getByTestId('buyer-terms-headline')).toHaveTextContent('Closes 8 Oct 2026, 3:00 PM, no extension');
+    const headline = within(section).getByTestId('buyer-terms-headline');
+    expect(within(headline).getByText('Closes')).toBeInTheDocument();
+    expect(within(headline).getByText('8 Oct 2026, 3:00 PM, no extension')).toBeInTheDocument();
     expect(within(section).queryByRole('term')).toBeNull();
     fireEvent.click(within(section).getByRole('button', { name: 'All 3' }));
     expect(within(section).getByRole('button', { name: 'Fewer' })).toHaveAttribute('aria-expanded', 'true');

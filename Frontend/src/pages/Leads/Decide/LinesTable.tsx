@@ -1,10 +1,17 @@
 import React from 'react';
 import {
   Box,
+  Button,
+  Checkbox,
   Chip,
+  Divider,
   FormControl,
-  InputLabel,
+  IconButton,
+  InputAdornment,
+  InputBase,
   Link,
+  ListSubheader,
+  Menu,
   MenuItem,
   Select,
   Stack,
@@ -21,6 +28,8 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import { alpha } from '@mui/material/styles';
+import { Close as CloseIcon, Search as SearchIcon } from '@mui/icons-material';
 import type {
   DecisionReasonCodeDTO,
   LeadDecisionLineDTO,
@@ -65,7 +74,18 @@ export interface LinesTableProps {
   currentRevisionNumber?: number | null;
   /** The revision the RFQ was created from, for the newer-revision call-out. */
   promotedRevisionNumber?: number | null;
+  /**
+   * One change on many lines: the ticked ones, or every line when `ids` is null. Without it the
+   * list offers no ticks and no bulk buttons.
+   */
+  onApply?: (ids: number[] | null, patch: Partial<EditableLineDecision>) => void;
+  /** The page's own controls for the lines (Download Excel, Check against the document). */
+  toolbarEnd?: React.ReactNode;
+  /** The running tally beside the page control. */
+  counter?: React.ReactNode;
 }
+
+export type LineFilter = 'all' | 'pending' | 'bid' | 'skip' | 'fix';
 
 export type LineChipMode = 'choice' | 'rfq' | 'newer-revision' | 'legacy';
 
@@ -120,8 +140,12 @@ export const readOnlyLineChip = (
 /** Lines drawn at once. Enough to work through, few enough to draw instantly. */
 export const LINES_PER_PAGE = 100;
 
+
 const numberOrEmpty = (value: number | undefined): string =>
   value == null || !Number.isFinite(value) ? '' : String(value);
+
+/** Controls inside a row are one line tall, so a row is two lines of text and no more. */
+const DENSE_INPUT_SX = { '& .MuiInputBase-root': { height: 32, fontSize: '0.875rem' } } as const;
 
 interface LineRowProps {
   line: LeadDecisionLineDTO;
@@ -142,6 +166,11 @@ interface LineRowProps {
   rfqRef?: string | null;
   currentRevisionNumber?: number | null;
   promotedRevisionNumber?: number | null;
+  /** Whether the row carries a tick box, and whether it is ticked. */
+  selectable: boolean;
+  selected: boolean;
+  onToggleSelect: (revisionLineId: number, range: boolean) => void;
+  columns: number;
 }
 
 /**
@@ -152,18 +181,21 @@ interface LineRowProps {
 const LineRow = React.memo(function LineRow({
   line, decision, unitOptions, currencyOptions, unitCodes, currencyCodes, skipReasons, readOnly, onChange, onOpenDocument,
   reasonLabel, chipChoice, chipMode, rfqRef, currentRevisionNumber, promotedRevisionNumber,
+  selectable, selected, onToggleSelect, columns,
 }: LineRowProps) {
   const label = lineLabel(line);
   const choice = decision?.decision ?? 'Pending';
   const quoting = choice === 'Bid';
   const skipping = choice === 'NoBid';
-  const needs = new Set<LineNeedKind>(lineNeeds(line, decision, unitCodes, currencyCodes).map((need) => need.kind));
+  const needList = lineNeeds(line, decision, unitCodes, currencyCodes);
+  const needs = new Set<LineNeedKind>(needList.map((need) => need.kind));
   const unverified = needs.has('source') || needs.has('missing-source');
-  // What the customer wrote for the unit, said under the picker: the word they used when Nexora
-  // mapped it, the word itself when it is not a unit this tenant quotes in, or that there was none.
+  // What the customer wrote for the unit. A word Nexora understood is said on hover; only a word
+  // that asks something of the rep (not stated, not a unit this tenant quotes in) is on the line.
   const unitReading = readUnit(line, unitCodes);
   const unitValue = tenantUnitCode(decision?.unitOfMeasure, unitOptions) ?? '';
   const unitNote = skipping ? null : unitCaption(unitReading, decision?.unitOfMeasure, quoting && !readOnly);
+  const unitNoteOnHover = unitReading.kind === 'mapped';
   // Two numbers can sit on a line and they are not the same thing: the buyer's own material
   // code, and the maker's part number. Each is named so a rep never quotes the wrong one.
   const detail = [
@@ -172,130 +204,224 @@ const LineRow = React.memo(function LineRow({
       ? `${line.manufacturerName ? `${line.manufacturerName} ` : ''}P/N ${line.manufacturerPartNumber}`
       : line.manufacturerName,
   ].filter(Boolean).join(' · ');
-  const showDetailRow = !readOnly && (skipping || unverified || (quoting && Boolean(line.needsAttention)));
   // What the buyer wrote about the line beyond its name: the specification and their own
   // columns (approved makers, standing instructions). Folded by default — a 1,500-line list
   // must stay a list — and one click away, on the line, not in a dialog.
   const extraEntries = Object.entries(line.extras ?? {}).filter(([, value]) => Boolean(value));
   const hasDetails = Boolean(line.specification?.trim()) || extraEntries.length > 0;
   const [detailsOpen, setDetailsOpen] = React.useState(false);
+  // The row's edge says where it stands at a glance: something to fix, quoting, skipped.
+  const edge: 'fix' | 'bid' | 'skip' | null = !readOnly && choice !== 'Pending' && needList.length > 0
+    ? 'fix'
+    : quoting ? 'bid' : skipping ? 'skip' : null;
+
+  const quantityText = (
+    <Typography variant="body2" component="span" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+      {numberOrEmpty(decision?.quantity ?? line.quantity ?? undefined) || '—'}{' '}
+      <Box component="span" sx={unitNote && unitNoteOnHover ? { textDecoration: 'underline dotted', textUnderlineOffset: 3 } : undefined}>
+        {decision?.unitOfMeasure ?? line.unitOfMeasure ?? ''}
+      </Box>
+    </Typography>
+  );
 
   return (
     <>
       <TableRow
         hover
-        sx={{ '& > td': { borderBottom: 0, verticalAlign: 'top', pt: 1.5 }, opacity: skipping ? 0.7 : 1 }}
+        selected={selected}
+        sx={{
+          '& > td': { borderBottom: detailsOpen ? 0 : undefined, py: 0.75, verticalAlign: 'middle' },
+          '& > td:first-of-type': {
+            boxShadow: (t) => `inset 3px 0 0 ${edge === 'fix' ? t.palette.warning.main : edge === 'bid' ? t.palette.primary.main : edge === 'skip' ? t.palette.text.disabled : 'transparent'}`,
+          },
+          opacity: skipping ? 0.72 : 1,
+        }}
       >
-        <TableCell>
-          <Typography sx={{ fontWeight: 600, textDecoration: skipping ? 'line-through' : 'none', overflowWrap: 'anywhere' }}>
+        {selectable ? (
+          <TableCell padding="checkbox">
+            <Checkbox
+              size="small"
+              checked={selected}
+              onClick={(event) => onToggleSelect(line.revisionLineId, event.shiftKey)}
+              slotProps={{ input: { 'aria-label': `Select line ${label}` } }}
+            />
+          </TableCell>
+        ) : null}
+        <TableCell sx={{ color: 'text.secondary', fontVariantNumeric: 'tabular-nums', fontSize: '0.8rem', whiteSpace: 'nowrap', pl: selectable ? 0 : undefined }}>
+          {label}
+        </TableCell>
+        <TableCell sx={{ minWidth: 0 }}>
+          <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.35, textDecoration: skipping ? 'line-through' : 'none', overflowWrap: 'anywhere' }}>
             {lineTitle(line)}
           </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-            {[`Line ${label}`, detail].filter(Boolean).join(' · ')}
-            {hasDetails ? (
-              <>
-                {' · '}
-                <Link
-                  component="button"
-                  type="button"
-                  onClick={() => setDetailsOpen((open) => !open)}
-                  aria-expanded={detailsOpen}
-                  aria-label={`${detailsOpen ? 'Hide' : 'Show'} details for line ${label}`}
-                  sx={{ fontWeight: 700, verticalAlign: 'baseline' }}
-                >
-                  {detailsOpen ? 'Hide details' : 'Details'}
-                </Link>
-              </>
-            ) : null}
-          </Typography>
-          {detailsOpen ? (
-            <Box sx={{ mt: 1, mb: 0.5, pl: 1.5, borderLeft: 2, borderColor: 'divider', maxWidth: 760 }}>
-              {line.specification?.trim() ? (
-                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary', mb: extraEntries.length ? 1 : 0 }}>
-                  {line.specification.trim()}
-                </Typography>
+          {detail || hasDetails ? (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.4 }}>
+              {detail}
+              {hasDetails ? (
+                <>
+                  {detail ? ' · ' : ''}
+                  <Link
+                    component="button"
+                    type="button"
+                    onClick={() => setDetailsOpen((open) => !open)}
+                    aria-expanded={detailsOpen}
+                    aria-label={`${detailsOpen ? 'Hide' : 'Show'} details for line ${label}`}
+                    sx={{ fontWeight: 700, verticalAlign: 'baseline', fontSize: 'inherit' }}
+                  >
+                    {detailsOpen ? 'Hide details' : 'Details'}
+                  </Link>
+                </>
               ) : null}
-              {extraEntries.map(([key, value]) => (
-                <Typography key={key} variant="body2" sx={{ color: 'text.secondary', whiteSpace: 'pre-wrap' }}>
-                  <Box component="span" sx={{ fontWeight: 700, color: 'text.primary' }}>{key}: </Box>{value}
-                </Typography>
-              ))}
-            </Box>
+            </Typography>
+          ) : null}
+          {/* What a quoted line still owes, on the line itself rather than on a row of its own:
+              how a catalogue warning was handled (written for the rep by Quote, and changeable
+              here), and whether a person has checked the line against the document. */}
+          {!readOnly && quoting && line.needsAttention ? (
+            <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', mt: 0.25, maxWidth: 760 }}>
+              <Typography variant="caption" color="warning.main" sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+                {catalogWarningSummary(line.warningSnapshotJson, line.attentionReason)}:
+              </Typography>
+              <InputBase
+                value={decision?.note ?? ''}
+                placeholder="How you handled it"
+                error={needs.has('attention')}
+                inputProps={{ 'aria-label': `How you handled it (line ${label})` }}
+                onChange={(event) => onChange(line.revisionLineId, { note: event.target.value.slice(0, 1000) || undefined })}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  height: 24,
+                  fontSize: '0.75rem',
+                  px: 0.75,
+                  borderRadius: 1,
+                  border: 1,
+                  borderColor: needs.has('attention') ? 'error.main' : 'transparent',
+                  bgcolor: (t) => alpha(t.palette.warning.main, 0.06),
+                  '&:hover, &.Mui-focused': { borderColor: needs.has('attention') ? 'error.main' : 'divider' },
+                }}
+              />
+            </Stack>
+          ) : null}
+          {!readOnly && unverified ? (
+            <Typography variant="caption" color="warning.main" sx={{ display: 'block', mt: 0.25, lineHeight: 1.4 }}>
+              {needs.has('missing-source')
+                ? 'No source document is on file for this line, so it cannot be quoted.'
+                : (
+                  <>
+                    {/* Two different truths. A line whose item, quantity and unit are each an
+                        exact cell of the document was read, not guessed; saying "not sure"
+                        about it told the rep the reader was unreliable when only the person's
+                        confirmation was missing. Only a line the evidence does not cover
+                        earns the doubt. */}
+                    {line.sourceEvidenceComplete
+                      ? 'Read from the document; not yet checked by a person.'
+                      : 'Nexora is not sure it read this line correctly.'}{' '}
+                    {/* Named for its line: the page's one "Check the document" is the next-step button. */}
+                    <Link component="button" type="button" onClick={() => onOpenDocument(line)} sx={{ fontWeight: 700, verticalAlign: 'baseline', fontSize: 'inherit' }}>
+                      {`Check line ${label}`}
+                    </Link>
+                  </>
+                )}
+            </Typography>
           ) : null}
           {choice === 'Clarify' ? (
             <Chip size="small" label="Waiting on the customer" color="warning" variant="outlined" sx={{ mt: 0.5 }} />
           ) : null}
         </TableCell>
-        <TableCell>
-          {readOnly || !quoting ? (
-            <Typography sx={{ fontVariantNumeric: 'tabular-nums' }}>
-              {numberOrEmpty(decision?.quantity ?? line.quantity ?? undefined) || '—'} {decision?.unitOfMeasure ?? line.unitOfMeasure ?? ''}
-            </Typography>
-          ) : (
-            <Stack direction="row" spacing={1}>
-              <TextField
-                size="small"
-                type="number"
-                value={numberOrEmpty(decision?.quantity)}
-                error={needs.has('quantity')}
-                slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': `Quantity for line ${label}` } }}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  onChange(line.revisionLineId, { quantity: event.target.value === '' || !Number.isFinite(next) ? undefined : next });
-                }}
-                sx={{ width: 96 }}
-              />
-              <FormControl
-                size="small"
-                error={needs.has('unit') || needs.has('unit-unconfigured')}
-                sx={{ minWidth: 88 }}
-                data-unit-line={line.revisionLineId}
-              >
-                {/* Only a unit the tenant quotes in is ever the value, so the box never renders
-                    blank while holding a word; that word is said underneath instead. */}
-                <Select
-                  value={unitValue}
-                  displayEmpty
-                  renderValue={(value: string) => value || <Box component="em" sx={{ color: 'text.secondary' }}>Unit</Box>}
-                  inputProps={{ 'aria-label': `Unit for line ${label}` }}
-                  onChange={(event) => onChange(line.revisionLineId, { unitOfMeasure: event.target.value || undefined })}
-                >
-                  <MenuItem value=""><em>Unit</em></MenuItem>
-                  {unitOptions.map((option) => (
-                    <MenuItem key={option.code} value={option.code}>{option.code}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Stack>
-          )}
-          {unitNote ? (
-            <Typography
-              variant="caption"
-              sx={{ display: 'block', mt: 0.5, color: unitReading.kind === 'mapped' || readOnly ? 'text.secondary' : 'warning.dark' }}
-            >
-              {unitNote}
-            </Typography>
-          ) : null}
-        </TableCell>
-        <TableCell>
-          {readOnly || !quoting ? (
-            <Typography>{decision?.currency ?? line.currency ?? '—'}</Typography>
-          ) : (
-            <FormControl size="small" error={needs.has('currency') || needs.has('currency-unconfigured')} sx={{ minWidth: 120 }}>
+        {skipping && !readOnly ? (
+          // A skipped line has no quantity or currency to give; its two cells ask why instead, so
+          // the reason sits on the line and not on a row of its own.
+          <TableCell colSpan={2}>
+            <FormControl size="small" error={needs.has('reason')} sx={{ width: '100%', maxWidth: 320, ...DENSE_INPUT_SX }}>
               <Select
-                value={decision?.currency ?? ''}
+                value={decision?.reasonCode ?? ''}
                 displayEmpty
-                renderValue={(value: string) => value || <Box component="em" sx={{ color: 'text.secondary' }}>Not stated</Box>}
-                inputProps={{ 'aria-label': `Currency for line ${label}` }}
-                onChange={(event) => onChange(line.revisionLineId, { currency: event.target.value || undefined })}
+                renderValue={(value: string) => skipReasons.find((reason) => reason.code === value)?.label
+                  ?? <Box component="em" sx={{ color: 'text.secondary' }}>Why skip?</Box>}
+                inputProps={{ 'aria-label': `Why skip line ${label}` }}
+                onChange={(event) => onChange(line.revisionLineId, { reasonCode: event.target.value || undefined })}
               >
-                {currencyOptions.map((option) => (
-                  <MenuItem key={option.code} value={option.code}>{option.code}</MenuItem>
+                {skipReasons.map((reason) => (
+                  <MenuItem key={reason.code} value={reason.code}>{reason.label}</MenuItem>
                 ))}
               </Select>
             </FormControl>
-          )}
-        </TableCell>
+          </TableCell>
+        ) : (
+          <>
+            <TableCell>
+              {readOnly || !quoting ? (
+                unitNote && unitNoteOnHover ? <Tooltip title={unitNote}>{quantityText}</Tooltip> : quantityText
+              ) : (
+                <Stack direction="row" spacing={0.75}>
+                  <TextField
+                    size="small"
+                    type="number"
+                    value={numberOrEmpty(decision?.quantity)}
+                    error={needs.has('quantity')}
+                    slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': `Quantity for line ${label}` } }}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      onChange(line.revisionLineId, { quantity: event.target.value === '' || !Number.isFinite(next) ? undefined : next });
+                    }}
+                    sx={{ width: 84, ...DENSE_INPUT_SX }}
+                  />
+                  <Tooltip title={unitNote && unitNoteOnHover ? unitNote : ''}>
+                    <FormControl
+                      size="small"
+                      error={needs.has('unit') || needs.has('unit-unconfigured')}
+                      sx={{ minWidth: 80, ...DENSE_INPUT_SX }}
+                      data-unit-line={line.revisionLineId}
+                    >
+                      {/* Only a unit the tenant quotes in is ever the value, so the box never renders
+                          blank while holding a word; that word is said underneath instead. */}
+                      <Select
+                        value={unitValue}
+                        displayEmpty
+                        renderValue={(value: string) => value || <Box component="em" sx={{ color: 'text.secondary' }}>Unit</Box>}
+                        inputProps={{ 'aria-label': `Unit for line ${label}` }}
+                        onChange={(event) => onChange(line.revisionLineId, { unitOfMeasure: event.target.value || undefined })}
+                      >
+                        <MenuItem value=""><em>Unit</em></MenuItem>
+                        {unitOptions.map((option) => (
+                          <MenuItem key={option.code} value={option.code}>{option.code}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Tooltip>
+                </Stack>
+              )}
+              {unitNote && !unitNoteOnHover ? (
+                <Typography
+                  variant="caption"
+                  sx={{ display: 'block', mt: 0.25, lineHeight: 1.3, color: readOnly ? 'text.secondary' : 'warning.dark' }}
+                >
+                  {unitNote}
+                </Typography>
+              ) : null}
+            </TableCell>
+            <TableCell>
+              {readOnly || !quoting ? (
+                <Typography variant="body2">{decision?.currency ?? line.currency ?? '—'}</Typography>
+              ) : (
+                <FormControl size="small" error={needs.has('currency') || needs.has('currency-unconfigured')} sx={{ minWidth: 96, ...DENSE_INPUT_SX }}>
+                  <Select
+                    value={decision?.currency ?? ''}
+                    displayEmpty
+                    renderValue={(value: string) => value || <Box component="em" sx={{ color: 'text.secondary' }}>Not stated</Box>}
+                    inputProps={{ 'aria-label': `Currency for line ${label}` }}
+                    onChange={(event) => onChange(line.revisionLineId, { currency: event.target.value || undefined })}
+                  >
+                    {currencyOptions.map((option) => (
+                      <MenuItem key={option.code} value={option.code}>{option.code}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              )}
+            </TableCell>
+          </>
+        )}
         <TableCell align="right">
           {readOnly ? (() => {
             const chip = readOnlyLineChip(chipMode, chipChoice, reasonLabel, {
@@ -324,71 +450,31 @@ const LineRow = React.memo(function LineRow({
                   ? { decision: 'Bid', reasonCode: undefined }
                   : { decision: 'NoBid' });
               }}
+              sx={{ '& .MuiToggleButton-root': { height: 30, minHeight: 30, px: 1.5, py: 0, fontWeight: 700, fontSize: '0.8rem' } }}
             >
-              <ToggleButton value="Bid" sx={{ px: 2, fontWeight: 700 }}>Quote</ToggleButton>
-              <ToggleButton value="NoBid" sx={{ px: 2, fontWeight: 700 }}>Skip</ToggleButton>
+              <ToggleButton value="Bid">Quote</ToggleButton>
+              <ToggleButton value="NoBid">Skip</ToggleButton>
             </ToggleButtonGroup>
           )}
         </TableCell>
       </TableRow>
-      {showDetailRow ? (
-        <TableRow>
-          <TableCell colSpan={4} sx={{ pt: 0, pb: 1.5 }}>
-            <Stack spacing={1} sx={{ pl: { sm: 2 } }}>
-              {skipping ? (
-                <FormControl size="small" error={needs.has('reason')} sx={{ maxWidth: 420 }}>
-                  <InputLabel id={`skip-reason-${line.revisionLineId}`}>Why skip line {label}</InputLabel>
-                  <Select
-                    labelId={`skip-reason-${line.revisionLineId}`}
-                    label={`Why skip line ${label}`}
-                    value={decision?.reasonCode ?? ''}
-                    onChange={(event) => onChange(line.revisionLineId, { reasonCode: event.target.value || undefined })}
-                  >
-                    {skipReasons.map((reason) => (
-                      <MenuItem key={reason.code} value={reason.code}>{reason.label}</MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              ) : null}
-              {quoting && line.needsAttention ? (
-                <Box>
-                  <Typography variant="body2" color="warning.main" sx={{ fontWeight: 600 }}>
-                    {catalogWarningSummary(line.warningSnapshotJson, line.attentionReason)}
-                  </Typography>
-                  <TextField
-                    size="small"
-                    fullWidth
-                    label={`How you handled it (line ${label})`}
-                    value={decision?.note ?? ''}
-                    error={needs.has('attention')}
-                    onChange={(event) => onChange(line.revisionLineId, { note: event.target.value.slice(0, 1000) || undefined })}
-                    sx={{ mt: 1, maxWidth: 560 }}
-                  />
-                </Box>
-              ) : null}
-              {unverified ? (
-                <Typography variant="body2" color="warning.main">
-                  {needs.has('missing-source')
-                    ? 'No source document is on file for this line, so it cannot be quoted.'
-                    : (
-                      <>
-                        {/* Two different truths. A line whose item, quantity and unit are each an
-                            exact cell of the document was read, not guessed; saying "not sure"
-                            about it told the rep the reader was unreliable when only the person's
-                            confirmation was missing. Only a line the evidence does not cover
-                            earns the doubt. */}
-                        {line.sourceEvidenceComplete
-                          ? 'Read from the document; not yet checked by a person.'
-                          : 'Nexora is not sure it read this line correctly.'}{' '}
-                        {/* Named for its line: the page's one "Check the document" is the next-step button. */}
-                        <Link component="button" type="button" onClick={() => onOpenDocument(line)} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
-                          {`Check line ${label}`}
-                        </Link>
-                      </>
-                    )}
+      {detailsOpen ? (
+        <TableRow selected={selected}>
+          {selectable ? <TableCell padding="checkbox" /> : null}
+          <TableCell />
+          <TableCell colSpan={columns - (selectable ? 2 : 1)} sx={{ pt: 0, pb: 1 }}>
+            <Box sx={{ pl: 1.5, borderLeft: 2, borderColor: 'divider', maxWidth: 860 }}>
+              {line.specification?.trim() ? (
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary', mb: extraEntries.length ? 1 : 0 }}>
+                  {line.specification.trim()}
                 </Typography>
               ) : null}
-            </Stack>
+              {extraEntries.map(([key, value]) => (
+                <Typography key={key} variant="body2" sx={{ color: 'text.secondary', whiteSpace: 'pre-wrap' }}>
+                  <Box component="span" sx={{ fontWeight: 700, color: 'text.primary' }}>{key}: </Box>{value}
+                </Typography>
+              ))}
+            </Box>
           </TableCell>
         </TableRow>
       ) : null}
@@ -396,11 +482,23 @@ const LineRow = React.memo(function LineRow({
   );
 });
 
+const FILTERS: ReadonlyArray<{ key: LineFilter; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'pending', label: 'Not chosen' },
+  { key: 'bid', label: 'Quote' },
+  { key: 'skip', label: 'Skip' },
+  { key: 'fix', label: 'To fix' },
+];
+
+const searchText = (line: LeadDecisionLineDTO): string => [
+  lineLabel(line), lineTitle(line), line.itemMaterialCode, line.manufacturerName, line.manufacturerPartNumber, line.description,
+].filter(Boolean).join(' ').toLowerCase();
+
 /**
- * One row per line the customer asked for. Only what is missing becomes a control: a line that
- * arrived with a quantity, a unit and a currency reads as text; a line missing its currency shows
- * a highlighted picker on that one cell. Skipping asks why, quoting a flagged line asks how the
- * warning was handled, and nothing else interrupts.
+ * The lines as a list to work through: a tick on every line, the bulk buttons acting on the ticked
+ * lines (or all of them when none is ticked), filters with counts, a search, and column headings
+ * that stay put while only the lines scroll (owner 2026-09-28). Only what is missing becomes a
+ * control: a line that arrived with a quantity, a unit and a currency reads as text.
  */
 const LinesTable: React.FC<LinesTableProps> = ({
   leadId,
@@ -419,6 +517,9 @@ const LinesTable: React.FC<LinesTableProps> = ({
   rfqRef,
   currentRevisionNumber,
   promotedRevisionNumber,
+  onApply,
+  toolbarEnd,
+  counter,
 }) => {
   const skipReasons = React.useMemo(() => reasonCodes.filter((reason) => reason.appliesTo.includes('NoBid')), [reasonCodes]);
   const reasonLabels = React.useMemo(
@@ -432,6 +533,32 @@ const LinesTable: React.FC<LinesTableProps> = ({
     : chipMode === 'rfq' || chipMode === 'newer-revision' ? 'RFQ' : 'Choice';
   const unitCodes = React.useMemo(() => new Set(unitOptions.map((option) => option.code.toUpperCase())), [unitOptions]);
   const currencyCodes = React.useMemo(() => new Set(currencyOptions.map((option) => option.code.toUpperCase())), [currencyOptions]);
+  const selectable = !readOnly && Boolean(onApply);
+  const columns = (selectable ? 1 : 0) + 5;
+
+  // Which lines are shown: a filter by where each line stands, and a search over its words and numbers.
+  const [filter, setFilter] = React.useState<LineFilter>('all');
+  const [search, setSearch] = React.useState('');
+  const standing = React.useCallback((line: LeadDecisionLineDTO): Exclude<LineFilter, 'all'>[] => {
+    const decision = decisions[line.revisionLineId];
+    const choice = decision?.decision ?? 'Pending';
+    const kinds: Exclude<LineFilter, 'all'>[] = [];
+    if (choice === 'Bid') kinds.push('bid');
+    else if (choice === 'NoBid') kinds.push('skip');
+    else kinds.push('pending');
+    if (choice !== 'Pending' && lineNeeds(line, decision, unitCodes, currencyCodes).length > 0) kinds.push('fix');
+    return kinds;
+  }, [currencyCodes, decisions, unitCodes]);
+  const counts = React.useMemo(() => {
+    const tally: Record<LineFilter, number> = { all: lines.length, pending: 0, bid: 0, skip: 0, fix: 0 };
+    for (const line of lines) for (const kind of standing(line)) tally[kind] += 1;
+    return tally;
+  }, [lines, standing]);
+  const needle = search.trim().toLowerCase();
+  const shown = React.useMemo(
+    () => lines.filter((line) => (filter === 'all' || standing(line).includes(filter)) && (!needle || searchText(line).includes(needle))),
+    [filter, lines, needle, standing],
+  );
 
   // A page of lines at a time. Every row is a live form (quantity, unit, currency, a reason),
   // and a real bid list runs to 1,500 lines: drawing them all at once froze the browser for
@@ -440,9 +567,67 @@ const LinesTable: React.FC<LinesTableProps> = ({
   const [page, setPage] = React.useState(0);
   const [pageSize, setPageSize] = React.useState(linesPerPage);
   React.useEffect(() => {
-    if (page * pageSize >= lines.length) setPage(0);
-  }, [lines.length, page, pageSize]);
-  const visible = lines.length > pageSize ? lines.slice(page * pageSize, (page + 1) * pageSize) : lines;
+    if (page * pageSize >= shown.length) setPage(0);
+  }, [shown.length, page, pageSize]);
+  const visible = shown.length > pageSize ? shown.slice(page * pageSize, (page + 1) * pageSize) : shown;
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const turnTo = (next: number) => {
+    setPage(next);
+    scrollRef.current?.scrollTo?.({ top: 0 });
+  };
+
+  // The ticks. Kept by line id across pages and filters; a line that is no longer on the request
+  // (a new revision) drops out on its own.
+  const [ticked, setTicked] = React.useState<Set<number>>(() => new Set());
+  const lastTicked = React.useRef<number | null>(null);
+  const lineIds = React.useMemo(() => new Set(lines.map((line) => line.revisionLineId)), [lines]);
+  const selectedIds = React.useMemo(() => [...ticked].filter((id) => lineIds.has(id)), [lineIds, ticked]);
+  const shownTicked = shown.filter((line) => ticked.has(line.revisionLineId)).length;
+  const allShownTicked = shown.length > 0 && shownTicked === shown.length;
+  const toggleOne = React.useCallback((revisionLineId: number, range: boolean) => {
+    setTicked((current) => {
+      const next = new Set(current);
+      const turnOn = !current.has(revisionLineId);
+      // Shift-click ticks (or clears) every line shown between the last one clicked and this one.
+      const ids = visibleIdsRef.current;
+      const from = lastTicked.current == null ? -1 : ids.indexOf(lastTicked.current);
+      const to = ids.indexOf(revisionLineId);
+      const span = range && from >= 0 && to >= 0 ? ids.slice(Math.min(from, to), Math.max(from, to) + 1) : [revisionLineId];
+      for (const id of span) if (turnOn) next.add(id); else next.delete(id);
+      return next;
+    });
+    lastTicked.current = revisionLineId;
+  }, []);
+  const visibleIdsRef = React.useRef<number[]>([]);
+  visibleIdsRef.current = visible.map((line) => line.revisionLineId);
+  const toggleShown = () => setTicked((current) => {
+    const next = new Set(current);
+    for (const line of shown) if (allShownTicked) next.delete(line.revisionLineId); else next.add(line.revisionLineId);
+    return next;
+  });
+  const clearTicks = () => setTicked(new Set());
+
+  // The bulk buttons act on the ticked lines, or on every line when none is ticked.
+  const scope = selectedIds.length > 0 ? String(selectedIds.length) : 'all';
+  const apply = (patch: Partial<EditableLineDecision>) => onApply?.(selectedIds.length > 0 ? selectedIds : null, patch);
+  // Each menu says first which lines it will change, and how to change only some (owner 2026-09-28:
+  // the rep must see that ticking lines narrows the change).
+  const scopeHeader = (
+    <ListSubheader sx={{ lineHeight: 1.4, py: 1, fontSize: '0.75rem', maxWidth: 260, whiteSpace: 'normal' }}>
+      {selectedIds.length > 0 ? (
+        <Box component="span" sx={{ fontWeight: 800, color: 'text.primary' }}>
+          For the {selectedIds.length} ticked {selectedIds.length === 1 ? 'line' : 'lines'}
+        </Box>
+      ) : (
+        <>
+          <Box component="span" sx={{ display: 'block', fontWeight: 800, color: 'text.primary' }}>For all {lines.length.toLocaleString()} lines</Box>
+          Tick lines to change only those.
+        </>
+      )}
+    </ListSubheader>
+  );
+  const [skipAnchor, setSkipAnchor] = React.useState<HTMLElement | null>(null);
+  const [currencyAnchor, setCurrencyAnchor] = React.useState<HTMLElement | null>(null);
 
   // A bid list with no unit column: every line marked to quote lacks one. One picker sets them all, and
   // only those — a line that already has a unit keeps it.
@@ -452,15 +637,19 @@ const LinesTable: React.FC<LinesTableProps> = ({
   }).length;
   const showBulkUnit = !readOnly && Boolean(onBulkUnit) && unitlessQuoted >= 2;
 
-  // The next-step button can bring the rep to a unit picker. Turn to the line's page first, then
-  // focus the picker once that page is drawn.
+  // The next-step button can bring the rep to a unit picker. Show every line, turn to the line's
+  // page, then focus the picker once that page is drawn.
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const [focusTarget, setFocusTarget] = React.useState<{ lineId?: number } | null>(null);
   React.useEffect(() => {
     if (!focusUnit) return;
-    if (focusUnit.lineId != null && lines.length > pageSize) {
-      const index = lines.findIndex((candidate) => candidate.revisionLineId === focusUnit.lineId);
-      if (index >= 0) setPage(Math.floor(index / pageSize));
+    if (focusUnit.lineId != null) {
+      setFilter('all');
+      setSearch('');
+      if (lines.length > pageSize) {
+        const index = lines.findIndex((candidate) => candidate.revisionLineId === focusUnit.lineId);
+        if (index >= 0) setPage(Math.floor(index / pageSize));
+      }
     }
     setFocusTarget({ lineId: focusUnit.lineId });
     // Only a new request moves the page; the lines changing under it must not, so the lines and
@@ -477,102 +666,273 @@ const LinesTable: React.FC<LinesTableProps> = ({
     setFocusTarget(null);
   }, [focusTarget, page]);
 
+  const denseButton = { fontWeight: 700, minHeight: 32, height: 32, py: 0, px: 1.5, whiteSpace: 'nowrap' } as const;
+  const paged = shown.length > pageSize || lines.length > linesPerPage;
+
   return (
-    <Box ref={containerRef}>
-    {showBulkUnit ? (
+    <Box ref={containerRef} sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      {/* One row above the lines: which lines are shown (filters, search), what to do to the ticked
+          ones, then where you are in them and the page's own actions. It was two rows; the lines get
+          that height back. */}
       <Stack
         direction="row"
-        spacing={1.5}
-        data-testid="decide-bulk-unit"
-        sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1, px: { xs: 2, sm: 3 }, py: 1.25, borderTop: 1, borderColor: 'divider', bgcolor: 'action.hover' }}
+        useFlexGap
+        sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 0.75, rowGap: 0.75, px: { xs: 1.5, sm: 2 }, py: 0.75, borderBottom: 1, borderColor: 'divider' }}
       >
-        <Typography variant="body2" sx={{ fontWeight: 700 }}>{unitlessQuoted} lines marked to quote need a unit.</Typography>
-        <FormControl size="small" error sx={{ minWidth: 180 }}>
-          <Select
-            value=""
-            displayEmpty
-            renderValue={() => <Box component="em" sx={{ color: 'text.secondary' }}>Unit for all {unitlessQuoted}</Box>}
-            inputProps={{ 'aria-label': `Unit for the ${unitlessQuoted} lines marked to quote without one` }}
-            onChange={(event) => { if (event.target.value) onBulkUnit?.(String(event.target.value)); }}
-          >
-            {unitOptions.map((option) => (
-              <MenuItem key={option.code} value={option.code}>
-                {option.label && option.label !== option.code ? `${option.code} · ${option.label}` : option.code}
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <Typography variant="caption" color="text.secondary">Lines that already have a unit keep theirs.</Typography>
-      </Stack>
-    ) : null}
-    <TableContainer sx={{ overflowX: 'auto' }}>
-      {lines.length > linesPerPage ? (
-        <TablePagination
-          component="div"
-          count={lines.length}
-          page={page}
-          onPageChange={(_event, next) => setPage(next)}
-          rowsPerPage={pageSize}
-          onRowsPerPageChange={(event) => { setPageSize(Number(event.target.value)); setPage(0); }}
-          rowsPerPageOptions={[linesPerPage, linesPerPage * 2, linesPerPage * 5]}
-          labelRowsPerPage="Lines per page"
-          labelDisplayedRows={({ from, to, count }) => `Lines ${from}–${to} of ${count}`}
-          getItemAriaLabel={(type) => `${type} page of lines`}
-        />
-      ) : null}
-      <Table size="small" aria-label="Lines the customer asked for" sx={{ minWidth: 720 }}>
-        <TableHead>
-          <TableRow>
-            <TableCell sx={{ fontWeight: 700 }}>Item</TableCell>
-            <TableCell sx={{ fontWeight: 700, width: 200 }}>Quantity</TableCell>
-            <TableCell sx={{ fontWeight: 700, width: 140 }}>Price in</TableCell>
-            <TableCell sx={{ fontWeight: 700, width: 170 }} align="right">{decisionHeader}</TableCell>
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {visible.map((line) => {
-            // Lines that belong to an RFQ (or arrived after one, or predate this screen's records)
-            // report what the server saved for them. The page fills its choices in after the first
-            // paint, so reading those painted "Left out" on every line of a promoted request first.
-            const chipRecord = chipMode === 'choice' ? decisions[line.revisionLineId] : line.participation ?? undefined;
-            const reasonCode = chipRecord?.reasonCode;
-            return (
-            <LineRow
-              key={line.revisionLineId}
-              line={line}
-              decision={decisions[line.revisionLineId]}
-              unitOptions={unitOptions}
-              currencyOptions={currencyOptions}
-              unitCodes={unitCodes}
-              currencyCodes={currencyCodes}
-              skipReasons={skipReasons}
-              readOnly={readOnly}
-              onChange={onChange}
-              onOpenDocument={onOpenDocument}
-              reasonLabel={reasonCode ? reasonLabels.get(reasonCode) ?? null : null}
-              chipChoice={chipRecord?.decision}
-              chipMode={chipMode}
-              rfqRef={rfqRef}
-              currentRevisionNumber={currentRevisionNumber}
-              promotedRevisionNumber={promotedRevisionNumber}
+        {lines.length > 1 ? (
+          <>
+          {FILTERS.filter((item) => item.key === 'all' || counts[item.key] > 0 || filter === item.key).map((item) => (
+            <Chip
+              key={item.key}
+              clickable
+              size="small"
+              aria-pressed={filter === item.key}
+              label={`${item.label} ${counts[item.key]}`}
+              color={filter === item.key ? (item.key === 'fix' ? 'warning' : 'primary') : 'default'}
+              variant={filter === item.key ? 'filled' : 'outlined'}
+              onClick={() => { setFilter(item.key); turnTo(0); }}
+              sx={{ height: 26, fontSize: '0.75rem', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}
             />
-            );
-          })}
-          {lines.length === 0 ? (
+          ))}
+          <TextField
+            size="small"
+            placeholder="Find a line"
+            value={search}
+            onChange={(event) => { setSearch(event.target.value); turnTo(0); }}
+            slotProps={{
+              htmlInput: { 'aria-label': 'Find a line by its words or numbers' },
+              input: {
+                startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment>,
+                endAdornment: search ? (
+                  <InputAdornment position="end">
+                    <IconButton size="small" aria-label="Clear the search" onClick={() => { setSearch(''); turnTo(0); }}>
+                      <CloseIcon fontSize="small" />
+                    </IconButton>
+                  </InputAdornment>
+                ) : undefined,
+              },
+            }}
+            sx={{ width: 220, '& .MuiInputBase-root': { height: 30, fontSize: '0.8125rem' } }}
+          />
+          </>
+        ) : null}
+        {selectable && lines.length > 1 ? <Divider orientation="vertical" flexItem sx={{ mx: 0.75, my: 0.5 }} /> : null}
+        {selectable && lines.length > 1 ? (
+          <>
+            {selectedIds.length > 0 ? (
+              <Chip
+                size="small"
+                color="primary"
+                label={`${selectedIds.length} selected`}
+                onDelete={clearTicks}
+                deleteIcon={<CloseIcon aria-label="Clear the selection" />}
+                sx={{ fontWeight: 700 }}
+              />
+            ) : null}
+            <Button size="small" variant="outlined" sx={denseButton} onClick={() => apply({ decision: 'Bid', reasonCode: undefined })}>
+              {scope === 'all' ? 'Quote all' : `Quote ${scope}`}
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              sx={denseButton}
+              aria-haspopup="menu"
+              aria-expanded={skipAnchor ? 'true' : undefined}
+              onClick={(event) => setSkipAnchor(event.currentTarget)}
+            >
+              {scope === 'all' ? 'Skip all…' : `Skip ${scope}…`}
+            </Button>
+            <Menu anchorEl={skipAnchor} open={Boolean(skipAnchor)} onClose={() => setSkipAnchor(null)} aria-label="Why skip these lines">
+              {scopeHeader}
+              {skipReasons.map((reason) => (
+                <MenuItem key={reason.code} onClick={() => { apply({ decision: 'NoBid', reasonCode: reason.code }); setSkipAnchor(null); }}>
+                  {reason.label}
+                </MenuItem>
+              ))}
+            </Menu>
+            {currencyOptions.length > 0 ? (
+              <>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  sx={denseButton}
+                  aria-haspopup="menu"
+                  aria-expanded={currencyAnchor ? 'true' : undefined}
+                  onClick={(event) => setCurrencyAnchor(event.currentTarget)}
+                >
+                  {scope === 'all' ? 'Currency for all…' : `Currency for ${scope}…`}
+                </Button>
+                <Menu anchorEl={currencyAnchor} open={Boolean(currencyAnchor)} onClose={() => setCurrencyAnchor(null)} aria-label="Currency for these lines">
+                  {scopeHeader}
+                  {currencyOptions.map((option) => (
+                    <MenuItem key={option.code} onClick={() => { apply({ currency: option.code }); setCurrencyAnchor(null); }}>
+                      {option.code}
+                    </MenuItem>
+                  ))}
+                </Menu>
+              </>
+            ) : null}
+          </>
+        ) : null}
+        <Box sx={{ flex: 1 }} />
+        {counter ? (
+          <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', mr: 2 }}>
+            {counter}
+          </Typography>
+        ) : null}
+        {paged ? (
+          <TablePagination
+            component="div"
+            count={shown.length}
+            page={Math.min(page, Math.max(0, Math.ceil(shown.length / pageSize) - 1))}
+            onPageChange={(_event, next) => turnTo(next)}
+            rowsPerPage={pageSize}
+            onRowsPerPageChange={(event) => { setPageSize(Number(event.target.value)); turnTo(0); }}
+            rowsPerPageOptions={[linesPerPage, linesPerPage * 2, linesPerPage * 5]}
+            labelRowsPerPage="Per page"
+            labelDisplayedRows={({ from, to, count }) => `Lines ${from}–${to} of ${count}`}
+            getItemAriaLabel={(type) => `${type} page of lines`}
+            sx={{
+              borderBottom: 0,
+              '& .MuiTablePagination-toolbar': { minHeight: 30, height: 30, pl: 0 },
+              '& .MuiTablePagination-selectLabel, & .MuiTablePagination-displayedRows': { fontSize: '0.8125rem', my: 0 },
+              '& .MuiTablePagination-actions button': { width: 30, height: 30, minWidth: 30, minHeight: 30 },
+            }}
+          />
+        ) : null}
+        {toolbarEnd ? <Box sx={{ display: 'flex', gap: 1, '& .MuiButton-root': denseButton }}>{toolbarEnd}</Box> : null}
+      </Stack>
+
+      {showBulkUnit ? (
+        <Stack
+          direction="row"
+          spacing={1.5}
+          data-testid="decide-bulk-unit"
+          sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1, px: { xs: 1.5, sm: 2 }, py: 0.75, borderBottom: 1, borderColor: 'divider', bgcolor: (t) => alpha(t.palette.warning.main, 0.08) }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 700 }}>{unitlessQuoted} lines marked to quote need a unit.</Typography>
+          <FormControl size="small" error sx={{ minWidth: 180, ...DENSE_INPUT_SX }}>
+            <Select
+              value=""
+              displayEmpty
+              renderValue={() => <Box component="em" sx={{ color: 'text.secondary' }}>Unit for all {unitlessQuoted}</Box>}
+              inputProps={{ 'aria-label': `Unit for the ${unitlessQuoted} lines marked to quote without one` }}
+              onChange={(event) => { if (event.target.value) onBulkUnit?.(String(event.target.value)); }}
+            >
+              {unitOptions.map((option) => (
+                <MenuItem key={option.code} value={option.code}>
+                  {option.label && option.label !== option.code ? `${option.code} · ${option.label}` : option.code}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Typography variant="caption" color="text.secondary">Lines that already have a unit keep theirs.</Typography>
+        </Stack>
+      ) : null}
+
+      {/* Only the lines scroll; the headings stay put so the rep always knows which column is which. */}
+      <TableContainer ref={scrollRef} sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        <Table
+          size="small"
+          stickyHeader
+          aria-label="Lines the customer asked for"
+          sx={{
+            minWidth: 760,
+            '& .MuiTableCell-stickyHeader': {
+              bgcolor: 'background.paper',
+              py: 0.75,
+              fontSize: '0.75rem',
+              fontWeight: 700,
+              letterSpacing: '.04em',
+              textTransform: 'uppercase',
+              color: 'text.secondary',
+              boxShadow: (t) => `inset 0 -1px 0 ${t.palette.divider}`,
+            },
+            '& .MuiTableRow-root.Mui-selected': { bgcolor: (t) => alpha(t.palette.primary.main, 0.07) },
+            '& .MuiTableRow-root.Mui-selected:hover': { bgcolor: (t) => alpha(t.palette.primary.main, 0.11) },
+          }}
+        >
+          <TableHead>
             <TableRow>
-              <TableCell colSpan={4}>
-                <Typography color="text.secondary">
-                  Nexora read no lines from this request. Check the document, or ask the customer for a list.
-                </Typography>
-                <Link component="button" type="button" onClick={() => onOpenDocument()} sx={{ fontWeight: 700 }}>
-                  Check the document for lead {leadId}
-                </Link>
-              </TableCell>
+              {selectable ? (
+                <TableCell padding="checkbox">
+                  <Checkbox
+                    size="small"
+                    checked={allShownTicked}
+                    indeterminate={shownTicked > 0 && !allShownTicked}
+                    disabled={shown.length === 0}
+                    onChange={toggleShown}
+                    slotProps={{ input: { 'aria-label': `Select all ${shown.length} lines shown` } }}
+                  />
+                </TableCell>
+              ) : null}
+              <TableCell sx={{ width: 64, pl: selectable ? 0 : undefined }}>Line</TableCell>
+              <TableCell>Item</TableCell>
+              <TableCell sx={{ width: 200 }}>Quantity</TableCell>
+              <TableCell sx={{ width: 120 }}>Price in</TableCell>
+              <TableCell sx={{ width: 150 }} align="right">{decisionHeader}</TableCell>
             </TableRow>
-          ) : null}
-        </TableBody>
-      </Table>
-    </TableContainer>
+          </TableHead>
+          <TableBody>
+            {visible.map((line) => {
+              // Lines that belong to an RFQ (or arrived after one, or predate this screen's records)
+              // report what the server saved for them. The page fills its choices in after the first
+              // paint, so reading those painted "Left out" on every line of a promoted request first.
+              const chipRecord = chipMode === 'choice' ? decisions[line.revisionLineId] : line.participation ?? undefined;
+              const reasonCode = chipRecord?.reasonCode;
+              return (
+                <LineRow
+                  key={line.revisionLineId}
+                  line={line}
+                  decision={decisions[line.revisionLineId]}
+                  unitOptions={unitOptions}
+                  currencyOptions={currencyOptions}
+                  unitCodes={unitCodes}
+                  currencyCodes={currencyCodes}
+                  skipReasons={skipReasons}
+                  readOnly={readOnly}
+                  onChange={onChange}
+                  onOpenDocument={onOpenDocument}
+                  reasonLabel={reasonCode ? reasonLabels.get(reasonCode) ?? null : null}
+                  chipChoice={chipRecord?.decision}
+                  chipMode={chipMode}
+                  rfqRef={rfqRef}
+                  currentRevisionNumber={currentRevisionNumber}
+                  promotedRevisionNumber={promotedRevisionNumber}
+                  selectable={selectable}
+                  selected={ticked.has(line.revisionLineId)}
+                  onToggleSelect={toggleOne}
+                  columns={columns}
+                />
+              );
+            })}
+            {lines.length > 0 && shown.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={columns}>
+                  <Typography variant="body2" color="text.secondary">
+                    No line matches.{' '}
+                    <Link component="button" type="button" onClick={() => { setFilter('all'); setSearch(''); turnTo(0); }} sx={{ fontWeight: 700, verticalAlign: 'baseline' }}>
+                      Show all {lines.length} lines
+                    </Link>
+                  </Typography>
+                </TableCell>
+              </TableRow>
+            ) : null}
+            {lines.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={columns}>
+                  <Typography color="text.secondary">
+                    Nexora read no lines from this request. Check the document, or ask the customer for a list.
+                  </Typography>
+                  <Link component="button" type="button" onClick={() => onOpenDocument()} sx={{ fontWeight: 700 }}>
+                    Check the document for lead {leadId}
+                  </Link>
+                </TableCell>
+              </TableRow>
+            ) : null}
+          </TableBody>
+        </Table>
+      </TableContainer>
     </Box>
   );
 };

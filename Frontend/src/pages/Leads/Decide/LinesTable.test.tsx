@@ -165,13 +165,16 @@ describe('the unit of measure on a line', () => {
     />
   );
 
-  it('pre-selects a mapped spelling and names the word the customer wrote', () => {
+  it('pre-selects a mapped spelling and names the word the customer wrote', async () => {
     render(table(
       [{ ...line(1), normalizedUom: 'EA', sourceFields: [{ field: 'UnitOfMeasure', rawValue: 'nos' }] }],
       { 10: { decision: 'Bid', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR' } },
     ));
     expect(screen.getByRole('combobox', { name: 'Unit for line 00001' })).toHaveTextContent('EA');
-    expect(screen.getByText('as written: nos (read as EA)')).toBeInTheDocument();
+    // Understood, so nothing to act on: said on hover, not under every line.
+    expect(screen.queryByText('as written: nos (read as EA)')).toBeNull();
+    fireEvent.mouseOver(screen.getByRole('combobox', { name: 'Unit for line 00001' }));
+    expect(await screen.findByText('as written: nos (read as EA)')).toBeInTheDocument();
   });
 
   it('never shows a blank picker holding a word: the picker asks and the word is said underneath', () => {
@@ -384,5 +387,112 @@ describe('the per-line document check', () => {
     expect(screen.queryByRole('button', { name: 'Check the document' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Check line 00001' }));
     expect(onOpenDocument).toHaveBeenCalledWith(unsure);
+  });
+});
+
+describe('ticking lines and acting on them', () => {
+  const lines = Array.from({ length: 6 }, (_item, index) => line(index + 1));
+  const renderList = (onApply = vi.fn(), decisions: DecisionMap = {}) => {
+    render(
+      <LinesTable
+        leadId={407}
+        lines={lines}
+        decisions={decisions}
+        unitOptions={[{ code: 'EA', label: 'Each' }]}
+        currencyOptions={[{ code: 'SAR', label: 'Saudi riyal' }, { code: 'USD', label: 'US dollar' }]}
+        reasonCodes={[{ code: 'NO_STOCK', label: 'Item unavailable', appliesTo: ['NoBid'] }]}
+        readOnly={false}
+        onChange={vi.fn()}
+        onOpenDocument={vi.fn()}
+        onApply={onApply}
+      />,
+    );
+    return onApply;
+  };
+
+  it('acts on every line while nothing is ticked, and only on the ticked lines once some are', () => {
+    const onApply = renderList();
+    fireEvent.click(screen.getByRole('button', { name: 'Quote all' }));
+    expect(onApply).toHaveBeenLastCalledWith(null, { decision: 'Bid', reasonCode: undefined });
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select line 00002' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select line 00004' }));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Quote 2' }));
+    expect(onApply).toHaveBeenLastCalledWith([20, 40], { decision: 'Bid', reasonCode: undefined });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Skip 2…' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Item unavailable' }));
+    expect(onApply).toHaveBeenLastCalledWith([20, 40], { decision: 'NoBid', reasonCode: 'NO_STOCK' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Currency for 2…' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'USD' }));
+    expect(onApply).toHaveBeenLastCalledWith([20, 40], { currency: 'USD' });
+
+    fireEvent.click(screen.getByLabelText('Clear the selection'));
+    expect(screen.getByRole('button', { name: 'Quote all' })).toBeInTheDocument();
+  });
+
+  it('says in each menu which lines it will change', () => {
+    renderList();
+    fireEvent.click(screen.getByRole('button', { name: 'Currency for all…' }));
+    expect(screen.getByText('For all 6 lines')).toBeInTheDocument();
+    expect(screen.getByText('Tick lines to change only those.')).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select line 00003' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Currency for 1…' }));
+    expect(screen.getByText('For the 1 ticked line')).toBeInTheDocument();
+  });
+
+  it('ticks a range with shift, and every line shown from the heading', () => {
+    const onApply = renderList();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select line 00002' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select line 00005' }), { shiftKey: true });
+    expect(screen.getByText('4 selected')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all 6 lines shown' }));
+    expect(screen.getByText('6 selected')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Quote 6' }));
+    const [ids] = onApply.mock.lastCall!;
+    expect([...ids].sort((a: number, b: number) => a - b)).toEqual([10, 20, 30, 40, 50, 60]);
+  });
+
+  it('filters by where each line stands, and finds a line by its words or numbers', () => {
+    renderList(vi.fn(), { 10: { decision: 'Bid', quantity: 4, unitOfMeasure: 'EA', currency: 'SAR' }, 20: { decision: 'NoBid' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Skip 1' }));
+    expect(screen.getByRole('group', { name: 'Quote or skip line 00002' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Quote or skip line 00001' })).toBeNull();
+    // A skip without a reason is something to fix.
+    fireEvent.click(screen.getByRole('button', { name: 'To fix 1' }));
+    expect(screen.getByRole('group', { name: 'Quote or skip line 00002' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'All 6' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Find a line by its words or numbers' }), { target: { value: 'item 5' } });
+    expect(screen.getByRole('group', { name: 'Quote or skip line 00005' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Quote or skip line 00001' })).toBeNull();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Find a line by its words or numbers' }), { target: { value: 'nothing like it' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Show all 6 lines' }));
+    expect(screen.getByRole('group', { name: 'Quote or skip line 00001' })).toBeInTheDocument();
+  });
+
+  it('offers no ticks on a list nobody can change', () => {
+    render(
+      <LinesTable
+        leadId={407}
+        lines={lines}
+        decisions={{}}
+        unitOptions={[]}
+        currencyOptions={[]}
+        reasonCodes={[]}
+        readOnly
+        onChange={vi.fn()}
+        onOpenDocument={vi.fn()}
+        onApply={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Quote all' })).toBeNull();
   });
 });
