@@ -32,7 +32,7 @@ export default function InsufficiencyPips({ have, need, label, unitPhrase = 'quo
   const sentence = `${label} is published once ${total} ${unitPhrase}. You have ${counted}.`;
 
   return (
-    <Stack spacing={1} sx={{ minWidth: 0 }}>
+    <Stack spacing={0.75} sx={{ minWidth: 0 }}>
       <Stack
         direction="row"
         spacing={0.75}
@@ -61,7 +61,7 @@ export default function InsufficiencyPips({ have, need, label, unitPhrase = 'quo
           />
         ))}
       </Stack>
-      <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
+      <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
         {sentence}
       </Typography>
     </Stack>

@@ -22,10 +22,10 @@ import type {
  * The empty case is the primary case (Nexora is pre-launch), so every band's empty state is
  * asserted together, on one screen, in the state a new tenant actually opens.
  */
-const auth = vi.hoisted(() => ({ businessUnitId: 3 as number | undefined, grants: null as Set<string> | null }));
+const auth = vi.hoisted(() => ({ businessUnitId: 3 as number | undefined, grants: null as Set<string> | null, isManager: true }));
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
-    userData: { businessUnitId: auth.businessUnitId, isManager: false },
+    userData: { id: 41, businessUnitId: auth.businessUnitId, isManager: auth.isManager },
     hasPermission: (moduleName: string) => auth.grants === null || auth.grants.has(moduleName),
     hasEntitlement: () => false,
   }),
@@ -187,6 +187,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   auth.businessUnitId = 3;
   auth.grants = null;
+  auth.isManager = true;
   getPerformance.mockResolvedValue(performance());
   getRelease01.mockResolvedValue(release());
   getDeadlineBoard.mockResolvedValue(board());
@@ -382,5 +383,54 @@ describe('the figures this screen refuses to show', () => {
     expect(screen.getByRole('button', { name: 'Performance by rep' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Every deadline in full' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Documents to check' })).toBeNull();
+  });
+});
+
+describe('a sales rep', () => {
+  const myRow = {
+    userId: 41, name: 'Sara Ali', activeLeads: 7, overdueLeads: 2, openRfqs: 4, draftQuotes: 1,
+    followUpsDue: 3, pipelineGroups: [], wonQuotes: 3, lostQuotes: 1, decidedQuotes: 4,
+    conversionEligible: false, conversionRate: null, activityCount: 12, opportunities: 7, quoteSent: 9,
+    customerResponses: 5, averageResponseHours: null, followUpsCreated: 5, completedFollowUps: 2,
+    followUpsCompletedOnTime: 2, openFollowUps: 3, overdueFollowUps: 1, revenueByCurrency: [],
+  };
+
+  it('gets their own desk: six plain tiles from their own row, not the team screen', async () => {
+    auth.isManager = false;
+    getPerformance.mockResolvedValue(performance({ scope: 'assigned_to_me', representatives: [myRow] }));
+    renderPage();
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'My desk' })).toBeInTheDocument();
+    const tiles = within(screen.getByRole('region', { name: 'My numbers' }));
+    await waitFor(() => expect(tiles.getByRole('button', { name: /Enquiries I'm working: 7, 2 past deadline/ })).toBeInTheDocument());
+    expect(tiles.getByRole('button', { name: /My open RFQs: 4/ })).toBeInTheDocument();
+    expect(tiles.getByRole('button', { name: /Quotes I sent: 9, 1 still in draft/ })).toBeInTheDocument();
+    expect(tiles.getByRole('button', { name: /Won: 3, 1 lost/ })).toBeInTheDocument();
+    // Four decided is under the minimum of five: no ratio is invented.
+    expect(tiles.getByRole('button', { name: /My win ratio: Not yet, Shows after 5 decided quotes · you have 4/ })).toBeInTheDocument();
+    expect(tiles.getByRole('button', { name: /Follow-ups: 3, 1 late/ })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Why we lost' })).toBeNull();
+  });
+
+  it('lets a manager switch between the team screen and their own desk', async () => {
+    getPerformance.mockResolvedValue(performance({ scope: 'managed_scope', representatives: [myRow] }));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'My desk' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'My desk' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Team' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
+  });
+
+  it('shows a tile as a figure, not a link, when the rep may not open its list', async () => {
+    auth.isManager = false;
+    auth.grants = new Set(['Dashboard', 'Leads']);
+    getPerformance.mockResolvedValue(performance({ scope: 'assigned_to_me', representatives: [myRow] }));
+    renderPage();
+
+    const tiles = within(await screen.findByRole('region', { name: 'My numbers' }));
+    await waitFor(() => expect(tiles.getByRole('button', { name: /Enquiries I'm working/ })).toBeInTheDocument());
+    expect(tiles.queryByRole('button', { name: /Quotes I sent/ })).toBeNull();
+    expect(tiles.getByText('Quotes I sent')).toBeInTheDocument();
   });
 });

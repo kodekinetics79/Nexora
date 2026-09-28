@@ -243,6 +243,33 @@ public class LeadIngestionAuditTests
         Assert.Equal(0, dto.LateIngestedExcludedLeads);
     }
 
+    [Fact]
+    public async Task Team_workload_shows_a_manager_only_the_reps_in_their_team()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        const long bu = 97;
+
+        Seed.LeadStatus(context, 24, bu, "Accepted");
+        foreach (var (id, name) in new[] { (9701L, "Mine"), (9702L, "Peer") })
+            context.Users.Add(new User
+            {
+                Id = id, FirstName = "Rep", LastName = name, Email = $"rep.{id}@example.test",
+                PasswordHash = "x", ImageUrl = "n/a", Buid = bu, IsActive = true,
+                CreatedBy = "seed", CreatedOn = SeedCreatedDate,
+            });
+        Seed.Lead(context, 970, bu, leadStatusId: 24).AssignTo = 9701;
+        Seed.Lead(context, 971, bu, leadStatusId: 24).AssignTo = 9702;
+        await context.SaveChangesAsync();
+
+        var dto = await new DashboardRepository(context).GetTeamWorkloadAsync(bu, [9701L]);
+
+        Assert.Single(dto.Rows, r => r.UserId == 9701);
+        Assert.DoesNotContain(dto.Rows, r => r.UserId == 9702);
+        // The peer's lead is owned, just not by this team — it is not "unassigned".
+        Assert.Equal(0, Assert.Single(dto.Rows, r => r.IsUnassignedBucket).OpenLeads);
+    }
+
     // ── Seed helper: corpus → source document → occurrence → lead lineage ────
 
     private static void LinkSourceOccurrence(

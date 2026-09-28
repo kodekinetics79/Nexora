@@ -8,7 +8,7 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<DashboardDataDTO> GetDashboardDataAsync(long businessUnitId);
 
         /// <summary>WP-B1: per-rep open/overdue leads + sent/stale quotes, plus an unassigned bucket row.</summary>
-        Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId);
+        Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId, IReadOnlyCollection<long>? visibleUserIds = null);
 
         /// <summary>
         /// WP-B2: stage funnel, loss reasons and weighted forecast, restricted to the rows

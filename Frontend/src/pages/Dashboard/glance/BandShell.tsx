@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
 import { Alert, AlertTitle, Box, Button, Paper, Stack, Tooltip, Typography } from '@mui/material';
-import { LockOutlined as ForbiddenIcon } from '@mui/icons-material';
+import { InfoOutlined as HintIcon, LockOutlined as ForbiddenIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { glanceCssVariables } from './tokens';
-import { NEU_TRANSITION, neuCssVariables, neuEmboss, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
+import { NEU_TRANSITION, neuCssVariables, neuInset, neuRaised, neuSlab, neuWell } from './neumorphic';
 import RefreshFailedNotice from '../../../components/common/RefreshFailedNotice';
 import { SCOPE_UNRESOLVED } from './scopeWords';
 
@@ -54,6 +54,17 @@ export interface BandShellProps {
    * still drawn. The band keeps its rows and says how old they are; only `error` replaces them.
    */
   refreshFailedAt?: number | null;
+  /**
+   * How to read the band, in one or two sentences. Behind an info key beside the title rather than
+   * printed above the chart: the screen has to fit one glance, and a reader needs the key once, not
+   * every time they look.
+   */
+  hint?: string;
+  /**
+   * The band that asks the reader to act. It wears the brass rim the chosen period key wears, so
+   * the one band with work in it is the one the eye finds among six slabs of the same material.
+   */
+  emphasis?: boolean;
   /** The band's reserved height. It is held in every state, empty included. */
   minHeight?: number;
   index?: number;
@@ -66,7 +77,7 @@ const sealFreshness = (generatedAt?: string | null): string => {
 };
 
 export default function BandShell({
-  title, seal, children, step, loading = false, error = null, forbidden = null, onRetry, refreshFailedAt = null, minHeight = 260, index = 0,
+  title, seal, children, step, hint, emphasis = false, loading = false, error = null, forbidden = null, onRetry, refreshFailedAt = null, minHeight = 240, index = 0,
 }: BandShellProps) {
   const scopeText = seal.scope ?? SCOPE_UNRESOLVED;
   const sealText = `${scopeText} · ${seal.window} · ${sealFreshness(seal.generatedAt)}`;
@@ -101,7 +112,7 @@ export default function BandShell({
       return (
         <Box
           role="status"
-          sx={{ minHeight: minHeight - 120, display: 'grid', placeItems: 'center' }}
+          sx={{ minHeight: minHeight - 100, display: 'grid', placeItems: 'center' }}
         >
           <Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading {title.toLowerCase()}…</Typography>
         </Box>
@@ -128,22 +139,30 @@ export default function BandShell({
         // does not mount the whole screen — still paints in the validated palette.
         ...glanceCssVariables(theme.palette.mode),
         ...neuCssVariables(theme.palette.mode),
-        ...neuSlab(theme.palette.mode, 16),
+        ...neuSlab(theme.palette.mode, 8),
+        ...(emphasis ? { boxShadow: `0 0 0 1.5px color-mix(in srgb, var(--nx-glance-seal-ink) 70%, transparent), ${neuRaised(theme.palette.mode, 8)}` } : {}),
         ...NEU_TRANSITION,
-        p: { xs: 2, md: 3 },
-        borderRadius: { xs: 5, md: 6 },
-        '&:hover': { boxShadow: neuRaised(theme.palette.mode, 20) },
+        p: 1.5,
+        // Pixel radii on purpose (the theme multiplies sx numbers by 12): the tray inside is
+        // 28 − 12 padding = 16px, so the two corners stay concentric instead of pinching.
+        borderRadius: '28px',
+        // Bands sit in a grid on the dashboard; filling the cell keeps a row's slabs one height.
+        height: '100%',
+        // The band reads its own width, not the window's, so its insides adapt to the cell.
+        containerType: 'inline-size',
+        // No hover lift: a band is not a button, and lifting it said it was.
         minHeight,
         display: 'flex',
         flexDirection: 'column',
       })}
     >
-      <Stack
-        direction={{ xs: 'column', sm: 'row' }}
-        spacing={1}
-        sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', mb: 2 }}
-      >
-        <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', minWidth: 0 }}>
+      {/*
+        Title on one line, seal on the next. A band is a third of the screen wide, so the seal
+        cannot share the title's line without truncating one of them; stacked, both stay whole and
+        the seal still sits in the same place on every band.
+      */}
+      <Stack spacing={0.5} sx={{ alignItems: 'flex-start', mb: 1 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', minWidth: 0, maxWidth: '100%' }}>
           {step && (
             <Typography
               aria-hidden
@@ -152,10 +171,10 @@ export default function BandShell({
                 // as (1 → 6) is something the eye can count down the left edge.
                 boxShadow: neuRaised(theme.palette.mode, 3),
                 alignSelf: 'center',
-                width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
+                width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
                 display: 'grid', placeItems: 'center',
                 fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700,
-                fontSize: 13, color: 'var(--nx-glance-seal-ink)', fontVariantNumeric: 'tabular-nums',
+                fontSize: 12, color: 'var(--nx-glance-seal-ink)', fontVariantNumeric: 'tabular-nums',
               })}
             >
               {step}
@@ -163,41 +182,62 @@ export default function BandShell({
           )}
           <Typography
             component="h2"
-            sx={(theme) => ({ fontWeight: 800, fontSize: { xs: 16, md: 19 }, lineHeight: 1.25, textShadow: neuEmboss(theme.palette.mode) })}
+            sx={{ fontWeight: 700, fontSize: 16, lineHeight: 1.25, textWrap: 'balance' }}
           >
             {title}
           </Typography>
         </Stack>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', maxWidth: '100%', minWidth: 0 }}>
         <Tooltip title={sealExplanation} placement="top-end">
           <Box
             data-testid="band-seal"
             data-governed={seal.governed ? 'true' : 'false'}
+            role="note"
             aria-label={`${sealText}. ${sealExplanation}`}
             sx={(theme) => ({
               flexShrink: 0,
-              alignSelf: { xs: 'flex-start', sm: 'auto' },
-              px: 1.5, py: 0.625,
+              px: 1.25, py: 0.375,
               borderRadius: 999,
               border: '1px solid',
               borderColor: 'var(--nx-glance-seal-rim)',
               backgroundColor: seal.governed ? 'var(--nx-glance-seal-ground)' : 'transparent',
-              // Governed = pressed in, like the period key that governs it; fixed windows stand
-              // proud. Filled-vs-outlined still carries the fact on its own; depth only repeats it.
-              boxShadow: seal.governed ? neuInset(theme.palette.mode, 3) : neuRaised(theme.palette.mode, 3),
+              // Governed = pressed in, like the period key that governs it. A fixed window is a
+              // flat outline: raised, it read as a button, and it is not one.
+              boxShadow: seal.governed ? neuInset(theme.palette.mode, 3) : 'none',
               color: 'var(--nx-glance-seal-ink)',
-              fontSize: 12,
+              fontSize: 11,
               fontWeight: seal.governed ? 700 : 600,
               letterSpacing: '0.01em',
               fontVariantNumeric: 'tabular-nums',
               whiteSpace: 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
-              maxWidth: { xs: '100%', sm: 340 },
+              maxWidth: '100%',
+              // In a narrow cell the seal wraps rather than hiding its window behind an ellipsis.
+              '@container (max-width: 360px)': { whiteSpace: 'normal' },
             })}
           >
             {sealText}
           </Box>
         </Tooltip>
+          {hint && (
+            <Tooltip title={hint} placement="top-start">
+              <Box
+                component="button"
+                type="button"
+                aria-label={`How to read this: ${hint}`}
+                sx={{
+                  display: 'inline-grid', placeItems: 'center', flexShrink: 0,
+                  width: 24, height: 24, p: 0, border: 0, borderRadius: '50%',
+                  background: 'none', color: 'text.secondary', cursor: 'help',
+                  '&:focus-visible': { outline: '2px solid', outlineColor: 'var(--nx-glance-seal-ink)' },
+                }}
+              >
+                <HintIcon sx={{ fontSize: 16 }} />
+              </Box>
+            </Tooltip>
+          )}
+        </Stack>
       </Stack>
       {/*
         The band's content is pressed INTO the slab: a raised object holding a sunken tray is the
@@ -205,9 +245,9 @@ export default function BandShell({
       */}
       <Box
         sx={(theme) => ({
-          ...neuWell(theme.palette.mode, 6),
-          borderRadius: { xs: 3, md: 4 },
-          p: { xs: 1.5, md: 2.5 },
+          ...neuWell(theme.palette.mode, 4),
+          borderRadius: '16px',
+          px: 1.5, py: 1,
           flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
         })}
       >

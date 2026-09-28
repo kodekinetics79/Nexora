@@ -461,7 +461,7 @@ namespace ERP_RFQ_Automation.Repositories
         /// <summary>Extraction sentinel floor — dates before this year are "unknown", never overdue.</summary>
         private const int SentinelYearFloor = 2000;
 
-        public async Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId)
+        public async Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId, IReadOnlyCollection<long>? visibleUserIds = null)
         {
             var now = DateTime.UtcNow;
             var acceptedLeadStatusIds = await ResolveStatusIdsAsync("LeadStatus", "ACCEPTED", "Accepted", legacyId: 24);
@@ -551,6 +551,12 @@ namespace ERP_RFQ_Automation.Repositories
             // no active BU user (owner unknown ⇒ effectively unowned work).
             var unassignedLeads = leadRows.Where(l => l.AssignTo == null || !users.Any(u => u.Id == l.AssignTo)).ToList();
             var orphanQuotes = quoteRows.Where((q, i) => !matchedQuoteOwners.Contains(i)).ToList();
+
+            // A manager sees the reps in their own team tree. Quote ownership is still matched
+            // against every rep in the unit above, so a peer team's quotes are not misfiled as
+            // "unassigned" just because their owner is off this manager's list.
+            if (visibleUserIds is not null)
+                rows = rows.Where(r => r.UserId.HasValue && visibleUserIds.Contains(r.UserId.Value)).ToList();
 
             rows = rows
                 .OrderByDescending(r => r.OpenLeads)

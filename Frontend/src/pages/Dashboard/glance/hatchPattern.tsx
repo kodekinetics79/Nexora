@@ -24,22 +24,22 @@ export const HATCH_MEANING = 'Hatched: not decided yet';
 
 export interface HatchPatternProps {
   id: string;
-  /** Override only if a band needs the hatch on an unusual ground; the default is brand brass. */
+  /** Override only if a band needs the hatch on an unusual ground; the default is brass mark. */
   color?: string;
 }
 
 /**
  * The <defs> block. Drop it inside the band's own <svg>, above the shapes that reference it.
- * ~10% brass at 45 degrees: present enough to read as texture, faint enough that the solid marks
- * beside it still carry the eye.
+ * 35% brass mark at 45 degrees: the hatch has to clear 3:1 against the clay to carry its meaning
+ * (WCAG 1.4.11), and it still reads as texture next to the solid marks beside it.
  */
 export function HatchPattern({ id, color }: HatchPatternProps) {
-  const stroke = color ?? seriesVar('brassBrand');
+  const stroke = color ?? seriesVar('brassMark');
   return (
     <defs>
       <pattern id={id} width={6} height={6} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
         <rect width={6} height={6} fill="none" />
-        <line x1={0} y1={0} x2={0} y2={6} stroke={stroke} strokeWidth={2} strokeOpacity={0.10} />
+        <line x1={0} y1={0} x2={0} y2={6} stroke={stroke} strokeWidth={2} strokeOpacity={0.35} />
       </pattern>
     </defs>
   );

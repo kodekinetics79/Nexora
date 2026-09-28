@@ -194,6 +194,62 @@ public static class ListViewCatalog
                 new("stockUnitCost", "Stock unit cost", DefaultVisible: false),
 
                 new("actions", "Actions", Locked: true)
+            ]),
+
+            // Not a grid: the team chart on Frontend/src/pages/SalesManagement/TeamChart.tsx. It
+            // reuses this store because the preference is the same shape — an ordered choice of
+            // keys per user — and it follows the reader to any browser. The FIRST visible entry is
+            // the across axis and the SECOND the up axis; everything else is stored hidden. Keys
+            // are RepPerformance field names from /api/commercial-intelligence/performance.
+            ["sales.performance.chart"] = new("sales.performance.chart", null,
+            [
+                new("quoteSent", "Quotes sent"),
+                new("wonQuotes", "Won"),
+                new("lostQuotes", "Lost", DefaultVisible: false),
+                new("conversionRate", "Win rate", DefaultVisible: false),
+                new("averageResponseHours", "Hours to customer reply", DefaultVisible: false),
+                new("opportunities", "Opportunities", DefaultVisible: false),
+                new("activityCount", "Activities", DefaultVisible: false),
+                new("overdueFollowUps", "Overdue follow-ups", DefaultVisible: false),
+                new("openRfqs", "Open RFQs", DefaultVisible: false),
+                new("activeLeads", "Active leads", DefaultVisible: false)
+            ]),
+
+            // Not grids: the reader's own dashboard (Frontend/src/pages/Dashboard/glance/chartPrefs.ts).
+            // `dashboard.layout` — one key per band; stored order is the grid order, visible is
+            // shown/hidden. `dashboard.charts` — one key per chart option `<chart>.<option>`; the
+            // visible key in a chart's group is that chart's choice. Keys are read by name on the
+            // client, so a rename resets every reader's dashboard.
+            ["dashboard.layout"] = new("dashboard.layout", null,
+            [
+                new("verdict", "Did we win what we decided?"),
+                new("outstanding", "What's out with customers"),
+                new("losses", "Why we lost"),
+                new("closing", "What's closing on us"),
+                new("today", "What needs you today"),
+                new("sixmonths", "The last six months")
+            ]),
+            ["dashboard.charts"] = new("dashboard.charts", null,
+            [
+                new("outstanding.count", "Where it stops: count"),
+                new("outstanding.value", "Where it stops: value", DefaultVisible: false),
+                new("losses.count", "Why we lost: count"),
+                new("losses.value", "Why we lost: value", DefaultVisible: false),
+                new("closing.enquiries", "Closing: enquiries"),
+                new("closing.lines", "Closing: lines", DefaultVisible: false),
+                // Band width: `size.<band>.wide` spans two grid columns on a wide screen.
+                new("size.verdict.normal", "Size: verdict normal"),
+                new("size.verdict.wide", "Size: verdict wide", DefaultVisible: false),
+                new("size.outstanding.normal", "Size: outstanding normal"),
+                new("size.outstanding.wide", "Size: outstanding wide", DefaultVisible: false),
+                new("size.losses.normal", "Size: losses normal"),
+                new("size.losses.wide", "Size: losses wide", DefaultVisible: false),
+                new("size.closing.normal", "Size: closing normal"),
+                new("size.closing.wide", "Size: closing wide", DefaultVisible: false),
+                new("size.today.normal", "Size: today normal"),
+                new("size.today.wide", "Size: today wide", DefaultVisible: false),
+                new("size.sixmonths.normal", "Size: sixmonths normal"),
+                new("size.sixmonths.wide", "Size: sixmonths wide", DefaultVisible: false)
             ])
         };
 

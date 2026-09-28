@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ClosingBand, { CLOSING_COLUMNS } from './ClosingBand';
 import type { DeadlineBoardDTO } from '../../../api/services/dashboardService';
@@ -8,6 +8,15 @@ import type { DeadlineBoardDTO } from '../../../api/services/dashboardService';
 const getDeadlineBoard = vi.fn();
 vi.mock('../../../api/services/dashboardService', () => ({
   default: { getDeadlineBoard: (...args: unknown[]) => getDeadlineBoard(...args) },
+}));
+
+const getColumns = vi.fn();
+const saveColumns = vi.fn();
+vi.mock('../../../api/services/listViewService', () => ({
+  default: {
+    getColumns: (...args: unknown[]) => getColumns(...args),
+    saveColumns: (...args: unknown[]) => saveColumns(...args),
+  },
 }));
 
 const navigate = vi.fn();
@@ -41,6 +50,11 @@ const board = (over: Partial<DeadlineBoardDTO> = {}): DeadlineBoardDTO => ({
   ...over,
 });
 
+const row = (leadId: number, bucket: string, daysLeft: number | null, lineItems: number) => ({
+  leadId, rfqno: `RFQ-${leadId}`, buyersName: `Buyer ${leadId}`, bidClosingDate: null,
+  daysLeft, bucket, lineItems, awaitingReview: false, lateIngested: false,
+});
+
 /** A tenant with real work: overdue, some near, some far, and two with no date at all. */
 const populated = (): DeadlineBoardDTO => board({
   openLeads: 27,
@@ -56,6 +70,14 @@ const populated = (): DeadlineBoardDTO => board({
     { key: 'later', label: 'More than 30 days', leads: 2, lineItems: 30 },
     { key: 'unknown', label: 'No closing date', leads: 2, lineItems: 14 },
   ],
+  // The rows the drill lists. "Closing today" and "1–3 days" are listed in full; "Past deadline"
+  // lists fewer than it counted, as a capped server answer would.
+  leads: [
+    row(101, 'overdue', -3, 20),
+    row(102, 'overdue', -1, 11),
+    row(201, 'today', 0, 9),
+    ...[1, 2, 3, 4, 5, 6].map((n) => row(300 + n, 'days_1_3', 2, n)),
+  ],
 });
 
 const barFor = (key: string) => screen.getByTestId(`closing-bar-${key}`);
@@ -64,6 +86,9 @@ const valueFor = (key: string) => screen.getByTestId(`closing-value-${key}`);
 beforeEach(() => {
   vi.clearAllMocks();
   getDeadlineBoard.mockResolvedValue(board());
+  getColumns.mockResolvedValue({ viewKey: 'dashboard.charts', columns: [], isCustomised: false, supportsCustomFields: false });
+  saveColumns.mockImplementation((viewKey: string, columns: unknown[]) =>
+    Promise.resolve({ viewKey, columns, isCustomised: true, supportsCustomFields: false }));
 });
 
 describe('ClosingBand — populated', () => {
@@ -91,19 +116,115 @@ describe('ClosingBand — populated', () => {
     expect(screen.getByText('4–7 days')).toBeInTheDocument();
     // The tallest column is the scale, and it is not a tick.
     expect(barFor('days_8_30')).toHaveAttribute('data-zero', 'false');
-    expect(barFor('days_8_30')).toHaveStyle({ height: '148px' });
+    expect(barFor('days_8_30')).toHaveStyle({ height: '76px' });
   });
 
   // The acceptance test for the whole screen: a figure that cannot open the rows it counted does
-  // not ship.
-  it('opens the enquiries a column counted', async () => {
+  // not ship. A column lists its enquiries in place, and each one opens its lead.
+  it('lists the enquiries a column counted, opens one, and goes back', async () => {
     getDeadlineBoard.mockResolvedValue(populated());
     render(<ClosingBand />, { wrapper });
 
     await waitFor(() => expect(valueFor('overdue')).toHaveTextContent('4'));
-    fireEvent.click(screen.getByRole('button', { name: /Past deadline: 4 open enquiries, 51 lines/ }));
+    const today = screen.getByRole('button', { name: /Closing today: 1 open enquiry, 9 lines/ });
+    fireEvent.click(today);
 
+    expect(today).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByText('Closing today · 1 enquiry · 9 lines')).toBeInTheDocument();
+    const lead = await screen.findByRole('button', { name: /Open RFQ-201, Buyer 201, Due today, 9 lines/ });
+    expect(screen.queryByText('RFQ-101')).not.toBeInTheDocument();
+    fireEvent.click(lead);
+    expect(navigate).toHaveBeenCalledWith('/procurement/leads/201/workbench');
+
+    fireEvent.click(screen.getByRole('button', { name: '← All deadlines' }));
+    expect(screen.queryByText('RFQ-201')).not.toBeInTheDocument();
+    expect(today).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText(/27 open enquiries carrying 412 lines\./)).toBeInTheDocument();
+  });
+
+  // The server lists the most urgent rows and stops; a short list must not pass for the whole bucket.
+  it('says so when the list is shorter than the count, and offers the full board', async () => {
+    getDeadlineBoard.mockResolvedValue(populated());
+    render(<ClosingBand />, { wrapper });
+
+    await waitFor(() => expect(valueFor('overdue')).toHaveTextContent('4'));
+    fireEvent.click(screen.getByRole('button', { name: /Past deadline: 4 open enquiries/ }));
+
+    expect(await screen.findByText(/Showing 2 of 4/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Open RFQ-101, Buyer 101, 3 days late/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'See all on the deadline board' }));
     expect(navigate).toHaveBeenCalledWith('/analytics/deadlines?bucket=overdue');
+  });
+
+  it('says none for an empty column rather than erroring', async () => {
+    getDeadlineBoard.mockResolvedValue(populated());
+    render(<ClosingBand />, { wrapper });
+
+    await waitFor(() => expect(valueFor('days_4_7')).toHaveTextContent('0'));
+    fireEvent.click(screen.getByRole('button', { name: /4–7 days: 0 open enquiries/ }));
+
+    expect(await screen.findByText('No open enquiries in this column.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('drags across columns to list a run of buckets, and Escape returns to all', async () => {
+    getDeadlineBoard.mockResolvedValue(populated());
+    render(<ClosingBand />, { wrapper });
+
+    await waitFor(() => expect(valueFor('overdue')).toHaveTextContent('4'));
+    const overdue = screen.getByRole('button', { name: /Past deadline:/ });
+    const today = screen.getByRole('button', { name: /Closing today:/ });
+    const soon = screen.getByRole('button', { name: /1–3 days:/ });
+    fireEvent.pointerDown(overdue, { button: 0, pointerId: 1 });
+    fireEvent.pointerMove(today, { pointerId: 1 });
+    fireEvent.pointerMove(soon, { pointerId: 1 });
+    fireEvent.pointerUp(soon, { pointerId: 1 });
+    // The click a browser may send after the drag must not collapse the run to one column.
+    fireEvent.click(soon);
+
+    expect(await screen.findByText('3 buckets · 11 enquiries · 148 lines')).toBeInTheDocument();
+    for (const button of [overdue, today, soon]) expect(button).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /4–7 days:/ })).toHaveAttribute('aria-pressed', 'false');
+    expect(await screen.findByText('RFQ-201')).toBeInTheDocument();
+    expect(screen.getByText('RFQ-306')).toBeInTheDocument();
+    expect(screen.getByText('RFQ-101')).toBeInTheDocument();
+
+    soon.focus();
+    fireEvent.keyDown(soon, { key: 'Escape' });
+    expect(screen.queryByText('RFQ-201')).not.toBeInTheDocument();
+    expect(overdue).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  // The measure switch on the chart: the columns' figures follow it, and the choice is saved.
+  it('switches the columns to line items and saves the choice', async () => {
+    getDeadlineBoard.mockResolvedValue(populated());
+    render(<ClosingBand />, { wrapper });
+
+    await waitFor(() => expect(valueFor('overdue')).toHaveTextContent('4'));
+    fireEvent.click(screen.getByRole('button', { name: 'Columns show: Enquiries. Change' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Line items' }));
+
+    await waitFor(() => expect(valueFor('overdue')).toHaveTextContent('51'));
+    expect(valueFor('days_8_30')).toHaveTextContent('220');
+    // The line-item scale has its own tallest column.
+    expect(barFor('days_8_30')).toHaveStyle({ height: '76px' });
+    expect(screen.getByText('12 enquiries')).toBeInTheDocument();
+    expect(saveColumns).toHaveBeenCalledWith('dashboard.charts', expect.arrayContaining([
+      { key: 'closing.lines', visible: true },
+      { key: 'closing.enquiries', visible: false },
+    ]));
+  });
+
+  // A bucket the server did not send was not counted, and a 0 would say it was.
+  it('draws a bucket the server did not send as a dash, never as 0', async () => {
+    const data = populated();
+    data.buckets = data.buckets.filter((b) => b.key !== 'later');
+    getDeadlineBoard.mockResolvedValue(data);
+    render(<ClosingBand />, { wrapper });
+
+    await waitFor(() => expect(valueFor('overdue')).toHaveTextContent('4'));
+    expect(valueFor('later')).toHaveTextContent('—');
+    expect(valueFor('later')).not.toHaveTextContent('0');
   });
 
   it('states the late-arrival caveat the server published rather than absorbing it', async () => {
@@ -150,7 +271,9 @@ describe('ClosingBand — empty', () => {
       expect(barFor(column.key)).toHaveStyle({ height: '3px' });
     }
     expect(screen.getByText('No closing date')).toBeInTheDocument();
-    expect(screen.getAllByRole('button')).toHaveLength(CLOSING_COLUMNS.length);
+    // The band's own "how to read this" key and the measure switch are buttons too; the columns
+    // are the ones in the plot.
+    expect(within(screen.getByRole('group', { name: 'Open enquiries by time left' })).getAllByRole('button')).toHaveLength(CLOSING_COLUMNS.length);
   });
 
   // "All clear" would be the screen's first lie: on a pre-launch tenant an empty urgency board

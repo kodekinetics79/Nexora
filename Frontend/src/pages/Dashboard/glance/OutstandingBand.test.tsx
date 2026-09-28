@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router-dom';
 import OutstandingBand from './OutstandingBand';
 import type { PipelineAnalyticsDTO } from '../../../api/services/dashboardService';
 
@@ -10,9 +11,24 @@ vi.mock('../../../api/services/dashboardService', () => ({
   default: { getPipelineAnalytics: (...args: unknown[]) => getPipelineAnalytics(...args) },
 }));
 
+// The funnel's measure is a per-user chart choice kept in the list-view store.
+const getColumns = vi.fn();
+const saveColumns = vi.fn();
+vi.mock('../../../api/services/listViewService', () => ({
+  default: {
+    getColumns: (...args: unknown[]) => getColumns(...args),
+    saveColumns: (...args: unknown[]) => saveColumns(...args),
+  },
+}));
+
+// The drill lines link to existing lists, so the band renders inside a router.
 const wrapper = ({ children }: { children: ReactNode }) => {
   const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return (
+    <MemoryRouter>
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    </MemoryRouter>
+  );
 };
 
 const FROM = '2026-08-08';
@@ -75,6 +91,12 @@ const rectOf = (testId: string) =>
 beforeEach(() => {
   vi.clearAllMocks();
   getPipelineAnalytics.mockResolvedValue(analytics());
+  getColumns.mockResolvedValue({ viewKey: 'dashboard.charts', columns: [], isCustomised: false, supportsCustomFields: false });
+  // The store answers with what it saved, as the server does.
+  saveColumns.mockImplementation(async (viewKey: string, columns: { key: string; visible: boolean }[]) => ({
+    viewKey, isCustomised: true, supportsCustomFields: false,
+    columns: columns.map((c) => ({ ...c, label: c.key, locked: false, source: 'catalog' })),
+  }));
 });
 
 describe('OutstandingBand — the sent book', () => {
@@ -86,7 +108,7 @@ describe('OutstandingBand — the sent book', () => {
     for (const [words, count] of [
       ['Won', '12'],
       ['Lost or expired', '16'],
-      ['Supplier responded', '3'],
+      ['Customer replied', '3'],
       ['Awaiting the customer', '15'],
     ] as const) {
       expect(screen.getAllByText(words).length).toBeGreaterThan(0);
@@ -122,7 +144,7 @@ describe('OutstandingBand — the sent book', () => {
     const widths = ['won', 'lost'].map((key) =>
       Number(band().querySelector(`[data-testid="book-segment-${key}"]`)!.getAttribute('data-width')));
     expect(widths[1]).toBeGreaterThanOrEqual(5);
-    expect(widths[0] + widths[1]).toBeCloseTo(560, 5);
+    expect(widths[0] + widths[1]).toBeCloseTo(440, 5);
   });
 
   it('keeps the frame and states the reason when the server sent no won stage at all', async () => {
@@ -161,7 +183,10 @@ describe('OutstandingBand — the funnel', () => {
     expect(quoted).toHaveTextContent('span three currencies with no approved rate between them');
     // Not a 0 and not a dash. The distinction is the whole product rule.
     expect(quoted.textContent).not.toMatch(/[—-]\s*$/);
-    expect(screen.getByTestId('funnel-value-won')).toHaveTextContent('380,000');
+    // A stated value sits beside its bar, compact, and never gets a reason line of its own.
+    expect(screen.getByTestId('funnel-money-won')).toHaveTextContent('380K');
+    expect(screen.getByTestId('funnel-money-quoted')).toHaveTextContent('value not stated');
+    expect(screen.queryByTestId('funnel-value-won')).toBeNull();
   });
 
   it('discloses the quotes deliberately left out of every figure, with the server\'s reason', async () => {
@@ -225,7 +250,7 @@ describe('OutstandingBand — the empty book a new tenant opens', () => {
     render(<OutstandingBand from={FROM} to={TO} />, { wrapper });
 
     expect(await screen.findByTestId('book-empty')).toHaveTextContent(/the book is empty rather than balanced/);
-    for (const words of ['Won', 'Lost or expired', 'Supplier responded', 'Awaiting the customer']) {
+    for (const words of ['Won', 'Lost or expired', 'Customer replied', 'Awaiting the customer']) {
       expect(screen.getAllByText(words).length).toBeGreaterThan(0);
     }
     for (const key of ['leads', 'accepted', 'quoted', 'won']) {
@@ -248,5 +273,97 @@ describe('OutstandingBand — when the aggregate cannot be loaded', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(within(band()).queryByTestId('book-empty')).toBeNull();
     expect(within(band()).queryByTestId('funnel-count-won')).toBeNull();
+  });
+});
+
+describe('OutstandingBand — reading the charts in place', () => {
+  it('switches the funnel from count to value on the chart itself and saves the choice', async () => {
+    getPipelineAnalytics.mockResolvedValue(populated());
+    render(<OutstandingBand from={FROM} to={TO} />, { wrapper });
+
+    await waitFor(() => expect(screen.getByTestId('funnel-count-won')).toHaveTextContent('12'));
+    // By count, won (12) is 12/148 of the longest bar.
+    expect(Number(screen.getByTestId('funnel-bar-won').getAttribute('data-frac'))).toBeCloseTo(12 / 148, 3);
+
+    fireEvent.click(screen.getByRole('button', { name: /Bars show: Where it stops · by count/ }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Where it stops · by value' }));
+
+    await waitFor(() => expect(saveColumns).toHaveBeenCalled());
+    expect(saveColumns.mock.calls[0][0]).toBe('dashboard.charts');
+    expect(saveColumns.mock.calls[0][1]).toEqual(expect.arrayContaining([
+      { key: 'outstanding.value', visible: true },
+      { key: 'outstanding.count', visible: false },
+    ]));
+    // By value, won (380K) is measured against requests in (3.1M).
+    await waitFor(() =>
+      expect(Number(screen.getByTestId('funnel-bar-won').getAttribute('data-frac'))).toBeCloseTo(380_000 / 3_100_000, 3));
+  });
+
+  it('under Value, puts the server\'s reason where a stage\'s bar would be, never a 0', async () => {
+    getPipelineAnalytics.mockResolvedValue(populated());
+    getColumns.mockResolvedValue({
+      viewKey: 'dashboard.charts', isCustomised: true, supportsCustomFields: false,
+      columns: [
+        { key: 'outstanding.count', visible: false, label: 'outstanding.count', locked: false, source: 'catalog' },
+        { key: 'outstanding.value', visible: true, label: 'outstanding.value', locked: false, source: 'catalog' },
+      ],
+    });
+    render(<OutstandingBand from={FROM} to={TO} />, { wrapper });
+
+    const reason = await screen.findByTestId('funnel-reason-quoted');
+    expect(reason).toHaveTextContent('span three currencies with no approved rate between them');
+    expect(screen.queryByTestId('funnel-bar-quoted')).toBeNull();
+    // The stated stages still have bars.
+    expect(screen.getByTestId('funnel-bar-leads')).toHaveAttribute('data-zero', 'false');
+  });
+
+  it('states a step\'s conversion in words when its stage is clicked, and closes on a second click', async () => {
+    getPipelineAnalytics.mockResolvedValue(populated());
+    render(<OutstandingBand from={FROM} to={TO} />, { wrapper });
+
+    const accepted = await screen.findByTestId('funnel-stage-accepted');
+    await waitFor(() => expect(screen.getByTestId('funnel-count-accepted')).toHaveTextContent('61'));
+    // At rest, nothing divides.
+    expect(band().textContent).not.toContain('%');
+
+    fireEvent.click(accepted);
+    expect(accepted).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('funnel-drill'))
+      .toHaveTextContent('61 were accepted in this window (Requests in: 148).');
+
+    fireEvent.click(accepted);
+    expect(accepted).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByTestId('funnel-drill')).toBeNull();
+  });
+
+  it('opens the first stage with its count alone and a link to the real list, and Escape closes it', async () => {
+    getPipelineAnalytics.mockResolvedValue(populated());
+    render(<OutstandingBand from={FROM} to={TO} />, { wrapper });
+
+    const leads = await screen.findByTestId('funnel-stage-leads');
+    await waitFor(() => expect(screen.getByTestId('funnel-count-leads')).toHaveTextContent('148'));
+    fireEvent.keyDown(leads, { key: 'Enter' });
+
+    const drill = screen.getByTestId('funnel-drill');
+    expect(drill).toHaveTextContent('148 requests came in.');
+    expect(within(drill).getByRole('link', { name: 'Open requests' })).toHaveAttribute('href', '/procurement/leads/all');
+
+    leads.focus();
+    fireEvent.keyDown(leads, { key: 'Escape' });
+    expect(screen.queryByTestId('funnel-drill')).toBeNull();
+  });
+
+  it('says what share of the sent book a clicked segment is, with its value', async () => {
+    getPipelineAnalytics.mockResolvedValue(populated());
+    render(<OutstandingBand from={FROM} to={TO} />, { wrapper });
+
+    await waitFor(() => expect(band().querySelector('[data-testid="book-segment-responded"]')).not.toBeNull());
+    const responded = band().querySelector('[data-testid="book-segment-responded"]') as SVGGElement;
+    fireEvent.keyDown(responded, { key: ' ' });
+
+    expect(responded).toHaveAttribute('aria-pressed', 'true');
+    const drill = screen.getByTestId('book-drill');
+    expect(drill).toHaveTextContent('3 of 46 sent quotes: customer replied.');
+    expect(drill).toHaveTextContent('90,000');
   });
 });

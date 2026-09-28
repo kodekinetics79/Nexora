@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
 import commercialIntelligenceService, { type CommercialAttentionItem } from '../../../api/services/commercialIntelligenceService';
+import { neuFocus } from './neumorphic';
 import { useAuth } from '../../../context/AuthContext';
 import { toPresentableError } from '../../../utils/apiErrors';
 import { parseDateSafe } from '../../../utils/dates';
@@ -32,10 +33,10 @@ const MAX_ROWS = 5;
 /** How far from "now" each end of the shared axis reaches. Fixed, so rows are comparable. */
 export const AXIS_DAYS = 14;
 
-const AXIS_WIDTH = 120;
-const AXIS_HEIGHT = 26;
-const AXIS_PAD = 8;
-const ROW_HEIGHT = 64;
+const AXIS_WIDTH = 92;
+const AXIS_HEIGHT = 22;
+const AXIS_PAD = 6;
+const ROW_HEIGHT = 34;
 /** The list holds five rows' worth of height whether it has five rows, one, or none. */
 const LIST_MIN_HEIGHT = ROW_HEIGHT * MAX_ROWS;
 
@@ -162,11 +163,13 @@ function AxisHeader() {
         flexShrink: 0,
         display: 'grid',
         gridTemplateColumns: '1fr auto 1fr',
+        columnGap: '4px',
         alignItems: 'baseline',
         color: 'text.secondary',
-        fontSize: 10.5,
+        fontSize: 10,
         fontWeight: 700,
-        letterSpacing: '0.04em',
+        letterSpacing: 0,
+        whiteSpace: 'nowrap',
         textTransform: 'uppercase',
       }}
     >
@@ -180,29 +183,29 @@ function AxisHeader() {
 function RowBody({ item, due }: { item: CommercialAttentionItem; due: DueReading | null }) {
   return (
     <>
-      <Stack spacing={0.25} sx={{ flexGrow: 1, minWidth: 0 }}>
+      <Stack spacing={0} sx={{ flexGrow: 1, minWidth: 0 }}>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', minWidth: 0 }}>
           <Typography
             component="span"
             sx={{
-              fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700, fontSize: 15,
+              fontFamily: '"Cambay", "Source Sans 3", sans-serif', fontWeight: 700, fontSize: 13,
               fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
             }}
           >
             {item.nexoraSerial || item.reference}
           </Typography>
-          <Typography component="span" variant="body2" sx={{ color: 'text.primary', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <Typography component="span" sx={{ fontSize: 13, color: 'text.primary', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {item.reason}
           </Typography>
         </Stack>
-        <Typography variant="caption" sx={{ color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <Typography variant="caption" sx={{ fontSize: 11, lineHeight: 1.3, color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {item.customerName || 'Customer not recorded'} · {item.ownerName ? `Owner ${item.ownerName}` : 'No owner assigned'}
         </Typography>
       </Stack>
       <Typography
         component="span"
         sx={{
-          width: 96, flexShrink: 0, textAlign: 'right', fontSize: 13, fontWeight: 700,
+          width: 70, flexShrink: 0, textAlign: 'right', fontSize: 12, fontWeight: 700,
           fontVariantNumeric: 'tabular-nums', color: 'text.primary',
         }}
       >
@@ -216,9 +219,11 @@ function RowBody({ item, due }: { item: CommercialAttentionItem; due: DueReading
 export interface TodayBandProps {
   /** Position in the screen's entrance stagger. */
   index?: number;
+  /** The band's numeral on a numbered screen; empty on a screen that does not number its bands. */
+  step?: string;
 }
 
-export default function TodayBand({ index = 0 }: TodayBandProps) {
+export default function TodayBand({ index = 0, step = '5' }: TodayBandProps) {
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   // Its own query, its own failure. A band that cannot load must not blank its neighbours, so
@@ -247,10 +252,12 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
 
   return (
     <BandShell
-      step="5"
+      step={step}
       title="What needs you today"
       index={index}
-      minHeight={468}
+      minHeight={240}
+      emphasis
+      hint={`Left of the line is late, right of it is still to come. Each end of the line is ${AXIS_DAYS} days from now.`}
       loading={query.isLoading}
       error={presented && !forbidden && !hasData ? presented.message : null}
       refreshFailedAt={presented && !forbidden && hasData ? query.dataUpdatedAt : null}
@@ -266,10 +273,15 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
         governed: false,
       }}
     >
-      <Stack spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}>
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'baseline', px: 1.5 }}>
-          <Box sx={{ flexGrow: 1 }} />
-          <Box sx={{ width: 96, flexShrink: 0 }} />
+      <Stack spacing={0.5} sx={{ flexGrow: 1, minWidth: 0 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', px: 1 }}>
+          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+            {/* Deliberately a way through, never a count: see the note at the top of this file. */}
+            <Button size="small" endIcon={<GoIcon />} onClick={() => navigate('/sales/today')} sx={{ fontWeight: 700, px: 0.5, minHeight: 0, py: 0 }}>
+              See all in Sales today
+            </Button>
+          </Box>
+          <Box sx={{ width: 70, flexShrink: 0 }} />
           <AxisHeader />
         </Stack>
 
@@ -280,20 +292,23 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
               borderRadius: 3,
               display: 'grid',
               placeItems: 'center',
-              p: 3,
+              p: 1.5,
             }}
           >
-            <Stack spacing={1.5} sx={{ maxWidth: 460, alignItems: 'flex-start' }}>
+            <Stack spacing={1} sx={{ maxWidth: 420, alignItems: 'flex-start' }}>
               <NothingScheduledIcon sx={{ color: 'text.secondary' }} />
-              <Typography sx={{ lineHeight: 1.5 }}>{NOTHING_SCHEDULED_SENTENCE}</Typography>
-              <Button
-                variant="outlined"
-                size="small"
-                endIcon={<GoIcon />}
-                onClick={() => navigate('/sales/routing')}
-              >
-                See unassigned enquiries
-              </Button>
+              <Typography variant="body2" sx={{ lineHeight: 1.45 }}>{NOTHING_SCHEDULED_SENTENCE}</Typography>
+              {/* /sales/routing needs Leads; a button that lands on Access denied is worse than none. */}
+              {hasPermission('Leads') && (
+                <Button
+                  variant="outlined"
+                  size="small"
+                  endIcon={<GoIcon />}
+                  onClick={() => navigate('/sales/routing')}
+                >
+                  See unassigned enquiries
+                </Button>
+              )}
             </Stack>
           </Box>
         ) : (
@@ -312,11 +327,12 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
               const surface = {
                 minHeight: ROW_HEIGHT,
                 // Each thing that needs you is a soft strip standing out of the band's tray.
-                borderRadius: 3,
+                borderRadius: '12px',
                 boxShadow: 'var(--nx-neu-raised-sm)',
-                mb: 1.5,
-                px: 1.5,
-                gap: 1.5,
+                mb: 0.5,
+                px: 1,
+                py: 0,
+                gap: 1,
                 alignItems: 'center',
               } as const;
 
@@ -324,9 +340,11 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
                 return (
                   <ListItem key={`${item.recordType}-${item.id}`} disableGutters sx={surface}>
                     <RowBody item={item} due={due} />
-                    <Typography variant="caption" sx={{ color: 'text.secondary', flexShrink: 0 }}>
-                      {permitted ? 'No link' : 'Permission required'}
-                    </Typography>
+                    {!permitted && (
+                      <Typography variant="caption" sx={{ color: 'text.secondary', flexShrink: 0 }}>
+                        Permission required
+                      </Typography>
+                    )}
                   </ListItem>
                 );
               }
@@ -337,6 +355,7 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
                   aria-label={`${label}. Open`}
                   sx={{
                     ...surface,
+                    ...neuFocus,
                     transition: 'transform 160ms cubic-bezier(0.2, 0.7, 0.2, 1), background-color 160ms ease-out',
                     '&:hover': { transform: 'translateY(-1px)' },
                     '&:active': { transform: 'translateY(1px)' },
@@ -350,19 +369,6 @@ export default function TodayBand({ index = 0 }: TodayBandProps) {
           </List>
         )}
 
-        <Stack
-          direction={{ xs: 'column', sm: 'row' }}
-          spacing={1}
-          sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', px: 1.5, pt: 0.5 }}
-        >
-          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4 }}>
-            Left of the line is late, right of it is still to come. Each end of the line is {AXIS_DAYS} days from now.
-          </Typography>
-          {/* Deliberately a way through, never a count: see the note at the top of this file. */}
-          <Button size="small" endIcon={<GoIcon />} onClick={() => navigate('/sales/today')} sx={{ fontWeight: 700, flexShrink: 0 }}>
-            See all in Sales today
-          </Button>
-        </Stack>
       </Stack>
     </BandShell>
   );

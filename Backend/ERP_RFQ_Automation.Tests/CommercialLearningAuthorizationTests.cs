@@ -61,10 +61,32 @@ public sealed class CommercialLearningAuthorizationTests
         Assert.Equal(PeerUserId, memory.SalesRepUserId);
     }
 
+    [Fact]
+    public async Task Manager_cannot_read_a_rep_outside_their_team()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(TenantId);
+        SeedUsers(context);
+        await context.SaveChangesAsync();
+        var controller = Controller(context, manager: true);
+        controller = WithScope(controller, context, new TestScopeResolver(AccountScopeTier.ManagedScope, [ActorUserId]));
+
+        var response = await controller.SalesRep(PeerUserId, default);
+
+        Assert.IsType<ForbidResult>(response.Result);
+    }
+
+    private static CommercialLearningController WithScope(
+        CommercialLearningController template, ErpRfqAutomationContext context, IAccountTeamScopeResolver scope) =>
+        new(new CommercialLearningService(context), null!, scope) { ControllerContext = template.ControllerContext };
+
     private static CommercialLearningController Controller(ErpRfqAutomationContext context, bool manager)
     {
+        // A manager's team here holds both reps; ManagerOutsideTeam below narrows it to the actor.
         var controller = new CommercialLearningController(
-            new CommercialLearningService(context), null!, new TestRoleGate(manager));
+            new CommercialLearningService(context), null!,
+            new TestScopeResolver(manager ? AccountScopeTier.ManagedScope : AccountScopeTier.AssignedAccounts,
+                manager ? [ActorUserId, PeerUserId] : [ActorUserId]));
         controller.ControllerContext = new ControllerContext
         {
             HttpContext = new DefaultHttpContext
@@ -101,13 +123,10 @@ public sealed class CommercialLearningAuthorizationTests
         CreatedOn = DateTime.UtcNow
     };
 
-    private sealed class TestRoleGate(bool manager) : IRoleGate
+    private sealed class TestScopeResolver(AccountScopeTier tier, long[] userIds) : IAccountTeamScopeResolver
     {
-        public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
-        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) =>
-            Task.FromResult(manager ? RoleRanks.Manager : RoleRanks.Member);
-        public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(manager);
-        public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) =>
-            Task.FromResult(manager);
+        public Task<AccountTeamScope> ResolveAsync(
+            long userId, long roleId, long businessUnitId, DateTime asOfUtc, CancellationToken ct = default)
+            => Task.FromResult(new AccountTeamScope(tier, userId, [], userIds));
     }
 }
