@@ -45,6 +45,32 @@ public sealed class MailboxStoredCredentialReplayTests
 
     private const string AttackerHost = "collector.attacker.example";
 
+    // ---- GET /api/Mailbox ------------------------------------------------------------------
+
+    /// <summary>
+    /// A password saved under a different key (a restored backup, a rotated key) cannot be read.
+    /// The list never shows a password, so it must not try to read one: it used to fail with a 500
+    /// and hide every mailbox, including the healthy ones.
+    /// </summary>
+    [Fact]
+    public async Task A_password_saved_under_another_key_does_not_take_down_the_mailbox_list()
+    {
+        using var database = new TestDb();
+        await SeedMailboxAsync(database);
+        var foreign = AesGcmSecretProtectorForTests.OtherKey().Protect("saved-elsewhere");
+        await using (var raw = database.ContextFor(null))
+            await raw.Database.ExecuteSqlRawAsync(
+                "UPDATE \"Email_Configurations\" SET \"Password\" = {0} WHERE \"ID\" = {1}", foreign, MailboxId);
+
+        await using var context = database.ContextFor(Bu);
+        var controller = ControllerFor(context, new RecordingTester());
+
+        var list = Assert.IsType<OkObjectResult>((await controller.GetAll()).Result);
+        var mailbox = Assert.Single(Assert.IsAssignableFrom<IReadOnlyList<MailboxResponseDTO>>(list.Value));
+        Assert.Equal(StoredAddress, mailbox.EmailAddress);
+        Assert.IsType<OkObjectResult>((await controller.GetById(MailboxId)).Result);
+    }
+
     // ---- POST /api/Mailbox/test ----------------------------------------------------------
 
     [Fact]
@@ -346,4 +372,10 @@ public sealed class MailboxStoredCredentialReplayTests
 
         public Task ExecuteAtomicAsync(Func<Task> work, CancellationToken cancellationToken = default) => work();
     }
+}
+
+internal static class AesGcmSecretProtectorForTests
+{
+    public static ERP_RFQ_Automation.Security.AesGcmSecretProtector OtherKey() =>
+        ERP_RFQ_Automation.Security.AesGcmSecretProtector.CreateEphemeral();
 }

@@ -280,9 +280,12 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
   test('governed RFQ lineage prepares one idempotent Quote Draft', async ({ page }) => {
     expect(partialRfqId, 'partial-bid UI journey must run first').toBeGreaterThan(0);
     await page.goto('/procurement/rfqs/all');
-    await page.getByPlaceholder('Search Nexora Serial, RFQ, customer or buyer').fill(partialRfqNumber);
+    await page.getByPlaceholder('Search RFQ, serial, customer or buyer').fill(partialRfqNumber);
     await expect(page.getByText(partialRfqNumber, { exact: true }).first()).toBeVisible();
     await page.goto(`/procurement/rfqs/view/${partialRfqId}`);
+    // The lineage lives in its own fold at the foot of the RFQ page (owner 2026-09-27); open it
+    // the way a rep would before reading it.
+    await page.getByRole('button', { name: /Where this RFQ came from/ }).click();
     await expect(page.getByText('Governed promotion receipt', { exact: true })).toBeVisible();
     await expect(page.getByText('Immutable Lead revision', { exact: true })).toBeVisible();
     await expect(page.getByText('Participation decision', { exact: true })).toBeVisible();

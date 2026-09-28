@@ -152,6 +152,7 @@ namespace ERP_RFQ_Automation.Controllers
                     UomName = product.Uom?.UomName,
                     UnitCost = product.UnitCost,
                     SellingPrice = product.SellingPrice,
+                    PriceCurrencyCode = product.PriceCurrency?.Code,
                     FinalLandedCost = product.FinalLandedCost,
                     FinalSalesPrice = product.FinalSalesPrice,
                     WarehouseId = product.WarehouseId,
@@ -418,10 +419,9 @@ namespace ERP_RFQ_Automation.Controllers
             product.CategoryId = request.CategoryId;
             product.ReorderPoint = request.ReorderPoint;
             product.UomId = request.UomId;
-            product.UnitCost = request.UnitCost;
-            product.SellingPrice = request.SellingPrice;
-            product.FinalLandedCost = request.FinalLandedCost;
-            product.FinalSalesPrice = request.FinalSalesPrice;
+            // Prices are kept on the Pricing sheet (PricingSheetController), in a currency the keeper
+            // chose. This edit no longer writes them: the product form stopped showing them, so
+            // writing the form's empty values here would wipe a price a manager had just set.
 
             product.WarehouseId = request.WarehouseId;
             product.PreferredSupplierId = request.PreferredSupplierId;

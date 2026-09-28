@@ -13,7 +13,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { Edit } from "@mui/icons-material";
+import { Close, Edit } from "@mui/icons-material";
 import { useSnackbar } from "notistack";
 import rfqService from "../../../api/services/rfqService";
 
@@ -88,18 +88,23 @@ export const acceptedMakersOf = (item: LineForMakers): string[] => {
 };
 
 /**
- * The maker column of an RFQ line: the maker the customer named, any others they accept, and a
- * small "Makers" button to change the list. One box, ";" between makers, like email addresses.
+ * The brand column of an RFQ line, saying who decides: the CUSTOMER. "Customer asked for" the brand
+ * they named, "Customer also accepts" the others, or "Customer accepts any of" when none is
+ * preferred. Owner 2026-09-27: "Makers" was too vague, and "Approved brands" begged the question
+ * "approved by whom?". Typing brands separated by ";" was one step too many, so the list is tags.
  */
 export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: LineForMakers; canEdit: boolean }) {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const [open, setOpen] = React.useState(false);
   const accepted = acceptedMakersOf(item);
-  const [text, setText] = React.useState("");
+  const [brands, setBrands] = React.useState<string[]>([]);
+  const [draft, setDraft] = React.useState("");
 
+  // A brand typed but not yet added still counts when the rep presses Save.
+  const pending = splitMakers([...brands, draft].join(";"));
   const save = useMutation({
-    mutationFn: () => rfqService.saveAcceptedMakers(rfqId, item.id, splitMakers(text).join("; ")),
+    mutationFn: () => rfqService.saveAcceptedMakers(rfqId, item.id, pending.join("; ")),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["rfq-detail", rfqId] });
       queryClient.invalidateQueries({ queryKey: ["rfq-commercial-intelligence", rfqId] });
@@ -107,26 +112,36 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
         queryClient.invalidateQueries({ queryKey: [key] });
       }
       enqueueSnackbar(result.acceptedMakers.length > 1
-        ? `Saved. Suppliers for ${result.acceptedMakers.length} makers will be found and asked.`
-        : "Makers saved.", { variant: "success" });
+        ? `Saved. Find supplier will look for suppliers of all ${result.acceptedMakers.length} brands.`
+        : "Brands saved.", { variant: "success" });
       setOpen(false);
     },
     onError: (error: { response?: { data?: { detail?: string } } }) =>
-      enqueueSnackbar(error?.response?.data?.detail || "The makers could not be saved.", { variant: "error" }),
+      enqueueSnackbar(error?.response?.data?.detail || "The brands could not be saved.", { variant: "error" }),
   });
 
-  const preview = splitMakers(text);
+  const add = () => {
+    const next = splitMakers([...brands, draft].join(";"));
+    setBrands(next);
+    setDraft("");
+  };
   const others = accepted.slice(item.manufacturerName ? 1 : 0);
 
   return (
     <>
-      <Typography sx={{ fontSize: "0.8rem", fontWeight: 700 }}>{item.manufacturerName || (others.length ? "Any of these" : "N/A")}</Typography>
-      {item.manufacturerName && (
-        <Typography variant="caption" sx={{ color: "text.disabled", display: "block" }}>{item.manufacturerPartNumber || "N/A"}</Typography>
+      {item.manufacturerName ? (
+        <>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>Customer asked for</Typography>
+          <Typography sx={{ fontSize: "0.8rem", fontWeight: 700 }}>
+            {item.manufacturerName}{item.manufacturerPartNumber ? ` ${item.manufacturerPartNumber}` : ""}
+          </Typography>
+        </>
+      ) : others.length === 0 && (
+        <Typography variant="caption" color="text.secondary">No brand named by the customer</Typography>
       )}
       {others.length > 0 && (
-        <Box sx={{ mt: 0.5 }}>
-          {item.manufacturerName && <Typography variant="caption" color="text.secondary">Also accepted</Typography>}
+        <Box sx={{ mt: item.manufacturerName ? 0.5 : 0 }}>
+          <Typography variant="caption" color="text.secondary">{item.manufacturerName ? "Customer also accepts" : "Customer accepts any of"}</Typography>
           <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap", mt: 0.25 }}>
             {others.map((maker) => (
               <Tooltip key={maker} title={maker}>
@@ -137,45 +152,49 @@ export function LineMakersCell({ rfqId, item, canEdit }: { rfqId: number; item: 
         </Box>
       )}
       {canEdit && (
-        <Button size="small" variant="text" startIcon={<Edit sx={{ fontSize: 14 }} />} sx={{ mt: 0.5, px: 0.5, minWidth: 0 }}
-          onClick={() => { setText(accepted.join("; ")); setOpen(true); }}
-          aria-label="Change accepted makers">
-          Makers
-        </Button>
+        <Tooltip title="Change the brands the customer accepts for this part, as their RFQ or a later message says. Find supplier asks suppliers for each one." describeChild>
+          <Button size="small" variant="text" startIcon={<Edit sx={{ fontSize: 14 }} />} sx={{ mt: 0.5, px: 0.5, minWidth: 0 }}
+            onClick={() => { setBrands(accepted); setDraft(""); setOpen(true); }}>
+            Edit accepted brands
+          </Button>
+        </Tooltip>
       )}
 
       <Dialog open={open} onClose={save.isPending ? undefined : () => setOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ pb: 0.5 }}>
-          <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Makers the customer accepts</Typography>
+          <Typography component="span" variant="h6" sx={{ fontWeight: 800, display: "block" }}>Brands / manufacturers the customer accepts</Typography>
           <Typography component="span" variant="body2" color="text.secondary" sx={{ display: "block" }} noWrap>
             {item.productShortDescription || item.productShortName || "This line"}
           </Typography>
         </DialogTitle>
         <DialogContent>
-          <TextField
-            fullWidth
-            multiline
-            minRows={2}
-            sx={{ mt: 1.5 }}
-            label="Makers"
-            placeholder="ABB S203-C16; GE THQL32010; Eaton"
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            helperText='Separate makers with ";". Add the part number after the maker if you know it.'
-            slotProps={{ htmlInput: { "aria-label": "Accepted makers" } }}
-          />
-          {preview.length > 0 && (
-            <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap", mt: 1.5 }}>
-              {preview.map((maker) => <Chip key={maker} size="small" color="primary" variant="outlined" label={makerLabel(maker)} />)}
-            </Stack>
-          )}
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1.5 }}>
-            Find supplier looks for suppliers of every maker here, and each supplier email lists them all.
-          </Typography>
+          <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap", mt: 1.5, minHeight: 32 }}>
+            {brands.length === 0 && <Typography variant="body2" color="text.secondary">No brands yet. Add the first one below.</Typography>}
+            {brands.map((brand) => (
+              <Tooltip key={brand} title={brand}>
+                <Chip color="primary" variant="outlined" label={makerLabel(brand)}
+                  onDelete={() => setBrands(brands.filter((x) => x !== brand))}
+                  deleteIcon={<Close aria-label={`Remove ${makerLabel(brand)}`} />} />
+              </Tooltip>
+            ))}
+          </Stack>
+          <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "flex-start" }}>
+            <TextField
+              fullWidth
+              size="small"
+              label="Add a brand / manufacturer"
+              placeholder="e.g. Siemens, or Siemens 3RT2046-1AN20"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (draft.trim()) add(); } }}
+              slotProps={{ htmlInput: { maxLength: 150, "aria-label": "Add a brand" } }}
+            />
+            <Button variant="outlined" onClick={add} disabled={!draft.trim()} sx={{ flexShrink: 0 }}>Add</Button>
+          </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setOpen(false)} disabled={save.isPending}>Cancel</Button>
-          <Button variant="contained" onClick={() => save.mutate()} disabled={save.isPending || preview.length > 12}>Save makers</Button>
+          <Button variant="contained" onClick={() => save.mutate()} disabled={save.isPending || pending.length > 12}>Save brands</Button>
         </DialogActions>
       </Dialog>
     </>

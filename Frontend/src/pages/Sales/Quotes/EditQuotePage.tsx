@@ -30,6 +30,7 @@ import {
 import { toast } from 'react-hot-toast';
 import { calculateQuoteTotals, type DiscountKind } from './quoteTotals';
 import { formatMoney } from '../../../utils/currency';
+import { deliveryText } from '../../../utils/delivery';
 import NextStepPanel from '../../../components/common/NextStepPanel';
 
 interface QuoteItem {
@@ -68,7 +69,7 @@ interface QuoteItem {
 }
 
 /** "28 days" → "4 weeks"; "10 days" stays days. */
-export const deliveryText = (days: number) => (days % 7 === 0 ? `${days / 7} week${days === 7 ? '' : 's'}` : `${days} day${days === 1 ? '' : 's'}`);
+export { deliveryText };
 
 const EditQuotePage: React.FC = () => {
   const { id } = useParams<{ id: string }>();

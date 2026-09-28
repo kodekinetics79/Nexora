@@ -21,6 +21,8 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         public decimal? SellingPrice { get; set; }
         public decimal? FinalLandedCost { get; set; }
         public decimal? FinalSalesPrice { get; set; }
+        /// <summary>The currency the Pricing sheet's landed cost and sale price are in; null until priced there.</summary>
+        public string? PriceCurrencyCode { get; set; }
 
         public long? WarehouseId { get; set; }
         public string? WarehouseName { get; set; }

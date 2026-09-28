@@ -5,7 +5,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions,
   Button, TextField, MenuItem, Grid, FormControlLabel,
   Switch, Divider, Typography, CircularProgress,
-  Alert,
+  Alert, Box,
 } from '@mui/material';
 import productService from '../../api/services/productService';
 import { useAuth } from '../../context/AuthContext';
@@ -253,17 +253,13 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
               {uoms?.map((u: any) => <MenuItem key={u.id} value={String(u.id)}>{u.value ?? u.name ?? u.uomName}</MenuItem>)}
             </TextField>
           </Grid>
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField fullWidth type="number" label="Unit Cost" value={form.unitCost} onChange={f('unitCost')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField fullWidth type="number" label="Selling Price ($)" value={form.sellingPrice} onChange={f('sellingPrice')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField fullWidth type="number" label="Final Landed Cost ($)" value={form.finalLandedCost} onChange={f('finalLandedCost')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField fullWidth type="number" label="Final Sales Price ($)" value={form.finalSalesPrice} onChange={f('finalSalesPrice')} />
+          <Grid size={{ xs: 12, sm: 6 }}>
+            {/* Prices live on the Pricing sheet, with the currency they are in. This form used to take
+                four unlabelled-currency figures marked "$" while every quote went out in SAR. */}
+            <Alert severity="info" sx={{ py: 0.25 }}>
+              Landed cost and sale price are kept on the{' '}
+              <Box component="a" href="/inventory/pricing-sheet" target="_blank" rel="noopener" sx={{ fontWeight: 700, color: 'primary.main' }}>pricing sheet</Box>.
+            </Alert>
           </Grid>
 
           {/* Logistics */}

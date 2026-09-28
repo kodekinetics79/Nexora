@@ -3,24 +3,25 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Box, Typography, Paper, Button, Chip, IconButton,
+  Box, Typography, Paper, Button, IconButton,
   Tooltip, Stack, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
 } from '@mui/x-data-grid';
 import {
-  Visibility as ViewIcon,
+  ChevronRight as OpenIcon,
   Refresh as RefreshIcon,
   Layers as ItemsIcon,
   CloudUpload as UploadIcon,
 } from '@mui/icons-material';
-import rfqService from '../../../api/services/rfqService';
+import rfqService, { type RfqResponseDTO } from '../../../api/services/rfqService';
 import SearchField from '../../../components/common/SearchField';
 import gridEmptyOverlay from '../../../components/common/gridOverlays';
 import ViewTabs from '../../../components/layout/ViewTabs';
 import { useAuth } from '../../../context/AuthContext';
 import { formatDateSafe } from '../../../utils/dates';
+import { DEADLINE_COLOR, deadlineWords } from '../../../utils/deadline';
 
 /**
  * Same defect as QuotesPage: two rail entries point here at a FILTERED address while the page
@@ -31,11 +32,8 @@ import { formatDateSafe } from '../../../utils/dates';
  * on the floor — that rail entry lands the user on EVERY RFQ under a heading promising a sourcing
  * subset, so it gets a stated warning rather than a silently complete list.
  */
-const RFQ_FILTERS: Record<string, { label: string; description: string }> = {
-  'ready-for-quote': {
-    label: 'Ready for Quote',
-    description: 'Showing only RFQs with a customer, a lead and complete line items. This is not every RFQ.',
-  },
+const RFQ_FILTERS: Record<string, { label: string }> = {
+  'ready-for-quote': { label: 'Ready for Quote' },
 };
 
 const AllRFQsPage: React.FC = () => {
@@ -43,10 +41,9 @@ const AllRFQsPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const readiness = searchParams.get('state') || undefined;
-  const activeFilter = readiness ? RFQ_FILTERS[readiness] : undefined;
-  const unappliedFilter = readiness && !activeFilter ? readiness : undefined;
+  const unappliedFilter = readiness && !RFQ_FILTERS[readiness] ? readiness : undefined;
   const { userData, hasPermission } = useAuth();
-  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
+  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 25, page: 0 });
   const [search, setSearch] = useState('');
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -91,196 +88,165 @@ const AllRFQsPage: React.FC = () => {
     ),
   }), [search, readiness, navigate]);
 
-  const getUrgencyColor = (dateStr: string | null) => {
-    if (!dateStr) return 'text.secondary';
-    const d = new Date(dateStr);
-    const now = new Date();
-    const diff = (d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
-    if (diff < 0) return 'error.dark';
-    if (diff < 3) return 'error.main';
-    if (diff < 7) return 'warning.main';
-    return 'success.main';
-  };
+  const openRfq = (id: number) => navigate(`/procurement/rfqs/view/${id}`);
+  const cellText = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const;
 
-  const columns: GridColDef[] = [
+  const columns: GridColDef<RfqResponseDTO>[] = [
     {
-      field: 'nexoraSerial',
-      headerName: 'Nexora Serial',
-      width: 190,
-      // No fallback through the lead or RFQ. The API used to substitute the parent's case when
-      // this document carried none, so a document outside the commercial case displayed one
-      // anyway. A blank here is real, and "Not linked" says so rather than reading as a
-      // still-loading cell.
-      valueGetter: (_value, row) => row.nexoraSerial || '',
-      renderCell: (p) => (
-        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'warning.main', whiteSpace: 'normal', overflowWrap: 'anywhere', lineHeight: 1.3, py: 1 }}>
-          {p.value || 'Not linked'}
-        </Typography>
-      ),
+      field: 'bidClosingDate',
+      headerName: 'Deadline',
+      width: 130,
+      sortable: false,
+      renderCell: (p) => {
+        const sent = Boolean(p.row.latestQuoteSentOn);
+        const { text, tone } = deadlineWords(p.row.bidClosingDate);
+        return (
+          <Tooltip title={p.row.bidClosingDate ? formatDateSafe(p.row.bidClosingDate) : ''} placement="top-start">
+            <Typography sx={{ ...cellText, fontSize: '0.85rem', fontWeight: sent ? 500 : 700, color: sent ? 'text.secondary' : DEADLINE_COLOR[tone] }}>
+              {text}
+            </Typography>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      field: 'customerName',
+      headerName: 'Customer',
+      flex: 1,
+      minWidth: 200,
+      sortable: false,
+      renderCell: (p) => {
+        const buyer = p.row.buyersName && p.row.buyersName !== p.row.customerName ? p.row.buyersName : null;
+        return (
+          <Typography sx={{ ...cellText, fontSize: '0.875rem' }} title={[p.row.customerName, buyer].filter(Boolean).join(' · ')}>
+            <Box component="span" sx={{ fontWeight: 700, color: p.row.customerName ? 'text.primary' : 'warning.dark' }}>
+              {p.row.customerName || 'No customer'}
+            </Box>
+            {buyer && <Box component="span" sx={{ color: 'text.secondary' }}> · {buyer}</Box>}
+          </Typography>
+        );
+      },
     },
     {
       field: 'rfqno',
       headerName: t('rfq_number'),
-      width: 190,
+      width: 205,
+      sortable: false,
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
-          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', letterSpacing: '-0.02em', mb: 0.2, whiteSpace: 'normal', overflowWrap: 'anywhere', lineHeight: 1.3 }}>
-            {p.row.rfqno || `RFQ-${p.row.id}`}
-          </Typography>
-          {p.row.leadId && (
-            <Box sx={{ display: 'flex' }}>
-              <Chip
-                label="From Lead"
-                size="small"
-                sx={{ height: 16, fontSize: '0.6rem', fontWeight: 900, bgcolor: 'warning.lighter', color: 'warning.dark' }}
-              />
-            </Box>
-          )}
-        </Box>
-      )
+        <Typography title={p.row.rfqno} sx={{ ...cellText, fontFamily: 'monospace', fontSize: '0.82rem', fontWeight: 600 }}>
+          {p.row.rfqno || `RFQ-${p.row.id}`}
+        </Typography>
+      ),
     },
     {
-      field: 'buyer',
-      headerName: 'Buyer And Customer',
-      flex: 1,
-      minWidth: 200,
+      field: 'nexoraSerial',
+      headerName: 'Nexora serial',
+      width: 200,
+      sortable: false,
+      // No fallback through the lead or RFQ: a blank here is real, and "Not linked" says so.
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
-          <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', color: 'text.primary', mb: 0.2 }}>
-            {p.row.buyersName || 'Unknown Buyer'}
-          </Typography>
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            {p.row.customerName || 'No Customer Linked'}
-          </Typography>
-        </Box>
-      )
+        <Typography title={p.row.nexoraSerial ?? ''} sx={{ ...cellText, fontFamily: 'monospace', fontSize: '0.75rem', color: p.row.nexoraSerial ? 'text.secondary' : 'warning.dark' }}>
+          {p.row.nexoraSerial || 'Not linked'}
+        </Typography>
+      ),
     },
     {
-      field: 'noOfLineItems',
-      headerName: 'RFQ Lines',
-      width: 130,
+      field: 'itemCount',
+      headerName: 'Lines',
+      width: 64,
+      align: 'right',
+      headerAlign: 'right',
+      sortable: false,
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
-          <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.value || 0}</Typography>
-        </Stack>
-      )
+        <Typography className="tabular-nums" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
+          {p.row.itemCount ?? p.row.noOfLineItems ?? 0}
+        </Typography>
+      ),
     },
     {
-      field: 'timelines',
-      headerName: t('date'),
-      width: 260,
+      field: 'ownerName',
+      headerName: 'Owner',
+      width: 150,
+      sortable: false,
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%', gap: 2 }}>
-          <Box>
-            <Typography sx={{ fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Received</Typography>
-            <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDateSafe(p.row.recDate)}</Typography>
-          </Box>
-          <Box sx={{ borderLeft: '1px solid', borderColor: 'divider', height: 24 }} />
-          <Box>
-            <Typography sx={{ fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Deadline</Typography>
-            <Typography sx={{ fontSize: '0.85rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
-              {formatDateSafe(p.row.bidClosingDate)}
-            </Typography>
-          </Box>
-        </Box>
-      )
+        <Typography sx={{ ...cellText, fontSize: '0.85rem', color: p.row.ownerName ? 'text.primary' : 'text.disabled' }}>
+          {p.row.ownerName || 'Unassigned'}
+        </Typography>
+      ),
     },
     {
-      field: 'rfqstatusValue',
-      headerName: t('status'),
-      width: 120,
+      field: 'quote',
+      headerName: 'Quote',
+      width: 270,
+      sortable: false,
       renderCell: (p) => {
-        const status = { label: p.row.rfqstatusValue || 'Unknown', color: 'default' as const };
+        const status = (p.row.rfqstatusCode ?? p.row.rfqstatusValue ?? '').toUpperCase();
+        const closed = status && !['DRAFT', 'OPEN', 'NEW', 'ACTIVE', 'INPROGRESS', 'IN_PROGRESS'].includes(status);
+        const sentOn = p.row.latestQuoteSentOn;
+        const text = sentOn
+          ? `Sent ${formatDateSafe(sentOn)}`
+          : p.row.latestQuoteNo ? 'Not sent yet' : closed ? (p.row.rfqstatusValue ?? '') : 'Not quoted';
         return (
-          <Chip
-            label={status.label}
-            size="small"
-            color={status.color}
-            sx={{ fontWeight: 900, height: 22, fontSize: '0.7rem', borderRadius: 1.5 }}
-          />
+          <Typography sx={{ ...cellText, fontSize: '0.85rem' }} title={p.row.latestQuoteNo ?? ''}>
+            <Box component="span" sx={{ fontWeight: 700, color: sentOn ? 'success.dark' : p.row.latestQuoteNo ? 'warning.dark' : 'text.secondary' }}>
+              {text}
+            </Box>
+            {p.row.latestQuoteNo && <Box component="span" sx={{ color: 'text.secondary', fontFamily: 'monospace', fontSize: '0.75rem' }}> · {p.row.latestQuoteNo}</Box>}
+          </Typography>
         );
-      }
+      },
     },
     {
-      field: 'actions',
-      headerName: t('actions'),
-      width: 80,
+      field: 'open',
+      headerName: '',
+      width: 44,
+      sortable: false,
+      disableColumnMenu: true,
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-          <Button size="small" startIcon={<ViewIcon />} onClick={() => navigate(`/procurement/rfqs/view/${p.row.id}`)}>
-            Open RFQ
-          </Button>
-        </Box>
-      )
+        <IconButton size="small" aria-label={`Open RFQ ${p.row.rfqno || p.row.id}`} onClick={() => openRfq(p.row.id)} sx={{ minHeight: 0 }}>
+          <OpenIcon fontSize="small" />
+        </IconButton>
+      ),
     },
   ];
 
   return (
-    <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
-      {/* Header Section */}
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5 }}>
-            <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>
-              {t('all_rfqs')}
-            </Typography>
-            {activeFilter && (
-              <Chip
-                size="small"
-                color="warning"
-                variant="outlined"
-                label={`Filtered: ${activeFilter.label}`}
-                sx={{ fontWeight: 800 }}
-              />
-            )}
-          </Stack>
-          <Typography variant="body2" color="text.secondary">
-            {activeFilter ? activeFilter.description : 'Manage and track all Request for Quotations'}
-          </Typography>
-          {activeFilter && (
-            <Button size="small" onClick={() => navigate('/procurement/rfqs/all')} sx={{ px: 0, fontWeight: 700 }}>
-              Show all RFQs
+    <Box sx={{ p: 2 }}>
+      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', rowGap: 1 }}>
+        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em' }}>
+          RFQs
+          {data && <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }}> · {data.totalItems}</Box>}
+        </Typography>
+        <SearchField width={340} value={search} onChange={setSearch} placeholder="Search RFQ, serial, customer or buyer" />
+        <Box sx={{ flex: 1 }} />
+        {hasPermission('RFQ Management', 'create') && (
+          <Tooltip title="Upload a customer inquiry for Lead reconciliation">
+            <Button
+              variant="outlined"
+              startIcon={<UploadIcon />}
+              onClick={() => navigate('/procurement/leads/manual-upload')}
+              sx={{ fontWeight: 700, minHeight: 36 }}
+            >
+              Upload inquiry
             </Button>
-          )}
-          {unappliedFilter && (
-            <Alert severity="warning" sx={{ mt: 1 }}>
-              This link asked for "{unappliedFilter}", which is not a filter this list applies. Every RFQ is shown.
-            </Alert>
-          )}
-        </Box>
-        <Stack direction="row" spacing={2}>
-          {hasPermission('RFQ Management', 'create') && (
-            <Tooltip title="Upload a customer inquiry for Lead reconciliation">
-              <Button
-                variant="outlined"
-                startIcon={<UploadIcon />}
-                onClick={() => navigate('/procurement/leads/manual-upload')}
-                sx={{ fontWeight: 800, borderRadius: 2 }}
-              >
-                Upload inquiry
-              </Button>
-            </Tooltip>
-          )}
-          <Tooltip title="Refresh Data">
-            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
-              <RefreshIcon />
-            </IconButton>
           </Tooltip>
-        </Stack>
+        )}
+        <Tooltip title="Refresh">
+          <IconButton aria-label="Refresh" onClick={() => refetch()} sx={{ width: 36, height: 36 }}>
+            <RefreshIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
       </Stack>
+      {unappliedFilter && (
+        <Alert severity="warning" sx={{ mb: 1 }}>
+          This link asked for "{unappliedFilter}", which is not a filter this list applies. Every RFQ is shown.
+        </Alert>
+      )}
 
-      {/* All / Drafts / Outstanding / Ready for quote — three routes and a query filter that a rep
-          reads as one list, so they are tabs here instead of four rail rows. */}
+      {/* All / Drafts / Ready for quote: one list to a rep, so tabs rather than rail rows. */}
       <ViewTabs primaryKey="rfqs" ariaLabel="RFQ views" />
 
-      {/* Filters */}
-      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-        <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search Nexora Serial, RFQ, customer or buyer" />
-      </Paper>
-
-      {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ height: 'calc(100vh - 196px)', minHeight: 360, width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         {isError ? (
           <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
             <Stack spacing={2} sx={{ alignItems: 'center', maxWidth: 480 }}>
@@ -294,13 +260,22 @@ const AllRFQsPage: React.FC = () => {
           rowCount={data?.totalItems ?? 0}
           loading={isLoading}
           slots={{ noRowsOverlay }}
-          pageSizeOptions={[10, 25, 50]}
+          pageSizeOptions={[25, 50, 100]}
           paginationModel={paginationModel}
           paginationMode="server"
           onPaginationModelChange={setPaginationModel}
           disableRowSelectionOnClick
           getRowId={(r) => r.id}
-          rowHeight={85}
+          rowHeight={48}
+          columnHeaderHeight={40}
+          onRowClick={(p) => openRfq(p.row.id)}
+          onCellKeyDown={(p, event) => { if (event.key === 'Enter') openRfq(p.row.id); }}
+          sx={{
+            border: 0,
+            '& .MuiDataGrid-row': { cursor: 'pointer' },
+            '& .MuiDataGrid-cell': { display: 'flex', alignItems: 'center' },
+            '& .MuiDataGrid-columnHeaderTitle': { fontWeight: 700 },
+          }}
         />}
       </Paper>
     </Box>

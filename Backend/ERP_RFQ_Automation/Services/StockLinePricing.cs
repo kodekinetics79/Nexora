@@ -45,7 +45,16 @@ public sealed record StockLinePriceView(
     AcceptedMakerStock? OtherMaker = null,
     IReadOnlyList<SupplierPriceOption>? SupplierPrices = null,
     bool CoveredByStock = false,
-    PartialStock? Partial = null);
+    PartialStock? Partial = null,
+    string? CostSource = null,
+    PriceSheetEntry? Sheet = null);
+
+/// <summary>
+/// The part's line on the Pricing sheet, in the currency it was entered in. Usable is false when
+/// that currency is not the quote's: the window shows the figures but never treats them as the
+/// quote's own. CurrencySet is false for a price entered before the sheet existed.
+/// </summary>
+public sealed record PriceSheetEntry(string? CurrencyCode, decimal? LandedCost, decimal? SalePrice, bool Usable, bool CurrencySet);
 
 /// <summary>
 /// Stock covers part of the quantity: FromStock at the stock cost, ToOrder at a supplier's price.
@@ -166,29 +175,67 @@ public sealed class StockLinePricingService : IStockLinePricingService
 
         var product = pricedProductId is null ? null : await _db.Products.AsNoTracking()
             .Where(x => x.Id == pricedProductId)
-            .Select(x => new { x.SellingPrice, x.UnitCost, x.FinalSalesPrice })
+            .Select(x => new
+            {
+                x.SellingPrice, x.UnitCost, x.FinalSalesPrice,
+                PriceCurrencyCode = x.PriceCurrency != null ? x.PriceCurrency.Code : null
+            })
             .SingleOrDefaultAsync(ct);
 
         var stock = await ShelfAsync(businessUnitId, pricedProductId, ct);
         var margin = await GetStandardMarginAsync(businessUnitId, ct);
         var covered = stock.Free >= (line.Quantity ?? 0m) && (line.Quantity ?? 0m) > 0m;
         var supplierPrices = await SupplierPricesAsync(businessUnitId, rfqItemId, pricedProductId, ct);
-        var price = Suggest(product?.SellingPrice ?? product?.FinalSalesPrice ?? stock.SellingPrice,
-            stock.UnitCost ?? product?.UnitCost, margin);
+
+        var currency = await _db.Quotes.AsNoTracking()
+            .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId && x.Currency != null)
+            .OrderByDescending(x => x.Id)
+            .Select(x => new StockCurrency(x.Currency!.Id, x.Currency.Code))
+            .FirstOrDefaultAsync(ct)
+            ?? await _db.Currencies.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive == true && x.IsBaseCurrency == true)
+                .Select(x => new StockCurrency(x.Id, x.Code))
+                .FirstOrDefaultAsync(ct);
+
+        // The Pricing sheet first: its landed cost and sale price are the figures a manager keeps,
+        // in the currency they chose. They count only in the quote's own currency, because nothing
+        // here converts. A price with no currency yet is from before the sheet existed and is read
+        // in the company's base currency, as it always was. The stock record's cost is a copy taken
+        // when the stock was first counted and never refreshed, so it is used only when the sheet
+        // has no cost, and the window says which one it used.
+        var baseCurrencyCode = await _db.Currencies.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive == true && x.IsBaseCurrency == true)
+            .Select(x => x.Code).FirstOrDefaultAsync(ct);
+        var sheetCurrency = product?.PriceCurrencyCode ?? baseCurrencyCode;
+        var sheetUsable = currency is not null && string.Equals(sheetCurrency, currency.Code, StringComparison.OrdinalIgnoreCase);
+        var sheetCost = Positive(product?.UnitCost);
+        var sheetSale = Positive(product?.SellingPrice) ?? Positive(product?.FinalSalesPrice);
+        var sheet = product is null || (sheetCost is null && sheetSale is null) ? null
+            : new PriceSheetEntry(sheetCurrency, sheetCost, sheetSale, sheetUsable, product.PriceCurrencyCode is not null);
+        var usableSheetCost = sheetUsable ? sheetCost : null;
+        var shelfCost = Positive(stock.UnitCost);
+        var cost = usableSheetCost ?? shelfCost;
+        var costSource = usableSheetCost is not null ? "PRICE_SHEET" : shelfCost is not null ? "STOCK_RECORD" : null;
+        var price = Suggest(sheetUsable ? sheetSale : null, cost, margin);
         // Not on the shelf: what a supplier will charge is the cost that matters, not an old stock cost.
-        var bestSupplier = supplierPrices.Where(x => x.Valid).OrderBy(x => x.Cost).FirstOrDefault();
+        // Only a price in the quote's own currency can be the cost. Nothing here converts, so a USD
+        // price ranked or blended against SAR figures by its bare number would be a SAR price nobody
+        // was quoted. The window still lists it, in its own currency, for the rep to read.
+        var bestSupplier = supplierPrices
+            .Where(x => x.Valid && currency is not null && string.Equals(x.CurrencyCode, currency.Code, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => x.Cost).FirstOrDefault();
         var need = line.Quantity ?? 0m;
         var partial = !covered && stock.Free > 0m && need > 0m
-            ? new PartialStock(Math.Min(stock.Free, need), need - Math.Min(stock.Free, need), stock.UnitCost ?? product?.UnitCost)
+            ? new PartialStock(Math.Min(stock.Free, need), need - Math.Min(stock.Free, need), cost)
             : null;
         if (!covered && price.Source != "SELLING_PRICE" && bestSupplier is not null)
         {
             // Part from the shelf at stock cost, the rest at the supplier's price: one blended cost.
-            var cost = partial?.StockUnitCost is decimal stockCost
+            var blendedCost = partial?.StockUnitCost is decimal stockCost
                 ? Math.Round((partial.FromStock * stockCost + partial.ToOrder * bestSupplier.Cost) / need, 4)
                 : bestSupplier.Cost;
             price = new StockPriceSuggestion(partial?.StockUnitCost is not null ? "BLENDED_PLUS_MARGIN" : "SUPPLIER_PLUS_MARGIN",
-                null, cost, margin, Math.Round(cost * (1m + (margin ?? 0m) / 100m), 2));
+                null, blendedCost, margin, Math.Round(blendedCost * (1m + (margin ?? 0m) / 100m), 2));
         }
 
         var history = pricedProductId is null
@@ -201,8 +248,9 @@ public sealed class StockLinePricingService : IStockLinePricingService
         var lastWon = wins.FirstOrDefault();
         var track = new PartTrackRecord(lastQuoted, lastWon, quotes.Count, wins.Count);
 
-        var onQuoteRow = await _db.QuoteItems.AsNoTracking()
-            .Where(x => x.RfqitemId == rfqItemId && x.Quote.BusinessUnitId == businessUnitId)
+        var quoteLines = _db.QuoteItems.AsNoTracking().Where(x => x.Quote.BusinessUnitId == businessUnitId);
+        var onQuoteRow = await quoteLines
+            .Where(x => x.RfqitemId == rfqItemId)
             .OrderByDescending(x => x.Quote.RevisionNo).ThenByDescending(x => x.Quote.Id)
             .Select(x => new
             {
@@ -212,19 +260,33 @@ public sealed class StockLinePricingService : IStockLinePricingService
                 StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
             })
             .FirstOrDefaultAsync(ct);
+        // A quote typed by hand and attached to this RFQ has no link from its lines to the RFQ's
+        // lines, so the price the customer already has for this part would otherwise be invisible
+        // here (and this RFQ's own quotes are left out of the history below). Same rule as the save
+        // (QuoteService.HandBuiltLineForAsync): the latest quote's one unlinked line for this
+        // product, when this is the RFQ's only line for that product.
+        if (onQuoteRow is null && line.ProductId is long lineProduct
+            && await _db.Rfqitems.CountAsync(x => x.Rfqid == rfqId && x.ProductId == lineProduct, ct) == 1)
+        {
+            var latestQuoteId = await _db.Quotes.AsNoTracking()
+                .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId)
+                .OrderByDescending(x => x.RevisionNo).ThenByDescending(x => x.Id)
+                .Select(x => (long?)x.Id).FirstOrDefaultAsync(ct);
+            var handBuilt = latestQuoteId is null ? [] : await quoteLines
+                .Where(x => x.QuoteId == latestQuoteId && x.RfqitemId == null && x.ProductId == lineProduct)
+                .Select(x => new
+                {
+                    x.QuoteId, x.Quote.QuoteNo, x.UnitPrice, ExStock = x.DeliveryLeadTime == 0, x.DeliveryLeadTime, x.ExStockQuantity,
+                    Currency = x.Quote.Currency != null ? x.Quote.Currency.Code : null,
+                    Status = x.Quote.Status != null ? x.Quote.Status.SetupCode : null,
+                    StatusValue = x.Quote.Status != null ? x.Quote.Status.SetupValue : null
+                })
+                .Take(2).ToListAsync(ct);
+            if (handBuilt.Count == 1) onQuoteRow = handBuilt[0];
+        }
         var onQuote = onQuoteRow is null ? null : new QuoteLineNow(onQuoteRow.QuoteId, onQuoteRow.QuoteNo, onQuoteRow.UnitPrice,
             onQuoteRow.ExStock, onQuoteRow.Currency, QuoteState(LifecyclePolicy.Canonicalize("Quote", onQuoteRow.Status, onQuoteRow.StatusValue)),
             onQuoteRow.DeliveryLeadTime, onQuoteRow.ExStockQuantity);
-
-        var currency = await _db.Quotes.AsNoTracking()
-            .Where(x => x.Rfqid == rfqId && x.BusinessUnitId == businessUnitId && x.Currency != null)
-            .OrderByDescending(x => x.Id)
-            .Select(x => new StockCurrency(x.Currency!.Id, x.Currency.Code))
-            .FirstOrDefaultAsync(ct)
-            ?? await _db.Currencies.AsNoTracking()
-                .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive == true && x.IsBaseCurrency == true)
-                .Select(x => new StockCurrency(x.Id, x.Code))
-                .FirstOrDefaultAsync(ct);
 
         return new StockLinePriceView(
             line.Id, line.ProductId,
@@ -242,7 +304,9 @@ public sealed class StockLinePricingService : IStockLinePricingService
             otherMaker,
             supplierPrices,
             covered,
-            partial);
+            partial,
+            costSource,
+            sheet);
     }
 
     /// <summary>How many supplier prices the window lists: the valid ones first, cheapest first.</summary>
@@ -407,4 +471,5 @@ public sealed class StockLinePricingService : IStockLinePricingService
         config.ModifiedOn = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
     }
+    private static decimal? Positive(decimal? value) => value is > 0m ? value : null;
 }

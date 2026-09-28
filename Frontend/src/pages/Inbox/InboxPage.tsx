@@ -4,13 +4,14 @@ import { useNavigate } from 'react-router-dom';
 import {
   Box,
   Button,
-  Chip,
   CircularProgress,
-  Divider,
+  IconButton,
   Paper,
   Stack,
+  Tooltip,
   Typography,
 } from '@mui/material';
+import { visuallyHidden } from '@mui/utils';
 import {
   ArrowForward as ArrowIcon,
   CheckCircleOutlined as ClearIcon,
@@ -182,22 +183,21 @@ const InboxPage: React.FC = () => {
   const refreshAll = () => queues.forEach((entry) => void entry.query.refetch());
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1200, mx: 'auto' }}>
-      <Stack
-        direction={{ xs: 'column', sm: 'row' }}
-        spacing={2}
-        sx={{ justifyContent: 'space-between', alignItems: { sm: 'flex-start' }, mb: 1 }}
-      >
-        <Box sx={{ minWidth: 0 }}>
-          <Typography variant="h4" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.02em' }}>
-            Inbox
-          </Typography>
-          <Typography
-            variant="body1"
-            color="text.secondary"
-            sx={{ mt: 0.5, maxWidth: 720, lineHeight: 1.6 }}
-            aria-live="polite"
-          >
+    <Box sx={{ p: { xs: 1, sm: 2 } }}>
+      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', rowGap: 0.5 }}>
+        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em' }}>
+          Inbox
+          {!anyLoading && queues.length > 0 && (
+            <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }}> · {waitingCount}</Box>
+          )}
+        </Typography>
+        {/* The count is in the title; the sentence is for screen readers, and shown only when it
+            says something the count cannot (a queue failed, or the role has none). */}
+        <Typography
+          variant="body2"
+          aria-live="polite"
+          sx={failedCount > 0 || queues.length === 0 ? { color: 'warning.dark', fontWeight: 600 } : visuallyHidden}
+        >
             {queues.length === 0
               ? 'Your role does not have any Inbox work queues.'
               : anyLoading
@@ -206,18 +206,16 @@ const InboxPage: React.FC = () => {
                 ? 'Some of your queues could not be read. What is shown below is not the whole picture.'
                 : waitingCount === 0
                   ? 'Nothing is waiting on you right now.'
-                  : `${waitingCount} ${waitingCount === 1 ? 'thing needs' : 'things need'} you. Work down the list — the top of it is the oldest part of the process.`}
-          </Typography>
-        </Box>
-        <Button
-          variant="outlined"
-          startIcon={<RefreshIcon />}
-          onClick={refreshAll}
-          disabled={queues.length === 0}
-          sx={{ flexShrink: 0, fontWeight: 700 }}
-        >
-          Refresh
-        </Button>
+                  : `${waitingCount} ${waitingCount === 1 ? 'thing needs' : 'things need'} you.`}
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        <Tooltip title="Refresh">
+          <span>
+            <IconButton aria-label="Refresh" onClick={refreshAll} disabled={queues.length === 0} sx={{ width: 36, height: 36 }}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
       </Stack>
 
       <GlanceStrip />
@@ -245,22 +243,15 @@ const InboxPage: React.FC = () => {
       {allClear && (
         <Paper
           variant="outlined"
-          sx={{ p: 3, borderRadius: 3, mb: 3, display: 'flex', gap: 2, alignItems: 'center' }}
+          sx={{ px: 2, py: 1.25, borderRadius: 2, mt: 1.5, display: 'flex', gap: 1.25, alignItems: 'center' }}
         >
-          <ClearIcon sx={{ fontSize: 40, color: 'success.main' }} aria-hidden />
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              You are clear.
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Every queue below is empty and all of them were read successfully. New work arrives on
-              its own from the mailbox and watched folders.
-            </Typography>
-          </Box>
+          <ClearIcon sx={{ fontSize: 22, color: 'success.main' }} aria-hidden />
+          <Typography sx={{ fontWeight: 700 }}>You are clear.</Typography>
         </Paper>
       )}
 
-      <Stack spacing={2.5} sx={{ mt: 2 }}>
+      {/* The theme's 44px touch floor made every row a tall block; inside a dense row buttons are 30px. */}
+      <Stack spacing={1.25} sx={{ mt: 1.5, '& .MuiButton-root': { minHeight: 30, py: 0.25 } }}>
         {queues.map(({ definition, query }) => (
           <QueueSection
             key={definition.key}
@@ -327,57 +318,62 @@ const QueueSection: React.FC<{
   const empty = emptyOverride ?? { title: definition.emptyTitle, message: definition.emptyMessage, action: definition.emptyAction };
   const emptyActionAllowed = !empty.action.moduleName || hasPermission(empty.action.moduleName);
 
+  const title = (
+    <Typography id={headingId} component="h2" sx={{ fontWeight: 800, fontSize: '1rem', whiteSpace: 'nowrap' }}>
+      {definition.title}
+      {!query.isLoading && !query.isError && (
+        <Box component="span" className="tabular-nums" sx={{ ml: 0.75, color: items.length > 0 ? 'primary.dark' : 'text.disabled' }}>
+          {items.length}
+        </Box>
+      )}
+    </Typography>
+  );
+
+  // A clear queue is one line: its name, 0, what that means, and the one way forward.
+  if (!query.isLoading && !query.isError && items.length === 0) {
+    return (
+      <Paper
+        component="section"
+        aria-labelledby={headingId}
+        variant="outlined"
+        sx={{ borderRadius: 2, px: 2, py: 0.75, display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap', minHeight: 44 }}
+      >
+        {title}
+        <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 200 }}>
+          {empty.title}
+        </Typography>
+        {emptyActionAllowed && (
+          <Button size="small" onClick={() => navigate(empty.action.path)} sx={{ fontWeight: 700, minHeight: 30 }}>
+            {empty.action.label}
+          </Button>
+        )}
+      </Paper>
+    );
+  }
+
   return (
     <Paper
       component="section"
       aria-labelledby={headingId}
       variant="outlined"
-      sx={{ borderRadius: 3, overflow: 'hidden' }}
+      sx={{ borderRadius: 2, overflow: 'hidden' }}
     >
-      <Box sx={{ px: { xs: 2, sm: 2.5 }, pt: 2, pb: 1.5 }}>
-        <Stack
-          direction="row"
-          spacing={1.5}
-          sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}
-        >
-          <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', minWidth: 0 }}>
-            <Typography id={headingId} variant="h6" component="h2" sx={{ fontWeight: 800 }}>
-              {definition.title}
-            </Typography>
-            {!query.isLoading && !query.isError && (
-              <Chip
-                size="small"
-                label={items.length}
-                color={items.length > 0 ? 'primary' : 'default'}
-                sx={{ height: 22, fontWeight: 800 }}
-              />
-            )}
-          </Stack>
-          {!query.isError && items.length > 0 && (
-            <Button
-              size="small"
-              endIcon={<ArrowIcon />}
-              onClick={() => navigate(definition.seeAllPath)}
-              sx={{ fontWeight: 700 }}
-            >
-              {definition.seeAllLabel}
-            </Button>
-          )}
-        </Stack>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          {definition.purpose}
-        </Typography>
-      </Box>
-
-      <Divider />
+      <Stack direction="row" spacing={1.5} sx={{ px: 2, py: 1, alignItems: 'center', justifyContent: 'space-between', bgcolor: 'action.hover' }}>
+        {title}
+        {!query.isError && items.length > 0 && (
+          <Button size="small" endIcon={<ArrowIcon />} onClick={() => navigate(definition.seeAllPath)} sx={{ fontWeight: 700, minHeight: 30 }}>
+            {definition.seeAllLabel}
+          </Button>
+        )}
+      </Stack>
 
       {query.isLoading ? (
-        <Box sx={{ display: 'grid', placeItems: 'center', py: 4 }}>
-          <CircularProgress size={26} aria-label={`Loading ${definition.title}`} />
+        <Box sx={{ display: 'grid', placeItems: 'center', py: 2 }}>
+          <CircularProgress size={22} aria-label={`Loading ${definition.title}`} />
         </Box>
       ) : query.isError ? (
         // Never an empty list on a failure: the rep would read it as a clear queue.
-        <Box sx={{ p: 2 }}>
+        <Box sx={{ p: 1.5 }}>
           <ApiErrorNotice
             error={query.error}
             context="list"
@@ -385,71 +381,49 @@ const QueueSection: React.FC<{
             onRetry={() => void query.refetch()}
           />
         </Box>
-      ) : items.length === 0 ? (
-        <Box sx={{ px: { xs: 2, sm: 2.5 }, py: 3.5, textAlign: 'center' }}>
-          <Typography sx={{ fontWeight: 700 }}>{empty.title}</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 560, mx: 'auto' }}>
-            {empty.message}
-          </Typography>
-          {emptyActionAllowed && (
-            <Button
-              variant="outlined"
-              sx={{ mt: 2, fontWeight: 700 }}
-              onClick={() => navigate(empty.action.path)}
-            >
-              {empty.action.label}
-            </Button>
-          )}
-        </Box>
       ) : (
         <Box>
-          {items.slice(0, INBOX_PREVIEW_ROWS).map((item, index) => (
+          {items.slice(0, INBOX_PREVIEW_ROWS).map((item) => (
+            // The whole row is a larger mouse target; the button in it is the keyboard route.
+            // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
             <Stack
               key={`${definition.key}-${item.id}`}
-              direction={{ xs: 'column', sm: 'row' }}
-              spacing={1}
+              direction="row"
+              spacing={1.5}
+              onClick={() => navigate(item.path)}
               sx={{
-                px: { xs: 2, sm: 2.5 },
-                py: 1.5,
-                alignItems: { sm: 'center' },
-                justifyContent: 'space-between',
-                borderTop: index === 0 ? 0 : '1px solid',
+                px: 2,
+                minHeight: 44,
+                alignItems: 'center',
+                borderTop: '1px solid',
                 borderColor: 'divider',
+                cursor: 'pointer',
+                '&:hover': { bgcolor: 'action.hover' },
               }}
             >
-              <Box sx={{ minWidth: 0 }}>
-                <Typography sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>
-                  {item.reference}
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
-                  {item.party}
-                  {item.detail ? ` · ${item.detail}` : ''}
-                </Typography>
-              </Box>
+              <Typography noWrap sx={{ fontWeight: 700, fontSize: '0.9rem', flexShrink: 0, maxWidth: '40%' }} title={item.reference}>
+                {item.reference}
+              </Typography>
+              <Typography noWrap variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 0 }}>
+                {item.party}
+                {item.detail ? ` · ${item.detail}` : ''}
+              </Typography>
               <Button
-                variant="contained"
+                variant="outlined"
                 size="small"
-                onClick={() => navigate(item.path)}
-                sx={{ flexShrink: 0, fontWeight: 700, alignSelf: { xs: 'flex-start', sm: 'center' } }}
+                onClick={(event) => { event.stopPropagation(); navigate(item.path); }}
+                sx={{ flexShrink: 0, fontWeight: 700, minHeight: 30, minWidth: 96 }}
               >
                 {item.actionLabel}
               </Button>
             </Stack>
           ))}
           {items.length > INBOX_PREVIEW_ROWS && (
-            <>
-              <Divider />
-              <Box sx={{ px: { xs: 2, sm: 2.5 }, py: 1.25 }}>
-                <Button
-                  size="small"
-                  endIcon={<ArrowIcon />}
-                  onClick={() => navigate(definition.seeAllPath)}
-                  sx={{ fontWeight: 700 }}
-                >
-                  {`${items.length - INBOX_PREVIEW_ROWS} more — ${definition.seeAllLabel.toLowerCase()}`}
-                </Button>
-              </Box>
-            </>
+            <Box sx={{ px: 2, py: 0.5, borderTop: '1px solid', borderColor: 'divider' }}>
+              <Button size="small" endIcon={<ArrowIcon />} onClick={() => navigate(definition.seeAllPath)} sx={{ fontWeight: 700, minHeight: 30 }}>
+                {`${items.length - INBOX_PREVIEW_ROWS} more`}
+              </Button>
+            </Box>
           )}
         </Box>
       )}

@@ -50,7 +50,9 @@ namespace ERP_RFQ_Automation.Repositories
                 var followUpStaleDays = await GetStaleQuoteDaysAsync(businessUnitId);
                 var cutoff = DateTime.UtcNow.AddDays(-followUpStaleDays);
                 query = query.Where(q => (q.Status.SetupCode == "SENT" || q.Status.SetupValue.ToUpper() == "SENT")
-                    && q.SentOn != null && q.SentOn <= cutoff && q.RespondedOn == null && q.OutcomeOn == null);
+                    && q.SentOn != null && q.SentOn <= cutoff && q.RespondedOn == null && q.OutcomeOn == null
+                    // A quote a sent revision replaced is not chased: the customer has the revision.
+                    && !_context.Quotes.Any(n => n.RevisionOfQuoteId == q.Id && n.SentOn != null));
             }
             else if (normalizedState == "outcomes")
                 query = query.Where(q => q.Status.SetupCode == "ACCEPTED" || q.Status.SetupCode == "REJECTED" || q.Status.SetupCode == "EXPIRED");
@@ -86,6 +88,18 @@ namespace ERP_RFQ_Automation.Repositories
             var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
 
             var dtos = quotes.Select(q => MapToDTO(q, itemCounts.TryGetValue(q.Id, out var count) ? count : 0, reasonNames, staleDays)).ToList();
+            var pageIds = dtos.Select(d => d.Id).ToList();
+            var sentSuccessors = await _context.Quotes.AsNoTracking()
+                .Where(n => n.RevisionOfQuoteId != null && pageIds.Contains(n.RevisionOfQuoteId.Value) && n.SentOn != null)
+                .Select(n => new { Of = n.RevisionOfQuoteId!.Value, n.QuoteNo })
+                .ToListAsync();
+            foreach (var dto in dtos)
+            {
+                var successor = sentSuccessors.FirstOrDefault(n => n.Of == dto.Id);
+                if (successor is null) continue;
+                dto.SupersededByQuoteNo = successor.QuoteNo;
+                dto.IsStale = false;
+            }
 
             return (dtos, totalItems);
         }

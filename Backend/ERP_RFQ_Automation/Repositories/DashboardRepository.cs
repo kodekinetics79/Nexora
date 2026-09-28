@@ -46,8 +46,10 @@ namespace ERP_RFQ_Automation.Repositories
                 .Where(o => o.BusinessUnitId == businessUnitId)
                 .Select(o => new { o.TotalAmount, o.CurrencyId })
                 .ToListAsync();
+            // A quote a SENT revision replaced is one offer, not two: only the revision counts.
             var quoteAmounts = await _context.Quotes.AsNoTracking()
-                .Where(q => q.BusinessUnitId == businessUnitId)
+                .Where(q => q.BusinessUnitId == businessUnitId
+                            && !_context.Quotes.Any(n => n.RevisionOfQuoteId == q.Id && n.SentOn != null))
                 .Select(q => new { q.TotalAmount, q.CurrencyId })
                 .ToListAsync();
 
@@ -505,7 +507,8 @@ namespace ERP_RFQ_Automation.Repositories
             // stale-quote digest, so both features agree on who owns a quote.
             var quoteRows = await _context.Quotes.AsNoTracking()
                 .Where(q => q.BusinessUnitId == businessUnitId
-                            && q.StatusId != null && sentQuoteStatusIds.Contains(q.StatusId.Value))
+                            && q.StatusId != null && sentQuoteStatusIds.Contains(q.StatusId.Value)
+                            && !_context.Quotes.Any(n => n.RevisionOfQuoteId == q.Id && n.SentOn != null))
                 .Select(q => new { q.CreatedBy, q.SentOn, q.RespondedOn })
                 .ToListAsync();
 
@@ -660,7 +663,8 @@ namespace ERP_RFQ_Automation.Repositories
                 scopedLeads = scopedLeads.Where(l => l.CreatedDate >= windowFrom && l.CreatedDate < windowTo);
 
             var scopedQuotes = _context.Quotes.AsNoTracking()
-                .Where(q => q.BusinessUnitId == businessUnitId);
+                .Where(q => q.BusinessUnitId == businessUnitId
+                            && !_context.Quotes.Any(n => n.RevisionOfQuoteId == q.Id && n.SentOn != null));
 
             // A quote belongs to the person named on it. Ownership is NOT inferred from the
             // customer's account team here: an account can carry work from several reps, and
@@ -737,6 +741,7 @@ namespace ERP_RFQ_Automation.Repositories
             {
                 var unownedInScope = _context.Quotes.AsNoTracking()
                     .Where(q => q.BusinessUnitId == businessUnitId
+                                && !_context.Quotes.Any(n => n.RevisionOfQuoteId == q.Id && n.SentOn != null)
                                 && q.OwnerUserId == null
                                 && q.CustomerId != null && accountCustomerIds.Contains(q.CustomerId.Value));
                 if (windowed)

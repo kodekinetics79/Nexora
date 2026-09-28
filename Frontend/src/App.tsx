@@ -26,6 +26,7 @@ const InboxPage = lazyWithRetry(() => import('./pages/Inbox/InboxPage'));
 const AllScreensPage = lazyWithRetry(() => import('./pages/Advanced/AllScreensPage'));
 const ProductsPage = lazyWithRetry(() => import('./pages/Inventory/ProductsPage'));
 const ProductDetailPage = lazyWithRetry(() => import('./pages/Inventory/ProductDetailPage'));
+const PricingSheetPage = lazyWithRetry(() => import('./pages/Inventory/PricingSheetPage'));
 const ProductCategoryPage = lazyWithRetry(() => import('./pages/Inventory/ProductCategoryPage'));
 const ProductSubCategoryPage = lazyWithRetry(() => import('./pages/Inventory/ProductSubCategoryPage'));
 const InventoryOverviewPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/InventoryOverviewPage'));
@@ -313,6 +314,7 @@ function App() {
       <Route path="/inventory/order-trace/:orderId" element={<TenantShell><PermissionGuard moduleName="Products"><PermissionGuard moduleName="Orders"><OrderTracePage /></PermissionGuard></PermissionGuard></TenantShell>} />
       <Route path="/inventory/products" element={<TenantShell><PermissionGuard moduleName="Products"><ProductsPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/products/:id" element={<TenantShell><PermissionGuard moduleName="Products"><ProductDetailPage /></PermissionGuard></TenantShell>} />
+      <Route path="/inventory/pricing-sheet" element={<TenantShell><PermissionGuard moduleName="Products"><PricingSheetPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/categories" element={<TenantShell><PermissionGuard moduleName="Product Categories"><ProductCategoryPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/sub-categories" element={<TenantShell><PermissionGuard moduleName="Product Categories"><ProductSubCategoryPage /></PermissionGuard></TenantShell>} />
       

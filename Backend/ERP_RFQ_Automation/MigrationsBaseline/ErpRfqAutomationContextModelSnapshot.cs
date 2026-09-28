@@ -14913,6 +14913,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("PreferredSupplierID");
 
+                    b.Property<long?>("PriceCurrencyId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("ProductName")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
@@ -14959,6 +14962,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id")
                         .HasName("PK__Inventor__3214EC27426EF885");
+
+                    b.HasIndex("PriceCurrencyId");
 
                     b.HasIndex("UomId");
 
@@ -26310,6 +26315,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("PreferredSupplierId")
                         .HasConstraintName("FK__Products__Prefe");
 
+                    b.HasOne("ERP_RFQ_Automation.Models.Currency", "PriceCurrency")
+                        .WithMany()
+                        .HasForeignKey("PriceCurrencyId");
+
                     b.HasOne("ERP_RFQ_Automation.Models.ProductSubCategory", "SubCategory")
                         .WithMany("Products")
                         .HasForeignKey("SubCategoryId")
@@ -26330,6 +26339,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Category");
 
                     b.Navigation("PreferredSupplier");
+
+                    b.Navigation("PriceCurrency");
 
                     b.Navigation("SubCategory");
 

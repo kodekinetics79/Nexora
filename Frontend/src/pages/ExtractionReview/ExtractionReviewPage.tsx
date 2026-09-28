@@ -2,18 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
-  Box, Typography, Paper, Button, Chip, Stack, Tooltip, Alert, Badge,
+  Box, Typography, Paper, Button, IconButton, Stack, Tooltip, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel,
 } from '@mui/x-data-grid';
 import {
   Refresh as RefreshIcon,
-  Layers as ItemsIcon,
-  RateReview as ReviewIcon,
-  FactCheck as QueueIcon,
   TaskAlt as CaughtUpIcon,
-  ErrorOutlined as NeedsCheckDotIcon,
 } from '@mui/icons-material';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type { NeedsReviewItem } from '../../api/services/extractionReviewService';
@@ -77,33 +73,17 @@ const ExtractionReviewPage: React.FC = () => {
   // never "in 4 hours" — clock skew reads as "just now".
   const formatRelative = (dateStr: string | null) => formatRelativeReceived(dateStr);
 
+  const openReview = (row: NeedsReviewItem) =>
+    navigate(`/procurement/extraction/review/${row.id}`, { state: { reviewReason: row.reviewReason } });
+
   const columns: GridColDef<NeedsReviewItem>[] = [
-    {
-      // Column index 0, matching the review workbench. Everything in this queue
-      // is unreviewed by definition; the dot makes that state readable at a
-      // glance instead of a colour-coded score that implied a verdict.
-      field: 'checkStatus',
-      headerName: 'Status',
-      width: 56,
-      sortable: false,
-      filterable: false,
-      align: 'center',
-      headerAlign: 'center',
-      renderCell: () => (
-        <Tooltip title="Not yet reviewed by a person">
-          <Box role="img" aria-label="Needs check" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-            <NeedsCheckDotIcon sx={{ fontSize: 18, color: 'error.main' }} />
-          </Box>
-        </Tooltip>
-      ),
-    },
     {
       field: 'rfqno',
       headerName: 'RFQ #',
       width: 170,
       renderCell: (p) => (
-        <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', letterSpacing: '-0.02em' }}>
-          {p.row.rfqno || 'NO RFQ #'}
+        <Typography noWrap title={p.row.rfqno ?? ''} sx={{ fontWeight: 600, fontSize: '0.82rem', fontFamily: 'monospace', color: p.row.rfqno ? 'text.primary' : 'text.disabled' }}>
+          {p.row.rfqno || 'No RFQ # yet'}
         </Typography>
       ),
     },
@@ -120,18 +100,12 @@ const ExtractionReviewPage: React.FC = () => {
     },
     {
       field: 'leadSource',
-      headerName: 'Source',
-      width: 120,
+      headerName: 'Came by',
+      width: 110,
       renderCell: (p) => (
-        <Chip
-          label={p.row.leadSource || '—'}
-          size="small"
-          sx={{
-            fontWeight: 900, fontSize: '0.65rem', height: 20, borderRadius: 1,
-            color: 'white !important',
-            bgcolor: p.row.leadSource === 'Email' ? 'primary.main' : 'secondary.main',
-          }}
-        />
+        <Typography sx={{ fontSize: '0.85rem', color: 'text.secondary' }}>
+          {p.row.leadSource === 'ManualUpload' ? 'Upload' : p.row.leadSource === 'BulkUpload' ? 'Bulk upload' : p.row.leadSource || '—'}
+        </Typography>
       ),
     },
     {
@@ -151,29 +125,26 @@ const ExtractionReviewPage: React.FC = () => {
     },
     {
       field: 'itemCount',
-      headerName: 'Lines',
-      width: 190,
-      align: 'center',
-      headerAlign: 'center',
+      headerName: 'Lines to check',
+      width: 130,
+      align: 'left',
+      headerAlign: 'left',
       renderCell: (p) => {
         const total = p.row.itemCount ?? 0;
         // Rendered only when the backend computes it; never inferred here.
         const needing = p.row.linesNeedingCheck;
         return (
-          <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-            <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-            <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>
-              {needing == null
-                ? `${total} line${total === 1 ? '' : 's'}`
-                : `${needing} of ${total} need a check`}
-            </Typography>
-          </Stack>
+          <Typography className="tabular-nums" sx={{ fontSize: '0.85rem', fontWeight: 700 }}>
+            {needing == null
+              ? `${total} line${total === 1 ? '' : 's'}`
+              : `${needing} of ${total}`}
+          </Typography>
         );
       },
     },
     {
       field: 'reviewReason',
-      headerName: 'Review Reason',
+      headerName: 'Why',
       flex: 1,
       minWidth: 200,
       renderCell: (p) => {
@@ -190,8 +161,8 @@ const ExtractionReviewPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Action',
-      width: 130,
+      headerName: '',
+      width: 120,
       sortable: false,
       filterable: false,
       align: 'center',
@@ -199,14 +170,13 @@ const ExtractionReviewPage: React.FC = () => {
       renderCell: (p) => (
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
           <Button
-            variant="contained"
+            variant="outlined"
             size="small"
-            startIcon={<ReviewIcon sx={{ fontSize: 16 }} />}
-            onClick={() => navigate(`/procurement/extraction/review/${p.row.id}`, { state: { reviewReason: p.row.reviewReason } })}
+            onClick={(event) => { event.stopPropagation(); openReview(p.row); }}
             aria-label={`Review extraction for ${p.row.rfqno || 'document'} ${p.row.id}`}
-            sx={{ fontWeight: 800, borderRadius: 2, textTransform: 'none' }}
+            sx={{ fontWeight: 700, width: 96 }}
           >
-            Review
+            Check it
           </Button>
         </Box>
       ),
@@ -214,35 +184,19 @@ const ExtractionReviewPage: React.FC = () => {
   ];
 
   return (
-    <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
-      {/* Header */}
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5 }}>
-            <Badge badgeContent={totalCount} color="warning" max={999} showZero={false}>
-              <QueueIcon sx={{ color: 'primary.main', fontSize: 30 }} />
-            </Badge>
-            <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>
-              Extraction Review
-            </Typography>
-          </Stack>
-          <Typography variant="body2" color="text.secondary">
-            {totalCount > 0
-              ? `${totalCount} document${totalCount === 1 ? '' : 's'} awaiting review — every extraction is reviewed by a person`
-              : 'Verify and correct extracted documents before they move downstream'}
-          </Typography>
-        </Box>
-        <Tooltip title="Refresh queue">
+    <Box sx={{ p: 2 }}>
+      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', rowGap: 1 }}>
+        <Typography variant="h5" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.01em' }}>
+          Documents to check
+          {data && <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }}> · {totalCount}</Box>}
+        </Typography>
+        <SearchField width={320} value={search} onChange={setSearch} placeholder="Search RFQ # or buyer" />
+        <Box sx={{ flex: 1 }} />
+        <Tooltip title="Refresh">
           <span>
-            <Button
-              variant="outlined"
-              startIcon={<RefreshIcon />}
-              onClick={() => refetch()}
-              disabled={isFetching}
-              sx={{ fontWeight: 800, borderRadius: 2, border: '2px solid' }}
-            >
-              Refresh
-            </Button>
+            <IconButton aria-label="Refresh" onClick={() => refetch()} disabled={isFetching} sx={{ width: 36, height: 36 }}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
           </span>
         </Tooltip>
       </Stack>
@@ -265,13 +219,8 @@ const ExtractionReviewPage: React.FC = () => {
         </Alert>
       )}
 
-      {/* Filters */}
-      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-        <SearchField width="360px" value={search} onChange={setSearch} placeholder="Search by RFQ No, Buyer Name..." />
-      </Paper>
-
       {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ height: 'calc(100vh - 196px)', minHeight: 360, width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         {isError ? (
           <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
             <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
@@ -293,6 +242,17 @@ const ExtractionReviewPage: React.FC = () => {
             onPaginationModelChange={setPaginationModel}
             disableRowSelectionOnClick
             getRowId={(r) => r.id}
+            rowHeight={48}
+            columnHeaderHeight={40}
+            onRowClick={(p) => openReview(p.row)}
+            onCellKeyDown={(p, event) => { if (event.key === 'Enter') openReview(p.row); }}
+            sx={{
+              border: 0,
+              '& .MuiDataGrid-row': { cursor: 'pointer' },
+              '& .MuiDataGrid-cell': { display: 'flex', alignItems: 'center' },
+              '& .MuiDataGrid-columnHeaderTitle': { fontWeight: 700 },
+              '& .MuiDataGrid-cell .MuiButton-root': { minHeight: 30, py: 0.25 },
+            }}
             slots={{
               noRowsOverlay: () => (
                 <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1.5, p: 3, textAlign: 'center' }}>

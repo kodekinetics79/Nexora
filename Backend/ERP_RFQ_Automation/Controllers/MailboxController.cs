@@ -87,6 +87,7 @@ public sealed class MailboxController(
             .AsNoTracking()
             .Where(x => x.BusinessUnitId == tenant)
             .OrderBy(x => x.Protocol).ThenBy(x => x.Id)
+            .Select(WithoutPassword)
             .ToListAsync(HttpContext.RequestAborted);
 
         return Ok(rows.Select(ToResponse).ToList());
@@ -99,7 +100,9 @@ public sealed class MailboxController(
         if (!TryTenant(out var tenant)) return Forbid();
 
         var row = await context.EmailConfigurations.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.Id == id && x.BusinessUnitId == tenant, HttpContext.RequestAborted);
+            .Where(x => x.Id == id && x.BusinessUnitId == tenant)
+            .Select(WithoutPassword)
+            .FirstOrDefaultAsync(HttpContext.RequestAborted);
 
         return row is null ? NotFound("Mailbox not found.") : Ok(ToResponse(row));
     }
@@ -705,6 +708,32 @@ public sealed class MailboxController(
     private sealed record MailboxAuditSnapshot(
         string ConfigurationName, string EmailAddress, string Protocol, string Host,
         int Port, string Username, bool UseSsl, int PollingInterval, bool IsActive);
+
+    /// <summary>
+    /// Reading a mailbox for display never touches its password. The password column is decrypted
+    /// as it is read, and one row saved under a different key used to fail the whole list with a
+    /// 500, hiding every healthy mailbox with it. The response never carried the password anyway.
+    /// </summary>
+    private static readonly System.Linq.Expressions.Expression<Func<EmailConfiguration, EmailConfiguration>> WithoutPassword =
+        x => new EmailConfiguration
+        {
+            Id = x.Id,
+            BusinessUnitId = x.BusinessUnitId,
+            ConfigurationName = x.ConfigurationName,
+            EmailAddress = x.EmailAddress,
+            Protocol = x.Protocol,
+            Host = x.Host,
+            Port = x.Port,
+            Username = x.Username,
+            UseSsl = x.UseSsl,
+            PollingInterval = x.PollingInterval,
+            IsActive = x.IsActive,
+            CreatedOn = x.CreatedOn,
+            LastSuccessfulPollOn = x.LastSuccessfulPollOn,
+            LastPollAttemptOn = x.LastPollAttemptOn,
+            LastPollError = x.LastPollError,
+            ConsecutivePollFailures = x.ConsecutivePollFailures,
+        };
 
     private static MailboxResponseDTO ToResponse(EmailConfiguration row)
     {

@@ -323,9 +323,9 @@ describe('an empty queue is never a dead end', () => {
 
     await screen.findByText('Every document has been checked');
     const documents = screen.getByRole('region', { name: /documents to check/i });
-    expect(
-      within(documents).getByText(/new documents land here automatically/i),
-    ).toBeInTheDocument();
+    // Owner 2026-09-27: a clear queue is one line (name, 0, what that means, the way forward);
+    // the explanatory paragraph went.
+    expect(within(documents).getByText('Every document has been checked')).toBeInTheDocument();
     expect(within(documents).getByRole('button', { name: 'Upload a document' })).toBeInTheDocument();
   });
 

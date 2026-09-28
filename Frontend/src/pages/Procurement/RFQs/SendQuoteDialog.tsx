@@ -22,8 +22,9 @@ import {
   TableRow,
   TextField,
   Typography,
+  Tooltip,
 } from "@mui/material";
-import { AttachFile, Send, WarningAmber } from "@mui/icons-material";
+import { AttachFile, Download, Send, WarningAmber } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { useSnackbar } from "notistack";
 import quoteService, { type PriceAttestationSource, type QuoteDTO, type QuoteLineDTO } from "../../../api/services/quoteService";
@@ -32,6 +33,7 @@ import currencyService from "../../../api/services/currencyService";
 import stockPriceService from "../../../api/services/stockPriceService";
 import { useAuth } from "../../../context/AuthContext";
 import { formatMoney } from "../../../utils/currency";
+import { deliveryText } from "../../../utils/delivery";
 
 const EMAIL = /^[^\s@;,]+@[^\s@;,]+\.[^\s@;,]+$/;
 const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -47,7 +49,7 @@ const HANDLED_HERE = new Set(["QUOTE_INCOMPLETE", "PRICE_ATTESTATION_REQUIRED"])
 
 const deliveryOf = (line: QuoteLineDTO) => {
   const days = line.deliveryLeadTime;
-  const when = !days ? "" : days % 7 === 0 ? `${days / 7} week${days === 7 ? "" : "s"}` : `${days} day${days === 1 ? "" : "s"}`;
+  const when = !days ? "" : deliveryText(days);
   if (line.exStockQuantity && line.exStockQuantity > 0) return `${qty(line.exStockQuantity)} ex stock, balance ${when ? `in ${when}` : "to follow"}`;
   if (days === 0) return "Ex stock";
   return when ? `Delivery ${when}` : "";
@@ -67,6 +69,8 @@ function LineChoiceControl({ quoteId, rfqId, line, currencyCode, onSaved }: {
   const [mode, setMode] = React.useState<LineChoice | null>(null);
   const [estimate, setEstimate] = React.useState("");
   const [reason, setReason] = React.useState("");
+  // "Other" opens a box for the rep's own words; the four reasons above it are one click each.
+  const [other, setOther] = React.useState(false);
   const current = line.pricingStatus ?? null;
 
   // The estimate starts from what this part was last quoted or won at, or a supplier's last price.
@@ -124,17 +128,24 @@ function LineChoiceControl({ quoteId, rfqId, line, currencyCode, onSaved }: {
       )}
       {mode === "NOT_QUOTED" && (
         <Box sx={{ mt: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>Reason the customer sees:</Typography>
           <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap" }}>
             {NOT_QUOTED_REASONS.map((text) => (
-              <Chip key={text} size="small" label={text} variant={reason === text ? "filled" : "outlined"} onClick={() => setReason(text)} />
+              <Chip key={text} size="small" label={text} clickable color={!other && reason === text ? "primary" : "default"}
+                variant={!other && reason === text ? "filled" : "outlined"} onClick={() => { setOther(false); setReason(text); }} />
             ))}
+            <Chip size="small" label="Other" clickable color={other ? "primary" : "default"} variant={other ? "filled" : "outlined"}
+              onClick={() => { setOther(true); setReason(""); }} />
           </Stack>
+          {other && (
+            <TextField size="small" fullWidth label="Type the reason" value={reason} onChange={(event) => setReason(event.target.value)}
+              placeholder="e.g. Customer's drawing revision not received" sx={{ mt: 1 }}
+              slotProps={{ htmlInput: { maxLength: 300, "aria-label": "Reason not quoted" } }} />
+          )}
           <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
-            <TextField size="small" label="Reason the customer sees" value={reason} onChange={(event) => setReason(event.target.value)}
-              sx={{ flex: 1 }} slotProps={{ htmlInput: { maxLength: 300, "aria-label": "Reason not quoted" } }} />
             <Button size="small" variant="contained" disabled={!reason.trim() || save.isPending}
               onClick={() => save.mutate({ status: "NOT_QUOTED", note: reason.trim() })}>Save</Button>
-            <Button size="small" onClick={() => setMode(null)}>Cancel</Button>
+            <Button size="small" onClick={() => { setMode(null); setOther(false); setReason(""); }}>Cancel</Button>
           </Stack>
         </Box>
       )}
@@ -148,6 +159,8 @@ export interface SendQuoteDialogProps {
   onClose: () => void;
   /** Called once the quote was handed over for delivery (it becomes "sent" a moment later). */
   onSent?: () => void;
+  /** The customer's deadline. Once it has passed, Send asks first; it never refuses. */
+  deadline?: string | null;
 }
 
 /**
@@ -155,7 +168,18 @@ export interface SendQuoteDialogProps {
  * prices hold, where the prices came from, and the email the customer gets. Anything only a
  * manager can fix in Setup is named in plain words with a link.
  */
-export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQuoteDialogProps) {
+export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline }: SendQuoteDialogProps) {
+  // Which action the passed-deadline question is for: sending by email, or recording a portal upload.
+  const [confirmLate, setConfirmLate] = React.useState<"email" | "portal" | null>(null);
+  // After the PDF is downloaded: the rep uploads it to the customer's portal, then records it here.
+  const [portalStep, setPortalStep] = React.useState(false);
+  const [portalReference, setPortalReference] = React.useState("");
+  // The deadline is a calendar day at the customer's end; it has passed once that day is over.
+  const deadlineDay = (() => {
+    const match = deadline?.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : null;
+  })();
+  const deadlinePassed = deadlineDay != null && deadlineDay.getTime() + 24 * 60 * 60 * 1000 <= Date.now();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
@@ -250,30 +274,74 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQu
   const validOk = validUntil !== "" && validUntil >= isoDay(new Date());
   const referenceOk = confirmed || reference.trim().length > 0;
   const currencyOk = !!quote?.currencyId || currencyId !== "";
-  const reasons = [
+  // What the quote itself needs, whichever way it goes out. The email address is needed only to
+  // email it: most customers take quotes through their own portal, from the downloaded PDF.
+  const readyReasons = [
     unpriced.length > 0 ? `${unpriced.length} ${unpriced.length === 1 ? "line has" : "lines have"} no price yet` : null,
     !currencyOk ? "Choose a currency" : null,
     !validOk ? "Choose how long the prices hold" : null,
     !referenceOk ? "Say where the prices came from" : null,
-    !toOk ? "Enter the customer's email" : null,
     setupBlockers.length > 0 ? "Setup needs finishing first" : null,
   ].filter(Boolean) as string[];
+  const reasons = [...readyReasons, ...(!toOk ? ["Enter the customer's email to send it by email"] : [])];
+
+  // Currency, validity and the price-source confirmation are saved the same way before either route.
+  const prepare = async () => {
+    const id = quoteId!;
+    const termsChanged = (!quote!.currencyId && currencyId !== "") || validUntil !== (quote!.validUntil ?? "").split("T")[0];
+    if (termsChanged) {
+      await rfqService.saveQuoteTerms(id, { currencyId: quote!.currencyId ? null : (currencyId as number), validUntil });
+    }
+    if (!confirmed) await quoteService.confirmPriceAttestation(id, source, reference.trim());
+    return id;
+  };
+  const refreshAfterSend = () => {
+    for (const key of ["send-quote", "send-quote-readiness", "send-quote-attestation", "send-quote-id", "send-quote-open", "stock-price", "rfq-detail"]) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+
+  const download = useMutation({
+    mutationFn: async () => {
+      const id = await prepare();
+      const blob = await quoteService.downloadPdf(id);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = draftQuery.data?.attachmentFileName || `${quote?.quoteNo ?? "Quote"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["send-quote-attestation"] });
+      setPortalStep(true);
+    },
+    onError: (error) => enqueueSnackbar(describeError(error, "The quote PDF could not be made."), { variant: "error" }),
+  });
+
+  const portal = useMutation({
+    mutationFn: () => quoteService.recordPortalSubmission(quoteId!, portalReference),
+    onSuccess: (result) => {
+      refreshAfterSend();
+      enqueueSnackbar(result.alreadySent ? `${result.quoteNo} was already recorded as sent.` : `${result.quoteNo} recorded as submitted on the customer's portal.`,
+        { variant: "success" });
+      onSent?.();
+      setPortalStep(false);
+      onClose();
+    },
+    onError: (error) => enqueueSnackbar(describeError(error, "The quote could not be recorded as submitted."), { variant: "error" }),
+  });
 
   const send = useMutation({
     mutationFn: async () => {
-      const id = quoteId!;
-      const termsChanged = (!quote!.currencyId && currencyId !== "") || validUntil !== (quote!.validUntil ?? "").split("T")[0];
-      if (termsChanged) {
-        await rfqService.saveQuoteTerms(id, { currencyId: quote!.currencyId ? null : (currencyId as number), validUntil });
-      }
-      if (!confirmed) await quoteService.confirmPriceAttestation(id, source, reference.trim());
+      const id = await prepare();
       const edited = draftQuery.data && (subject !== draftQuery.data.subject || body !== draftQuery.data.body);
       return quoteService.sendEmail(id, to.trim(), edited ? { subject, body } : undefined);
     },
     onSuccess: (outcome) => {
-      for (const key of ["send-quote", "send-quote-readiness", "send-quote-attestation", "send-quote-id", "send-quote-open", "stock-price", "rfq-detail"]) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+      refreshAfterSend();
       if (outcome.held) {
         enqueueSnackbar(outcome.message || "A price is below the allowed floor, so the quote is waiting for a manager's approval.", { variant: "warning" });
       } else if (outcome.priceAttestationRequired || outcome.taxDerivationRequired) {
@@ -467,14 +535,60 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent }: SendQu
         <Typography variant="caption" color={reasons.length ? "warning.main" : "text.secondary"} sx={{ flex: 1 }}>
           {quote && !alreadySent ? (reasons.length ? reasons.join(" · ") : "The quote PDF is attached to the email.") : ""}
         </Typography>
-        <Button onClick={onClose} disabled={send.isPending}>Cancel</Button>
+        <Button onClick={onClose} disabled={send.isPending || download.isPending}>Cancel</Button>
+        {quote && !alreadySent && (
+          <Tooltip title="For a customer who takes quotes through their own portal: download the PDF, upload it there, then record it here." describeChild>
+            <span>
+              <Button variant="outlined" startIcon={download.isPending ? <CircularProgress size={16} color="inherit" /> : <Download />}
+                disabled={readyReasons.length > 0 || download.isPending || send.isPending} onClick={() => download.mutate()}>
+                Download PDF
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         {quote && !alreadySent && (
           <Button variant="contained" startIcon={send.isPending ? <CircularProgress size={16} color="inherit" /> : <Send />}
-            disabled={reasons.length > 0 || send.isPending} onClick={() => send.mutate()}>
-            Send quote
+            disabled={reasons.length > 0 || send.isPending || download.isPending} onClick={() => (deadlinePassed ? setConfirmLate("email") : send.mutate())}>
+            Send by email
           </Button>
         )}
       </DialogActions>
+      {/* After the download: the rep uploads the PDF to the customer's portal, then records it here. */}
+      <Dialog open={portalStep} onClose={portal.isPending ? undefined : () => setPortalStep(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 800 }}>Submit it on the customer's portal</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Upload the downloaded PDF to the customer's portal. Then record it here, so {quote?.quoteNo} counts as sent and Nexora follows it up.
+          </Typography>
+          <TextField size="small" fullWidth label="Portal reference (optional)" value={portalReference}
+            onChange={(event) => setPortalReference(event.target.value)} placeholder="e.g. the bid or submission number"
+            slotProps={{ htmlInput: { maxLength: 200 } }} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPortalStep(false)} disabled={portal.isPending}>Not yet</Button>
+          <Button variant="contained" disabled={portal.isPending}
+            startIcon={portal.isPending ? <CircularProgress size={16} color="inherit" /> : undefined}
+            onClick={() => (deadlinePassed ? setConfirmLate("portal") : portal.mutate())}>
+            Mark as submitted
+          </Button>
+        </DialogActions>
+      </Dialog>
+      {/* Owner ruling 2026-09-26: a passed deadline informs, it never blocks. */}
+      <Dialog open={confirmLate !== null} onClose={() => setConfirmLate(null)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 800 }}>The deadline has passed</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            This RFQ's deadline was {deadlineDay?.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}.
+            {confirmLate === "portal" ? "Do you really want to record the quote as submitted?" : "Do you really want to send the quote?"}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmLate(null)}>Cancel</Button>
+          <Button variant="contained" onClick={() => { const action = confirmLate; setConfirmLate(null); if (action === "portal") portal.mutate(); else send.mutate(); }}>
+            {confirmLate === "portal" ? "Record anyway" : "Send anyway"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Dialog>
   );
 }
