@@ -13,6 +13,7 @@ import { useMeasuredWidth } from './useMeasuredWidth';
 import HatchPattern, { HATCH_MEANING, hatchFill, useHatchPatternId } from './hatchPattern';
 import { pipelineSeal, usePipelineAnalytics } from './pipelineAnalytics';
 import { seriesVar, type SeriesToken } from './tokens';
+import { useEscapeWithin } from './useEscapeWithin';
 import ChartMenu from './ChartMenu';
 import { useChartChoice } from './chartPrefs';
 import { neuInset } from './neumorphic';
@@ -201,6 +202,7 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
   const [measure, setMeasure] = useChartChoice('outstanding', MEASURES, 'count');
   // One drill open at a time across both charts, so the band never carries two sentences.
   const [picked, setPicked] = useState<{ chart: 'stage' | 'segment'; key: string } | null>(null);
+  const escapeRef = useEscapeWithin<HTMLDivElement>(!!picked, () => setPicked(null));
   const toggle = (chart: 'stage' | 'segment', key: string) =>
     setPicked((now) => (now?.chart === chart && now.key === key ? null : { chart, key }));
 
@@ -544,8 +546,8 @@ export default function OutstandingBand({ from, to, index = 2 }: OutstandingBand
       seal={pipelineSeal(data)}
     >
       <Stack
-        ref={measureRef} spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}
-        onKeyDown={(e) => { if (e.key === 'Escape' && picked) setPicked(null); }}
+        ref={(el: HTMLDivElement | null) => { measureRef.current = el; escapeRef.current = el; }}
+        spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}
       >
         <Stack spacing={0.5} sx={{ minWidth: 0 }}>
           <Typography component="h3" sx={{ fontWeight: 800, fontSize: 11, lineHeight: 1.2 }}>

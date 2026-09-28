@@ -348,6 +348,7 @@ describe('OutstandingBand — reading the charts in place', () => {
     expect(drill).toHaveTextContent('148 requests came in.');
     expect(within(drill).getByRole('link', { name: 'Open requests' })).toHaveAttribute('href', '/procurement/leads/all');
 
+    leads.focus();
     fireEvent.keyDown(leads, { key: 'Escape' });
     expect(screen.queryByTestId('funnel-drill')).toBeNull();
   });

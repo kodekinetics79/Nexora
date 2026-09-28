@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import { useMemo, useRef, useState, type PointerEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { Box, ButtonBase, Stack, Typography } from '@mui/material';
@@ -8,6 +8,7 @@ import BandShell from './BandShell';
 import { scopeWords } from './scopeWords';
 import { seriesVar, type SeriesToken } from './tokens';
 import { neuBar, neuFocus, neuInset, neuKey, neuRaised } from './neumorphic';
+import { useEscapeWithin } from './useEscapeWithin';
 import ChartMenu from './ChartMenu';
 import { useChartChoice } from './chartPrefs';
 
@@ -243,9 +244,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
     if (Date.now() - dragEndedAt.current < DRAG_CLICK_GUARD_MS) return;
     setPicked([columnIndex, columnIndex]);
   };
-  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === 'Escape' && picked) { event.stopPropagation(); setPicked(null); }
-  };
+  const escapeRef = useEscapeWithin<HTMLDivElement>(!!picked, () => setPicked(null));
 
   // The server's own count of open work decides this, not the height of the tallest column: a
   // tenant whose only enquiries landed in a bucket this build cannot draw has work, and telling
@@ -279,7 +278,7 @@ export default function ClosingBand({ step = '4', index = 0, onOpenBucket }: Clo
         governed: false,
       }}
     >
-      <Stack spacing={1} sx={{ minWidth: 0 }} onKeyDown={onKeyDown}>
+      <Stack ref={escapeRef} spacing={1} sx={{ minWidth: 0 }}>
 
         {/* The measure switch sits where the axis title would. */}
         <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center' }}>

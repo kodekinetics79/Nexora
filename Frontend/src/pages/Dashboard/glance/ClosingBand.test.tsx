@@ -189,6 +189,7 @@ describe('ClosingBand — populated', () => {
     expect(screen.getByText('RFQ-306')).toBeInTheDocument();
     expect(screen.getByText('RFQ-101')).toBeInTheDocument();
 
+    soon.focus();
     fireEvent.keyDown(soon, { key: 'Escape' });
     expect(screen.queryByText('RFQ-201')).not.toBeInTheDocument();
     expect(overdue).toHaveAttribute('aria-pressed', 'false');

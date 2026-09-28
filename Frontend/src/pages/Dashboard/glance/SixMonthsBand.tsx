@@ -289,6 +289,8 @@ export default function SixMonthsBand({
     // onClick never runs for a pointer. It stays for the keyboard, and swallows any click that
     // does arrive after this so nothing is picked twice.
     swallowClick.current = true;
+    // Any click the browser sends for this release arrives before the timer; the keyboard's never is.
+    setTimeout(() => { swallowClick.current = false; }, 0);
     pick(Math.min(drag.start, end), Math.max(drag.start, end));
   };
 
@@ -459,12 +461,13 @@ export default function SixMonthsBand({
       <Box
         ref={overlayRef}
         data-testid="six-months-overlay"
+        role="group"
+        aria-label="Months"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={() => setDrag(null)}
         onPointerLeave={() => { if (!drag) setHover(null); }}
-        onClick={() => { swallowClick.current = false; }}
         sx={{ position: 'absolute', inset: 0, touchAction: 'pan-y', userSelect: 'none' }}
       >
         {brush && (
@@ -479,6 +482,8 @@ export default function SixMonthsBand({
           />
         )}
         {labels.map((label, i) => (
+          // A native <button> rendered through Box for sx; the rule cannot see through `component`.
+          // eslint-disable-next-line jsx-a11y/no-static-element-interactions
           <Box
             component="button"
             type="button"

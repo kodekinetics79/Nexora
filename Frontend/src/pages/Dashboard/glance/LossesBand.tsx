@@ -10,6 +10,7 @@ import BandShell from './BandShell';
 import { pipelineSeal, usePipelineAnalytics } from './pipelineAnalytics';
 import { seriesVar } from './tokens';
 import { neuBar, neuFocus, neuWell } from './neumorphic';
+import { useEscapeWithin } from './useEscapeWithin';
 import ChartMenu from './ChartMenu';
 import { useChartChoice } from './chartPrefs';
 
@@ -291,9 +292,7 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
 
   const toggle = (code: string) => setOpen((current) => (current === code ? null : code));
   const openRow = [...stated, ...never].find((row) => row.code === open) ?? null;
-  const onEscape = (event: KeyboardEvent) => {
-    if (event.key === 'Escape' && open !== null) setOpen(null);
-  };
+  const escapeRef = useEscapeWithin<HTMLDivElement>(open !== null, () => setOpen(null));
 
   const plotDescription = isEmpty
     ? 'No lost quote has a reason against it in this window.'
@@ -315,7 +314,7 @@ export default function LossesBand({ from, to, index = 3 }: LossesBandProps) {
       onRetry={() => void analytics.refetch()}
       seal={pipelineSeal(data)}
     >
-      <Stack spacing={1} sx={{ flexGrow: 1, minWidth: 0 }} onKeyDown={onEscape}>
+      <Stack ref={escapeRef} spacing={1} sx={{ flexGrow: 1, minWidth: 0 }}>
 
         <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
           <ChartMenu label="Columns show" value={measure} options={MEASURE_OPTIONS} onChange={setMeasure} />

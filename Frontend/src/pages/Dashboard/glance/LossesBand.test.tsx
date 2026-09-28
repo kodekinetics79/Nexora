@@ -277,6 +277,7 @@ describe('LossesBand — opening a reason', () => {
     expect(screen.getByTestId('losses-drill')).toHaveTextContent('We never found out why.');
     expect(screen.getByTestId('losses-drill')).toHaveTextContent('14 of 33 losses (42%), value not available');
 
+    expired.focus();
     fireEvent.keyDown(expired, { key: 'Escape' });
     expect(screen.queryByTestId('losses-drill')).toBeNull();
     expect(expired).toHaveAttribute('aria-pressed', 'false');
