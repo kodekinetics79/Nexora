@@ -50,7 +50,7 @@ public sealed class PriceLine
     /// <summary>
     /// The authoritative cost floor for this line: the awarded supplier's LANDED unit cost, taken
     /// from <c>CustomerQuoteSourcingDecision.SupplierLandedUnitCost</c> — the very number the
-    /// customer price was derived from (<c>landed / (1 - margin)</c>), so it is the honest floor
+    /// customer price was derived from (<c>landed × (1 + margin on cost)</c>, MarginFormula), so it is the honest floor
     /// rather than an inferred one. Denominated in <see cref="FloorCurrency"/>, NOT necessarily in
     /// <see cref="Currency"/>.
     ///

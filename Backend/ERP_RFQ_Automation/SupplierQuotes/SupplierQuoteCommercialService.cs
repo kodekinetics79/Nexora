@@ -253,8 +253,8 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     // it — true of a customer price a rep types, false of a supplier quoting FOB or
                     // EXW, who by definition has not paid KSA duty. R8 forbids DERIVING duty from
                     // an HS code; it does not forbid recording the amount the buyer already knows.
-                    // At 5% KSA duty and a 20% target margin the hardcoded zero underpriced every
-                    // import by 6.25%, because customer price is landed / (1 - margin).
+                    // At 5% KSA duty the hardcoded zero underpriced every import by the duty AND
+                    // the margin on it, because customer price is landed x (1 + margin on cost).
                     TaxAmount = tax,
                     DutyCost = duty,
                     OtherCost = other,
@@ -297,8 +297,10 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
         CancellationToken cancellationToken = default)
     {
         EnsureTenant(command.BusinessUnitId);
+        // The 95 cap is the database check (CK_customer_quote_sourcing_decisions_Values). It no
+        // longer guards a division — margin is on cost — but raising it needs a migration.
         if (command.TargetMarginPercent is < 0 or >= 95)
-            throw new SupplierQuoteValidationException("Target margin must be between 0 and 95 percent.");
+            throw new SupplierQuoteValidationException("Margin on cost must be between 0 and 95 percent.");
         Required(command.Rationale, nameof(command.Rationale));
         var requestHash = Hash(new { command.QuoteItemId, command.SourcingAwardId,
             command.TargetMarginPercent, Rationale = command.Rationale.Trim() });
@@ -394,8 +396,11 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 throw new SupplierQuoteValidationException("The Supplier offer no longer meets the Customer required delivery date.");
 
             var landed = award.LandedUnitCost ?? throw new SupplierQuoteValidationException("The award has no landed-cost evidence.");
-            var customerUnitPrice = decimal.Round(landed / (1m - command.TargetMarginPercent / 100m), 6,
-                MidpointRounding.AwayFromZero);
+            // Margin ON COST (owner ruling 2026-09-27), rounded to the currency's minor unit. This
+            // was landed / (1 - margin) to 6 dp — margin on SALE — so 1,870.8333 at 20% became
+            // 2,338.541625 here while the stock path priced the same figure at 2,245.00.
+            var customerUnitPrice = ERP_RFQ_Automation.Services.MarginFormula.SaleFromCost(
+                landed, command.TargetMarginPercent);
             var decision = new CustomerQuoteSourcingDecision
             {
                 BusinessUnitId = command.BusinessUnitId,

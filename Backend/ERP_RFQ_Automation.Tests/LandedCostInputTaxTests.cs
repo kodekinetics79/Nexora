@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.Procurement;
@@ -18,8 +19,9 @@ namespace ERP_RFQ_Automation.Tests;
 /// ZATCA — not a cost of the goods. Three things followed, and they compound:
 ///
 ///   1. cost was overstated by the whole tax amount;
-///   2. the customer price is derived as <c>landed / (1 - margin)</c>, so the phantom cost was
-///      MARKED UP by the target margin before it reached the customer;
+///   2. the customer price is derived from landed cost by the margin (now ON COST,
+///      <c>landed × (1 + margin)</c>), so the phantom cost was MARKED UP by the target margin
+///      before it reached the customer;
 ///   3. output VAT is then added again on the customer quote line, so the customer was charged
 ///      tax on tax, and reported gross margin — and the digital-twin bridge built on it — was wrong.
 ///
@@ -29,13 +31,14 @@ namespace ERP_RFQ_Automation.Tests;
 ///
 ///                              before                after
 ///   landed unit cost           138.0000              120.0000
-///   customer price @ 20%       172.5000              150.0000
-///   customer gross @ 15% VAT   198.3750              172.5000
+///   customer price @ 20%       165.6000              144.0000      (margin on cost)
+///   customer gross @ 15% VAT   190.4400              165.6000
 ///
-/// The 18.00 of VAT per unit became a 22.50 net overcharge (18 / 0.8, the margin gross-up) and
-/// 25.875 once output VAT was applied to it. Note that the defective NET price, 172.50, is exactly
+/// The 18.00 of VAT per unit became a 21.60 net overcharge (18 × 1.2, the margin mark-up) and
+/// 24.84 once output VAT was applied to it. Note that the defective NET price, 165.60, is exactly
 /// 1.15x the correct one: the customer was quoted a full extra VAT inside the price, and then
-/// charged VAT on that too.
+/// charged VAT on that too. (These figures were 172.50 / 150.00 while the award path priced
+/// margin on SALE; the owner ruled margin on cost on 2026-09-27.)
 ///
 /// Freight, duty and other captured charges are untouched by all of this — nobody refunds them.
 ///
@@ -219,31 +222,33 @@ public sealed class LandedCostInputTaxTests
                 TargetMarginPercent, "Evidence-backed target margin", "input-tax-pricing", "qa",
                 "corr-input-tax-pricing"));
 
-        // 120 / (1 - 0.20). The defect produced 172.500000 — the supplier's 18.00/unit of VAT
-        // marked up by the margin to 22.50 and handed to the customer as price.
+        // 120 x (1 + 0.20): margin ON COST (owner ruling 2026-09-27, MarginFormula). With the
+        // supplier's 18.00/unit of VAT wrongly in cost the same margin would give 165.60 — the VAT
+        // marked up by the margin to 21.60 and handed to the customer as price. (On the old
+        // margin-on-SALE formula these were 150.00 and 172.50.)
         Assert.Equal(120.0000m, priced.SupplierLandedUnitCost);
-        Assert.Equal(150.000000m, priced.CustomerUnitPrice);
-        Assert.NotEqual(172.500000m, priced.CustomerUnitPrice);
+        Assert.Equal(144.00m, priced.CustomerUnitPrice);
+        Assert.NotEqual(150.00m, priced.CustomerUnitPrice);
+        Assert.NotEqual(165.60m, priced.CustomerUnitPrice);
 
         // Stated as the invariant rather than as a number: the price must be what the tax-free
         // build-up supports, and must not have moved by the VAT at all.
         var taxFreeLanded = LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat,
             CommercialMatchingPolicy.FullyRecoverablePercent);
-        Assert.Equal(decimal.Round(taxFreeLanded / (1m - TargetMarginPercent / 100m), 6,
-            MidpointRounding.AwayFromZero), priced.CustomerUnitPrice);
-        Assert.Equal(SupplierVat / Quantity / (1m - TargetMarginPercent / 100m),
-            172.50m - priced.CustomerUnitPrice);
+        Assert.Equal(MarginFormula.SaleFromCost(taxFreeLanded, TargetMarginPercent), priced.CustomerUnitPrice);
+        Assert.Equal(SupplierVat / Quantity * (1m + TargetMarginPercent / 100m),
+            165.60m - priced.CustomerUnitPrice);
 
         var quoteItem = await context.QuoteItems.SingleAsync(x => x.Id == quoteItemId);
-        Assert.Equal(150.000000m, quoteItem.UnitPrice);
+        Assert.Equal(144.00m, quoteItem.UnitPrice);
 
         // R17: output VAT is now DERIVED and PERSISTED by the same call that set the price, rather
         // than being computed by this test and never by the product. With the supplier's VAT out of
-        // the cost base, the customer is charged 15% exactly once: 1,725.00 gross on a 1,500.00 net
-        // line, against 1,983.75 before R15 — and against 1,500.00 with no VAT at all, which is
-        // what shipping R15 without R17 would have sent to the customer.
-        Assert.Equal(225.00m, quoteItem.TaxAmount);
-        Assert.Equal(1_725.00m, quoteItem.TotalAmount);
+        // the cost base, the customer is charged 15% exactly once: 1,656.00 gross on a 1,440.00 net
+        // line — and against 1,440.00 with no VAT at all, which is what shipping R15 without R17
+        // would have sent to the customer.
+        Assert.Equal(216.00m, quoteItem.TaxAmount);
+        Assert.Equal(1_656.00m, quoteItem.TotalAmount);
         Assert.Equal(15m, quoteItem.TaxRatePercentApplied);
         Assert.Equal(QuoteLineTaxCategories.Standard, quoteItem.TaxCategory);
     }

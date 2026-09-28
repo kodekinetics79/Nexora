@@ -81,14 +81,14 @@ public sealed class SupplierCostCaptureTests
             supplierInputTaxRecoverablePercent: 100m, allocatedDuty: 50m, allocatedOther: 10m,
             allocatedDiscount: 20m));
 
-        // Duty omitted is the 6.25% underprice: 110.0000 landed instead of 115.0000 on a 5% duty,
-        // which at a 20% target margin quotes 137.50 against a correct 143.75.
+        // Duty omitted underprices: 110.0000 landed instead of 115.0000 on a 5% duty, which at a
+        // 20% margin on cost quotes 132.00 against a correct 138.00.
         var withoutDuty = LandedCostFormula.UnitCost(100m, 10m, 100m, 0m, 100m);
         var withDuty = LandedCostFormula.UnitCost(100m, 10m, 100m, 0m, 100m, allocatedDuty: 50m);
         Assert.Equal(110.0000m, withoutDuty);
         Assert.Equal(115.0000m, withDuty);
-        Assert.Equal(137.500000m, decimal.Round(withoutDuty / 0.8m, 6, MidpointRounding.AwayFromZero));
-        Assert.Equal(143.750000m, decimal.Round(withDuty / 0.8m, 6, MidpointRounding.AwayFromZero));
+        Assert.Equal(132.00m, ERP_RFQ_Automation.Services.MarginFormula.SaleFromCost(withoutDuty, 20m));
+        Assert.Equal(138.00m, ERP_RFQ_Automation.Services.MarginFormula.SaleFromCost(withDuty, 20m));
     }
 
     // ───────────────────────────────────────── defect 1: the production chain

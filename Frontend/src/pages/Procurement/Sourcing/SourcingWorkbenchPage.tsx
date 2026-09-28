@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { saleFromCost } from "../../../utils/margin";
 import { Link as RouterLink, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -2414,7 +2415,8 @@ function CustomerPricingDialog({ selection, onClose, onSaved }: any) {
   const [margin, setMargin] = useState(20);
   const [rationale, setRationale] = useState("Approved supplier award and target margin");
   const [idempotencyKey] = useState(() => commandKey(`customer-pricing:${selection.awardId}`));
-  const sellingPrice = margin >= 95 ? 0 : selection.landedUnitCost / (1 - margin / 100);
+  // Margin ON COST (owner ruling 2026-09-27): the same formula the server stores the price with.
+  const sellingPrice = margin < 0 || margin >= 95 ? 0 : saleFromCost(selection.landedUnitCost, margin);
   const mutation = useMutation({
     mutationFn: () => procurementService.applyCustomerQuotePricing({
       quoteItemId: selection.quoteItemId,
@@ -2433,7 +2435,7 @@ function CustomerPricingDialog({ selection, onClose, onSaved }: any) {
         <Stack spacing={2} sx={{ mt: 1 }}>
           <Alert severity="info">Supplier cost remains confidential and is preserved separately from the customer selling price.</Alert>
           <Typography>Approved landed cost: <strong>{money(selection.landedUnitCost, selection.currencyCode)}</strong></Typography>
-          <TextField type="number" label="Target margin (%)" value={margin}
+          <TextField type="number" label="Margin on cost %" value={margin}
             onChange={(event) => setMargin(number(event.target.value))}
             slotProps={{ htmlInput: { min: 0, max: 94.99, step: 0.25 } }}
             error={margin < 0 || margin >= 95} />
