@@ -1,11 +1,15 @@
-﻿using System;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using System;
 
 #nullable disable
 
 namespace ERP_RFQ_Automation.MigrationsBaseline
 {
     /// <inheritdoc />
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260819193757_RfqLineHumanProductResolution")]
     public partial class RfqLineHumanProductResolution : Migration
     {
         /// <inheritdoc />

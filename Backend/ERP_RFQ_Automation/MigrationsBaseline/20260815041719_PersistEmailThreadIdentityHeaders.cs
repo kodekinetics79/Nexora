@@ -1,10 +1,14 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace ERP_RFQ_Automation.Migrations
 {
     /// <inheritdoc />
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260815041719_PersistEmailThreadIdentityHeaders")]
     public partial class PersistEmailThreadIdentityHeaders : Migration
     {
         /// <inheritdoc />

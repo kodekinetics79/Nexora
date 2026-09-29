@@ -1,10 +1,14 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace ERP_RFQ_Automation.Migrations
 {
     /// <inheritdoc />
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260819123809_Gate2QuoteHeaderDiscountAllocation")]
     public partial class Gate2QuoteHeaderDiscountAllocation : Migration
     {
         /// <inheritdoc />

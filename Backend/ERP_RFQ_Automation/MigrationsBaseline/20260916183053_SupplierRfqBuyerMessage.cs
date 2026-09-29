@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -11,6 +13,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// ("Please submit your best pricing and lead times."), which is the truthful state of every
     /// Supplier RFQ sent before this column existed. No data migration.
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260916183053_SupplierRfqBuyerMessage")]
     public partial class SupplierRfqBuyerMessage : Migration
     {
         /// <inheritdoc />

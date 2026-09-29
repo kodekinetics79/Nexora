@@ -1,10 +1,14 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace ERP_RFQ_Automation.MigrationsBaseline
 {
     /// <inheritdoc />
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260814130345_EmailInquiryAssembledLead")]
     public partial class EmailInquiryAssembledLead : Migration
     {
         /// <inheritdoc />

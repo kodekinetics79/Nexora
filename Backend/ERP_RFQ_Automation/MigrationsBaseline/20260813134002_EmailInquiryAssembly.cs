@@ -1,12 +1,16 @@
-﻿using System;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+using System;
 
 #nullable disable
 
 namespace ERP_RFQ_Automation.Migrations
 {
     /// <inheritdoc />
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260813134002_EmailInquiryAssembly")]
     public partial class EmailInquiryAssembly : Migration
     {
         /// <inheritdoc />

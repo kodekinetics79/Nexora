@@ -504,6 +504,10 @@ of runner, not a rewrite.
    apply nothing. And without `BuildTargetModel` the target model is empty, so `AlterColumn`
    emits a bare `ALTER COLUMN … TYPE` and PostgreSQL raises `0A000` on any policy-covered
    column even when the type is identical.
+   *Amended 2026-09-29:* the first half stopped being true once migrations began carrying
+   `[DbContext]`/`[Migration]` on the class (`MigrationDiscoveryTests` guards it). Designer files
+   of already-applied migrations without `AlterColumn` were removed to unblock five OOM-killed
+   Render deploys; the full `migrations script` output was byte-identical. See `Backend/Dockerfile`.
 5. **Would not delete the 134 superseded migrations.** They are already out of `@(Compile)` and
    cost nothing. They are the only record of *why*; the baseline records only *what*.
 6. **Would not hand-transcribe raw SQL into a regenerated EF baseline.** 1,849 statements where

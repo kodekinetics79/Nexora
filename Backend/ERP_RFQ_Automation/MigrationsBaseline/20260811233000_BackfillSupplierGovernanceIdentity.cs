@@ -1,3 +1,5 @@
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -48,6 +50,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// read. Reverting the schema is not the same act as re-introducing a defect.</para>
     /// </summary>
     /// <inheritdoc />
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260811233000_BackfillSupplierGovernanceIdentity")]
     public partial class BackfillSupplierGovernanceIdentity : Migration
     {
         /// <inheritdoc />

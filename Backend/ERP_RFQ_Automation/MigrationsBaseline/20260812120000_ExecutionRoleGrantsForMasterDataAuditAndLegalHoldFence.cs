@@ -1,5 +1,7 @@
-using System;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using System;
 
 #nullable disable
 
@@ -73,6 +75,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// SELECT only: placement and release stay on the platform plane, and the
     /// <c>tenant_legal_holds_immutable</c> trigger remains the control above that.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260812120000_ExecutionRoleGrantsForMasterDataAuditAndLegalHoldFence")]
     public partial class ExecutionRoleGrantsForMasterDataAuditAndLegalHoldFence : Migration
     {
         /// <inheritdoc />
