@@ -1,5 +1,7 @@
-using System;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using System;
 
 #nullable disable
 
@@ -85,6 +87,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// <c>TenantPurgeExecutor</c>'s reach assertion refuses to run rather than quietly skipping it
     /// — which is the whole point of the assertion.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260811154500_TenantPurgeExecutionRole")]
     public partial class TenantPurgeExecutionRole : Migration
     {
         /// <summary>

@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -17,6 +19,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// which RFQ survives (one may carry quotes). Resolve by deleting the spurious RFQ or
     /// NULLing its "LeadID", then rerun.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260815045012_EnforceSingleRfqPerLead")]
     public partial class EnforceSingleRfqPerLead : Migration
     {
         /// <inheritdoc />

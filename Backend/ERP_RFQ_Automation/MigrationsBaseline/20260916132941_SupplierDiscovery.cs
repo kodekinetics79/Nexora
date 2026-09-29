@@ -1,6 +1,8 @@
-﻿using System;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+using System;
 
 #nullable disable
 
@@ -24,6 +26,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// <c>TenantPurgeExecutor.AssertPurgeReachAsync</c> refuses to sweep a tenant while any table
     /// carrying a business-unit column is out of its reach.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260916132941_SupplierDiscovery")]
     public partial class SupplierDiscovery : Migration
     {
         private const string Table = "supplier_discovery_searches";

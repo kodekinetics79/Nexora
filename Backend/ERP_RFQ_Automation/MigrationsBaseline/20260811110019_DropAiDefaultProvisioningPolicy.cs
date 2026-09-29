@@ -1,5 +1,7 @@
-using System;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using System;
 
 #nullable disable
 
@@ -70,6 +72,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// set, so converting it would constrain every other write to the table — including the
     /// tenant's own legitimate policy UPDATE — rather than closing the INSERT hole.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260811110019_DropAiDefaultProvisioningPolicy")]
     public partial class DropAiDefaultProvisioningPolicy : Migration
     {
         /// <inheritdoc />

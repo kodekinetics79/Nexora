@@ -1,10 +1,14 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace ERP_RFQ_Automation.Migrations
 {
     /// <inheritdoc />
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260917134536_QuoteItemExStockQuantity")]
     public partial class QuoteItemExStockQuantity : Migration
     {
         /// <inheritdoc />

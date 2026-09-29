@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -29,6 +31,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// warranty and tight enough that a mistyped year ("2026") is refused by the database rather
     /// than silently dominating the ranking as the longest warranty in the set.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260812155257_Gate2SupplierQuoteWarrantyMonths")]
     public partial class Gate2SupplierQuoteWarrantyMonths : Migration
     {
         /// <inheritdoc />

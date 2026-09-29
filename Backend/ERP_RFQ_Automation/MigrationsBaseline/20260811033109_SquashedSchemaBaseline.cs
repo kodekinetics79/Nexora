@@ -1,7 +1,9 @@
-﻿using System;
-using System.IO;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+using System.IO;
+using System;
 
 #nullable disable
 
@@ -44,6 +46,8 @@ namespace ERP_RFQ_Automation.Migrations
     ///   schema from the model and never had the PostgreSQL-only controls; this keeps
     ///   `migrations script` and any non-Npgsql migrate path working.
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260811033109_SquashedSchemaBaseline")]
     public partial class SquashedSchemaBaseline : Migration
     {
         private const string NpgsqlProvider = "Npgsql.EntityFrameworkCore.PostgreSQL";

@@ -1,5 +1,7 @@
-using System;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using System;
 
 #nullable disable
 
@@ -135,6 +137,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// have an owner that does not bypass it. What is guarded instead is the thing that can
     /// actually be absent: the tables and the functions.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260811210000_TenantProvisioningSeedsUnderForcedRowSecurity")]
     public partial class TenantProvisioningSeedsUnderForcedRowSecurity : Migration
     {
         /// <inheritdoc />

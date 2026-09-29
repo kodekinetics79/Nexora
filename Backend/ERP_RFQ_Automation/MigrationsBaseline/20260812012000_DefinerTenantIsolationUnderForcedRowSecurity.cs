@@ -1,5 +1,7 @@
-using System;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using System;
 
 #nullable disable
 
@@ -143,6 +145,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// reason 20260811210000 records: these policies name no role, so there is no 42704 to avoid,
     /// and guarding on one could only SKIP a fix that is still required.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260812012000_DefinerTenantIsolationUnderForcedRowSecurity")]
     public partial class DefinerTenantIsolationUnderForcedRowSecurity : Migration
     {
         /// <summary>

@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -32,6 +34,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// table privileges cover columns added later. Adding one here would be noise, and a
     /// column-level grant would be worse — it would silently narrow the table grant.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260812130000_PlatformBrowserTrustPolicy")]
     public partial class PlatformBrowserTrustPolicy : Migration
     {
         /// <inheritdoc />
