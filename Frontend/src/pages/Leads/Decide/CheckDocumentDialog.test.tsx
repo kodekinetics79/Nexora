@@ -12,7 +12,7 @@ import type { LeadDecisionLineDTO, LeadDecisionWorkbenchDTO } from '../../../api
 const snack = vi.fn();
 vi.mock('notistack', () => ({ useSnackbar: () => ({ enqueueSnackbar: snack }) }));
 
-const api = { getById: vi.fn(), submitReview: vi.fn(), fetchObjectUrl: vi.fn(), getSourceGrid: vi.fn(), confirmClosingDate: vi.fn() };
+const api = { getById: vi.fn(), submitReview: vi.fn(), fetchObjectUrl: vi.fn(), getSourceGrid: vi.fn(), getWordRows: vi.fn(), confirmClosingDate: vi.fn() };
 const renderDocx = vi.fn();
 vi.mock('docx-preview', () => ({ renderAsync: (...args: unknown[]) => renderDocx(...args) }));
 vi.mock('../../../api/services/leadService', () => ({
@@ -22,7 +22,10 @@ vi.mock('../../../api/services/leadService', () => ({
   },
 }));
 vi.mock('../../../api/services/leadDecisionService', () => ({
-  default: { getSourceGrid: (...args: unknown[]) => api.getSourceGrid(...args) },
+  default: {
+    getSourceGrid: (...args: unknown[]) => api.getSourceGrid(...args),
+    getWordRows: (...args: unknown[]) => api.getWordRows(...args),
+  },
 }));
 vi.mock('../../../api/services/extractionReviewService', () => ({
   default: { submitReview: (...args: unknown[]) => api.submitReview(...args) },
@@ -118,6 +121,8 @@ beforeEach(() => {
   api.getById.mockResolvedValue(lead);
   api.fetchObjectUrl.mockResolvedValue({ url: 'blob:doc', contentType: 'application/pdf', blob: new Blob(['%PDF']) });
   api.getSourceGrid.mockResolvedValue(bidListGrid);
+  // A small Word file: the server says to draw it whole.
+  api.getWordRows.mockResolvedValue(null);
   api.submitReview.mockResolvedValue({ ...lead, reviewVersion: 4 });
 });
 
@@ -184,10 +189,80 @@ describe('CheckDocumentDialog', () => {
       const evidence = workbench().evidence[0];
       renderDialog({ workbench: workbench({ evidence: [{ ...evidence, name: 'RFP Switchgear.docx', mediaType: DOCX }] }) });
 
-      expect(await screen.findByText('MODULE, 16 CHANNEL FAILSAFE RELAY OUTPUT')).toBeVisible();
+      // One quick question to the server (is it small enough to draw whole?) comes before the drawing.
+      expect(await screen.findByText('MODULE, 16 CHANNEL FAILSAFE RELAY OUTPUT', {}, { timeout: 4000 })).toBeVisible();
       expect(screen.queryByRole('button', { name: 'Open in a new tab' })).toBeNull();
       expect(screen.queryByText(/cannot be shown here/)).not.toBeInTheDocument();
       vi.unstubAllGlobals();
+    });
+
+    it('shows a large Word file as the rows around the line being checked, without downloading it', async () => {
+      api.getWordRows.mockResolvedValue({
+        sheets: [
+          { name: 'Table 1', headerRowNumber: 1, truncated: false, rows: [{ number: 1, cells: ['Timing Rules'] }, { number: 2, cells: ['Due date', '10/8/2026 3:00 PM'] }] },
+          {
+            name: 'Table 7', headerRowNumber: 1, truncated: true,
+            rows: [
+              { number: 1, cells: ['Name', 'Alternative', 'Value'] },
+              { number: 23822, cells: ['MODULE ADAPT ESD 4CH. RELAY OUTPUT'] },
+              { number: 23823, cells: ['Quantity', '', '1 each'] },
+              { number: 23824, cells: ['Material Number', '', '000000002000007686'] },
+            ],
+          },
+        ],
+      });
+      const evidence = { ...workbench().evidence[0], name: 'RFP 6000000028.docx', mediaType: DOCX, downloadUrl: '/api/File/source-document/18' };
+      const wordLine = line({
+        id: 1, description: 'MODULE ADAPT ESD 4CH. RELAY OUTPUT', verificationStatus: 'NEEDS_CHECK', sourceAddress: "'Table 7'!R23823",
+        sourceFields: [{ field: 'ProductShortName', rawValue: 'MODULE ADAPT ESD 4CH. RELAY OUTPUT', sourceAddress: "'Table 7'!R23823" }],
+      });
+      renderDialog({ workbench: workbench({ evidence: [evidence], lines: [wordLine] }), focusLineId: 10 });
+
+      const table = await screen.findByRole('table', { name: 'RFP 6000000028.docx' });
+      expect(api.getWordRows).toHaveBeenLastCalledWith('/api/File/source-document/18', 7, 23823);
+      // The line's own table, its headings, and the row the line was read from, marked.
+      expect(within(table).getByRole('columnheader', { name: 'Value' })).toBeInTheDocument();
+      expect(within(table).getByRole('row', { selected: true })).toHaveTextContent('23823Quantity1 each');
+      expect(within(table).getByText('MODULE ADAPT ESD 4CH. RELAY OUTPUT')).toBeInTheDocument();
+      expect(screen.getByText('Row 23823 is the line you are checking.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Table 1' })).toBeInTheDocument();
+      // The file itself was not downloaded, and not drawn.
+      expect(api.fetchObjectUrl).not.toHaveBeenCalled();
+      expect(renderDocx).not.toHaveBeenCalled();
+    });
+
+    it('opens a large Word file on the first listed line\'s rows, marking none until the rep picks a line', async () => {
+      api.getWordRows.mockResolvedValue({
+        sheets: [
+          { name: 'Table 1', headerRowNumber: 1, truncated: false, rows: [{ number: 1, cells: ['Introduction'] }, { number: 2, cells: ['This is a print version of the event.'] }] },
+          {
+            name: 'Table 7', headerRowNumber: 1, truncated: true,
+            rows: [
+              { number: 1, cells: ['Content'] },
+              { number: 22, cells: ['MODULE ADAPT ESD 4CH. RELAY OUTPUT'] },
+              { number: 23, cells: ['Price'] },
+              { number: 24, cells: ['Quantity', '', '1 each'] },
+            ],
+          },
+        ],
+      });
+      const evidence = { ...workbench().evidence[0], name: 'RFP 6000000028.docx', mediaType: DOCX, downloadUrl: '/api/File/source-document/18' };
+      const wordLine = line({ id: 1, verificationStatus: 'NEEDS_CHECK', sourceAddress: "'Table 7'!R23", sourceFields: [] });
+      renderDialog({ workbench: workbench({ evidence: [evidence], lines: [wordLine] }) });
+
+      const table = await screen.findByRole('table', { name: 'RFP 6000000028.docx' });
+      expect(api.getWordRows).toHaveBeenLastCalledWith('/api/File/source-document/18', 7, 23);
+      expect(within(table).getByText('MODULE ADAPT ESD 4CH. RELAY OUTPUT')).toBeInTheDocument();
+      expect(within(table).queryByRole('row', { selected: true })).toBeNull();
+      expect(screen.getByText('Rows 22–24 of Table 7.')).toBeInTheDocument();
+    });
+
+    it('offers the download when a large Word file cannot be read as rows', async () => {
+      api.getWordRows.mockRejectedValue(new Error('Unprocessable'));
+      const evidence = { ...workbench().evidence[0], name: 'RFP 6000000028.docx', mediaType: DOCX };
+      renderDialog({ workbench: workbench({ evidence: [evidence] }) });
+      expect(await screen.findByText(/cannot be shown here/)).toBeInTheDocument();
+      expect(renderDocx).not.toHaveBeenCalled();
     });
 
     it('offers only the download for an old .doc, which no browser can draw', async () => {

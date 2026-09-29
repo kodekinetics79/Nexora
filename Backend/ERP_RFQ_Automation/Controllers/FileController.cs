@@ -377,6 +377,68 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
+        /// The rows of a large Word source around the line being checked (<c>?table=7&amp;row=23823</c>,
+        /// from the line's <c>'Table 7'!R23823</c>), so the decision screen shows it in a second
+        /// instead of the browser drawing the whole file (54–183 s for the 6.8 MB Aramco RFP).
+        /// 204 when the file is small enough to draw whole, as before. Same authorization and
+        /// verified bytes as the download; 415 when the file is not a Word file.
+        /// </summary>
+        [HttpGet("source-document/{sourceDocumentId:long}/word-rows")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
+        public async Task<IActionResult> SourceDocumentWordRows(
+            long sourceDocumentId, [FromQuery] int? table, [FromQuery] int? row, CancellationToken ct)
+        {
+            try
+            {
+                var (refusal, document, job) = await ResolveReadableSourceDocumentAsync(sourceDocumentId, ct);
+                if (refusal is not null) return refusal;
+                var name = document!.OriginalFileName ?? string.Empty;
+                var mime = document.DetectedMimeType ?? string.Empty;
+                if (!name.EndsWith(".docx", StringComparison.OrdinalIgnoreCase)
+                    && !mime.Contains("wordprocessingml", StringComparison.OrdinalIgnoreCase))
+                    return StatusCode(StatusCodes.Status415UnsupportedMediaType, "This document is not a Word file.");
+
+                byte[] bytes;
+                await using (var stream = await _evidenceStorage.OpenVerifiedReadAsync(job!.StoragePath!, document.ContentHash, ct))
+                {
+                    using var buffer = new MemoryStream();
+                    await stream.CopyToAsync(buffer, ct);
+                    bytes = buffer.ToArray();
+                }
+                var xmlLength = WordTableWindowReader.DocumentXmlLength(bytes);
+                if (xmlLength is null)
+                    return StatusCode(StatusCodes.Status415UnsupportedMediaType, "This document is not a Word file.");
+                if (xmlLength <= WordTableWindowReader.PageViewMaxXmlBytes)
+                    return NoContent();
+
+                var grid = WordTableWindowReader.Read(bytes, table, row);
+                Response.Headers[IntegrityHeader] = IntegrityVerified;
+                return Ok(grid);
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound("The requested source document was not found in evidence storage.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Rejected unsafe storage identity for source document {SourceDocumentId}.", sourceDocumentId);
+                return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Evidence integrity verification failed for source document {SourceDocumentId}.", sourceDocumentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The evidence object failed integrity verification.");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Source document {SourceDocumentId} could not be read as Word rows.", sourceDocumentId);
+                return StatusCode(StatusCodes.Status422UnprocessableEntity,
+                    "The Word file could not be read as rows. Open the file instead.");
+            }
+        }
+
+        /// <summary>
         /// Terms read per stored object. The evidence is immutable and addressed by its content hash,
         /// so a reading never goes stale; the cap only bounds memory.
         /// </summary>

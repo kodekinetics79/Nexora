@@ -283,6 +283,17 @@ const leadDecisionService = {
     return response.data;
   },
 
+  /**
+   * The rows of a large Word source around the line being checked (`table` and `row` from its
+   * `'Table 7'!R23823`), read on the server. `null` when the file is small enough to draw whole.
+   */
+  getWordRows: async (documentPath: string, table?: number | null, row?: number | null): Promise<SourceGridDTO | null> => {
+    const response = await axiosInstance.get<SourceGridDTO | ''>(`${documentPath}/word-rows`, {
+      params: table && row ? { table, row } : undefined,
+    });
+    return response.status === 204 || !response.data ? null : response.data;
+  },
+
   /** What the buyer requires (delivery terms, currency, validity, agreement, …), read from the retained document. */
   getBuyerTerms: async (sourceDocumentId: number): Promise<BuyerTermDTO[]> => {
     const response = await axiosInstance.get<{ terms?: BuyerTermDTO[] }>(`/api/File/source-document/${sourceDocumentId}/buyer-terms`);

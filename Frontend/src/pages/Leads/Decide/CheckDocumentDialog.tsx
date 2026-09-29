@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
   Box,
@@ -40,6 +40,7 @@ import leadDecisionService, {
   type LeadDecisionEvidenceDTO,
   type LeadDecisionLineDTO,
   type LeadDecisionWorkbenchDTO,
+  type SourceGridDTO,
   type SourceGridSheetDTO,
 } from '../../../api/services/leadDecisionService';
 import { downloadAuthenticatedFile, fetchAuthenticatedObjectUrl } from '../../../utils/authenticatedFile';
@@ -217,44 +218,33 @@ const cellRange = (sheet: SourceGridSheetDTO): number =>
   sheet.rows.reduce((widest, row) => Math.max(widest, row.cells.length), 0);
 
 /**
- * The source spreadsheet as a table: the heading row the parser read the columns from, then the
- * rows, with the row the rep is checking marked and scrolled to. A row is numbered as the
- * spreadsheet numbers it, so "row 12" here is row 12 in Excel.
+ * Rows read from the source as a table: the heading row the parser read the columns from, then the
+ * rows, with the row the rep is checking marked and scrolled to. A row is numbered as the source
+ * numbers it, so "row 12" here is row 12 in Excel, or row 12 of that Word table.
  */
-const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string; focus: SourceCell | null; fallback: React.ReactNode }> = ({
-  evidence, path, focus, fallback,
-}) => {
-  const grid = useQuery({
-    queryKey: ['source-grid', path],
-    queryFn: () => leadDecisionService.getSourceGrid(path),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  const sheets = grid.data?.sheets ?? [];
+const SourceGridTable: React.FC<{
+  grid: SourceGridDTO; name: string; path: string; focus: SourceCell | null; unit: 'sheet' | 'table'; fallback: React.ReactNode;
+  /** Where to open when no line is being checked: its sheet and row, not marked. */
+  anchor?: SourceCell | null;
+}> = ({ grid, name, path, focus, unit, fallback, anchor = null }) => {
+  const sheets = grid.sheets ?? [];
   const [chosenSheet, setChosenSheet] = React.useState<string | null>(null);
   // The sheet the checked line came from wins; the rep can still turn to another.
+  const opening = focus ?? anchor;
   const sheetName = chosenSheet
-    ?? (focus && sheets.some((sheet) => sheet.name === focus.sheet) ? focus.sheet : sheets[0]?.name ?? null);
+    ?? (opening && sheets.some((sheet) => sheet.name === opening.sheet) ? opening.sheet : sheets[0]?.name ?? null);
   const sheet = sheets.find((candidate) => candidate.name === sheetName) ?? sheets[0];
   const focusedRow = focus && sheet && sheet.name === focus.sheet ? focus.row : null;
+  const openingRow = opening && sheet && sheet.name === opening.sheet ? opening.row : null;
   const containerRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
-    if (focusedRow == null) return;
-    containerRef.current?.querySelector<HTMLElement>(`[data-source-row="${focusedRow}"]`)
+    if (openingRow == null) return;
+    containerRef.current?.querySelector<HTMLElement>(`[data-source-row="${openingRow}"]`)
       ?.scrollIntoView?.({ block: 'center' });
-  }, [focusedRow, sheet?.name]);
+  }, [openingRow, sheet?.name]);
 
-  if (grid.isPending) {
-    return (
-      <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
-        <CircularProgress size={28} />
-      </Box>
-    );
-  }
-  // The cells could not be read (an older retained file, a format the reader does not know):
-  // the file itself is still one click away.
-  if (grid.isError || !sheet) return <>{fallback}</>;
+  if (!sheet) return <>{fallback}</>;
 
   const width = cellRange(sheet);
   const headerRow = sheet.headerRowNumber ?? null;
@@ -264,7 +254,7 @@ const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string
   return (
     <Box ref={containerRef}>
       {sheets.length > 1 ? (
-        <Stack direction="row" spacing={1} sx={{ mb: 1, flexWrap: 'wrap' }} aria-label="Sheets">
+        <Stack direction="row" spacing={1} sx={{ mb: 1, flexWrap: 'wrap' }} aria-label={unit === 'table' ? 'Tables' : 'Sheets'}>
           {sheets.map((candidate) => (
             <Chip
               key={candidate.name}
@@ -280,7 +270,7 @@ const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string
       <TableContainer
         sx={{ maxHeight: { xs: '48vh', md: '70vh' }, border: 1, borderColor: 'divider', borderRadius: 2, bgcolor: 'background.paper' }}
       >
-        <Table size="small" stickyHeader aria-label={evidence.name} sx={{ '& td, & th': { whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }}>
+        <Table size="small" stickyHeader aria-label={name} sx={{ '& td, & th': { whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }}>
           <TableHead>
             <TableRow>
               <TableCell sx={{ color: 'text.secondary', fontWeight: 400, width: 48 }}>#</TableCell>
@@ -314,9 +304,13 @@ const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string
         <Typography variant="caption" color="text.secondary">
           {focusedRow != null
             ? `Row ${focusedRow} is the line you are checking.`
-            : sheet.truncated ? 'The first rows of the sheet are shown.' : `${bodyRows.length} rows as the spreadsheet holds them.`}
+            : openingRow != null && sheet.truncated && bodyRows.length > 0
+              ? `Rows ${bodyRows[0].number}–${bodyRows[bodyRows.length - 1].number} of ${sheet.name}.`
+              : sheet.truncated
+                ? `The first rows of the ${unit} are shown.`
+                : `${bodyRows.length} ${bodyRows.length === 1 ? 'row' : 'rows'} as the ${unit === 'table' ? 'document' : 'spreadsheet'} holds them.`}
         </Typography>
-        <Link component="button" type="button" variant="caption" onClick={() => void downloadAuthenticatedFile(path, evidence.name)} sx={{ fontWeight: 700 }}>
+        <Link component="button" type="button" variant="caption" onClick={() => void downloadAuthenticatedFile(path, name)} sx={{ fontWeight: 700 }}>
           Download
         </Link>
       </Stack>
@@ -324,12 +318,76 @@ const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string
   );
 };
 
+/** The source spreadsheet as a table, read on the server from the same bytes the parser read. */
+const SourceGridView: React.FC<{ evidence: LeadDecisionEvidenceDTO; path: string; focus: SourceCell | null; fallback: React.ReactNode }> = ({
+  evidence, path, focus, fallback,
+}) => {
+  const grid = useQuery({
+    queryKey: ['source-grid', path],
+    queryFn: () => leadDecisionService.getSourceGrid(path),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+
+  if (grid.isPending) {
+    return (
+      <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
+        <CircularProgress size={28} />
+      </Box>
+    );
+  }
+  // The cells could not be read (an older retained file, a format the reader does not know):
+  // the file itself is still one click away.
+  if (grid.isError) return <>{fallback}</>;
+  return <SourceGridTable grid={grid.data} name={evidence.name} path={path} focus={focus} unit="sheet" fallback={fallback} />;
+};
+
+/** "Table 7" → 7: the Word table a line's `'Table 7'!R23823` names. */
+const wordTableNumber = (sheet: string | undefined): number | null => {
+  const match = /^Table (\d+)$/.exec(sheet ?? '');
+  return match ? Number(match[1]) : null;
+};
+
+/**
+ * A Word source. A large one is shown as the rows of its table around the line being checked,
+ * read on the server: drawing the whole 6.8 MB Aramco RFP in the browser took 54 s or more. A
+ * small one is drawn as the page, as before (the server answers that it is small).
+ */
+const WordSourceView: React.FC<{
+  evidence: LeadDecisionEvidenceDTO; path: string; focus: SourceCell | null; anchor: SourceCell | null; fallback: React.ReactNode;
+}> = ({ evidence, path, focus, anchor, fallback }) => {
+  // The line being checked, else the first line listed beside the document, so the window opens
+  // on the lines' own table rather than the print's introduction.
+  const opening = focus ?? anchor;
+  const table = wordTableNumber(opening?.sheet);
+  const row = table != null ? opening?.row ?? null : null;
+  const rows = useQuery({
+    queryKey: ['word-rows', path, table, row],
+    queryFn: () => leadDecisionService.getWordRows(path, table, row),
+    staleTime: 5 * 60_000,
+    retry: false,
+    // Moving to another line keeps the rows on screen until the new ones arrive.
+    placeholderData: keepPreviousData,
+  });
+
+  if (rows.isPending) {
+    return (
+      <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
+        <CircularProgress size={28} />
+      </Box>
+    );
+  }
+  if (rows.isError) return <>{fallback}</>;
+  if (rows.data == null) return <WordView path={path} name={evidence.name} fallback={fallback} />;
+  return <SourceGridTable grid={rows.data} name={evidence.name} path={path} focus={focus} anchor={anchor} unit="table" fallback={fallback} />;
+};
+
 /**
  * A Word file drawn in the page: tables, headings and line breaks as the document has them, so a
  * rep reads the original beside the lines instead of downloading it. Falls back to the download
  * when the file cannot be drawn.
  */
-const WordView: React.FC<{ url: string; name: string; fallback: React.ReactNode }> = ({ url, name, fallback }) => {
+const WordView: React.FC<{ path: string; name: string; fallback: React.ReactNode }> = ({ path, name, fallback }) => {
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = React.useState<'drawing' | 'drawn' | 'failed'>('drawing');
 
@@ -338,7 +396,10 @@ const WordView: React.FC<{ url: string; name: string; fallback: React.ReactNode 
     setStatus('drawing');
     (async () => {
       try {
-        const [{ renderAsync }, blob] = await Promise.all([import('docx-preview'), fetch(url).then((response) => response.blob())]);
+        const [{ renderAsync }, file] = await Promise.all([import('docx-preview'), fetchAuthenticatedObjectUrl(path)]);
+        // Only the bytes are drawn; the link made for them is not needed.
+        URL.revokeObjectURL?.(file.url);
+        const blob = file.blob;
         if (cancelled || !bodyRef.current) return;
         bodyRef.current.innerHTML = '';
         await renderAsync(blob, bodyRef.current, undefined, { inWrapper: false, ignoreWidth: true, ignoreHeight: true, breakPages: false });
@@ -348,7 +409,7 @@ const WordView: React.FC<{ url: string; name: string; fallback: React.ReactNode 
       }
     })();
     return () => { cancelled = true; };
-  }, [url]);
+  }, [path]);
 
   if (status === 'failed') return <>{fallback}</>;
   return (
@@ -376,7 +437,9 @@ const WordView: React.FC<{ url: string; name: string; fallback: React.ReactNode 
 
 type ViewerState = { url: string; kind: DocumentKind; text?: string } | { error: string } | null;
 
-const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus?: SourceCell | null }> = ({ evidence, focus = null }) => {
+const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus?: SourceCell | null; anchor?: SourceCell | null }> = ({
+  evidence, focus = null, anchor = null,
+}) => {
   const [state, setState] = React.useState<ViewerState>(null);
   const path = evidence ? inspectableEvidenceUrl(evidence) : null;
   const name = evidence?.name ?? '';
@@ -386,7 +449,7 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus
     let url: string | null = null;
     let cancelled = false;
     setState(null);
-    if (!path || knownKind === 'file' || knownKind === 'sheet') return undefined;
+    if (!path || knownKind === 'file' || knownKind === 'sheet' || knownKind === 'word') return undefined;
     fetchAuthenticatedObjectUrl(path)
       .then(async (result) => {
         // The server's content type wins over the file name once the bytes are here.
@@ -422,6 +485,7 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus
   );
   if (knownKind === 'file') return fileOffer;
   if (knownKind === 'sheet') return <SourceGridView evidence={evidence} path={path} focus={focus} fallback={fileOffer} />;
+  if (knownKind === 'word') return <WordSourceView evidence={evidence} path={path} focus={focus} anchor={anchor} fallback={fileOffer} />;
   if (!state) {
     return (
       <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 320 }}>
@@ -446,7 +510,7 @@ const DocumentViewer: React.FC<{ evidence: LeadDecisionEvidenceDTO | null; focus
     );
   }
   if (state.kind === 'file') return fileOffer;
-  if (state.kind === 'word') return <WordView url={state.url} name={evidence.name} fallback={fileOffer} />;
+  if (state.kind === 'word') return <WordView path={path} name={evidence.name} fallback={fileOffer} />;
   return state.kind === 'image' ? (
     <Box component="img" src={state.url} alt={evidence.name} sx={{ maxWidth: '100%', display: 'block' }} />
   ) : (
@@ -651,6 +715,8 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
     const followed = workbench.lines.find((line) => line.revisionLineId === activeLineId);
     return followed ? lineSourceCell(followed) : null;
   }, [workbench.lines, activeLineId]);
+  /** With no line followed yet, the source pane opens where the first line listed was read. */
+  const firstListedCell = drawnRows[0] ? lineSourceCell(drawnRows[0].line) : null;
 
   React.useEffect(() => {
     if (scrollTarget == null) return;
@@ -705,7 +771,7 @@ const CheckDocumentDialog: React.FC<CheckDocumentDialogProps> = ({
             ) : inspectable[0] ? (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>{inspectable[0].name}</Typography>
             ) : null}
-            <DocumentViewer evidence={inspectable[evidenceIndex] ?? null} focus={focusCell} />
+            <DocumentViewer evidence={inspectable[evidenceIndex] ?? null} focus={focusCell} anchor={firstListedCell} />
           </Box>
 
           <Box component="section" aria-label="Lines to check" sx={{ flex: '1 1 42%', minWidth: 0 }}>
