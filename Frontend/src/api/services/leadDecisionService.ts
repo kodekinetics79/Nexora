@@ -1,3 +1,4 @@
+import type { ClosingDateQuestionDTO } from './leadService';
 import axiosInstance from '../axiosInstance';
 
 export type LineParticipationDecision = 'Pending' | 'Bid' | 'NoBid' | 'Clarify';
@@ -179,6 +180,8 @@ export interface LeadOwnerDTO {
   assignmentMethod?: 'AUTOMATIC' | 'MANUAL';
   assignmentVersion?: number | null;
   rfqno?: string | null;
+  /** "Closes 9 Aug or 8 Sep?" when the document's closing date could be read two ways. */
+  closingDateQuestion?: ClosingDateQuestionDTO | null;
 }
 
 export interface ParticipationLineInput {

@@ -4,6 +4,7 @@ import { Alert, Button, CircularProgress, Stack, Typography } from '@mui/materia
 import { EventOutlined as EventIcon } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import leadService from '../../../api/services/leadService';
+import leadDecisionService from '../../../api/services/leadDecisionService';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatDeadline, formatDeadlineDay } from '../../../utils/dates';
 
@@ -20,15 +21,16 @@ export interface ClosingDateQuestionProps {
  * Closed 50 days ago" for a tender that closed on 8 September. One press answers it: the server
  * keeps the stated time, reads the received date the same way, and the question does not return.
  *
- * Shares the page's lead query, so it costs no request of its own.
+ * Shares the page's owner read (['lead-detail', id, 'owner']), so it costs no request of its own.
  */
 const ClosingDateQuestion: React.FC<ClosingDateQuestionProps> = ({ leadId, canEdit = true }) => {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const leadQuery = useQuery({
-    queryKey: ['lead-detail', leadId],
-    queryFn: () => leadService.getById(leadId),
+    queryKey: ['lead-detail', leadId, 'owner'],
+    queryFn: () => leadDecisionService.getOwner(leadId),
     enabled: leadId > 0,
+    retry: false,
   });
   const question = leadQuery.data?.closingDateQuestion ?? null;
 

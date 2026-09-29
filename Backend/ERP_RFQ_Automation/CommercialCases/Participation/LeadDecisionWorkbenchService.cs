@@ -467,12 +467,17 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 x.AssignmentMethod,
                 x.AssignmentVersion,
                 x.Rfqno,
+                x.HeaderRemarks,
+                x.BidClosingDate,
             })
             .SingleOrDefaultAsync(ct)
             ?? throw new KeyNotFoundException($"Lead {leadId} was not found in this business unit.");
+        // The closing-date question rides on this read too: Decide no longer reads the full lead
+        // record, and the question is a header fact the rep must see on this screen.
         return new LeadOwnerDto(leadId, owner.AssignTo,
             owner.HasOwner ? $"{owner.FirstName} {owner.LastName}".Trim() : null,
-            owner.AssignmentMethod, owner.AssignmentVersion, owner.Rfqno);
+            owner.AssignmentMethod, owner.AssignmentVersion, owner.Rfqno,
+            ERP_RFQ_Automation.Extraction.ClosingDateQuestion.From(owner.HeaderRemarks, owner.BidClosingDate));
     }
 
     /// <summary>
@@ -795,7 +800,8 @@ public sealed record PromotionReceiptDto(long RfqId, string? RfqNumber, int Lead
     string? PromotedByName = null, int? PromotedRevisionLineCount = null);
 public sealed record SourceCoverageDto(int CoveredLines, int TotalLines);
 public sealed record LeadOwnerDto(long LeadId, long? AssignedToId, string? AssignedToFullName,
-    string AssignmentMethod, long AssignmentVersion, string? Rfqno);
+    string AssignmentMethod, long AssignmentVersion, string? Rfqno,
+    ERP_RFQ_Automation.Extraction.ClosingDateQuestionDTO? ClosingDateQuestion = null);
 public sealed record DecisionBlockerDto(string Code, string Message, string? ActionLabel = null, string? ActionPath = null);
 public sealed record DecisionValueOptionDto(string Code, string Label);
 public sealed record LeadDecisionWorkbenchDto(long LeadId, long LeadRevisionId, int LeadRevisionNumber,

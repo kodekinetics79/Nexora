@@ -12,6 +12,10 @@ vi.mock('../../../api/services/leadService', () => ({
     confirmClosingDate: (...args: unknown[]) => api.confirmClosingDate(...args),
   },
 }));
+// The question reads Decide's small owner read, not the full lead record (PERF-02).
+vi.mock('../../../api/services/leadDecisionService', () => ({
+  default: { getOwner: (...args: unknown[]) => api.getById(...args) },
+}));
 
 import ClosingDateQuestion from './ClosingDateQuestion';
 
