@@ -153,8 +153,10 @@ public sealed class BuyerQuoteTermsService : IBuyerQuoteTermsService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Not cached: a read that failed once (storage hiccup, file not yet reachable) must be
+            // tried again on the next request instead of hiding the buyer's terms until a restart.
             _logger?.LogWarning(ex, "Buyer terms could not be read from source document {SourceDocumentId}.", sourceDocumentId);
-            terms = BuyerQuoteTerms.None;
+            return BuyerQuoteTerms.None;
         }
         if (ByContentHash.Count >= CacheCap) ByContentHash.Clear();
         ByContentHash[document.ContentHash] = terms;
