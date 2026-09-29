@@ -1,7 +1,7 @@
 import React from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Alert, Box, Button, CircularProgress, Collapse, Divider, Typography,
+  Alert, Box, Button, CircularProgress, Collapse, Divider, IconButton, Popover, Tooltip, Typography,
 } from '@mui/material';
 import { ExpandMore as ExpandMoreIcon, ExpandLess as ExpandLessIcon, History as HistoryIcon } from '@mui/icons-material';
 import commercialRoutingService, { type LeadAssignmentHistoryEntry } from '../../api/services/commercialRoutingService';
@@ -70,8 +70,13 @@ const HistoryRow: React.FC<{ entry: LeadAssignmentHistoryEntry }> = ({ entry }) 
   );
 };
 
-const LeadOwnerHistory: React.FC<{ leadId: number }> = ({ leadId }) => {
+/**
+ * `popover`: the trail opens over the page instead of pushing it down, for a screen that keeps
+ * the owner on one row beside the other facts.
+ */
+const LeadOwnerHistory: React.FC<{ leadId: number; popover?: boolean }> = ({ leadId, popover = false }) => {
   const [open, setOpen] = React.useState(false);
+  const buttonRef = React.useRef<HTMLButtonElement>(null);
 
   // Fetched only once opened: this is the rare case, and a detail page should not pay for it
   // on every load.
@@ -84,54 +89,83 @@ const LeadOwnerHistory: React.FC<{ leadId: number }> = ({ leadId }) => {
 
   const entries = history.data ?? [];
 
+  const trail = (
+    <Box sx={{ pl: 0.5, pr: 1, pb: 1, maxWidth: 520 }}>
+      {popover ? null : <Divider sx={{ mb: 1 }} />}
+
+      {history.isLoading && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
+          <CircularProgress size={16} />
+          <Typography variant="body2" color="text.secondary">Reading the trail…</Typography>
+        </Box>
+      )}
+
+      {/* A trail that failed to load is not an empty trail. Saying "never reassigned" over a
+          failed request would be a claim about the record that nobody checked. */}
+      {history.isError && (
+        <Alert
+          severity="error"
+          sx={{ borderRadius: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={() => history.refetch()} sx={{ fontWeight: 700 }}>
+              Retry
+            </Button>
+          }
+        >
+          We couldn&apos;t load the owner history. No empty history has been assumed.
+        </Alert>
+      )}
+
+      {!history.isLoading && !history.isError && entries.length === 0 && (
+        <Typography variant="body2" color="text.secondary" sx={{ py: 1 }}>
+          This inquiry has never changed hands.
+        </Typography>
+      )}
+
+      {!history.isError && entries.map((entry) => <HistoryRow key={entry.id} entry={entry} />)}
+    </Box>
+  );
+
+  const toggle = (
+    <Button
+      size="small"
+      variant="text"
+      startIcon={<HistoryIcon fontSize="small" />}
+      endIcon={open ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+      onClick={() => setOpen((current) => !current)}
+      aria-expanded={open}
+      sx={{ fontWeight: 700, textTransform: 'none', px: 0.5 }}
+    >
+      Owner history
+    </Button>
+  );
+
+  if (popover) {
+    return (
+      <>
+        <Tooltip title="Owner history">
+          <IconButton ref={buttonRef} size="small" aria-label="Owner history" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+            <HistoryIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        <Popover
+          open={open}
+          anchorEl={buttonRef.current}
+          onClose={() => setOpen(false)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+          slotProps={{ paper: { sx: { p: 1.5, width: 420, maxWidth: 'calc(100vw - 32px)' } } }}
+        >
+          {trail}
+        </Popover>
+      </>
+    );
+  }
+
   return (
     <Box sx={{ mt: 1 }}>
-      <Button
-        size="small"
-        variant="text"
-        startIcon={<HistoryIcon fontSize="small" />}
-        endIcon={open ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-        onClick={() => setOpen((current) => !current)}
-        aria-expanded={open}
-        sx={{ fontWeight: 700, textTransform: 'none', px: 0.5 }}
-      >
-        Owner history
-      </Button>
+      {toggle}
       <Collapse in={open} unmountOnExit>
-        <Box sx={{ pl: 0.5, pr: 1, pb: 1, maxWidth: 520 }}>
-          <Divider sx={{ mb: 1 }} />
-
-          {history.isLoading && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
-              <CircularProgress size={16} />
-              <Typography variant="body2" color="text.secondary">Reading the trail…</Typography>
-            </Box>
-          )}
-
-          {/* A trail that failed to load is not an empty trail. Saying "never reassigned" over a
-              failed request would be a claim about the record that nobody checked. */}
-          {history.isError && (
-            <Alert
-              severity="error"
-              sx={{ borderRadius: 2 }}
-              action={
-                <Button color="inherit" size="small" onClick={() => history.refetch()} sx={{ fontWeight: 700 }}>
-                  Retry
-                </Button>
-              }
-            >
-              We couldn&apos;t load the owner history. No empty history has been assumed.
-            </Alert>
-          )}
-
-          {!history.isLoading && !history.isError && entries.length === 0 && (
-            <Typography variant="body2" color="text.secondary" sx={{ py: 1 }}>
-              This inquiry has never changed hands.
-            </Typography>
-          )}
-
-          {!history.isError && entries.map((entry) => <HistoryRow key={entry.id} entry={entry} />)}
-        </Box>
+        {trail}
       </Collapse>
     </Box>
   );
