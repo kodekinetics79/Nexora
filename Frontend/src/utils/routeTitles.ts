@@ -86,6 +86,7 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/setup/uom': 'Units of Measure',
   '/setup/locations': 'Locations',
   '/setup/quote-format': 'Quote Format',
+  '/setup/quote-statuses': 'Quote statuses',
   '/setup/business-unit': 'Business Units',
   '/setup/price-structure': 'Price Structure',
   '/setup/sla': 'Deadlines & Alerts',

@@ -6,6 +6,7 @@ import {
 import rfqService from '../../../api/services/rfqService';
 import currencyService from '../../../api/services/currencyService';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
+import ValidityDateField from './ValidityDateField';
 
 const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const daysFromToday = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return isoDay(d); };
@@ -71,9 +72,8 @@ export default function QuoteTermsDialog({
       <DialogTitle sx={{ fontWeight: 800 }}>Set how long the prices hold</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
-          <TextField type="date" label="Prices valid until" value={date} error={date !== '' && !dateOk}
-            onChange={(event) => setDate(event.target.value)}
-            slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: isoDay(new Date()), 'aria-label': 'Prices valid until' } }} />
+          <ValidityDateField label="Prices valid until" value={date} error={date !== '' && !dateOk}
+            onChange={setDate} min={isoDay(new Date())} fullWidth />
           {suggestedValidUntil && (
             <Typography variant="caption" color="text.secondary">
               Buyer asks for at least {new Date(`${suggestedValidUntil.split('T')[0]}T00:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}.

@@ -324,12 +324,15 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     activePrefixes: ['/sales/quotes/view', '/sales/quotes/edit', '/sales/quotes/create'],
     views: [
       {
-        key: 'quotes-draft',
-        label: 'Drafts',
-        path: '/sales/quotes?state=draft',
+        // The whole list, and where a quote opened from it belongs. Without it the page a rep lands
+        // on lit no tab at all, so nothing said this was everything.
+        key: 'quotes-all',
+        label: 'All',
+        path: '/sales/quotes',
         moduleName: 'Quotations',
         activePrefixes: ['/sales/quotes/view', '/sales/quotes/edit', '/sales/quotes/create'],
       },
+      { key: 'quotes-draft', label: 'Drafts', path: '/sales/quotes?state=draft', moduleName: 'Quotations' },
       { key: 'quotes-sent', label: 'Sent', path: '/sales/quotes?state=sent', moduleName: 'Quotations' },
       {
         key: 'quotes-follow-up',

@@ -67,6 +67,10 @@ vi.mock('./customer-awards', () => ({ CustomerAwardDialog: () => null }));
 vi.mock('../../../components/common/EmailPromptDialog', () => ({
   default: ({ open }: { open: boolean }) => (open ? <div>recipient dialog</div> : null),
 }));
+// A quote that came from an RFQ goes out through the RFQ page's send window (email or portal).
+vi.mock('../../Procurement/RFQs/SendQuoteDialog', () => ({
+  default: ({ open, rfqId }: { open: boolean; rfqId: number }) => (open ? <div>send window for RFQ {rfqId}</div> : null),
+}));
 
 import QuoteViewPage from './QuoteViewPage';
 
@@ -116,7 +120,8 @@ beforeEach(() => {
 
 describe('sending a Draft quote', () => {
   it('offers one primary send control that opens the real send chain', async () => {
-    getById.mockResolvedValue(quoteFixture('Draft'));
+    // A quote with no RFQ behind it keeps the email chain: recipient, then price confirmation.
+    getById.mockResolvedValue({ ...quoteFixture('Draft'), rfqId: undefined });
     renderQuote();
 
     const send = await screen.findByRole('button', { name: /send to customer/i });
@@ -125,8 +130,19 @@ describe('sending a Draft quote', () => {
     expect(await screen.findByText('recipient dialog')).toBeInTheDocument();
   });
 
-  it('never transitions the quote to Sent from the UI', async () => {
+  it('a quote from an RFQ opens the RFQ send window, which also records a portal submission', async () => {
     getById.mockResolvedValue(quoteFixture('Draft'));
+    renderQuote();
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to customer/i }));
+
+    expect(await screen.findByText('send window for RFQ 41')).toBeInTheDocument();
+    expect(screen.queryByText('recipient dialog')).not.toBeInTheDocument();
+    expect(transitionStatus).not.toHaveBeenCalled();
+  });
+
+  it('never transitions the quote to Sent from the UI', async () => {
+    getById.mockResolvedValue({ ...quoteFixture('Draft'), rfqId: undefined });
     renderQuote();
 
     const send = await screen.findByRole('button', { name: /send to customer/i });
@@ -164,7 +180,9 @@ describe('a quote already with the customer', () => {
     getById.mockResolvedValue(quoteFixture('Sent'));
     renderQuote();
 
-    const again = await screen.findByRole('button', { name: /send again/i });
+    // Rarely used, so it lives under More; the Sent quote's one next step is Update status.
+    fireEvent.click(await screen.findByRole('button', { name: /^more$/i }));
+    const again = await screen.findByRole('menuitem', { name: /send again/i });
     fireEvent.click(again);
 
     expect(await screen.findByText('recipient dialog')).toBeInTheDocument();

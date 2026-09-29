@@ -149,6 +149,28 @@ describe('QuoteViewPage — the send blockers arrive before the dialog', () => {
       .toHaveAttribute('href', '/setup/mailboxes');
   });
 
+  it('counts only blockers as "must be fixed"; warnings are listed but not counted', async () => {
+    getSendReadiness.mockResolvedValue({
+      quoteId: 66,
+      canSend: false,
+      blockers: [{ code: 'QUOTE_INCOMPLETE', message: 'Commercial Review Required: this quote has no currency. Set the currency on the quote before sending it.' }],
+      warnings: [
+        { code: 'VALIDITY_BELOW_BUYER_MINIMUM', message: 'The buyer asked for 90 days of validity; this quote gives 30.' },
+        { code: 'DELIVERY_TERMS_DIFFER', message: 'The buyer asked for DDP; this quote says EXW.' },
+      ],
+    });
+    renderQuote();
+
+    const panel = await screen.findByTestId('quote-next-step');
+    await waitFor(() => expect(panel).toHaveTextContent('Fix the item below, then send the quote.'));
+    // The warnings are still listed, so not counting them is a choice, not an absence.
+    expect(screen.getByText(/buyer asked for 90 days of validity/i)).toBeVisible();
+    expect(screen.getByText(/buyer asked for DDP/i)).toBeVisible();
+    expect(panel).not.toHaveTextContent(/Fix the 3 items/i);
+    expect(screen.getByRole('button', { name: /sending is blocked/i }))
+      .toHaveAttribute('title', '1 thing must be fixed first — see the list below');
+  });
+
   it('says the customer may already hold a quote whose delivery was interrupted', async () => {
     getSendReadiness.mockResolvedValue({
       quoteId: 66,
