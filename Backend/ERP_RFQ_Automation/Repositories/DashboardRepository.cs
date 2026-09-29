@@ -9,16 +9,19 @@ using ERP_RFQ_Automation.DTOs.Dashboard;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
 using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.MultiTenancy;
 
 namespace ERP_RFQ_Automation.Repositories
 {
     public class DashboardRepository : IDashboardRepository
     {
         private readonly ErpRfqAutomationContext _context;
+        private readonly ICompanyClock _companyClock;
 
-        public DashboardRepository(ErpRfqAutomationContext context)
+        public DashboardRepository(ErpRfqAutomationContext context, ICompanyClock? companyClock = null)
         {
             _context = context;
+            _companyClock = companyClock ?? CompanyClock.Utc;
         }
 
         public async Task<DashboardDataDTO> GetDashboardDataAsync(long businessUnitId)
@@ -239,7 +242,8 @@ namespace ERP_RFQ_Automation.Repositories
             ERP_RFQ_Automation.Authorization.AccountTeamScope? accessScope = null)
         {
             var now = DateTime.UtcNow;
-            var today = now.Date;
+            // Closing dates are the buyer's wall-clock time: "today" is the company's today.
+            var today = (await _companyClock.NowAsync(businessUnitId, cancellationToken)).Date;
 
             // "Open" mirrors GetDashboardDataAsync's ActiveLeads: untriaged leads count,
             // because untriaged is precisely the state the deadline board exists to surface.
@@ -466,6 +470,7 @@ namespace ERP_RFQ_Automation.Repositories
         public async Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId)
         {
             var now = DateTime.UtcNow;
+            var companyNow = await _companyClock.NowAsync(businessUnitId);
             var acceptedLeadStatusIds = await ResolveStatusIdsAsync("LeadStatus", "ACCEPTED", "Accepted", legacyId: 24);
             var sentQuoteStatusIds = await ResolveStatusIdsAsync("QuoteStatus", "SENT", "Sent", legacyId: 43);
             var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
@@ -543,7 +548,7 @@ namespace ERP_RFQ_Automation.Repositories
                     // Audit fairness: late-ingested leads (entered Nexora after
                     // their due date) are excluded — arriving late is not aging.
                     OverdueLeads = myLeads.Count(l =>
-                        IsOverdue(l.BidClosingDate, now) && !lateIngestedLeadIds.Contains(l.Id)),
+                        IsOverdue(l.BidClosingDate, companyNow) && !lateIngestedLeadIds.Contains(l.Id)),
                     SentQuotes = myQuotes.Count,
                     StaleQuotes = myQuotes.Count(q => IsStaleSentQuote(q.SentOn, q.RespondedOn, staleDays, now))
                 });
@@ -568,7 +573,7 @@ namespace ERP_RFQ_Automation.Repositories
                 OpenLeads = unassignedLeads.Count,
                 // Audit fairness: same late-ingested exclusion as the rep rows.
                 OverdueLeads = unassignedLeads.Count(l =>
-                    IsOverdue(l.BidClosingDate, now) && !lateIngestedLeadIds.Contains(l.Id)),
+                    IsOverdue(l.BidClosingDate, companyNow) && !lateIngestedLeadIds.Contains(l.Id)),
                 SentQuotes = orphanQuotes.Count,
                 StaleQuotes = orphanQuotes.Count(q => IsStaleSentQuote(q.SentOn, q.RespondedOn, staleDays, now)),
                 IsUnassignedBucket = true
@@ -583,7 +588,7 @@ namespace ERP_RFQ_Automation.Repositories
                 // they were ingested after their due date. Reported so the
                 // exclusion is never silent.
                 LateIngestedExcludedLeads = leadRows.Count(l =>
-                    IsOverdue(l.BidClosingDate, now) && lateIngestedLeadIds.Contains(l.Id))
+                    IsOverdue(l.BidClosingDate, companyNow) && lateIngestedLeadIds.Contains(l.Id))
             };
         }
 

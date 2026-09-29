@@ -202,6 +202,7 @@ public sealed class SlaSweepWorker : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var notifications = scope.ServiceProvider.GetRequiredService<ISlaNotifications>();
         var outcomes = scope.ServiceProvider.GetRequiredService<IQuoteOutcomeService>();
+        var companyClock = scope.ServiceProvider.GetService<ICompanyClock>() ?? CompanyClock.Utc;
 
         // Fail closed. If the DbContext did not pick the pushed scope up, every query
         // below would silently run cross-tenant under the bypass role again.
@@ -216,7 +217,9 @@ public sealed class SlaSweepWorker : BackgroundService
                          .FirstOrDefaultAsync(p => p.BusinessUnitId == bu, ct)
                      ?? SlaPolicy.Default(bu);
 
-        await SweepLeadDeadlinesAsync(db, notifications, bu, policy, ct);
+        // Closing dates are the buyer's wall-clock time: deadline reminders run on the company's clock.
+        var companyNow = await companyClock.NowAsync(bu, ct);
+        await SweepLeadDeadlinesAsync(db, notifications, bu, policy, companyNow, ct);
         await SweepUnassignedLeadsAsync(db, notifications, bu, policy, ct);
         await SweepQuoteAutoExpiryAsync(db, outcomes, bu, policy, ct);
         await SweepStaleQuotesAsync(db, notifications, bu, policy, ct);
@@ -225,16 +228,16 @@ public sealed class SlaSweepWorker : BackgroundService
         await SweepSupplierAcknowledgementsAsync(db, notifications, bu, policy, ct);
         await SweepInboundShipDateBreachesAsync(db, notifications, bu, ct);
         await SweepInboundDeliveryRiskAsync(db, notifications, bu, ct);
-        await SweepUndecidedRfqLinesAsync(db, notifications, bu, policy, ct);
+        await SweepUndecidedRfqLinesAsync(db, notifications, bu, policy, companyNow, ct);
         await SweepSupplierResponseOverdueAsync(db, notifications, bu, ct);
     }
 
     // ---------------- 1. lead deadlines ----------------
 
     private async Task SweepLeadDeadlinesAsync(
-        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, CancellationToken ct)
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, DateTime now,
+        CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
         var horizon = now.AddDays(policy.WarnDaysBeforeClose);
 
         // Real dates only (sentinels < 2000 are "unknown", mirroring the extraction
@@ -1124,12 +1127,12 @@ public sealed class SlaSweepWorker : BackgroundService
                                                      && line.ParticipationDecision == Rfqitem.ParticipationPending));
 
     private async Task SweepUndecidedRfqLinesAsync(
-        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, CancellationToken ct)
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, DateTime now,
+        CancellationToken ct)
     {
         // Non-positive means the tenant has not configured this reminder (register R12).
         if (policy.QuoteDecisionReminderDays <= 0) return;
 
-        var now = DateTime.UtcNow;
         var today = now.Date;
         var horizon = BusinessCalendar
             .AddBusinessDays(DateOnly.FromDateTime(today), policy.QuoteDecisionReminderDays)

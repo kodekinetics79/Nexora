@@ -147,6 +147,14 @@ public sealed record TenantAccessSnapshot(
     public DateTime? CreatedOn { get; init; }
 
     /// <summary>
+    /// The company's time zone, chosen when the company was created (IANA id, e.g.
+    /// <c>Asia/Riyadh</c>). A buyer's closing time is stored as the buyer printed it, a wall-clock
+    /// time with no zone, and it is read in this zone. Null when none was set or the column is not
+    /// readable under this role; <see cref="MultiTenancy.CompanyClock"/> then keeps UTC.
+    /// </summary>
+    public string? TimeZoneId { get; init; }
+
+    /// <summary>
     /// Whether a non-Billable tenant has a written <c>BillingModeReason</c> — a BOOLEAN, never
     /// the text. An exemption nobody wrote down is an exemption nobody decided, and it should
     /// not carry unlimited capacity; but the reason itself is internal commercial free text of

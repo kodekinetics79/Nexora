@@ -53,6 +53,13 @@ namespace ERP_RFQ_Automation.DTOs.UserDTO
         /// minimal surface rather than an error.</para>
         /// </summary>
         public List<string> Entitlements { get; set; } = new();
+
+        /// <summary>
+        /// The company's time zone (IANA id), chosen when the company was created. Screens count a
+        /// closing date's days left on this calendar, as the server does. Null: none set, and the
+        /// screen keeps the reader's own calendar.
+        /// </summary>
+        public string? TimeZoneId { get; set; }
     }
 
     public class MyModulePermissionDTO

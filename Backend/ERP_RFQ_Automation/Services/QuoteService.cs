@@ -154,6 +154,7 @@ namespace ERP_RFQ_Automation.Services
 
     public class QuoteService : IQuoteService
     {
+        private readonly ERP_RFQ_Automation.MultiTenancy.ICompanyClock _companyClock;
         private readonly ErpRfqAutomationContext _context;
         private readonly IEmailService _emailService;
         private readonly IQuoteConfigurationRepository _quoteConfigRepository;
@@ -183,8 +184,10 @@ namespace ERP_RFQ_Automation.Services
             Microsoft.Extensions.Logging.ILogger<QuoteService>? logger = null,
             // Buyer-terms slice 2: the RFQ document's validity floor, currency rule and delivery
             // terms become the draft's defaults and the send warnings. Optional for the same reason.
-            ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService? buyerTerms = null)
+            ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService? buyerTerms = null,
+            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null)
         {
+            _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
             _logger = logger;
             _buyerTerms = buyerTerms;
             _context = context;
@@ -554,8 +557,9 @@ namespace ERP_RFQ_Automation.Services
                     // max(today + 30, the buyer's floor): SEC "valid for 90 days from bid due date"
                     // → closing + 90; Aramco "at least 60 days from the bid closing date" → closing
                     // + 60. The rep can still change it; the send dialog warns if it goes short.
+                    // Counted from the company's today, the calendar the closing date is written in.
                     ValidUntil = ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTermRules.DefaultValidUntil(
-                        now.Date, rfq.BidClosingDate, buyerTerms.Validity),
+                        (await _companyClock.NowAsync(businessUnitId, ct)).Date, rfq.BidClosingDate, buyerTerms.Validity),
                     StatusId = await ResolveQuoteStatusIdAsync("DRAFT", businessUnitId),
                     // Only when the buyer states a rule and exactly names a currency this tenant
                     // quotes in (Aramco "USD or SAR" with a SAR-only tenant → SAR). Otherwise the

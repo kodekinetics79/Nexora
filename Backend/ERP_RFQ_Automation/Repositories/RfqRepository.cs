@@ -20,9 +20,13 @@ namespace ERP_RFQ_Automation.Repositories
     {
         private readonly ErpRfqAutomationContext _context;
 
-        public RfqRepository(ErpRfqAutomationContext context)
+        private readonly ERP_RFQ_Automation.MultiTenancy.ICompanyClock _companyClock;
+
+        public RfqRepository(ErpRfqAutomationContext context,
+            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null)
         {
             _context = context;
+            _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
         }
 
         public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null)
@@ -929,7 +933,8 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
             var rfqs = await query.ToListAsync();
 
-            var now = DateTime.UtcNow;
+            // Closing dates are the buyer's wall-clock time, so "soon" is counted on the company's clock.
+            var now = await _companyClock.NowAsync(businessUnitId);
             var sevenDaysLater = now.AddDays(7);
 
             return new RfqStatsDTO

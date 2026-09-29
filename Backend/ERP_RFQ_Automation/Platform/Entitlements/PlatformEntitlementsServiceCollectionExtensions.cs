@@ -13,6 +13,8 @@ public static class PlatformEntitlementsServiceCollectionExtensions
     {
         services.AddMemoryCache();
         services.AddScoped<ITenantAccessService, TenantAccessService>();
+        // Deadlines are read on the company's wall clock; the zone rides on the access snapshot.
+        services.AddScoped<MultiTenancy.ICompanyClock, MultiTenancy.CompanyClock>();
         services.AddScoped<IEntitlementService, EntitlementService>();
         // Render escaped entitlement denials as problem+json instead of a generic 500.
         services.Configure<MvcOptions>(o => o.Filters.Add<EntitlementProblemFilter>());

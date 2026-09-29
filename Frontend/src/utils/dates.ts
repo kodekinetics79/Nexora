@@ -192,14 +192,48 @@ export function formatDeadlineDay(dateStr: string | null | undefined, fallback =
 }
 
 /**
- * Whole calendar days from today (the reader's today) to the deadline's own day: 0 on the day it
+ * The company's time zone, chosen when the company was created (from the session's permissions
+ * read). A closing date is the buyer's wall-clock time, so its days left are counted on the
+ * company's calendar, the same one the server uses. Null: the reader's own calendar.
+ */
+let companyTimeZone: string | null = null;
+
+export function setCompanyTimeZone(zone: string | null | undefined): void {
+  companyTimeZone = zone && zone.trim() ? zone.trim() : null;
+}
+
+/** Year, month (0-based) and day of `now` on the company's calendar, else the reader's. */
+function todayParts(now: Date, zone: string | null): { year: number; month: number; day: number } {
+  if (zone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: 'numeric', day: 'numeric' })
+        .formatToParts(now);
+      const part = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+      const year = part('year');
+      const month = part('month');
+      const day = part('day');
+      if (year && month && day) return { year, month: month - 1, day };
+    } catch {
+      // A zone this browser does not know: fall back to the reader's calendar.
+    }
+  }
+  return { year: now.getFullYear(), month: now.getMonth(), day: now.getDate() };
+}
+
+/**
+ * Whole calendar days from today (the company's today) to the deadline's own day: 0 on the day it
  * closes, negative once that day has passed, null when there is no real date. The ONE count every
  * screen uses — the Leads list and Decide used to say 9 and 10 for the same bid.
  */
-export function calendarDaysUntil(dateStr: string | null | undefined, now: Date = new Date()): number | null {
+export function calendarDaysUntil(
+  dateStr: string | null | undefined,
+  now: Date = new Date(),
+  zone: string | null = companyTimeZone,
+): number | null {
   const w = readWallClock(dateStr);
   if (!w) return null;
   const due = Date.UTC(w.year, w.month, w.day);
-  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const t = todayParts(now, zone);
+  const today = Date.UTC(t.year, t.month, t.day);
   return Math.round((due - today) / DAY_MS);
 }

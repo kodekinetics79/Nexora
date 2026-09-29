@@ -34,6 +34,7 @@ namespace ERP_RFQ_Automation.Repositories
         /// <summary>How many the DETAIL projection and the resolve dialog carry.</summary>
         private const int DetailCandidateCount = 5;
 
+        private readonly ERP_RFQ_Automation.MultiTenancy.ICompanyClock _companyClock;
         private readonly ErpRfqAutomationContext _context;
         private readonly ISlaPolicyReader _slaPolicy;
         private readonly ILogger<LeadRepository>? _logger;
@@ -54,9 +55,11 @@ namespace ERP_RFQ_Automation.Repositories
             ICommercialLineResolutionApplicationService? lineResolution = null,
             ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? aliasLearner = null,
             ERP_RFQ_Automation.Services.DocumentIntelligence.Learning.IHeaderSpellingLearner? headerSpellingLearner = null,
-            ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.IManufacturerPatternLearner? manufacturerPatternLearner = null)
+            ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge.IManufacturerPatternLearner? manufacturerPatternLearner = null,
+            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null)
         {
             _context = context;
+            _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
             _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
             _logger = logger;
             _metrics = metrics;
@@ -1052,7 +1055,8 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
             var leads = await query.ToListAsync();
 
-            var now = DateTime.UtcNow;
+            // Closing dates are the buyer's wall-clock time, so "soon" is counted on the company's clock.
+            var now = await _companyClock.NowAsync(businessUnitId);
             var sevenDaysLater = now.AddDays(7);
 
             return new LeadStatsDTO
