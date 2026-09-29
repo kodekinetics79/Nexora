@@ -58,6 +58,8 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
         /// <summary>The rep downloaded the quote and uploaded it to the customer's own portal: record it as sent.</summary>
         Task<PortalSubmissionResult> RecordPortalSubmissionAsync(long quoteId, long businessUnitId, string actor, long? actorUserId, string? portalReference, CancellationToken ct = default);
+        /// <summary>The rep quoted this RFQ outside Nexora (by hand, in Excel, on the portal): keep their file and record the quote as sent.</summary>
+        Task<UploadedQuoteResult> RecordUploadedQuoteAsync(UploadedQuoteCommand command, CancellationToken ct = default);
 
         /// <summary>
         /// The default covering e-mail for this quote — subject, plain-text body, attachment name
@@ -152,7 +154,7 @@ namespace ERP_RFQ_Automation.Services
             string idempotencyKey, CancellationToken ct = default);
     }
 
-    public class QuoteService : IQuoteService
+    public partial class QuoteService : IQuoteService
     {
         private readonly ERP_RFQ_Automation.MultiTenancy.ICompanyClock _companyClock;
         private readonly ErpRfqAutomationContext _context;
@@ -166,6 +168,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly Microsoft.Extensions.Logging.ILogger<QuoteService>? _logger;
         private readonly ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? _outboundSenders;
         private readonly ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService? _buyerTerms;
+        private readonly ERP_RFQ_Automation.Infrastructure.Storage.IEvidenceObjectStorage? _evidence;
 
         // Optional collaborators preserve existing direct constructions used by focused
         // tests; production DI supplies the lifecycle and sales services.
@@ -185,9 +188,12 @@ namespace ERP_RFQ_Automation.Services
             // Buyer-terms slice 2: the RFQ document's validity floor, currency rule and delivery
             // terms become the draft's defaults and the send warnings. Optional for the same reason.
             ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService? buyerTerms = null,
-            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null)
+            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null,
+            // Where an uploaded quote's file is kept. Optional for the same reason as the two above.
+            ERP_RFQ_Automation.Infrastructure.Storage.IEvidenceObjectStorage? evidence = null)
         {
             _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
+            _evidence = evidence;
             _logger = logger;
             _buyerTerms = buyerTerms;
             _context = context;
@@ -3039,12 +3045,15 @@ namespace ERP_RFQ_Automation.Services
 
             var successor = await _context.Quotes.AsNoTracking()
                 .Where(q => q.RevisionOfQuoteId == quoteId)
-                .Select(q => new { q.QuoteNo, q.RevisionNo })
+                .Select(q => new { q.QuoteNo, q.RevisionNo, q.RemovedOn })
                 .FirstOrDefaultAsync();
+            // A quote is revised once (UX_Quotes_BU_RevisionOfQuoteId), withdrawn revision included.
             if (successor != null)
-                throw new InvalidOperationException(
-                    $"Quote '{source.QuoteNo}' has already been revised as '{successor.QuoteNo}' (Rev {successor.RevisionNo}). " +
-                    "Revise the latest revision instead.");
+                throw new InvalidOperationException(successor.RemovedOn != null
+                    ? $"Quote '{source.QuoteNo}' was already revised as '{successor.QuoteNo}', which was withdrawn. " +
+                      "It cannot be revised again."
+                    : $"Quote '{source.QuoteNo}' has already been revised as '{successor.QuoteNo}' (Rev {successor.RevisionNo}). " +
+                      "Revise the latest revision instead.");
 
             // Chain lock: award/outcome on ANY revision closes the whole chain.
             var chain = await LoadRevisionChainAsync(source.Id, source.RevisionOfQuoteId);
@@ -3160,10 +3169,14 @@ namespace ERP_RFQ_Automation.Services
                     .FirstOrDefaultAsync();
             }
 
-            var successor = await _context.Quotes.AsNoTracking()
+            // Any revision replaces the quote, sent or not; a withdrawn (removed) one replaced nothing.
+            // CreateRevisionAsync still counts a withdrawn one (a quote is revised once:
+            // UX_Quotes_BU_RevisionOfQuoteId), so CanRevise below keeps that rule separately.
+            var successors = await _context.Quotes.AsNoTracking()
                 .Where(q => q.RevisionOfQuoteId == quoteId)
-                .Select(q => new { q.Id, q.QuoteNo })
-                .FirstOrDefaultAsync();
+                .Select(q => new { q.Id, q.QuoteNo, q.RemovedOn })
+                .ToListAsync();
+            var successor = successors.FirstOrDefault(q => q.RemovedOn == null);
 
             var chain = await LoadRevisionChainAsync(quote.Id, quote.RevisionOfQuoteId);
             var chainLocked = quote.OutcomeOn.HasValue || chain.Any(c => c.OutcomeOn.HasValue);
@@ -3182,7 +3195,7 @@ namespace ERP_RFQ_Automation.Services
                 SupersededByQuoteId = successor?.Id,
                 SupersededByQuoteNo = successor?.QuoteNo,
                 ChainLocked = chainLocked,
-                CanRevise = !isDraft && successor == null && !chainLocked
+                CanRevise = !isDraft && successors.Count == 0 && !chainLocked
             };
         }
 
@@ -3302,7 +3315,7 @@ namespace ERP_RFQ_Automation.Services
                     "the customer's decision.");
 
             var successor = await _context.Quotes.AsNoTracking()
-                .Where(q => q.RevisionOfQuoteId == quoteId && q.BusinessUnitId == businessUnitId)
+                .Where(q => q.RevisionOfQuoteId == quoteId && q.BusinessUnitId == businessUnitId && q.RemovedOn == null)
                 .Select(q => new { q.QuoteNo, q.RevisionNo })
                 .FirstOrDefaultAsync(ct);
             if (successor is not null)
@@ -3441,7 +3454,7 @@ namespace ERP_RFQ_Automation.Services
             for (var hop = 0; downId.HasValue && hop < maxHops; hop++)
             {
                 var member = await _context.Quotes.AsNoTracking()
-                    .Where(q => q.RevisionOfQuoteId == downId.Value)
+                    .Where(q => q.RevisionOfQuoteId == downId.Value && q.RemovedOn == null)
                     .Select(q => new RevisionChainMember(q.Id, q.QuoteNo, q.OutcomeOn, q.RevisionOfQuoteId))
                     .FirstOrDefaultAsync();
                 if (member == null || !visited.Add(member.Id)) break;

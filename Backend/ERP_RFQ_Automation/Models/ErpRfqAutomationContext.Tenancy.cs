@@ -371,6 +371,9 @@ public partial class ErpRfqAutomationContext
         // See Models/ErpRfqAutomationContext.QuoteRemoval.cs.
         ConfigureQuoteRemovalModel(modelBuilder);
         ConfigureQuoteBackfillModel(modelBuilder);
+        // The client's own quote steps/endings on the quote + setup-row order.
+        // See Models/ErpRfqAutomationContext.QuoteClientStatus.cs.
+        ConfigureQuoteClientStatusModel(modelBuilder);
         ConfigureRfqLineProductResolutionModel(modelBuilder);
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

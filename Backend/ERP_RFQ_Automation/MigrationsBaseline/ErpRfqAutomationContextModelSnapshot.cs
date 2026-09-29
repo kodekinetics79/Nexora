@@ -15298,8 +15298,33 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("StatusID");
 
+                    b.Property<long?>("SubStatusId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("SubStatusOn")
+                        .HasColumnType("timestamp without time zone");
+
                     b.Property<decimal?>("TotalAmount")
                         .HasColumnType("decimal(18, 2)");
+
+                    b.Property<string>("UploadedFileContentType")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("UploadedFileName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("UploadedFileSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long?>("UploadedFileSize")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("UploadedFileStorageUri")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<DateTime?>("ValidUntil")
                         .HasColumnType("timestamp without time zone");
@@ -15319,6 +15344,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("OwnerUserId");
 
                     b.HasIndex("StatusId");
+
+                    b.HasIndex("SubStatusId");
 
                     b.HasIndex("BusinessUnitId", "ExternalQuoteReference")
                         .IsUnique()
@@ -16475,6 +16502,11 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("SetupCode")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<short>("SortOrder")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("smallint")
+                        .HasDefaultValue((short)0);
 
                     b.Property<string>("SetupType")
                         .IsRequired()
@@ -26453,6 +26485,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .WithMany("QuoteStatuses")
                         .HasForeignKey("StatusId")
                         .HasConstraintName("FK_Quotes_Status");
+
+                    b.HasOne("ERP_RFQ_Automation.Models.SetupMaster", null)
+                        .WithMany()
+                        .HasForeignKey("SubStatusId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("FK_Quotes_SubStatus");
 
                     b.HasOne("ERP_RFQ_Automation.Models.CommercialCase", null)
                         .WithMany()

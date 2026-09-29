@@ -24,6 +24,12 @@ public partial class ErpRfqAutomationContext
         {
             entity.Property(x => x.ExternalQuoteReference).HasMaxLength(100);
 
+            // The file behind a quote made outside Nexora (Quote.Upload.cs).
+            entity.Property(x => x.UploadedFileName).HasMaxLength(255);
+            entity.Property(x => x.UploadedFileStorageUri).HasMaxLength(500);
+            entity.Property(x => x.UploadedFileSha256).HasMaxLength(64);
+            entity.Property(x => x.UploadedFileContentType).HasMaxLength(100);
+
             entity.Property(x => x.Origin)
                 .HasMaxLength(20)
                 .IsRequired()

@@ -112,6 +112,7 @@ public sealed class TenantDataControlService(
         "Image.FilePath",
         "EmailInquiryComponent.EvidenceUri",
         "ExtractionJob.StoragePath",
+        "Quote.UploadedFileStorageUri",
         "FieldEvidence.EvidenceKey"
     };
 
@@ -481,6 +482,16 @@ public sealed class TenantDataControlService(
             .ToListAsync(ct);
         foreach (var job in jobs)
             Protect(tenantId, keys, hashes, job.Uri, job.Hash);
+
+        // The file behind a quote the rep made outside Nexora and uploaded. The quote row is its
+        // only pointer, and the customer holds that document, so it lives exactly as long as the
+        // quote does.
+        var uploadedQuotes = await db.Quotes.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId && x.UploadedFileStorageUri != null)
+            .Select(x => new { Uri = x.UploadedFileStorageUri, Hash = x.UploadedFileSha256 })
+            .ToListAsync(ct);
+        foreach (var quote in uploadedQuotes)
+            Protect(tenantId, keys, hashes, quote.Uri, quote.Hash);
 
         return new ReferencedEvidence(keys, hashes);
     }

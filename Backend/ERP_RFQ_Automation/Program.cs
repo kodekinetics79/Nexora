@@ -946,6 +946,7 @@ builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ISlaPolicyReader,
 // ==== SLA & deadline engine + quote outcome capture (Sla/) ====
 // After AddNotifications(...) — SlaNotifications depends on IEmailSender.
 builder.Services.AddScoped<ERP_RFQ_Automation.Sla.IQuoteOutcomeService, ERP_RFQ_Automation.Sla.QuoteOutcomeService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Sla.IQuoteClientStatusService, ERP_RFQ_Automation.Sla.QuoteClientStatusService>();
 // The lead-stage loss reuses the quote's governed picklist rather than owning a second one.
 builder.Services.AddScoped<ERP_RFQ_Automation.Sla.ILeadOutcomeReasons, ERP_RFQ_Automation.Sla.LeadOutcomeReasons>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_Automation.Sla.SlaNotifications>();

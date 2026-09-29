@@ -96,8 +96,13 @@ public sealed class LeadOutcomeReasons : ILeadOutcomeReasons
         await _context.SetupMasters.AsNoTracking().IgnoreQueryFilters()
             .Where(s => s.SetupType == SetupType
                         && s.BusinessUnitId == businessUnitId
-                        && (s.IsActive == true || s.IsActive == null))
-            .OrderBy(s => s.SetupId)
+                        && (s.IsActive == true || s.IsActive == null)
+                        // A reason the client keeps for Won quotes ("Best price") never explains a
+                        // rejected lead — the same filter IQuoteOutcomeService.GetOutcomeReasonsAsync applies.
+                        && (s.ParentSetupId == null
+                            || !_context.SetupMasters.IgnoreQueryFilters()
+                                .Any(p => p.SetupId == s.ParentSetupId && p.SetupCode == "ACCEPTED")))
+            .OrderBy(s => s.SortOrder).ThenBy(s => s.SetupId)
             .Select(s => new OutcomeReasonDto
             {
                 Id = s.SetupId,

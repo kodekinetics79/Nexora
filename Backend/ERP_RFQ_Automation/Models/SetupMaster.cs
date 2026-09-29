@@ -27,6 +27,12 @@ public partial class SetupMaster
     /// </summary>
     public short RoleRank { get; set; }
 
+    /// <summary>
+    /// Where the row sits in its list (the client's quote steps, endings and reasons are shown in
+    /// the order the tenant chose). Rows that never had an order keep 0 and fall back to their id.
+    /// </summary>
+    public short SortOrder { get; set; }
+
     public bool? IsActive { get; set; }
 
     public string CreatedBy { get; set; } = null!;
