@@ -337,13 +337,14 @@ const QuotesPage: React.FC = () => {
    * neither emailed nor revised from here. Download is always there.
    */
   const rowActions = (quote: QuoteDTO) => {
-    const live = quoteCode(quote) === 'SENT' && !quote.supersededByQuoteNo && !quote.uploadedFileName;
+    const live = quoteCode(quote) === 'SENT' && !quote.supersededByQuoteNo && !quote.pendingRevisionId && !quote.uploadedFileName;
     return { revise: canEdit && live, email: canEdit && live };
   };
 
   const runMove = (quote: QuoteDTO, move: QuoteMove) => {
     if (move === 'update') setStatusTarget(quote);
     else if (move === 'po') navigate(`/sales/quotes/view/${quote.id}?action=po`);
+    else if (move === 'revision' && quote.pendingRevisionId) navigate(`/sales/quotes/view/${quote.pendingRevisionId}`);
     else openQuote(quote);
   };
 

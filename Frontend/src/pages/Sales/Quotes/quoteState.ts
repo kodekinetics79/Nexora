@@ -61,6 +61,10 @@ export function quoteStatusWords(quote: QuoteDTO): QuoteStatusWords {
   }
   if (code === 'SENT') {
     const sent = quote.daysSinceSent != null ? `Sent ${ago(quote.daysSinceSent)}` : 'Sent';
+    // The customer still holds this quote; the revision that will replace it is not out yet.
+    if (quote.pendingRevisionQuoteNo) {
+      return { label: 'Sent', tone: 'info', detail: `Revision ${quote.pendingRevisionQuoteNo} not sent yet` };
+    }
     if (quote.subStatusKind === 'STEP' && quote.subStatusName) {
       return { label: quote.subStatusName, tone: 'info', detail: quote.subStatusOn ? `Since ${day(quote.subStatusOn)}` : sent };
     }
@@ -79,7 +83,7 @@ export function quoteStatusWords(quote: QuoteDTO): QuoteStatusWords {
   return { label: quote.statusValue || '—', tone: 'neutral' };
 }
 
-export type QuoteMove = 'finish' | 'update' | 'po' | 'view';
+export type QuoteMove = 'finish' | 'update' | 'po' | 'view' | 'revision';
 
 export interface QuoteNextMove {
   move: QuoteMove;
@@ -102,6 +106,8 @@ export function quoteNextMove(
 ): QuoteNextMove {
   const code = quoteCode(quote);
   if (quote.supersededByQuoteNo) return { move: 'view', label: 'View' };
+  // Its status can only move on the revision, once that is sent: finish the revision.
+  if (quote.pendingRevisionId) return can.edit ? { move: 'revision', label: 'Finish revision' } : { move: 'view', label: 'View' };
   if (code === 'DRAFT' && can.edit) return { move: 'finish', label: 'Finish' };
   if (code === 'SENT' && can.edit) return { move: 'update', label: 'Update status' };
   if (code === 'ACCEPTED' && can.enterPo) return { move: 'po', label: 'Enter PO' };

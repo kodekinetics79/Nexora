@@ -391,7 +391,7 @@ public sealed class QuoteClientStatusTests
     // ------------------------------------------------------------------ replaced by a revision (finding 1)
 
     [Fact]
-    public async Task A_draft_revision_replaces_the_quote_in_the_list_the_page_and_the_commands_alike()
+    public async Task A_draft_revision_is_named_on_the_list_and_a_sent_one_replaces_the_quote()
     {
         using var db = new TestDb();
         await using var ctx = db.ContextFor(Bu);
@@ -403,10 +403,15 @@ public sealed class QuoteClientStatusTests
         var statuses = Statuses(ctx);
         var step = (await statuses.GetCatalogAsync(Bu, false)).Steps.First();
 
-        // The list says "replaced" exactly when the page and the server do: sent or not.
+        // A draft revision replaces nothing on the list (the customer still holds the original,
+        // PricingSheetTests), but it is named so the list offers to finish it instead of moves the
+        // server refuses. A sent revision replaces the quote.
         var (rows, _) = await new QuoteRepository(ctx).GetAllAsync(Bu, 1, 25);
-        Assert.Equal("QT-97413", rows.Single(q => q.Id == 97_412).SupersededByQuoteNo);
+        var withDraft = rows.Single(q => q.Id == 97_412);
+        Assert.Null(withDraft.SupersededByQuoteNo);
+        Assert.Equal((97_413L, "QT-97413"), (withDraft.PendingRevisionId, withDraft.PendingRevisionQuoteNo));
         Assert.Equal("QT-97415", rows.Single(q => q.Id == 97_414).SupersededByQuoteNo);
+        Assert.Null(rows.Single(q => q.Id == 97_414).PendingRevisionQuoteNo);
         var info = await new QuoteService(ctx, null!, null!).GetRevisionInfoAsync(97_412, Bu);
         Assert.Equal(("QT-97413", false), (info.SupersededByQuoteNo, info.CanRevise));
 

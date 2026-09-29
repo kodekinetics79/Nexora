@@ -137,6 +137,9 @@ export interface QuoteDTO {
   daysSinceSent?: number | null;
   /** Set once a later revision was SENT: the customer holds that one, so this quote no longer counts. */
   supersededByQuoteNo?: string | null;
+  /** A revision of this quote not sent yet: the customer still holds this one; its status moves once the revision goes out. */
+  pendingRevisionId?: number | null;
+  pendingRevisionQuoteNo?: string | null;
   /** The number printed on a quote made outside Nexora. */
   externalQuoteReference?: string | null;
   /** Set when the quote was made outside Nexora and uploaded: the file the customer holds. */

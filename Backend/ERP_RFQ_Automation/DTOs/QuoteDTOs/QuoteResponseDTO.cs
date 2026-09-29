@@ -67,6 +67,14 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         /// </summary>
         public string? SupersededByQuoteNo { get; set; }
 
+        /// <summary>
+        /// A revision of this quote that has not been sent yet. The customer still holds THIS quote,
+        /// but its status can only move on the revision once that is sent, so the list offers to
+        /// finish the revision. Null when there is none or it was sent (then SupersededByQuoteNo).
+        /// </summary>
+        public long? PendingRevisionId { get; set; }
+        public string? PendingRevisionQuoteNo { get; set; }
+
         /// <summary>The number printed on a quote made outside Nexora — the one the customer knows it by.</summary>
         public string? ExternalQuoteReference { get; set; }
 

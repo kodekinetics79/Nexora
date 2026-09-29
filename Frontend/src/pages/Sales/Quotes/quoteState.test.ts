@@ -59,6 +59,13 @@ describe('quoteNextMove', () => {
     expect(quoteNextMove(quote({ statusCode: 'ORDERED' }), can).label).toBe('View');
   });
 
+  it('offers to finish a revision that is not sent yet, and keeps the quote as Sent', () => {
+    const q = quote({ pendingRevisionId: 13, pendingRevisionQuoteNo: 'QT-0926-0001-R2', isStale: true });
+    expect(quoteStatusWords(q)).toMatchObject({ label: 'Sent', detail: 'Revision QT-0926-0001-R2 not sent yet' });
+    expect(quoteNextMove(q, can)).toEqual({ move: 'revision', label: 'Finish revision' });
+    expect(quoteNextMove(q, { edit: false, enterPo: false }).label).toBe('View');
+  });
+
   it('never offers work on a replaced quote or to someone who may not do it', () => {
     expect(quoteNextMove(quote({ supersededByQuoteNo: 'QT-0926-0001-R2' }), can).label).toBe('View');
     expect(quoteNextMove(quote({ statusCode: 'SENT' }), { edit: false, enterPo: false }).label).toBe('View');

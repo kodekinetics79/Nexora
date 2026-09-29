@@ -93,20 +93,28 @@ namespace ERP_RFQ_Automation.Repositories
 
             var dtos = quotes.Select(q => MapToDTO(q, itemCounts.TryGetValue(q.Id, out var count) ? count : 0, reasonNames, staleDays)).ToList();
             var pageIds = dtos.Select(d => d.Id).ToList();
-            // Any live revision replaces the quote, sent or still a draft: the same rule the quote
-            // page (revision info) and the step / outcome commands apply, so the list never offers
-            // a move the server refuses. A withdrawn (removed) revision replaced nothing.
+            // A SENT revision replaces the quote: the customer now holds that one. A revision still
+            // in draft replaces nothing - the customer still holds this quote - but the step and
+            // outcome commands already refuse this quote, so the list names the waiting revision
+            // (PendingRevision*) and offers to finish it instead. A withdrawn revision is neither.
             var successors = await _context.Quotes.AsNoTracking()
                 .Where(n => n.RevisionOfQuoteId != null && pageIds.Contains(n.RevisionOfQuoteId.Value) && n.RemovedOn == null)
-                .Select(n => new { Of = n.RevisionOfQuoteId!.Value, n.QuoteNo, n.SentOn })
+                .Select(n => new { Of = n.RevisionOfQuoteId!.Value, n.Id, n.QuoteNo, n.SentOn })
                 .ToListAsync();
             foreach (var dto in dtos)
             {
                 var successor = successors.FirstOrDefault(n => n.Of == dto.Id);
                 if (successor is null) continue;
-                dto.SupersededByQuoteNo = successor.QuoteNo;
-                // Not chased once the customer has the revision (the Follow-up tab's own rule).
-                if (successor.SentOn != null) dto.IsStale = false;
+                if (successor.SentOn != null)
+                {
+                    dto.SupersededByQuoteNo = successor.QuoteNo;
+                    dto.IsStale = false;
+                }
+                else
+                {
+                    dto.PendingRevisionId = successor.Id;
+                    dto.PendingRevisionQuoteNo = successor.QuoteNo;
+                }
             }
 
             // The client's step / ending and the owner's name: two batched reads for the page.
