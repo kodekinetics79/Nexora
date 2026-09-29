@@ -140,7 +140,7 @@ afterEach(() => {
 });
 
 describe('enquiries without an owner tells the truth about unowned enquiries', () => {
-  it('says how many unowned enquiries are still being checked instead of "Every enquiry has an owner"', async () => {
+  it('says how many unowned enquiries are still being checked instead of calling the queue clear', async () => {
     // The routing queue (accepted, unclaimed) is empty ...
     api.outstandingLeads.mockResolvedValue(empty);
     // ... but the Leads list, Owner = Unassigned, has two open enquiries nobody has accepted yet.
@@ -148,19 +148,17 @@ describe('enquiries without an owner tells the truth about unowned enquiries', (
 
     renderInbox();
 
-    const owners = await screen.findByRole('region', { name: 'Enquiries without an owner' });
-    expect(await within(owners).findByText('2 unowned enquiries are still being checked — see Documents to check')).toBeInTheDocument();
-    expect(within(owners).queryByText('Every enquiry has an owner')).not.toBeInTheDocument();
-    expect(within(owners).getByRole('button', { name: 'Open Documents to check' })).toBeInTheDocument();
+    const owners = await screen.findByRole('region', { name: /enquiries without an owner.*2 still being checked/i });
+    expect(within(owners).getByRole('button')).toBeInTheDocument();
     expect(api.leadList).toHaveBeenCalledWith(expect.objectContaining({ view: 'open,unassigned', pageSize: 1 }));
     // The screen is not "clear" while unowned work exists upstream of the routing queue.
     expect(screen.queryByText('You are clear.')).not.toBeInTheDocument();
   });
 
-  it('keeps "Every enquiry has an owner" when the unassigned list really is empty', async () => {
+  it('shows the queue as plainly clear when the unassigned list really is empty', async () => {
     renderInbox();
     const owners = await screen.findByRole('region', { name: 'Enquiries without an owner' });
-    expect(await within(owners).findByText('Every enquiry has an owner')).toBeInTheDocument();
+    expect(within(owners).queryByText(/still being checked/)).not.toBeInTheDocument();
   });
 });
 
@@ -318,15 +316,13 @@ describe('what is waiting on you', () => {
 });
 
 describe('an empty queue is never a dead end', () => {
-  it('says what happened and offers the next action as a button', async () => {
+  it('folds a clear queue into one line that opens where the queue lives', async () => {
     renderInbox();
 
-    await screen.findByText('Every document has been checked');
+    await screen.findByText('You are clear.');
     const documents = screen.getByRole('region', { name: /documents to check/i });
-    // Owner 2026-09-27: a clear queue is one line (name, 0, what that means, the way forward);
-    // the explanatory paragraph went.
-    expect(within(documents).getByText('Every document has been checked')).toBeInTheDocument();
-    expect(within(documents).getByRole('button', { name: 'Upload a document' })).toBeInTheDocument();
+    // Owner 2026-09-28: a clear queue is not work and gets no box — its name, a tick, one click.
+    expect(within(documents).getByRole('button', { name: 'Documents to check' })).toBeInTheDocument();
   });
 
   it('offers a next action on every queue', async () => {
@@ -338,14 +334,14 @@ describe('an empty queue is never a dead end', () => {
       /mail that needs a person/i,
       /documents to check/i,
       /enquiries without an owner/i,
-      /my enquiries awaiting a decision/i,
+      /enquiries to decide/i,
       /rfqs still in draft/i,
       /supplier replies to read/i,
       /quotes not yet sent/i,
       /customer orders to confirm/i,
     ]) {
       const region = section(heading);
-      // Exactly one call to action per empty queue — a stated reason plus one button.
+      // Exactly one way forward per clear queue.
       expect(within(region).getAllByRole('button')).toHaveLength(1);
     }
   });
@@ -387,7 +383,7 @@ describe('a queue that failed is never shown as a queue that is clear', () => {
     renderInbox();
 
     await screen.findByText(/assigned enquiries awaiting a decision could not be loaded/i);
-    const decisions = section(/my enquiries awaiting a decision/i);
+    const decisions = section(/enquiries to decide/i);
     expect(within(decisions).getByRole('button', { name: /try again/i })).toBeInTheDocument();
     expect(within(decisions).queryByText(/no assigned enquiry is waiting/i)).toBeNull();
   });

@@ -25,7 +25,7 @@ test('exact duplicate is persisted and visible without repeated extraction', asy
     const response = page.waitForResponse((candidate) =>
       candidate.request().method() === 'POST'
       && candidate.url().includes('/api/Extraction/upload'));
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     expect((await response).status()).toBe(202);
     await expect(page).toHaveURL(/\/procurement\/leads\/ingestion\/[0-9a-f-]+$/i);
   }
