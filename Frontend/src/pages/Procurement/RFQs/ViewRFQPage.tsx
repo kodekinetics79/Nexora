@@ -41,13 +41,11 @@ import { useAuth } from '../../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 import LifecycleActions from '../../../components/common/LifecycleActions';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
-import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 import procurementService from '../../../api/services/procurementService';
 import commercialLearningService from '../../../api/services/commercialLearningService';
 import NextStepPanel from '../../../components/common/NextStepPanel';
-import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
+import Fact from '../../../components/common/Fact';
 import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
-import { formatMoney } from '../../../utils/currency';
 import { calendarDaysUntil, formatDateSafe, formatDeadline, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
@@ -119,19 +117,6 @@ export const presentRfqExtraFields = (json: string | null | undefined): ExtraFie
 };
 
 /**
- * Scenario money.
- *
- * This used to be a third private copy of `formatMoney`, hardcoded to `en-US` — so the same SAR
- * figure was grouped one way here and another way on the quote screen — and, when the record
- * carried no currency code, it printed the database foreign key: "1,240 (currency 7)". A
- * currency id tells the reader nothing; `formatMoney` already renders a bare grouped number for
- * a record with no stated currency, which is the honest output, so the note beside it only has
- * to say the currency is missing.
- */
-const formatScenarioMoney = (value: number, currencyCode?: string | null) =>
-  currencyCode ? formatMoney(value, currencyCode) : `${formatMoney(value)} (currency not stated)`;
-
-/**
  * "Not now" on a part missing from the catalogue is a choice, so it is remembered in this browser:
  * the line stops asking and is priced by hand. Storage can be blocked or empty; then the choice lasts
  * for this visit only, and the page still renders.
@@ -151,16 +136,6 @@ const writeNotNowLineIds = (key: string, ids: number[]) => {
     // Storage blocked: the choice lasts for this visit.
   }
 };
-
-/** The page's folds: 12px corners, one line per summary (title, then its description in grey). */
-const FOLD_SX = { borderRadius: 1.5, '&::before': { display: 'none' } } as const;
-const FOLD_SUMMARY_SX = { minHeight: 44, '& .MuiAccordionSummary-content': { my: 0.75, minWidth: 0 } } as const;
-const FOLD_LINE_SX = { display: 'flex', alignItems: 'baseline', gap: 1.5, minWidth: 0 } as const;
-/** The lineage facts in a grid, four across, instead of a tall stack of seven. */
-const LINEAGE_GRID_SX = {
-  display: 'grid', gridTemplateColumns: { xs: 'repeat(2, 1fr)', md: 'repeat(4, 1fr)' }, columnGap: 2, rowGap: 1,
-  '& > *': { mb: '0 !important' },
-} as const;
 
 const ViewRFQPage: React.FC = () => {
   const { t } = useTranslation();
@@ -450,8 +425,6 @@ const ViewRFQPage: React.FC = () => {
   // A passed customer deadline alone does not block either (owner ruling 2026-09-26): the rep
   // decides whether to quote late, and Send asks for confirmation. Same rule as the server.
   const canPrepareQuote = !(intelligence?.commercialDecision === 'NO_QUOTE_REVIEW' && intelligence.slaRisk !== 'OVERDUE');
-  const canOpenRecommendedAction = Boolean(intelligence?.nextBestAction?.userOverrideAllowed &&
-    intelligence.nextBestAction?.overrideAction?.startsWith('/') && hasPermission('RFQ Management'));
   const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));
   const offersByLine = new Map<number, number>();
   for (const offer of sourcingQuery.data?.offers ?? []) {
@@ -560,6 +533,32 @@ const ViewRFQPage: React.FC = () => {
   // customer deadline — the leak utils/dates.ts exists to close.
   const deadline = parseDateSafe(rfq.bidClosingDate);
   const overdue = deadline !== null && deadline < new Date();
+  // What the customer stated goes up into the facts row; a term they did not state stays in the
+  // RFQ record as "Not stated", so a missing term is still visible. Nothing is filled in for them.
+  const sameName = (a?: string | null, b?: string | null) => (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase();
+  const buyerName = rfq.buyersName?.trim() || null;
+  // The Customer fact already shows the buyer when there is no customer, or when the buyer is the contact.
+  const buyerInHeader = buyerName && rfq.customerName && !sameName(buyerName, rfq.customerName) && !sameName(buyerName, rfq.contactName)
+    ? buyerName : null;
+  const theirReference = rfq.customerRfqReference?.trim() || null;
+  const deliverTo = rfq.deliveryLocation?.trim() || null;
+  const neededBy = parseDateSafe(rfq.requiredDeliveryDate) ? formatDateSafe(rfq.requiredDeliveryDate) : null;
+  // Who marked the lead to quote, from the promotion receipt, in one sentence. No receipt: say so.
+  const sourceRevision = rfq.sourceLeadRevisionNumber || null;
+  const lineageSentence = rfq.promotionId
+    ? [
+      `Marked to quote${rfq.promotedBy ? ` by ${rfq.promotedBy}` : ''}${parseDateSafe(rfq.promotedAtUtc) ? ` on ${formatDateSafe(rfq.promotedAtUtc)}` : ''}`,
+      sourceRevision ? `from lead revision ${sourceRevision}` : 'lead revision not stated',
+      sourceRevision && rfq.activeLeadRevision > sourceRevision ? `lead now at revision ${rfq.activeLeadRevision}` : null,
+    ].filter(Boolean).join(' · ')
+    : null;
+  const receiptValue = rfq.promotionId
+    ? [
+      `#${rfq.promotionId}`,
+      rfq.participationDecisionId ? `decision #${rfq.participationDecisionId}` : null,
+      rfq.participationVersion ? `version ${rfq.participationVersion}` : null,
+    ].filter(Boolean).join(' · ')
+    : null;
   // Closing today or tomorrow with the quote not yet out: say so, and offer to send what is ready.
   // Calendar days, not hours: a bid closing tomorrow afternoon is "tomorrow" all day today.
   const daysToClose = deadline === null ? null : calendarDaysUntil(rfq.bidClosingDate);
@@ -777,6 +776,8 @@ const ViewRFQPage: React.FC = () => {
           sx={{ mt: 0.75, gap: 1.5, flexWrap: 'wrap', alignItems: 'center', typography: 'body2',
             '& .fact-label': { color: 'text.secondary', mr: 0.5, fontSize: '0.75rem' }, '& .fact-value': { fontWeight: 700 } }}>
           <span><span className="fact-label">Customer</span><span className="fact-value">{`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`}</span></span>
+          {buyerInHeader && <span><span className="fact-label">Buyer</span><span className="fact-value">{buyerInHeader}</span></span>}
+          {theirReference && <span><span className="fact-label">Their reference</span><span className="fact-value">{theirReference}</span></span>}
           {(rfq.accountOwnerName || 'Unassigned') === (rfq.opportunityOwnerName || 'Unassigned') ? (
             <span><span className="fact-label">Owner</span><span className="fact-value">{rfq.accountOwnerName || 'Unassigned'}</span></span>
           ) : (
@@ -786,6 +787,8 @@ const ViewRFQPage: React.FC = () => {
             </>
           )}
           <span><span className="fact-label">Customer deadline</span><Box component="span" className="fact-value" sx={{ color: overdue ? 'error.main' : 'text.primary' }}>{formatDeadline(rfq.bidClosingDate || null)}</Box></span>
+          {deliverTo && <span><span className="fact-label">Deliver to</span><span className="fact-value">{deliverTo}</span></span>}
+          {neededBy && <span><span className="fact-label">Needed by</span><span className="fact-value">{neededBy}</span></span>}
           {/* A determinate bar pinned at 0 while the request is in flight is an assertion,
               and it is indistinguishable from an RFQ that genuinely scores zero. */}
           <Tooltip title={readinessNarrative} describeChild>
@@ -1141,221 +1144,78 @@ const ViewRFQPage: React.FC = () => {
               </Box>
             </Paper>
 
-            {/* Explanations and details keep every field and control they had; they are
-                folded so the page reads top-down: lines, then how to fulfil them, then the
-                record behind them. Nothing here is a different screen. */}
-            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
-                <Box sx={FOLD_LINE_SX}>
-                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Ways to fulfil this request</Typography>
-                  <Typography variant="body2" color="text.secondary" noWrap>{intelligence?.nextBestAction.label ?? 'Stock, supplier and split options with their evidence.'}</Typography>
-                </Box>
+            {/* The record behind the RFQ, closed, like "Quote record" on the quote page: where it came
+                from, the customer's terms not already in the facts row, and its history. How the
+                lines can be fulfilled is the Next step and the Sourcing workbench; the engine's
+                scenarios and the processing evidence stay in the API and on the lead and quote pages. */}
+            <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                <Typography sx={{ fontWeight: 600 }}>RFQ record</Typography>
               </AccordionSummary>
               <AccordionDetails>
-                <Stack spacing={2}>
-                {intelligenceQuery.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => intelligenceQuery.refetch()}>Retry</Button>}>Commercial intelligence could not be reconciled.</Alert>}
-                {intelligence && <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 1 }}>
-                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', mb: 2 }}>
-                    <Box>
-                      <Typography sx={{ fontWeight: 900 }}>Opportunity Digital Twin</Typography>
-                      <Typography variant="body2" color="text.secondary">{intelligence.nextBestAction.label}</Typography>
-                      <Typography variant="caption" color="text.secondary">Confidence {Math.round(intelligence.nextBestAction.confidence * 100)}% · {intelligence.digitalTwin.validity}</Typography>
-                    </Box>
-                    {canOpenRecommendedAction && <Button variant="outlined" onClick={() => navigate(intelligence.nextBestAction.overrideAction)}>Open recommended action</Button>}
-                  </Stack>
-                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(4, 1fr)' }, gap: 1.5 }}>
-                    {intelligence.digitalTwin.scenarios.map((scenario) => <Box key={scenario.code} sx={{ border: '1px solid', borderColor: 'divider', p: 1.5, minHeight: 132 }}>
-                      <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'center' }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{scenario.label}</Typography><Chip size="small" icon={scenario.eligible ? <ApproveIcon /> : <BlockerIcon />} color={scenario.eligible ? 'success' : 'default'} label={scenario.eligible ? 'Eligible' : 'Evidence needed'} /></Stack>
-                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{scenario.explanation}</Typography>
-                      {scenario.estimatedLandedCost != null && <Typography variant="body2" sx={{ mt: 1, fontWeight: 800 }}>Landed total {formatScenarioMoney(scenario.estimatedLandedCost, scenario.currencyCode)} · {scenario.estimatedLeadTimeDays ?? '—'} days</Typography>}
-                      <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 700 }}>Risk {statusLabel(scenario.riskBand)} · Confidence {Math.round(scenario.confidence * 100)}%</Typography>
-                      {scenario.validUntil && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Valid to {formatDateSafe(scenario.validUntil)}</Typography>}
-                      {scenario.quantities.length > 0 && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Stock {scenario.quantities.reduce((sum, line) => sum + line.immediateStockQuantity, 0)} · Supplier {scenario.quantities.reduce((sum, line) => sum + line.supplierQuantity, 0)}</Typography>}
-                      <Box component="details" sx={{ mt: 1 }}>
-                        <Typography component="summary" variant="caption" sx={{ fontWeight: 800, cursor: 'pointer' }}>Evidence and assumptions</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>{scenario.riskExplanation}</Typography>
-                        {scenario.costSources.map((source, index) => <Typography key={`${source.sourceType}-${index}`} variant="caption" sx={{ display: 'block' }}>{source.label}: {source.amount != null ? formatScenarioMoney(source.amount, scenario.currencyCode) : statusLabel(source.status)}</Typography>)}
-                        {scenario.assumptions.map((assumption) => <Typography key={assumption} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Assumption: {assumption}</Typography>)}
-                        {scenario.approvalRequirements.map((approval) => <Typography key={approval} variant="caption" color="warning.main" sx={{ display: 'block' }}>Approval: {approval}</Typography>)}
-                        {scenario.evidence.map((item) => <Typography key={`${item.recordType}-${item.recordId}-${item.role}`} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Evidence: {item.reference}</Typography>)}
-                      </Box>
-                    </Box>)}
-                  </Box>
-                  <Divider sx={{ my: 2 }} />
-                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} sx={{ justifyContent: 'space-between' }}>
-                    <Box>
-                      <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Predictive pricing · shadow mode</Typography>
-                      <Typography variant="caption" color="text.secondary">{intelligence.digitalTwin.backtest.cohort}</Typography>
-                      <Typography variant="body2" sx={{ mt: 0.5 }}>{intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').length} of {intelligence.digitalTwin.predictivePricing.length} lines have sufficient order-backed evidence.</Typography>
-                      {intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').map((line) => <Box key={line.rfqItemId} sx={{ mt: 1 }}>
-                        <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }}>Line {line.rfqItemId}: {line.recommendedUnitPrice != null ? formatScenarioMoney(line.recommendedUnitPrice, line.currencyCode) : 'withheld'} · {line.customerOrderSampleSize} order outcomes</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Winning range {line.winningRangeLow != null && line.winningRangeHigh != null ? `${formatScenarioMoney(line.winningRangeLow, line.currencyCode)} to ${formatScenarioMoney(line.winningRangeHigh, line.currencyCode)}` : 'insufficient'} · walk-forward MAPE {line.backtestMeanAbsolutePercentError != null ? `${line.backtestMeanAbsolutePercentError}% (${line.backtestHoldoutCount} holdouts)` : 'not measured'} · decided-cohort conversion baseline {line.cohortConversionBaseline != null ? `${Math.round(line.cohortConversionBaseline * 100)}%` : 'withheld'}</Typography>
-                      </Box>)}
-                    </Box>
-                    <Box>
-                      <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Customer target bridge</Typography>
-                      <Typography variant="body2">{intelligence.digitalTwin.customerTargetBridges.filter(bridge => bridge.status === 'VERIFIED_SOURCING_DECISION').length} verified · {intelligence.digitalTwin.customerTargetBridges.filter(bridge => bridge.status !== 'VERIFIED_SOURCING_DECISION').length} need attention</Typography>
-                      <Typography variant="caption" color="text.secondary">Margins and maximum Supplier costs are never inferred without a persisted decision.</Typography>
-                    </Box>
-                  </Stack>
-                </Paper>}
-
-                </Stack>
-              </AccordionDetails>
-            </Accordion>
-            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
-                <Box sx={FOLD_LINE_SX}>
-                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Line intelligence and processing evidence</Typography>
-                  <Typography variant="body2" color="text.secondary" noWrap>What was checked in stock and sourcing for each line, and how the request was read.</Typography>
-                </Box>
-              </AccordionSummary>
-              <AccordionDetails>
-                <Stack spacing={2}>
-                <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="rfq" recordId={rfq.id} /></Box>
-
-                  <CommercialProcessingEvidence resource="rfqs" id={rfq.id} />
-                </Stack>
-              </AccordionDetails>
-            </Accordion>
-            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
-                <Box sx={FOLD_LINE_SX}>
-                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Request details</Typography>
-                  <Typography variant="body2" color="text.secondary" noWrap>Who asked, when, and the terms preserved from their document.</Typography>
-                </Box>
-              </AccordionSummary>
-              <AccordionDetails>
-                <Stack spacing={3}>
-                {/* General Info */}
-                <Paper sx={{ p: 2, borderRadius: 1.5, border: '1px solid', borderColor: 'divider' }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
-                    <Typography sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em' }}>
-                      General Information
-                    </Typography>
-                  </Box>
-                  <Grid container spacing={2}>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Current Lead revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}>
-                      {rfq.leadId && commercialAccess.canViewLeadEvidence ? (
-                        <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>
-                          Open Canonical Lead
-                        </Button>
-                      ) : null}
-                    </Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName || 'N/A'} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
-                
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDateSafe(rfq.recDate)} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDeadline(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ Type" value={rfq.rfqtype || 'Agreement'} /></Grid>
-
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Created On" value={formatDateSafe(rfq.createdDate)} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName || null} /></Grid>
-                  </Grid>
-
-                  {rfq.headerRemarks && (
-                    <Box sx={{ mt: 2 }}>
-                      <Divider sx={{ mb: 2 }} />
-                      <DataField label="Header Remarks" value={rfq.headerRemarks} bold={false} />
-                    </Box>
+                <Typography variant="body2" data-testid="rfq-lineage" sx={{ fontWeight: 600, mb: 1.5 }}>
+                  {lineageSentence ?? (
+                    <>
+                      <Box component="span" sx={{ color: 'warning.dark' }}>No record of who marked this to quote</Box>
+                      {rfq.activeLeadRevision > 0 && ` · lead at revision ${rfq.activeLeadRevision}`}
+                    </>
                   )}
-                </Paper>
-
-                <Paper component="section" aria-labelledby="customer-request-terms-heading" sx={{ p: 2, borderRadius: 1.5, border: '1px solid', borderColor: 'divider' }}>
-                  <Typography id="customer-request-terms-heading" component="h2" sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em', mb: 0.5 }}>
-                    Customer request terms
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
-                    Read-only values preserved from the immutable Lead revision used to create this RFQ.
-                  </Typography>
-                  <Grid container spacing={2}>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer RFQ reference" value={rfq.customerRfqReference ?? null} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Required delivery date" value={formatDateSafe(rfq.requiredDeliveryDate ?? null)} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Delivery location" value={rfq.deliveryLocation ?? null} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Agreement reference" value={rfq.agreementReference ?? null} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Closing date (Hijri)" value={rfq.bidClosingDateHijri ?? null} /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><DataField label="Inquiry type" value={rfq.inquiryType ?? null} /></Grid>
-                  </Grid>
-                </Paper>
-
-                </Stack>
-              </AccordionDetails>
-            </Accordion>
-            {/* Where the RFQ came from, and what happened to it. Owner 2026-09-27: this was two
-                large cards and a full-width gold button under the folds; it is record-keeping a rep
-                rarely opens, so it folds like the others and reads as a compact two-column list. */}
-            <Accordion variant="outlined" disableGutters sx={FOLD_SX}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={FOLD_SUMMARY_SX}>
-                <Box sx={FOLD_LINE_SX}>
-                  <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', whiteSpace: 'nowrap' }}>Where this RFQ came from</Typography>
-                  <Typography variant="body2" color="text.secondary" noWrap>The lead, the decision to quote, and the RFQ's history.</Typography>
-                </Box>
-              </AccordionSummary>
-              <AccordionDetails>
-                <Grid container spacing={3}>
-                  <Grid size={{ xs: 12, md: 7 }}>
-                    <Box component="section" aria-labelledby="promotion-lineage-heading">
-                <Typography id="promotion-lineage-heading" sx={{ fontWeight: 800, fontSize: '0.9rem', mb: 1 }}>
-                  {rfq.promotionId ? 'Governed promotion receipt' : 'Promotion receipt unavailable'}
                 </Typography>
-                {rfq.promotionId ? (
-                  <Box sx={LINEAGE_GRID_SX}>
-                    <DataField label="Lead" value={rfq.leadId ? `#${rfq.leadId}` : null} />
-                    <DataField
-                      label="Immutable Lead revision"
-                      value={rfq.sourceLeadRevisionNumber
-                        ? `Revision ${rfq.sourceLeadRevisionNumber}`
-                        : rfq.sourceLeadRevisionId ? `Revision record #${rfq.sourceLeadRevisionId}` : null}
+                <Grid container spacing={2}>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Fact
+                      label="Lead"
+                      value={(
+                        <>
+                          {Boolean(rfq.leadId) && commercialAccess.canViewLeadEvidence && (
+                            <Link component="button" type="button" underline="hover" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)} sx={{ fontWeight: 700, textAlign: 'left' }}>
+                              Lead #{rfq.leadId}
+                            </Link>
+                          )}
+                          {Boolean(rfq.leadId) && !commercialAccess.canViewLeadEvidence && `Lead #${rfq.leadId}`}
+                          {!rfq.leadId && 'Not stated'}
+                        </>
+                      )}
                     />
-                    <DataField label="Participation decision" value={rfq.participationDecisionId ? `#${rfq.participationDecisionId}` : null} />
-                    <DataField label="Participation version" value={rfq.participationVersion ? `Version ${rfq.participationVersion}` : null} />
-                    <DataField label="Promotion receipt" value={`#${rfq.promotionId}`} />
-                    <DataField label="Promoted by" value={rfq.promotedBy ?? null} />
-                    <DataField label="Promoted on" value={formatDateSafe(rfq.promotedAtUtc ?? null)} />
-                  </Box>
-                ) : (
-                  <Alert severity="warning" sx={{ mb: 1.5 }}>
-                    This RFQ has no governed promotion receipt in the response. It may be a legacy or manually created record; immutable source lineage cannot be claimed.
-                  </Alert>
-                )}
-                {rfq.leadId && commercialAccess.canViewLeadEvidence ? (
-                  <Button
-                    variant="outlined" size="small"
-                    onClick={() => navigate(`/procurement/leads/${rfq.leadId}/workbench`)}
-                    sx={{ textTransform: 'none', fontWeight: 700, mt: 1 }}
-                  >
-                    Open Lead decision record
-                  </Button>
-                ) : null}
-                    </Box>
                   </Grid>
-                  <Grid size={{ xs: 12, md: 5 }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                      <HistoryIcon sx={{ color: 'text.secondary', fontSize: 18 }} />
-                      <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>Workflow history</Typography>
-                    </Box>
-               <Stack spacing={1}>
+                  {receiptValue && <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Receipt" value={receiptValue} /></Grid>}
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Received" value={formatDateSafe(rfq.recDate, 'Not stated')} /></Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Business unit" value={rfq.businessUnitName || 'Not stated'} /></Grid>
+                  {!buyerName && <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Buyer" value="Not stated" /></Grid>}
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Customer email" value={rfq.customerEmail || rfq.leadEmail || 'Not stated'} /></Grid>
+                  {!theirReference && <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Their reference" value="Not stated" /></Grid>}
+                  {!deliverTo && <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Deliver to" value="Not stated" /></Grid>}
+                  {!neededBy && <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Needed by" value="Not stated" /></Grid>}
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="RFQ type" value={rfq.rfqtype || 'Not stated'} /></Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Inquiry type" value={rfq.inquiryType || 'Not stated'} /></Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Agreement reference" value={rfq.agreementReference || 'Not stated'} /></Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}><Fact label="Customer deadline (Hijri)" value={rfq.bidClosingDateHijri || 'Not stated'} /></Grid>
+                  {rfq.headerRemarks && (
+                    <Grid size={12}><Fact label="Remarks" value={<Box component="span" sx={{ whiteSpace: 'pre-wrap', fontWeight: 500 }}>{rfq.headerRemarks}</Box>} /></Grid>
+                  )}
+                </Grid>
+                <Divider sx={{ my: 1.5 }} />
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                  <HistoryIcon sx={{ color: 'text.secondary', fontSize: 18 }} />
+                  <Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>Workflow history</Typography>
+                </Box>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={{ xs: 1, sm: 4 }}>
                   {[
                     { title: 'RFQ Created', user: rfq.createdBy, date: rfq.createdDate, icon: <EditIcon sx={{ fontSize: 14 }} /> },
-                    rfq.modifiedBy && { title: 'Last Modified', user: rfq.modifiedBy, date: rfq.modifiedDate, icon: <HistoryIcon sx={{ fontSize: 14 }} /> },
-                  ].filter(Boolean).map((log: any, i) => (
-                    <Box key={i} sx={{ display: 'flex', gap: 1.5 }}>
-                       <Box sx={{ mt: 0.5, p: 0.5, borderRadius: '50%', bgcolor: 'action.hover', display: 'flex' }}>
-                         {log.icon}
-                       </Box>
-                       <Box>
-                          <Typography sx={{ fontSize: '0.75rem', fontWeight: 800 }}>{log.title}</Typography>
-                          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>by {log.user}</Typography>
-                          <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>{formatDateSafe(log.date)}</Typography>
-                       </Box>
+                    rfq.modifiedBy ? { title: 'Last Modified', user: rfq.modifiedBy, date: rfq.modifiedDate, icon: <HistoryIcon sx={{ fontSize: 14 }} /> } : null,
+                  ].filter((log): log is NonNullable<typeof log> => log !== null).map((log) => (
+                    <Box key={log.title} sx={{ display: 'flex', gap: 1.5 }}>
+                      <Box sx={{ mt: 0.5, p: 0.5, borderRadius: '50%', bgcolor: 'action.hover', display: 'flex', alignSelf: 'flex-start' }}>
+                        {log.icon}
+                      </Box>
+                      <Box>
+                        <Typography sx={{ fontSize: '0.75rem', fontWeight: 800 }}>{log.title}</Typography>
+                        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>by {log.user || 'Not stated'}</Typography>
+                        <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>{formatDateSafe(log.date, 'Not stated')}</Typography>
+                      </Box>
                     </Box>
                   ))}
-               </Stack>
-                  </Grid>
-                </Grid>
+                </Stack>
               </AccordionDetails>
             </Accordion>
           </Stack>

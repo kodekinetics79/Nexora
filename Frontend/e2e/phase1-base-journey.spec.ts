@@ -283,14 +283,12 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await page.getByPlaceholder('Search RFQ/Bid number, serial, customer or buyer').fill(partialRfqNumber);
     await expect(page.getByText(partialRfqNumber, { exact: true }).first()).toBeVisible();
     await page.goto(`/procurement/rfqs/view/${partialRfqId}`);
-    // The lineage lives in its own fold at the foot of the RFQ page (owner 2026-09-27); open it
-    // the way a rep would before reading it.
-    await page.getByRole('button', { name: /Where this RFQ came from/ }).click();
-    await expect(page.getByText('Governed promotion receipt', { exact: true })).toBeVisible();
-    await expect(page.getByText('Immutable Lead revision', { exact: true })).toBeVisible();
-    await expect(page.getByText('Participation decision', { exact: true })).toBeVisible();
-    await expect(page.getByText('Promotion receipt', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open Lead decision record' })).toBeVisible();
+    // The lineage lives in the one "RFQ record" fold at the foot of the RFQ page (owner
+    // 2026-09-29); open it the way a rep would before reading it.
+    await page.getByRole('button', { name: 'RFQ record' }).click();
+    await expect(page.getByTestId('rfq-lineage')).toHaveText(/^Marked to quote .* · from lead revision \d+/);
+    await expect(page.getByText('Receipt', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: `Lead #${env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID}` })).toBeVisible();
 
     const bearer = await token(page);
     const rfqResponse = await readApi(page, bearer, `/api/Rfq/${partialRfqId}`);
@@ -303,8 +301,8 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await expect(page).toHaveURL(/\/sales\/quotes\/view\/\d+$/);
     partialQuoteId = Number(page.url().split('/').at(-1));
     expect(partialQuoteId).toBeGreaterThan(0);
-    await expect(page.getByRole('button', { name: 'Open Source RFQ' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open Canonical Lead' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^RFQ / })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open lead' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export PDF' })).toBeDisabled();
 
     // The operator returns to the RFQ. The header no longer offers to prepare a draft a second
@@ -373,7 +371,7 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     // or keep the draft as quoted (which records the review).
     await expect(page.getByText('Customer revision received', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Keep as quoted' })).toBeVisible();
-    await page.getByRole('button', { name: 'Open Canonical Lead' }).click();
+    await page.getByRole('button', { name: 'Open lead' }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/leads/view/${env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID}$`));
     await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
   });

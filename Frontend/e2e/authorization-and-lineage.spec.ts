@@ -30,10 +30,18 @@ test('Lead, RFQ and Quote retain one Nexora Serial', async ({ page }) => {
   for (const route of [
     `/procurement/leads/view/${fixture.leadId}`,
     `/procurement/rfqs/view/${fixture.rfqId}`,
-    `/sales/quotes/view/${fixture.quoteId}`,
   ]) {
     await page.goto(route);
     await expect(page.getByText(`Nexora Serial: ${fixture.nexoraSerial}`)).toBeVisible();
     await expect(page.getByText(fixture.customerName!, { exact: true }).first()).toBeVisible();
   }
+
+  // The quote page names the customer as its heading, links back to its RFQ and lead in the
+  // "Came from" fact, and keeps the serial in its closed "Quote record" fold.
+  await page.goto(`/sales/quotes/view/${fixture.quoteId}`);
+  await expect(page.getByText(fixture.customerName!, { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /^RFQ / })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open lead' })).toBeVisible();
+  await page.getByRole('button', { name: 'Quote record' }).click();
+  await expect(page.getByText(fixture.nexoraSerial!, { exact: true })).toBeVisible();
 });
