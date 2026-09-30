@@ -9,8 +9,9 @@ import { useSearchParams } from 'react-router-dom';
  * written, so an unfiltered list keeps a clean address, and a value the page cannot read (a hand-
  * edited or stale link) falls back to the default instead of emptying the list.
  *
- * Generic on purpose: Leads uses it first, RFQs and Quotes are meant to reuse it unchanged. Each key
- * has one KIND that says what a readable value looks like; a page uses the keys it has columns for.
+ * Generic on purpose: each list defines its own keys once with `defineListFilters` and reads them
+ * with `useListFilterState`; the default export is the Leads list's. Each key has one KIND that says
+ * what a readable value looks like.
  */
 
 export const DUE_WINDOWS = ['overdue', '7d', '14d'] as const;
@@ -44,7 +45,8 @@ export type OwnerChoice = (typeof OWNER_CHOICES)[number];
 export const NO_CUSTOMER = 'none';
 export const NOT_OPENED = 'none';
 
-type Kind =
+/** What a readable value looks like for one key. */
+export type ListFilterKind =
   | { kind: 'enum'; values: readonly string[] }
   /** A positive id, or `none`. Kept as text: it goes straight back to the server. */
   | { kind: 'idOrNone' }
@@ -58,65 +60,36 @@ type Kind =
   | { kind: 'text' }
   /** One short word (a source such as Email). */
   | { kind: 'word' };
+type Kind = ListFilterKind;
 
-const SCHEMA = {
-  customer: { kind: 'idOrNone' },
-  source: { kind: 'word' },
-  status: { kind: 'idOrNone' },
-  owner: { kind: 'enum', values: OWNER_CHOICES },
-  rep: { kind: 'id' },
-  due: { kind: 'enum', values: DUE_WINDOWS },
-  dueFrom: { kind: 'day' },
-  dueTo: { kind: 'day' },
-  received: { kind: 'enum', values: RECEIVED_WINDOWS },
-  receivedFrom: { kind: 'day' },
-  receivedTo: { kind: 'day' },
-  ingested: { kind: 'enum', values: RECEIVED_WINDOWS },
-  ingestedFrom: { kind: 'day' },
-  ingestedTo: { kind: 'day' },
-  required: { kind: 'enum', values: AHEAD_WINDOWS },
-  requiredFrom: { kind: 'day' },
-  requiredTo: { kind: 'day' },
-  itemsMin: { kind: 'count' },
-  itemsMax: { kind: 'count' },
-  serial: { kind: 'text' },
-  rfq: { kind: 'text' },
-  buyer: { kind: 'text' },
-  agreement: { kind: 'text' },
-} as const satisfies Record<string, Kind>;
+type KindValue<K extends Kind> =
+  K extends { kind: 'enum'; values: readonly (infer V)[] } ? V
+    : K extends { kind: 'id' } | { kind: 'count' } ? number
+      : string;
 
-export type ListFilterKey = keyof typeof SCHEMA;
-export const LIST_FILTER_KEYS = Object.keys(SCHEMA) as ListFilterKey[];
+/** The values a schema's keys read as: each one null while it does not narrow the list. */
+export type ListFilterValuesOf<S extends Record<string, Kind>> = { [K in keyof S]: KindValue<S[K]> | null };
 
-export interface ListFilterValues {
-  customer: string | null;
-  source: string | null;
-  status: string | null;
-  owner: OwnerChoice | null;
-  rep: number | null;
-  due: DueWindow | null;
-  dueFrom: string | null;
-  dueTo: string | null;
-  received: ReceivedWindow | null;
-  receivedFrom: string | null;
-  receivedTo: string | null;
-  ingested: ReceivedWindow | null;
-  ingestedFrom: string | null;
-  ingestedTo: string | null;
-  required: AheadWindow | null;
-  requiredFrom: string | null;
-  requiredTo: string | null;
-  itemsMin: number | null;
-  itemsMax: number | null;
-  serial: string | null;
-  rfq: string | null;
-  buyer: string | null;
-  agreement: string | null;
+/**
+ * One list's filter keys and the rules between them, built once per list page. Every list keeps its
+ * own keys on the URL; the reading, writing and clearing are the same for all of them.
+ */
+export interface ListFilterDefinition<S extends Record<string, Kind>> {
+  schema: S;
+  keys: (keyof S & string)[];
+  empty: ListFilterValuesOf<S>;
+  parse: (params: URLSearchParams) => ListFilterValuesOf<S>;
+  write: (params: URLSearchParams, values: Partial<ListFilterValuesOf<S>>) => URLSearchParams;
+  clearKeys: (params: URLSearchParams) => URLSearchParams;
+  any: (values: ListFilterValuesOf<S>) => boolean;
 }
 
-export const EMPTY_LIST_FILTERS: ListFilterValues = Object.freeze(
-  Object.fromEntries(LIST_FILTER_KEYS.map((key) => [key, null])) as unknown as ListFilterValues,
-);
+export interface ListFilterRules<S extends Record<string, Kind>> {
+  /** `[preset, from, to]`: a preset and a custom range for the same date cannot both hold; the preset wins. */
+  presets?: readonly (readonly [keyof S & string, keyof S & string, keyof S & string])[];
+  /** `[winner, loser]`: while the first holds, the second is dropped. */
+  supersedes?: readonly (readonly [keyof S & string, keyof S & string])[];
+}
 
 const POSITIVE_INTEGER = /^[1-9]\d*$/;
 const COUNT = /^(0|[1-9]\d{0,8})$/;
@@ -146,25 +119,93 @@ const readValue = (kind: Kind, raw: string): string | number | null => {
   }
 };
 
-export const parseListFilters = (params: URLSearchParams): ListFilterValues => {
-  const values = { ...EMPTY_LIST_FILTERS } as Record<ListFilterKey, string | number | null>;
-  LIST_FILTER_KEYS.forEach((key) => {
-    values[key] = readValue(SCHEMA[key], params.get(key)?.trim() ?? '');
-  });
-  const parsed = values as unknown as ListFilterValues;
-  // A preset and a custom range for the same date cannot both hold; the preset wins.
-  if (parsed.due) { parsed.dueFrom = null; parsed.dueTo = null; }
-  if (parsed.received) { parsed.receivedFrom = null; parsed.receivedTo = null; }
-  if (parsed.ingested) { parsed.ingestedFrom = null; parsed.ingestedTo = null; }
-  if (parsed.required) { parsed.requiredFrom = null; parsed.requiredTo = null; }
-  // One rep's list is a slice of everyone's: "Unassigned" or "Mine" plus a rep is not a question.
-  if (parsed.owner) parsed.rep = null;
-  return parsed;
+/** Builds one list's filter keys: how each is read from the URL, written back and cleared. */
+export const defineListFilters = <S extends Record<string, Kind>>(
+  schema: S,
+  rules: ListFilterRules<S> = {},
+): ListFilterDefinition<S> => {
+  const keys = Object.keys(schema) as (keyof S & string)[];
+  const empty = Object.freeze(Object.fromEntries(keys.map((key) => [key, null]))) as unknown as ListFilterValuesOf<S>;
+
+  const parse = (params: URLSearchParams): ListFilterValuesOf<S> => {
+    const values = { ...empty } as Record<string, string | number | null>;
+    keys.forEach((key) => {
+      values[key] = readValue(schema[key], params.get(key)?.trim() ?? '');
+    });
+    (rules.presets ?? []).forEach(([preset, from, to]) => {
+      if (values[preset] != null) { values[from] = null; values[to] = null; }
+    });
+    (rules.supersedes ?? []).forEach(([winner, loser]) => {
+      if (values[winner] != null) values[loser] = null;
+    });
+    return values as unknown as ListFilterValuesOf<S>;
+  };
+
+  const write = (params: URLSearchParams, values: Partial<ListFilterValuesOf<S>>): URLSearchParams => {
+    const next = new URLSearchParams(params);
+    (Object.keys(values) as (keyof S & string)[]).forEach((key) => {
+      if (!(key in schema)) return;
+      const value = values[key];
+      const text = value == null ? '' : String(value).trim();
+      if (text) next.set(key, text);
+      else next.delete(key);
+    });
+    return next;
+  };
+
+  const clearKeys = (params: URLSearchParams): URLSearchParams => {
+    const next = new URLSearchParams(params);
+    keys.forEach((key) => next.delete(key));
+    return next;
+  };
+
+  const any = (values: ListFilterValuesOf<S>): boolean => keys.some((key) => values[key] != null);
+
+  return { schema, keys, empty, parse, write, clearKeys, any };
 };
 
+/** The Leads list's keys. */
+const SCHEMA = {
+  customer: { kind: 'idOrNone' },
+  source: { kind: 'word' },
+  status: { kind: 'idOrNone' },
+  owner: { kind: 'enum', values: OWNER_CHOICES },
+  rep: { kind: 'id' },
+  due: { kind: 'enum', values: DUE_WINDOWS },
+  dueFrom: { kind: 'day' },
+  dueTo: { kind: 'day' },
+  received: { kind: 'enum', values: RECEIVED_WINDOWS },
+  receivedFrom: { kind: 'day' },
+  receivedTo: { kind: 'day' },
+  ingested: { kind: 'enum', values: RECEIVED_WINDOWS },
+  ingestedFrom: { kind: 'day' },
+  ingestedTo: { kind: 'day' },
+  required: { kind: 'enum', values: AHEAD_WINDOWS },
+  requiredFrom: { kind: 'day' },
+  requiredTo: { kind: 'day' },
+  itemsMin: { kind: 'count' },
+  itemsMax: { kind: 'count' },
+  serial: { kind: 'text' },
+  rfq: { kind: 'text' },
+  buyer: { kind: 'text' },
+  agreement: { kind: 'text' },
+} as const satisfies Record<string, Kind>;
+
+const LEAD_LIST_FILTERS = defineListFilters(SCHEMA, {
+  presets: [['due', 'dueFrom', 'dueTo'], ['received', 'receivedFrom', 'receivedTo'], ['ingested', 'ingestedFrom', 'ingestedTo'], ['required', 'requiredFrom', 'requiredTo']],
+  // One rep's list is a slice of everyone's: "Unassigned" or "Mine" plus a rep is not a question.
+  supersedes: [['owner', 'rep']],
+});
+
+export type ListFilterKey = keyof typeof SCHEMA;
+export const LIST_FILTER_KEYS: ListFilterKey[] = LEAD_LIST_FILTERS.keys;
+export type ListFilterValues = ListFilterValuesOf<typeof SCHEMA>;
+export const EMPTY_LIST_FILTERS: ListFilterValues = LEAD_LIST_FILTERS.empty;
+
+export const parseListFilters = LEAD_LIST_FILTERS.parse;
+
 /** True while any key narrows the list. */
-export const anyListFilter = (values: ListFilterValues): boolean =>
-  LIST_FILTER_KEYS.some((key) => values[key] != null);
+export const anyListFilter = LEAD_LIST_FILTERS.any;
 
 /**
  * The reader's today as `yyyy-MM-dd`, on the local calendar — the same day `calendarDaysUntil`
@@ -212,56 +253,49 @@ export const aheadRange = (window: AheadWindow, now: Date = new Date()): { from:
 };
 
 /** Writes the given values onto a copy of `params`: a default removes its key, other keys are kept. */
-export const writeListFilters = (params: URLSearchParams, values: Partial<ListFilterValues>): URLSearchParams => {
-  const next = new URLSearchParams(params);
-  (Object.keys(values) as ListFilterKey[]).forEach((key) => {
-    if (!(key in SCHEMA)) return;
-    const value = values[key];
-    const text = value == null ? '' : String(value).trim();
-    if (text) next.set(key, text);
-    else next.delete(key);
-  });
-  return next;
-};
+export const writeListFilters = LEAD_LIST_FILTERS.write;
 
 /** Removes only the filter keys from a copy of `params`. */
-export const clearListFilterKeys = (params: URLSearchParams): URLSearchParams => {
-  const next = new URLSearchParams(params);
-  LIST_FILTER_KEYS.forEach((key) => next.delete(key));
-  return next;
-};
+export const clearListFilterKeys = LEAD_LIST_FILTERS.clearKeys;
 
-export interface UseListFilters extends ListFilterValues {
-  /** The same values as one object that keeps its identity until the URL changes (a memo dependency). */
-  values: ListFilterValues;
+export interface ListFilterState<S extends Record<string, Kind>> {
+  /** The values as one object that keeps its identity until the URL changes (a memo dependency). */
+  values: ListFilterValuesOf<S>;
   /** True while any key narrows the list. */
   active: boolean;
-  set: (values: Partial<ListFilterValues>) => void;
+  set: (values: Partial<ListFilterValuesOf<S>>) => void;
   clear: () => void;
+}
+
+/** One list's filters, held on the URL. */
+export const useListFilterState = <S extends Record<string, Kind>>(definition: ListFilterDefinition<S>): ListFilterState<S> => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const values = useMemo(() => definition.parse(searchParams), [definition, searchParams]);
+
+  const set = useCallback((next: Partial<ListFilterValuesOf<S>>) => {
+    setSearchParams((current) => definition.write(current, next), { replace: true });
+  }, [definition, setSearchParams]);
+
+  const clear = useCallback(() => {
+    setSearchParams((current) => definition.clearKeys(current), { replace: true });
+  }, [definition, setSearchParams]);
+
+  return { values, active: definition.any(values), set, clear };
+};
+
+export interface UseListFilters extends ListFilterValues, ListFilterState<typeof SCHEMA> {
   dueParams: () => { due?: DueWindow; today?: string };
 }
 
+/** The Leads list's filters. */
 const useListFilters = (): UseListFilters => {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const values = useMemo(() => parseListFilters(searchParams), [searchParams]);
-
-  const set = useCallback((next: Partial<ListFilterValues>) => {
-    setSearchParams((current) => writeListFilters(current, next), { replace: true });
-  }, [setSearchParams]);
-
-  const clear = useCallback(() => {
-    setSearchParams((current) => clearListFilterKeys(current), { replace: true });
-  }, [setSearchParams]);
-
-  const due = values.due;
+  const state = useListFilterState(LEAD_LIST_FILTERS);
+  const due = state.values.due;
   const dueParamsForReader = useCallback(() => dueParams(due), [due]);
 
   return {
-    ...values,
-    values,
-    active: anyListFilter(values),
-    set,
-    clear,
+    ...state.values,
+    ...state,
     dueParams: dueParamsForReader,
   };
 };

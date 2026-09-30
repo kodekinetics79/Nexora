@@ -44,7 +44,131 @@ namespace ERP_RFQ_Automation.Repositories
                 .ToList();
         }
 
-        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false)
+        private static string? Term(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToLower();
+        private static DateTime? Day(DateTime? value) =>
+            value.HasValue ? DateTime.SpecifyKind(value.Value.Date, DateTimeKind.Unspecified) : null;
+
+        /// <summary>The column-header filters; see <see cref="RfqListColumnFilters"/>.</summary>
+        private IQueryable<Rfq> ApplyColumnFilters(IQueryable<Rfq> query, RfqListColumnFilters f, long businessUnitId)
+        {
+            if (string.Equals(f.Customer, "none", StringComparison.OrdinalIgnoreCase))
+                query = query.Where(r => r.CustomerId == null);
+            else if (long.TryParse(f.Customer, out var customerId))
+                query = query.Where(r => r.CustomerId == customerId);
+
+            if (Term(f.Rfq) is { } rfq) query = query.Where(r => r.Rfqno.ToLower().Contains(rfq));
+            if (Term(f.Serial) is { } serial) query = query.Where(r => r.NexoraSerial != null && r.NexoraSerial.ToLower().Contains(serial));
+            if (Term(f.CustomerRef) is { } customerRef) query = query.Where(r => r.CustomerRfqReference != null && r.CustomerRfqReference.ToLower().Contains(customerRef));
+            if (Term(f.Email) is { } email)
+                query = query.Where(r => (r.Customer != null && r.Customer.ContactEmail != null && r.Customer.ContactEmail.ToLower().Contains(email))
+                    || (r.Lead != null && r.Lead.Clientemail != null && r.Lead.Clientemail.ToLower().Contains(email)));
+            if (Term(f.Buyer) is { } buyer) query = query.Where(r => r.BuyersName != null && r.BuyersName.ToLower().Contains(buyer));
+            if (Term(f.Location) is { } location) query = query.Where(r => r.DeliveryLocation != null && r.DeliveryLocation.ToLower().Contains(location));
+            if (Term(f.Agreement) is { } agreement) query = query.Where(r => r.AgreementReference != null && r.AgreementReference.ToLower().Contains(agreement));
+            if (Term(f.Opportunity) is { } opportunity) query = query.Where(r => r.OpportunityNo != null && r.OpportunityNo.ToLower().Contains(opportunity));
+            if (Term(f.PromotedBy) is { } promotedBy)
+                query = query.Where(r => r.PromotionId != null && _context.Set<RfqPromotion>()
+                    .Any(p => p.Id == r.PromotionId && p.PromotedBy != null && p.PromotedBy.ToLower().Contains(promotedBy)));
+            if (Term(f.AccountOwner) is { } accountOwner)
+                query = query.Where(r => r.CustomerId != null && (
+                    from ownership in _context.Set<CustomerOwnership>()
+                    join user in _context.Users on ownership.PrimaryUserId equals user.Id
+                    where ownership.BusinessUnitId == businessUnitId && ownership.CustomerId == r.CustomerId
+                          && ownership.IsActive && ownership.EffectiveTo == null
+                          && (user.FirstName + " " + user.LastName).ToLower().Contains(accountOwner)
+                    select ownership.Id).Any());
+
+            // One value each, as the column shows it.
+            if (!string.IsNullOrWhiteSpace(f.RfqType)) query = query.Where(r => r.Rfqtype == f.RfqType);
+            if (!string.IsNullOrWhiteSpace(f.InquiryType)) query = query.Where(r => r.InquiryType == f.InquiryType);
+            if (!string.IsNullOrWhiteSpace(f.Bidding)) query = query.Where(r => r.BiddingDecision == f.Bidding);
+            if (f.StatusId is long statusId) query = query.Where(r => r.RfqstatusId == statusId);
+
+            // The Quote column: nothing yet, a draft being priced, or sent to the customer.
+            var live = _context.Quotes.Where(q => q.RemovedOn == null);
+            switch (f.Quote?.Trim().ToLowerInvariant())
+            {
+                case "none": query = query.Where(r => !live.Any(q => q.Rfqid == r.Id)); break;
+                case "draft": query = query.Where(r => live.Any(q => q.Rfqid == r.Id) && !live.Any(q => q.Rfqid == r.Id && q.SentOn != null)); break;
+                case "sent": query = query.Where(r => live.Any(q => q.Rfqid == r.Id && q.SentOn != null)); break;
+            }
+
+            if (ListDueWindow.Resolve(f.Due, f.Today, DateTime.UtcNow) is { } w)
+                query = query.Where(r => r.BidClosingDate != null && r.BidClosingDate >= w.From && r.BidClosingDate < w.Before);
+            if (Day(f.DueFrom) is { } dueFrom)
+            {
+                var from = dueFrom < ListDueWindow.Floor ? ListDueWindow.Floor : dueFrom;
+                query = query.Where(r => r.BidClosingDate != null && r.BidClosingDate >= from);
+            }
+            if (Day(f.DueTo) is { } dueTo)
+            {
+                var before = dueTo.AddDays(1);
+                query = query.Where(r => r.BidClosingDate != null && r.BidClosingDate >= ListDueWindow.Floor && r.BidClosingDate < before);
+            }
+            // Day ranges are inclusive of both days.
+            if (Day(f.ReceivedFrom) is { } receivedFrom) query = query.Where(r => r.RecDate >= receivedFrom);
+            if (Day(f.ReceivedTo) is { } receivedTo) { var before = receivedTo.AddDays(1); query = query.Where(r => r.RecDate < before); }
+            if (Day(f.RequiredFrom) is { } requiredFrom) query = query.Where(r => r.RequiredDeliveryDate != null && r.RequiredDeliveryDate >= requiredFrom);
+            if (Day(f.RequiredTo) is { } requiredTo) { var before = requiredTo.AddDays(1); query = query.Where(r => r.RequiredDeliveryDate != null && r.RequiredDeliveryDate < before); }
+            if (Day(f.SubmittedFrom) is { } submittedFrom) query = query.Where(r => r.SubDate != null && r.SubDate >= submittedFrom);
+            if (Day(f.SubmittedTo) is { } submittedTo) { var before = submittedTo.AddDays(1); query = query.Where(r => r.SubDate != null && r.SubDate < before); }
+            if (Day(f.CreatedFrom) is { } createdFrom) query = query.Where(r => r.CreatedDate >= createdFrom);
+            if (Day(f.CreatedTo) is { } createdTo) { var before = createdTo.AddDays(1); query = query.Where(r => r.CreatedDate < before); }
+            if (Day(f.ModifiedFrom) is { } modifiedFrom) query = query.Where(r => r.ModifiedDate != null && r.ModifiedDate >= modifiedFrom);
+            if (Day(f.ModifiedTo) is { } modifiedTo) { var before = modifiedTo.AddDays(1); query = query.Where(r => r.ModifiedDate != null && r.ModifiedDate < before); }
+
+            if (f.LinesMin is int min) query = query.Where(r => r.Rfqitems.Count() >= min);
+            if (f.LinesMax is int max) query = query.Where(r => r.Rfqitems.Count() <= max);
+            return query;
+        }
+
+        /// <summary>
+        /// The picker choices for the RFQs list's header filters, from the RFQs the reader can see in
+        /// the same queue: customers (plus how many have none), statuses, RFQ types, inquiry types
+        /// and bidding decisions, each with a count. Gated by the RFQ permission, not Customers.
+        /// </summary>
+        public async Task<RfqListChoices> GetListChoicesAsync(long businessUnitId, string? readiness = null, AccountTeamScope? accessScope = null)
+        {
+            IQueryable<Rfq> query = _context.Rfqs.AsNoTracking().Where(r => r.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            if (string.Equals(readiness, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                var finished = await FinishedRfqStatusIdsAsync(businessUnitId);
+                query = query.Where(r => (r.RfqstatusId == null || !finished.Contains(r.RfqstatusId.Value))
+                    && !_context.Quotes.Any(q => q.Rfqid == r.Id && q.RemovedOn == null && q.SentOn != null));
+            }
+
+            var rows = await query.Select(r => new
+            {
+                r.CustomerId, CustomerName = r.Customer != null ? r.Customer.Name : null,
+                r.RfqstatusId, StatusLabel = r.Rfqstatus != null ? r.Rfqstatus.SetupValue : null,
+                r.Rfqtype, r.InquiryType, r.BiddingDecision,
+            }).ToListAsync();
+
+            static IReadOnlyList<RfqListChoice> Values(IEnumerable<string?> values) => values
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .GroupBy(v => v!)
+                .Select(g => new RfqListChoice(g.Key, g.Key, g.Count()))
+                .OrderBy(c => c.Label, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return new RfqListChoices(
+                rows.Where(r => r.CustomerId.HasValue && r.CustomerName != null)
+                    .GroupBy(r => (r.CustomerId!.Value, r.CustomerName!))
+                    .Select(g => new RfqListChoice(g.Key.Value.ToString(), g.Key.Item2, g.Count()))
+                    .OrderBy(c => c.Label, StringComparer.OrdinalIgnoreCase).ToList(),
+                rows.Count(r => r.CustomerId == null),
+                rows.Where(r => r.RfqstatusId.HasValue && r.StatusLabel != null)
+                    .GroupBy(r => (r.RfqstatusId!.Value, r.StatusLabel!))
+                    .Select(g => new RfqListChoice(g.Key.Value.ToString(), g.Key.Item2, g.Count()))
+                    .OrderBy(c => c.Label, StringComparer.OrdinalIgnoreCase).ToList(),
+                Values(rows.Select(r => r.Rfqtype)),
+                Values(rows.Select(r => r.InquiryType)),
+                Values(rows.Select(r => r.BiddingDecision)));
+        }
+
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false, RfqListColumnFilters? columns = null)
         {
             IQueryable<Rfq> query = _context.Rfqs
                 .AsNoTracking()
@@ -108,6 +232,9 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(r => r.CustomerId == customerId.Value);
             if (unassigned)
                 query = query.Where(r => r.Lead == null || r.Lead.AssignTo == null);
+
+            if (columns != null)
+                query = ApplyColumnFilters(query, columns, businessUnitId);
 
             if (!string.IsNullOrWhiteSpace(search))
             {
@@ -982,4 +1109,9 @@ namespace ERP_RFQ_Automation.Repositories
             };
         }
     }
+
+    public sealed record RfqListChoice(string Value, string Label, int Count);
+    public sealed record RfqListChoices(
+        IReadOnlyList<RfqListChoice> Customers, int NoCustomer, IReadOnlyList<RfqListChoice> Statuses,
+        IReadOnlyList<RfqListChoice> RfqTypes, IReadOnlyList<RfqListChoice> InquiryTypes, IReadOnlyList<RfqListChoice> BiddingDecisions);
 }

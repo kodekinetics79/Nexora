@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Repositories;
 ﻿using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
@@ -43,6 +44,21 @@ namespace ERP_RFQ_Automation.Controllers
         private async Task<bool> CanAccessRfqAsync(long id, CancellationToken ct = default) =>
             _commercialAccess != null && await _commercialAccess.CanAccessRfqAsync(id, ct);
 
+        /// <summary>
+        /// The picker choices for the RFQs list's header filters (customers, statuses, RFQ types,
+        /// inquiry types, bidding decisions) with counts, from the RFQs the reader can see.
+        /// </summary>
+        [HttpGet("choices")]
+        [RequireModulePermission("RFQ Management", PermissionAction.View)]
+        public async Task<IActionResult> GetListChoices([FromQuery] string? readiness = null)
+        {
+            if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                return Unauthorized();
+            var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+            if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
+            return Ok(await _repository.GetListChoicesAsync(businessUnitId, readiness, actor.AccountScope));
+        }
+
         [HttpGet]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
         public async Task<ActionResult<PaginatedRfqResponseDTO>> GetAll(
@@ -56,7 +72,10 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] string? rfqStatusCode = null,
             [FromQuery] string? readiness = null,
             [FromQuery] long? customerId = null,
-            [FromQuery] bool unassigned = false)
+            [FromQuery] bool unassigned = false,
+            // The column-header filters, bound by name from the query string (customer, rfq, due,
+            // dueFrom, linesMin, quote, ...): see RfqListColumnFilters.
+            [FromQuery] RfqListColumnFilters? columns = null)
         {
             try
             {
@@ -74,7 +93,7 @@ namespace ERP_RFQ_Automation.Controllers
 
                 var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
                 if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
-                var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness, actor.AccountScope, customerId, unassigned);
+                var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness, actor.AccountScope, customerId, unassigned, columns);
                 
                 return Ok(new PaginatedRfqResponseDTO
                 {

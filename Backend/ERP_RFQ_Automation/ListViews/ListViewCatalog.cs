@@ -63,7 +63,7 @@ public static class ListViewCatalog
             ["leads.list"] = new("leads.list", null,
             [
                 new("nexoraSerial", "Nexora Serial", DefaultVisible: false),
-                new("rfqno", "RFQ #"),
+                new("rfqno", "RFQ/Bid #"),
                 new("client", "Client"),
                 new("buyer", "Buyer contact", DefaultVisible: false),
                 new("recDate", "Received", DefaultVisible: false),
@@ -82,7 +82,7 @@ public static class ListViewCatalog
                 // against the Gregorian one beside it. Rendered alongside, never instead of.
                 new("bidClosingDateHijri", "Deadline (Hijri)", DefaultVisible: false),
                 // FR-RFQ-03. The standing agreement this inquiry is called off against —
-                // not the inquiry's own reference, which is the "RFQ #" column above.
+                // not the inquiry's own reference, which is the "RFQ/Bid #" column above.
                 new("agreementReference", "Agreement reference", DefaultVisible: false),
                 new("itemCount", "Items"),
                 new("leadSource", "Source", DefaultVisible: false),
@@ -104,7 +104,7 @@ public static class ListViewCatalog
             ["rfqs.list"] = new("rfqs.list", null,
             [
                 new("nexoraSerial", "Nexora serial"),
-                new("rfqno", "RFQ #"),
+                new("rfqno", "RFQ/Bid #"),
                 new("customerRfqReference", "Customer RFQ reference", DefaultVisible: false),
                 new("customerName", "Customer"),
                 new("customerEmail", "Customer email", DefaultVisible: false),

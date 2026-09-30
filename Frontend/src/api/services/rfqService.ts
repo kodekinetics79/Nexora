@@ -144,10 +144,63 @@ export interface RfqFilterParams {
     rfqStatusId?: number;
     rfqStatusCode?: string;
     readiness?: string;
-    /** Only this client's RFQs. */
+    /** Only this client's RFQs. Superseded on the RFQs list by `customer`. */
     customerId?: number;
     /** Only RFQs whose lead has no owner. */
     unassigned?: boolean;
+    // The column-header filters (RfqListColumnFilters). Text matches "contains"; days are
+    // `yyyy-MM-dd` local days, both ends inclusive.
+    /** A customer id, or `none` for RFQs with no customer yet. */
+    customer?: string;
+    rfq?: string;
+    serial?: string;
+    customerRef?: string;
+    email?: string;
+    buyer?: string;
+    accountOwner?: string;
+    location?: string;
+    agreement?: string;
+    opportunity?: string;
+    promotedBy?: string;
+    rfqType?: string;
+    inquiryType?: string;
+    bidding?: string;
+    statusId?: number;
+    quote?: 'none' | 'draft' | 'sent';
+    /** A deadline window; always sent with `today`. */
+    due?: 'overdue' | '7d' | '14d';
+    today?: string;
+    dueFrom?: string;
+    dueTo?: string;
+    receivedFrom?: string;
+    receivedTo?: string;
+    requiredFrom?: string;
+    requiredTo?: string;
+    submittedFrom?: string;
+    submittedTo?: string;
+    createdFrom?: string;
+    createdTo?: string;
+    modifiedFrom?: string;
+    modifiedTo?: string;
+    linesMin?: number;
+    linesMax?: number;
+}
+
+/** One choice in an RFQs list header filter; `value` is what goes back to the server. */
+export interface RfqListChoice {
+    value: string;
+    label: string;
+    count: number;
+}
+
+/** The header-filter choices for the RFQs list, counted over the RFQs in the same view. */
+export interface RfqListChoices {
+    customers: RfqListChoice[];
+    noCustomer: number;
+    statuses: RfqListChoice[];
+    rfqTypes: RfqListChoice[];
+    inquiryTypes: RfqListChoice[];
+    biddingDecisions: RfqListChoice[];
 }
 
 /** Mirrors backend RfqitemCreateRequestDTO. `quantity` is [Required] server-side and must be positive. */
@@ -247,6 +300,11 @@ const rfqService = {
 
     getAll: async (params: RfqFilterParams): Promise<PaginatedRfqResponseDTO> => {
         const response = await axiosInstance.get<PaginatedRfqResponseDTO>("/api/Rfq", { params });
+        return response.data;
+    },
+    /** The RFQs list's header-filter choices, for the same readiness the grid asks for. */
+    getListChoices: async (readiness?: string): Promise<RfqListChoices> => {
+        const response = await axiosInstance.get<RfqListChoices>("/api/Rfq/choices", { params: readiness ? { readiness } : {} });
         return response.data;
     },
     getById: async (id: number, businessUnitId: number) => {

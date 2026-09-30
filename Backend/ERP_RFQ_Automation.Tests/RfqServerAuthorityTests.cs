@@ -316,11 +316,15 @@ public sealed class RfqServerAuthorityTests
         public Rfq? Updated { get; private set; }
         public int CallCount { get; private set; }
 
+        public Task<ERP_RFQ_Automation.Repositories.RfqListChoices> GetListChoicesAsync(long businessUnitId, string? readiness = null, AccountTeamScope? accessScope = null)
+            => throw new NotSupportedException();
+
         public Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(
             long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null,
             bool? isActive = null, long? assignedToId = null, string? createdBy = null,
             long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null,
-            AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false)
+            AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false,
+            ERP_RFQ_Automation.Repositories.RfqListColumnFilters? columns = null)
         {
             Record(businessUnitId);
             return Task.FromResult<(IEnumerable<RfqResponseDTO>, int)>(([], 0));
