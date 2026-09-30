@@ -144,6 +144,10 @@ export interface RfqFilterParams {
     rfqStatusId?: number;
     rfqStatusCode?: string;
     readiness?: string;
+    /** Only this client's RFQs. */
+    customerId?: number;
+    /** Only RFQs whose lead has no owner. */
+    unassigned?: boolean;
 }
 
 /** Mirrors backend RfqitemCreateRequestDTO. `quantity` is [Required] server-side and must be positive. */

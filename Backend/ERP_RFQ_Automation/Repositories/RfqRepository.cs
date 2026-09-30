@@ -29,7 +29,7 @@ namespace ERP_RFQ_Automation.Repositories
             _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
         }
 
-        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null)
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false)
         {
             IQueryable<Rfq> query = _context.Rfqs
                 .AsNoTracking()
@@ -72,6 +72,13 @@ namespace ERP_RFQ_Automation.Repositories
                     (!string.IsNullOrWhiteSpace(createdBy) && r.CreatedBy == createdBy)
                 );
             }
+
+            // The list's Client and Unassigned filters. The owner is the lead's owner, the same
+            // person the Owner column shows.
+            if (customerId.HasValue)
+                query = query.Where(r => r.CustomerId == customerId.Value);
+            if (unassigned)
+                query = query.Where(r => r.Lead == null || r.Lead.AssignTo == null);
 
             if (!string.IsNullOrWhiteSpace(search))
             {
