@@ -545,11 +545,15 @@ public sealed class RfqCreateCommercialLineageTests
     private sealed class ThrowingRfqRepository(Exception exception) : IRfqRepository
     {
         public Task AddAsync(Rfq rfq) => throw exception;
+        public Task<ERP_RFQ_Automation.Repositories.RfqListChoices> GetListChoicesAsync(long businessUnitId, string? readiness = null, AccountTeamScope? accessScope = null)
+            => throw new NotSupportedException();
+
         public Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(
             long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null,
             bool? isActive = null, long? assignedToId = null, string? createdBy = null,
             long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null,
-            AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false)
+            AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false,
+            ERP_RFQ_Automation.Repositories.RfqListColumnFilters? columns = null)
             => Task.FromResult<(IEnumerable<RfqResponseDTO>, int)>(([], 0));
         public Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null) => throw exception;
         public Task UpdateAsync(Rfq rfq) => throw exception;
