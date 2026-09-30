@@ -14,10 +14,49 @@ export interface LeadFilters {
   leadSource?: string;
   startDate?: string;
   endDate?: string;
+  /** Ingested window as instants (the reader's local midnights), matching the Ingested cell. */
+  ingestedFrom?: string;
+  ingestedBefore?: string;
   emailSource?: string;
   clientemail?: string;
   search?: string;
+  /**
+   * Comma-joined queue + owner tokens (`queue`, `unassigned`, `mine:{id}`, `rep:{id}`).
+   * `rep:{id}` narrows to one rep's inquiries and is never combined with `mine`/`unassigned`.
+   */
   view?: string;
+  /** A customer id, or `none` for inquiries with no customer linked yet. */
+  customer?: string;
+  /** Bid due date window; absent means any date. Always sent with `today`. */
+  due?: 'overdue' | '7d' | '14d';
+  /** The reader's local calendar day, `yyyy-MM-dd`, that `due` counts from. */
+  today?: string;
+  /** Column filters, each "contains": Nexora serial, RFQ/Bid number, buyer name or email, agreement. */
+  serial?: string;
+  rfq?: string;
+  buyer?: string;
+  agreement?: string;
+  /** A custom Deadline range, `yyyy-MM-dd` inclusive; sent instead of `due`. */
+  dueFrom?: string;
+  dueTo?: string;
+  /** Required delivery range, `yyyy-MM-dd` inclusive. */
+  requiredFrom?: string;
+  requiredTo?: string;
+  itemsMin?: number;
+  itemsMax?: number;
+  /** A lead status id, or `none` for inquiries nobody has opened yet. */
+  status?: string;
+}
+
+/** The Customer choices for a leads list: customers of the leads in that view, with counts. */
+export interface LeadListCustomers {
+  customers: { customerId: number; name: string; count: number }[];
+  /** How many leads in the view have no customer linked yet. */
+  noCustomer: number;
+  /** The statuses of the leads in the view, with counts. */
+  statuses: { statusId: number; code: string; label: string; count: number }[];
+  /** How many leads in the view nobody has opened yet (no status). */
+  notOpened: number;
 }
 
 export interface LeadClarificationRequest {
@@ -762,6 +801,21 @@ const leadService = {
   getAll: async (filters: LeadFilters): Promise<PaginatedResponse<LeadResponseDTO>> => {
     const r = await axiosInstance.get('/api/Lead', { params: filters });
     return r.data;
+  },
+
+  /**
+   * GET /api/Lead/customers — the customers of the leads under `view` (the same composed view the
+   * grid sends) and the same date button, with counts, plus how many have no customer yet; and the
+   * statuses of the leads under `view`, with counts, plus how many nobody has opened yet.
+   */
+  getListCustomers: async (view?: string, due?: { due?: string; today?: string }): Promise<LeadListCustomers> => {
+    const r = await axiosInstance.get<LeadListCustomers>('/api/Lead/customers', { params: { view, ...due } });
+    return {
+      customers: Array.isArray(r.data?.customers) ? r.data.customers : [],
+      noCustomer: r.data?.noCustomer ?? 0,
+      statuses: Array.isArray(r.data?.statuses) ? r.data.statuses : [],
+      notOpened: r.data?.notOpened ?? 0,
+    };
   },
 
   getById: async (id: number): Promise<LeadResponseDTO> => {

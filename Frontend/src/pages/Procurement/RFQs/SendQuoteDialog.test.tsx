@@ -80,6 +80,7 @@ beforeEach(() => {
 
 describe('Send quote', () => {
   it('sets currency and 30-day validity, confirms the price source and sends to the typed email', async () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     const onSent = renderDialog();
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText('BATTERY, DRY CELL, 3.6VDC')).toBeInTheDocument();
@@ -96,6 +97,9 @@ describe('Send quote', () => {
     expect(mocks.saveQuoteTerms).toHaveBeenCalledWith(7, expect.objectContaining({ currencyId: 1, validUntil: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) }));
     expect(mocks.confirmPriceAttestation).toHaveBeenCalledWith(7, 'SALES_MANAGER', 'Ahmed Saleh');
     await waitFor(() => expect(onSent).toHaveBeenCalled());
+    // A sent quote takes its RFQ off the RFQ list, so that list refetches even while inactive.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['rfqs'], refetchType: 'all' });
+    invalidate.mockRestore();
   });
 
   it('after the customer deadline, Send asks first and sends only on Send anyway', async () => {

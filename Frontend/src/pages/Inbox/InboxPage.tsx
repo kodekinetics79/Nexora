@@ -165,14 +165,15 @@ const InboxPage: React.FC = () => {
   /**
    * "Enquiries without an owner" is the ROUTING queue: accepted enquiries nobody has claimed. An
    * enquiry that is unowned because nobody has accepted it yet is not in that queue, but it is
-   * still unowned — the Leads list (Owner = Unassigned) and Sales today both count it. Calling the
+   * still unowned — the Leads list (Owner = Unassigned, its default 'queue' view: not yet an RFQ)
+   * and Sales today both count it. Calling the
    * queue clear over two such enquiries was a lie by omission, so the same list the Leads page
    * reads is asked for its count and the clear line says what is really true.
    */
   const asksForUnowned = visibleQueues.some((queue) => queue.key === 'leads-to-own');
   const unownedOpen = useQuery({
     queryKey: ['inbox', 'unowned-open', businessUnitId] as const,
-    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: 1, view: 'open,unassigned' }),
+    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: 1, view: 'queue,unassigned' }),
     enabled: asksForUnowned,
     staleTime: 30_000,
     retry: false,
@@ -625,6 +626,8 @@ export async function loadQueue(
         pageNumber: 1,
         pageSize: 25,
         rfqStatusCode: 'DRAFT',
+        // Agrees with the RFQ list: an RFQ whose quote was sent has left the queue.
+        readiness: 'open',
         businessUnitId,
       });
       return (page.items ?? [])

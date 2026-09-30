@@ -258,7 +258,8 @@ describe('DecidePage', () => {
   });
 
   it('chains the assessment, the decision, qualification and promotion behind one button', async () => {
-    renderPage();
+    const { client } = renderPage();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
     await quoteEveryLine();
     await pickOption('Currency for line 00002', 'SAR');
     fireEvent.click(screen.getByRole('button', { name: 'Create RFQ' }));
@@ -297,6 +298,9 @@ describe('DecidePage', () => {
     }));
     expect(snack).toHaveBeenCalledWith('RFQ RFQ-2026-0417 created with 3 lines.', { variant: 'success' });
     expect(navigate).toHaveBeenCalledWith('/procurement/rfqs/view/417');
+    // The lead has left the Leads queue: the list and its count refetch now, not on return.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['leads'], refetchType: 'all' });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['leads-total'], refetchType: 'all' });
   });
 
   it('builds the request once for a whole Create RFQ click, and never reads the full lead record', async () => {

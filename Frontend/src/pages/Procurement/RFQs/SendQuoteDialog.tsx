@@ -330,6 +330,9 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
     for (const key of ["send-quote", "send-quote-readiness", "send-quote-attestation", "send-quote-id", "send-quote-open", "stock-price", "rfq-detail"]) {
       queryClient.invalidateQueries({ queryKey: [key] });
     }
+    // A sent quote takes its RFQ off the RFQ list. 'all' refetches the list even while inactive,
+    // so going back to it does not paint the quoted RFQ from cache first.
+    queryClient.invalidateQueries({ queryKey: ["rfqs"], refetchType: "all" });
   };
 
   const download = useMutation({

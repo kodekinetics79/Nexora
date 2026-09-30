@@ -567,6 +567,10 @@ const DecidePage: React.FC = () => {
         idempotencyKey: promotionKey.current,
       });
       guard.markSaved(formOf(workbench, decisions, concern));
+      // The lead has left the Leads queue. 'all' refetches the inactive list now, so going back
+      // to it does not paint the converted lead from cache first. Not awaited: nobody is looking.
+      void queryClient.invalidateQueries({ queryKey: ['leads'], refetchType: 'all' });
+      void queryClient.invalidateQueries({ queryKey: ['leads-total'], refetchType: 'all' });
       enqueueSnackbar(
         `RFQ ${receipt.rfqNumber || `#${receipt.rfqId}`} created with ${receipt.promotedLineCount} line${receipt.promotedLineCount === 1 ? '' : 's'}.`,
         { variant: 'success' },

@@ -59,4 +59,62 @@ public sealed class RfqListWorkOrderTests
         Assert.NotNull(quoted.LatestQuoteSentOn);
         Assert.Null(list.Single(r => r.Id == 4).LatestQuoteNo);
     }
+    /// <summary>
+    /// Owner 2026-09-29: once an RFQ becomes a quote it leaves the RFQ list. "Became a quote" means
+    /// SENT: pricing the first line creates the draft, and a half-priced RFQ must stay where the rep
+    /// prices it. A withdrawn quote does not count; an RFQ closed without a quote is finished too.
+    /// A search (no readiness) still reaches every RFQ.
+    /// </summary>
+    [Fact]
+    public async Task Open_list_drops_rfqs_whose_quote_was_sent_or_that_were_closed()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        const long tenant = Tenant + 1;
+        var leads = Enumerable.Range(0, 6).Select(i => Seed.Lead(context, 96_211 + i, tenant)).ToList();
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = 96_290, SetupType = "RFQStatus", SetupCode = "CANCELLED", SetupValue = "Cancelled",
+            BusinessUnitId = tenant, IsActive = true, CreatedBy = "seed", CreatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        var now = DateTime.UtcNow;
+        for (var i = 0; i < 6; i++)
+        {
+            var rfq = new Rfq
+            {
+                Id = 201 + i, Rfqno = $"RFQ-{201 + i}", RecDate = now, BusinessUnitId = tenant,
+                LeadId = leads[i].Id, CreatedBy = "seed", CreatedDate = now,
+                RfqstatusId = i == 5 ? 96_290 : null,
+            };
+            rfq.InheritCommercialIdentity(leads[i]);
+            context.Rfqs.Add(rfq);
+        }
+        await context.SaveChangesAsync();
+        Quote Q(long id, long rfqId, DateTime? sentOn) => new()
+        {
+            Id = id, QuoteNo = $"QT-{id}", Rfqid = rfqId, BusinessUnitId = tenant, QuoteDate = now, SentOn = sentOn,
+            CreatedBy = "seed", CreatedDate = now
+        };
+        // 201: no quote. 202: sent. 203: draft only (pricing under way). 204: sent + draft revision.
+        // 205: only a withdrawn quote. 206: cancelled, no quote.
+        context.Quotes.Add(Q(21, 202, now.AddDays(-1)));
+        context.Quotes.Add(Q(22, 203, null));
+        context.Quotes.Add(Q(23, 204, now.AddDays(-2)));
+        context.Quotes.Add(Q(24, 204, null));
+        var withdrawn = Q(25, 205, now.AddDays(-3));
+        withdrawn.RemovedOn = now; withdrawn.RemovedBy = "seed"; withdrawn.RemovalReason = "wrong customer";
+        context.Quotes.Add(withdrawn);
+        await context.SaveChangesAsync();
+
+        var repo = new RfqRepository(context);
+        var (open, openTotal) = await repo.GetAllAsync(tenant, readiness: "open");
+        Assert.Equal(new long[] { 201, 203, 205 }, open.Select(r => r.Id).OrderBy(id => id));
+        Assert.Equal(3, openTotal);
+
+        var (all, allTotal) = await repo.GetAllAsync(tenant);
+        Assert.Equal(6, allTotal);
+        Assert.Equal(6, all.Count());
+    }
 }

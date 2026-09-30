@@ -25,6 +25,21 @@ namespace ERP_RFQ_Automation.Repositories
             _context = context;
         }
 
+        private async Task<List<long>> FinishedRfqStatusIdsAsync(long businessUnitId)
+        {
+            var statuses = await _context.SetupMasters.AsNoTracking()
+                .Where(s => s.BusinessUnitId == businessUnitId
+                    && s.SetupType.ToLower().Replace(" ", "") == "rfqstatus")
+                .Select(s => new { s.SetupId, s.SetupCode, s.SetupValue })
+                .ToListAsync();
+
+            return statuses
+                .Where(s => LifecyclePolicy.IsTerminal(
+                    "Rfq", LifecyclePolicy.Canonicalize("Rfq", s.SetupCode, s.SetupValue)))
+                .Select(s => s.SetupId)
+                .ToList();
+        }
+
         public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null)
         {
             IQueryable<Rfq> query = _context.Rfqs
@@ -50,7 +65,21 @@ namespace ERP_RFQ_Automation.Repositories
                     (r.Rfqstatus.SetupCode != null && r.Rfqstatus.SetupCode.ToUpper() == code ||
                      r.Rfqstatus.SetupValue.ToUpper() == code));
             }
-            if (string.Equals(readiness, "ready-for-quote", StringComparison.OrdinalIgnoreCase))
+            // "open" is the RFQ list's default: RFQs whose quote has not gone to the customer. Once
+            // a quote is SENT (emailed, marked submitted or uploaded) the work lives on the Quotes
+            // list. A draft does not count: pricing the first line creates the draft
+            // (PriceRfqLineAsync), and a half-priced RFQ must stay where the rep prices it.
+            // "Ready for quote" is the same queue narrowed further, so it drops sent RFQs too.
+            // An RFQ closed without a quote (cancelled, lost, expired) is finished work too; which
+            // states those are comes from the lifecycle policy, as on the Leads list.
+            var readyForQuote = string.Equals(readiness, "ready-for-quote", StringComparison.OrdinalIgnoreCase);
+            if (readyForQuote || string.Equals(readiness, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                var finished = await FinishedRfqStatusIdsAsync(businessUnitId);
+                query = query.Where(r => (r.RfqstatusId == null || !finished.Contains(r.RfqstatusId.Value))
+                    && !_context.Quotes.Any(q => q.Rfqid == r.Id && q.RemovedOn == null && q.SentOn != null));
+            }
+            if (readyForQuote)
             {
                 query = query.Where(r => r.CustomerId != null && r.LeadId != null
                     && r.Rfqitems.Any()

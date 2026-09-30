@@ -810,9 +810,14 @@ public sealed class CommercialIntelligenceController(
         var quotes = await db.Quotes.AsNoTracking().Include(x => x.Status).Include(x => x.Currency)
             .Where(x => x.BusinessUnitId == tenant && x.Rfqid.HasValue && rfqIds.Contains(x.Rfqid.Value)).ToListAsync(ct);
         return users.Select(user => { var ownedLeadIds = assignments.Where(x => x.ToUserId == user.Id).Select(x => x.LeadId).ToHashSet();
-            var activeLeads = leads.Where(x => ownedLeadIds.Contains(x.Id) && !TerminalLead(x.LeadStatus?.SetupCode, x.LeadStatus?.SetupValue)).ToArray();
+            // The two tiles open the Leads and RFQ lists, so they count what those lists show: a lead
+            // leaves once it has an RFQ, an RFQ once its quote was sent (LeadRepository "queue",
+            // RfqRepository readiness "open").
+            var leadIdsWithRfq = rfqs.Where(x => x.LeadId.HasValue).Select(x => x.LeadId!.Value).ToHashSet();
+            var rfqIdsWithSentQuote = quotes.Where(x => x.Rfqid.HasValue && x.RemovedOn == null && x.SentOn != null).Select(x => x.Rfqid!.Value).ToHashSet();
+            var activeLeads = leads.Where(x => ownedLeadIds.Contains(x.Id) && !leadIdsWithRfq.Contains(x.Id) && !TerminalLead(x.LeadStatus?.SetupCode, x.LeadStatus?.SetupValue)).ToArray();
             var allOwnedRfqs = rfqs.Where(x => x.LeadId.HasValue && ownedLeadIds.Contains(x.LeadId.Value)).ToArray();
-            var openRfqs = allOwnedRfqs.Where(x => !TerminalRfq(x.Rfqstatus?.SetupCode, x.Rfqstatus?.SetupValue)).ToArray();
+            var openRfqs = allOwnedRfqs.Where(x => !rfqIdsWithSentQuote.Contains(x.Id) && !TerminalRfq(x.Rfqstatus?.SetupCode, x.Rfqstatus?.SetupValue)).ToArray();
             var allOwnedRfqIds = allOwnedRfqs.Select(x => x.Id).ToHashSet();
             var ownedQuotes = quotes.Where(x => x.Rfqid.HasValue && allOwnedRfqIds.Contains(x.Rfqid.Value) && !TerminalQuote(x.Status?.SetupCode, x.Status?.SetupValue)).ToArray();
             return new RepSummary(user.Id, Name(user), user.Email, user.Role?.SetupValue,

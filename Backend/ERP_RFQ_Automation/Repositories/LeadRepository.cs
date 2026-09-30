@@ -124,7 +124,7 @@ namespace ERP_RFQ_Automation.Repositories
         }
 
         /// <summary>Which owner the leads list was narrowed to. See <see cref="ParseLeadListView"/>.</summary>
-        private enum LeadListOwnerFilter { None, Unassigned, Mine }
+        private enum LeadListOwnerFilter { None, Unassigned, Mine, Rep }
 
         /// <summary>
         /// Splits the list's <c>view</c> parameter into the QUEUE view and the OWNER filter.
@@ -163,6 +163,13 @@ namespace ERP_RFQ_Automation.Repositories
                     owner = LeadListOwnerFilter.Mine;
                     if (token.Length > 5 && long.TryParse(token[5..], out var parsed)) ownerUserId = parsed;
                 }
+                else if (token.StartsWith("rep:", StringComparison.OrdinalIgnoreCase))
+                {
+                    // A manager narrowing to one rep. Like "mine" it can only narrow the rows the
+                    // caller's scope already admits, so a rep naming a colleague sees nothing.
+                    owner = LeadListOwnerFilter.Rep;
+                    ownerUserId = long.TryParse(token[4..], out var rep) ? rep : null;
+                }
                 else
                 {
                     queueView ??= token;
@@ -172,48 +179,103 @@ namespace ERP_RFQ_Automation.Repositories
             return (queueView, owner, ownerUserId);
         }
 
-        public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null, AccountTeamScope? accessScope = null)
+        /// <summary>The column-header filters; see <see cref="LeadListColumnFilters"/>.</summary>
+        private async Task<IQueryable<Lead>> ApplyColumnFilters(IQueryable<Lead> query, LeadListColumnFilters f, long businessUnitId)
         {
-            var (queueView, ownerFilter, ownerUserId) = ParseLeadListView(view);
+            static string? Term(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToLower();
+            if (Term(f.Serial) is { } serial)
+                query = query.Where(l => l.CommercialCaseReference.ToLower().Contains(serial));
+            if (Term(f.Rfq) is { } rfq)
+                query = query.Where(l => l.Rfqno != null && l.Rfqno.ToLower().Contains(rfq));
+            if (Term(f.Buyer) is { } buyer)
+                query = query.Where(l => (l.BuyersName != null && l.BuyersName.ToLower().Contains(buyer))
+                    || (l.Clientemail != null && l.Clientemail.ToLower().Contains(buyer)));
+            if (Term(f.Agreement) is { } agreement)
+                query = query.Where(l => l.AgreementReference != null && l.AgreementReference.ToLower().Contains(agreement));
 
-            var query = _context.Leads
-                .AsNoTracking()
-                .Include(l => l.BusinessUnit)
-                .Include(l => l.EmailIngests)
-                // The owner is projected onto every list row now (see below), so the navigation
-                // has to travel with the page or each row costs a lazy round trip.
-                .Include(l => l.AssignToNavigation)
-                .Where(l => l.BusinessUnitId == businessUnitId);
+            // Day ranges are inclusive of both days: "to 30 Sep" keeps a 17:00 closing on the 30th.
+            if (LeadListColumnFilters.Day(f.ReceivedFrom) is { } receivedFrom)
+                query = query.Where(l => l.RecDate >= receivedFrom);
+            if (LeadListColumnFilters.Day(f.ReceivedTo) is { } receivedTo)
+            {
+                var before = receivedTo.AddDays(1);
+                query = query.Where(l => l.RecDate < before);
+            }
+            if (LeadListColumnFilters.Day(f.DueFrom) is { } dueFrom)
+            {
+                var from = dueFrom < ListDueWindow.Floor ? ListDueWindow.Floor : dueFrom;
+                query = query.Where(l => l.BidClosingDate != null && l.BidClosingDate >= from);
+            }
+            if (LeadListColumnFilters.Day(f.DueTo) is { } dueTo)
+            {
+                var before = dueTo.AddDays(1);
+                query = query.Where(l => l.BidClosingDate != null && l.BidClosingDate >= ListDueWindow.Floor && l.BidClosingDate < before);
+            }
+            if (LeadListColumnFilters.Day(f.RequiredFrom) is { } requiredFrom)
+                query = query.Where(l => l.RequiredDeliveryDate != null && l.RequiredDeliveryDate >= requiredFrom);
+            if (LeadListColumnFilters.Day(f.RequiredTo) is { } requiredTo)
+            {
+                var before = requiredTo.AddDays(1);
+                query = query.Where(l => l.RequiredDeliveryDate != null && l.RequiredDeliveryDate < before);
+            }
+            // Ingested is what the cell shows: the earliest arrival of the lead's source documents,
+            // or when the lead was created if it has none (LeadIngestionAudit.ResolveIngestionTimestamp).
+            // Arrival times are read per lead and compared here, the same way the cell is built, so
+            // the filter and the cell cannot disagree.
+            if (f.IngestedFrom.HasValue || f.IngestedBefore.HasValue)
+            {
+                var arrivals = await _context.Set<LeadIdentity.LeadIngestionOccurrence>().AsNoTracking()
+                    .Where(o => o.BusinessUnitId == businessUnitId && o.LeadId != null && o.SourceDocumentOccurrenceId != null)
+                    .Join(_context.Set<DocumentIntelligence.Persistence.SourceDocumentOccurrence>().AsNoTracking()
+                            .Where(sd => sd.BusinessUnitId == businessUnitId),
+                        o => o.SourceDocumentOccurrenceId, sd => (long?)sd.Id,
+                        (o, sd) => new { LeadId = o.LeadId!.Value, sd.ReceivedOn })
+                    .ToListAsync();
+                var earliest = arrivals.GroupBy(a => a.LeadId).ToDictionary(g => g.Key, g => g.Min(a => a.ReceivedOn));
+                bool Inside(DateTimeOffset at) =>
+                    (f.IngestedFrom is not { } from || at >= from) && (f.IngestedBefore is not { } before || at < before);
+                var withSource = earliest.Keys.ToList();
+                var sourceInside = earliest.Where(e => Inside(e.Value)).Select(e => e.Key).ToList();
+                var fromUtc = f.IngestedFrom?.UtcDateTime;
+                var beforeUtc = f.IngestedBefore?.UtcDateTime;
+                query = query.Where(l => sourceInside.Contains(l.Id)
+                    || (!withSource.Contains(l.Id)
+                        && (fromUtc == null || l.CreatedDate >= fromUtc)
+                        && (beforeUtc == null || l.CreatedDate < beforeUtc)));
+            }
+            if (f.ItemsMin is int min)
+                query = query.Where(l => l.LeadItems.Count() >= min);
+            if (f.ItemsMax is int max)
+                query = query.Where(l => l.LeadItems.Count() <= max);
 
-            if (accessScope != null)
-                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            if (string.Equals(f.Status, "none", StringComparison.OrdinalIgnoreCase))
+                query = query.Where(l => l.LeadStatusId == null);
+            else if (long.TryParse(f.Status, out var statusId))
+                query = query.Where(l => l.LeadStatusId == statusId);
+            return query;
+        }
 
+        /// <summary>
+        /// The queue view and owner narrowing shared by the list and its customer choices, so the
+        /// customer picker only ever offers customers that are in the list the reader is on.
+        /// </summary>
+        private async Task<IQueryable<Lead>> ApplyQueueAndOwnerAsync(
+            IQueryable<Lead> query, string? queueView, LeadListOwnerFilter ownerFilter, long? ownerUserId, long businessUnitId)
+        {
             // The default list is the untriaged inbox — RfqRepository spells LeadStatusId == null
             // out as "new lead to review". "open" and "revisions" deliberately escape it: ANY
             // lifecycle transition stamps a status, so a queue that keeps this filter is a queue
             // that empties itself the moment a rep starts working, which is precisely how the
             // deadline board lost every tender the day after it was advanced.
-            var openWorkView = string.Equals(queueView, "open", StringComparison.OrdinalIgnoreCase);
+            // "queue" is the Leads list's own default: the open pipeline minus every lead that has
+            // already become an RFQ. From there the work lives on the RFQ, so the lead leaves this
+            // list the way Unassigned/Assigned already drop it (GetAcceptedLeadsAsync). "open" is
+            // left whole because the deadline board follows a tender past its RFQ to submission.
+            var leadQueueView = string.Equals(queueView, "queue", StringComparison.OrdinalIgnoreCase);
+            var openWorkView = leadQueueView || string.Equals(queueView, "open", StringComparison.OrdinalIgnoreCase);
             if (!openWorkView && !string.Equals(queueView, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.LeadStatusId == null);
 
-            // Apply filters
-            if (id.HasValue)
-                query = query.Where(l => l.Id == id.Value);
-            if (!string.IsNullOrWhiteSpace(rfqno))
-                query = query.Where(l => l.Rfqno != null && l.Rfqno.ToLower().Contains(rfqno.ToLower()));
-            if (!string.IsNullOrWhiteSpace(buyersName))
-                query = query.Where(l => l.BuyersName != null && l.BuyersName.ToLower().Contains(buyersName.ToLower()));
-            if (!string.IsNullOrWhiteSpace(leadSource))
-                query = query.Where(l => l.LeadSource.ToLower().Contains(leadSource.ToLower()));
-            if (!string.IsNullOrWhiteSpace(emailSource))
-                query = query.Where(l => l.EmailSource != null && l.EmailSource.ToLower().Contains(emailSource.ToLower()));
-            if (!string.IsNullOrWhiteSpace(clientemail))
-                query = query.Where(l => l.Clientemail != null && l.Clientemail.ToLower().Contains(clientemail.ToLower()));
-            if (startDate.HasValue)
-                query = query.Where(l => l.RecDate >= startDate.Value);
-            if (endDate.HasValue)
-                query = query.Where(l => l.RecDate <= endDate.Value);
             if (string.Equals(queueView, "duplicates", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.DuplicateStatus == "suspected" || l.DuplicateStatus == "confirmed");
             else if (string.Equals(queueView, "revisions", StringComparison.OrdinalIgnoreCase))
@@ -226,6 +288,8 @@ namespace ERP_RFQ_Automation.Repositories
                 // list of strings restated here.
                 var finished = await FinishedLeadStatusIdsAsync(businessUnitId);
                 query = query.Where(l => l.LeadStatusId == null || !finished.Contains(l.LeadStatusId.Value));
+                if (leadQueueView)
+                    query = query.Where(l => !l.Rfqs.Any());
             }
             else if (string.Equals(queueView, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
                 // Advisory queue criteria only. RFQ Promotion performs the authoritative
@@ -244,6 +308,140 @@ namespace ERP_RFQ_Automation.Repositories
                 var mineUserId = ownerUserId ?? -1;
                 query = query.Where(l => l.AssignTo == mineUserId);
             }
+            else if (ownerFilter == LeadListOwnerFilter.Rep)
+            {
+                var repUserId = ownerUserId ?? -1;
+                query = query.Where(l => l.AssignTo == repUserId);
+            }
+
+            return query;
+        }
+
+        /// <summary>
+        /// The customers in the leads list the reader is on (same scope, queue and owner), with
+        /// how many inquiries each has, plus how many have no customer yet. Feeds the Customer
+        /// picker: it is gated by the Leads permission, not Customers, and never offers a
+        /// customer that would empty the list.
+        /// </summary>
+        public async Task<(IReadOnlyList<(long CustomerId, string Name, int Count)> Customers, int NoCustomer)> GetLeadListCustomersAsync(
+            long businessUnitId, string? view = null, AccountTeamScope? accessScope = null, string? due = null, DateTime? today = null)
+        {
+            var (queueView, ownerFilter, ownerUserId) = ParseLeadListView(view);
+            var query = _context.Leads.AsNoTracking().Where(l => l.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            query = await ApplyQueueAndOwnerAsync(query, queueView, ownerFilter, ownerUserId, businessUnitId);
+            // The counts follow the date filter too, so "(2)" beside a customer is what picking it shows.
+            if (ListDueWindow.Resolve(due, today, DateTime.UtcNow) is { } w)
+                query = query.Where(l => l.BidClosingDate != null && l.BidClosingDate >= w.From && l.BidClosingDate < w.Before);
+
+            var counts = await query.GroupBy(l => l.CustomerId)
+                .Select(g => new { CustomerId = g.Key, Count = g.Count() })
+                .ToListAsync();
+            var ids = counts.Where(c => c.CustomerId.HasValue).Select(c => c.CustomerId!.Value).ToList();
+            var names = await _context.Customers.AsNoTracking()
+                .Where(c => ids.Contains(c.Id))
+                .Select(c => new { c.Id, c.Name })
+                .ToDictionaryAsync(c => c.Id, c => c.Name);
+            var customers = counts
+                .Where(c => c.CustomerId.HasValue && names.ContainsKey(c.CustomerId.Value))
+                .Select(c => (c.CustomerId!.Value, names[c.CustomerId.Value], c.Count))
+                .OrderBy(c => c.Item2, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return (customers, counts.Where(c => c.CustomerId == null).Sum(c => c.Count));
+        }
+
+        /// <summary>
+        /// The Status choices for the leads list the reader is on (same scope, queue and owner):
+        /// each status present with its count, plus how many are not opened yet (no status).
+        /// </summary>
+        public async Task<(IReadOnlyList<(long StatusId, string Code, string Label, int Count)> Statuses, int NotOpened)> GetLeadListStatusesAsync(
+            long businessUnitId, string? view = null, AccountTeamScope? accessScope = null)
+        {
+            var (queueView, ownerFilter, ownerUserId) = ParseLeadListView(view);
+            var query = _context.Leads.AsNoTracking().Where(l => l.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            query = await ApplyQueueAndOwnerAsync(query, queueView, ownerFilter, ownerUserId, businessUnitId);
+
+            var counts = await query.GroupBy(l => l.LeadStatusId)
+                .Select(g => new { StatusId = g.Key, Count = g.Count() })
+                .ToListAsync();
+            var ids = counts.Where(c => c.StatusId.HasValue).Select(c => c.StatusId!.Value).ToList();
+            var rows = await _context.SetupMasters.AsNoTracking()
+                .Where(sm => ids.Contains(sm.SetupId))
+                .Select(sm => new { sm.SetupId, sm.SetupCode, sm.SetupValue })
+                .ToDictionaryAsync(sm => sm.SetupId);
+            var statuses = counts
+                .Where(c => c.StatusId.HasValue && rows.ContainsKey(c.StatusId.Value))
+                .Select(c =>
+                {
+                    var row = rows[c.StatusId!.Value];
+                    return (row.SetupId, LifecyclePolicy.Canonicalize("Lead", row.SetupCode, row.SetupValue), row.SetupValue, c.Count);
+                })
+                .OrderBy(c => c.SetupValue, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return (statuses, counts.Where(c => c.StatusId == null).Sum(c => c.Count));
+        }
+
+        public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null, AccountTeamScope? accessScope = null, string? search = null, string? customerFilter = null, string? due = null, DateTime? today = null, LeadListColumnFilters? columns = null)
+        {
+            var (queueView, ownerFilter, ownerUserId) = ParseLeadListView(view);
+
+            var query = _context.Leads
+                .AsNoTracking()
+                .Include(l => l.BusinessUnit)
+                .Include(l => l.EmailIngests)
+                // The owner is projected onto every list row now (see below), so the navigation
+                // has to travel with the page or each row costs a lazy round trip.
+                .Include(l => l.AssignToNavigation)
+                .Where(l => l.BusinessUnitId == businessUnitId);
+
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+
+            query = await ApplyQueueAndOwnerAsync(query, queueView, ownerFilter, ownerUserId, businessUnitId);
+
+            // Apply filters
+            if (id.HasValue)
+                query = query.Where(l => l.Id == id.Value);
+            // The list's search box promises serial, RFQ number, buyer or email. It also sends the
+            // same text as rfqno, which on its own matched the RFQ number only; the search wins.
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var term = search.Trim().ToLower();
+                query = query.Where(l => (l.Rfqno != null && l.Rfqno.ToLower().Contains(term))
+                    || l.CommercialCaseReference.ToLower().Contains(term)
+                    || (l.BuyersName != null && l.BuyersName.ToLower().Contains(term))
+                    || (l.Clientemail != null && l.Clientemail.ToLower().Contains(term)));
+            }
+            // The page no longer sends its search text as rfqno too; an older caller that does is
+            // still answered by the search alone.
+            if (!string.IsNullOrWhiteSpace(rfqno) && !string.Equals(rfqno, search, StringComparison.Ordinal))
+                query = query.Where(l => l.Rfqno != null && l.Rfqno.ToLower().Contains(rfqno.ToLower()));
+            if (!string.IsNullOrWhiteSpace(buyersName))
+                query = query.Where(l => l.BuyersName != null && l.BuyersName.ToLower().Contains(buyersName.ToLower()));
+            if (!string.IsNullOrWhiteSpace(leadSource))
+                query = query.Where(l => l.LeadSource.ToLower().Contains(leadSource.ToLower()));
+            if (!string.IsNullOrWhiteSpace(emailSource))
+                query = query.Where(l => l.EmailSource != null && l.EmailSource.ToLower().Contains(emailSource.ToLower()));
+            if (!string.IsNullOrWhiteSpace(clientemail))
+                query = query.Where(l => l.Clientemail != null && l.Clientemail.ToLower().Contains(clientemail.ToLower()));
+            if (startDate.HasValue)
+                query = query.Where(l => l.RecDate >= startDate.Value);
+            if (endDate.HasValue)
+                query = query.Where(l => l.RecDate <= endDate.Value);
+            // Customer and date buttons (Leads list, 2026-09-29). "none" is the inquiries nobody has
+            // linked to a customer yet, so a customer filter never hides them without a way back.
+            if (string.Equals(customerFilter, "none", StringComparison.OrdinalIgnoreCase))
+                query = query.Where(l => l.CustomerId == null);
+            else if (long.TryParse(customerFilter, out var customerId))
+                query = query.Where(l => l.CustomerId == customerId);
+            var window = ListDueWindow.Resolve(due, today, DateTime.UtcNow);
+            if (window is { } w)
+                query = query.Where(l => l.BidClosingDate != null && l.BidClosingDate >= w.From && l.BidClosingDate < w.Before);
+            if (columns != null)
+                query = await ApplyColumnFilters(query, columns, businessUnitId);
 
             // Get total count before pagination
             var totalCount = await query.CountAsync();

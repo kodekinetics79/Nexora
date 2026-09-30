@@ -28,8 +28,10 @@ import { DEADLINE_COLOR, deadlineWords } from '../../../utils/deadline';
  * Same defect as QuotesPage: two rail entries point here at a FILTERED address while the page
  * heads itself "All RFQs / Manage and track all Request for Quotations" either way.
  *
- * RfqRepository.GetAllAsync narrows on 'ready-for-quote' and nothing else, so it is the only value
- * that earns a filter chip. "Sourcing Cases" sends ?state=requires-sourcing, which the server drops
+ * RfqRepository.GetAllAsync narrows on 'open' (no sent quote, not finished — the plain list's
+ * default) and 'ready-for-quote' (the same, narrowed further). Only 'ready-for-quote' is a filter a
+ * link can ask for, so it is the only value that earns a filter chip. "Sourcing Cases" sends
+ * ?state=requires-sourcing, which the server drops
  * on the floor — that rail entry lands the user on EVERY RFQ under a heading promising a sourcing
  * subset, so it gets a stated warning rather than a silently complete list.
  */
@@ -84,16 +86,38 @@ const AllRFQsPage: React.FC = () => {
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 25, page: 0 });
   const [search, setSearch] = useState('');
 
+  // The plain list is "open": RFQs whose quote has not been sent. Once sent, the work is on the
+  // Quotes list, so the RFQ leaves this one. A typed search still reaches every RFQ.
+  const listReadiness = readiness ?? (search.trim() ? undefined : 'open');
+
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['rfqs', paginationModel, search, readiness],
+    queryKey: ['rfqs', paginationModel, search, listReadiness],
     queryFn: () => rfqService.getAll({
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       search: search || undefined,
       businessUnitId: userData?.businessUnitId || undefined,
-      readiness,
+      readiness: listReadiness,
     }),
   });
+
+  /**
+   * Every RFQ, open or quoted, so an empty default list can say which nothing it is: no RFQs at
+   * all, or every one already quoted. One row is enough; only the count is read. Silent because
+   * the main query reports its own failures. Under the ['rfqs'] prefix so the same invalidations
+   * refresh it.
+   */
+  const totalQuery = useQuery({
+    queryKey: ['rfqs', 'total', userData?.businessUnitId ?? null],
+    queryFn: () => rfqService.getAll({
+      pageNumber: 1,
+      pageSize: 1,
+      businessUnitId: userData?.businessUnitId || undefined,
+    }),
+    meta: { silenceGlobalError: true },
+  });
+  const filtered = Boolean(search) || Boolean(readiness);
+  const isCaughtUp = !filtered && (totalQuery.data?.totalItems ?? 0) > 0;
 
   /**
    * The three highest-traffic grids in the product — this one, Leads and Quotes — shipped MUI's
@@ -101,7 +125,15 @@ const AllRFQsPage: React.FC = () => {
    * and it offers no way out of any of them. Memoised because DataGrid takes a component TYPE
    * here: rebuilding the factory each render would remount the overlay for nothing.
    */
-  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay(isCaughtUp ? {
+    title: 'Nothing to quote',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    action: (
+      <Button variant="contained" onClick={() => navigate('/sales/quotes')} sx={{ fontWeight: 700 }}>
+        Open quotes
+      </Button>
+    ),
+  } : {
     title: 'No RFQs yet',
     message: 'An RFQ is created when you qualify an enquiry. Qualify one and it lands here, ready to price.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
@@ -110,7 +142,7 @@ const AllRFQsPage: React.FC = () => {
         See all inquiries
       </Button>
     ),
-    filtered: Boolean(search) || Boolean(readiness),
+    filtered,
     filteredTitle: 'No RFQ matches this view',
     filteredMessage: readiness
       ? 'Nothing in the list matches this filter. Clear it to see every RFQ.'
@@ -121,10 +153,10 @@ const AllRFQsPage: React.FC = () => {
         onClick={() => { setSearch(''); navigate('/procurement/rfqs/all'); }}
         sx={{ fontWeight: 700 }}
       >
-        Show all RFQs
+        {search && !readiness ? 'Clear search' : 'Show all RFQs'}
       </Button>
     ),
-  }), [search, readiness, navigate]);
+  }), [isCaughtUp, filtered, search, readiness, navigate]);
 
   const openRfq = (id: number) => navigate(`/procurement/rfqs/view/${id}`);
   const cellText = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const;
@@ -255,7 +287,16 @@ const AllRFQsPage: React.FC = () => {
           RFQs
           {data && <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }}> · {data.totalItems}</Box>}
         </Typography>
-        <SearchField width={340} value={search} onChange={setSearch} placeholder="Search RFQ, serial, customer or buyer" />
+        <SearchField
+          width={340}
+          value={search}
+          onChange={(value) => {
+            setSearch(value);
+            // A new search is a new result set; page 3 of it may not exist.
+            setPaginationModel((current) => ({ ...current, page: 0 }));
+          }}
+          placeholder="Search RFQ, serial, customer or buyer"
+        />
         <Box sx={{ flex: 1 }} />
         {hasPermission('RFQ Management', 'create') && (
           <Tooltip title="Upload a customer inquiry for Lead reconciliation">
@@ -277,7 +318,7 @@ const AllRFQsPage: React.FC = () => {
             pageSize,
             search: search || undefined,
             businessUnitId: userData?.businessUnitId || undefined,
-            readiness,
+            readiness: listReadiness,
           }))}
         />
         <Tooltip title="Refresh">

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SnackbarProvider } from 'notistack';
@@ -56,6 +56,12 @@ const renderPage = () => {
 
 const NOTICE = /You do not have a Sales Rep profile yet/;
 
+/** The Owner header's choices, opened. */
+const openOwnerFilter = () => {
+  fireEvent.click(screen.getByRole('button', { name: 'Filter by owner' }));
+  return within(screen.getByRole('menu'));
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
@@ -71,19 +77,23 @@ describe('LeadsPage — "All inquiries" opens on everyone', () => {
     authUser.id = 5;
     authUser.isManager = true;
     renderPage();
-    await waitFor(() => expect(lastGridView()).toBe('open'));
-    expect(screen.getByRole('button', { name: 'Everyone' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'Unassigned' })).toHaveAttribute('aria-pressed', 'false');
+    await waitFor(() => expect(lastGridView()).toBe('queue'));
+    expect(screen.getByRole('button', { name: 'Filter by owner' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.queryByText(/Every inquiry here already has an owner/)).not.toBeInTheDocument();
+    const menu = openOwnerFilter();
+    expect(menu.getByRole('menuitem', { name: 'Anyone' })).toHaveClass('Mui-selected');
+    expect(menu.getByRole('menuitem', { name: 'Unassigned' })).not.toHaveClass('Mui-selected');
   });
 
   it('asks for everyone’s open inquiries for a rep too — "Mine" stays one click away', async () => {
     authUser.id = 2;
     authUser.isManager = false;
     renderPage();
-    await waitFor(() => expect(lastGridView()).toBe('open'));
-    expect(screen.getByRole('button', { name: 'Everyone' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'Mine' })).toBeEnabled();
+    await waitFor(() => expect(lastGridView()).toBe('queue'));
+    expect(screen.getByRole('button', { name: 'Filter by owner' })).toHaveAttribute('aria-pressed', 'false');
+    const menu = openOwnerFilter();
+    expect(menu.getByRole('menuitem', { name: 'Anyone' })).toHaveClass('Mui-selected');
+    expect(menu.getByRole('menuitem', { name: 'Mine' })).not.toHaveAttribute('aria-disabled', 'true');
   });
 });
 
@@ -99,7 +109,7 @@ describe('LeadsPage — the "no Sales Rep profile" notice', () => {
 
     cleanup();
     renderPage();
-    await waitFor(() => expect(lastGridView()).toBe('open'));
+    await waitFor(() => expect(lastGridView()).toBe('queue'));
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
   });
 
