@@ -108,7 +108,11 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         [property: JsonPropertyName("DeliveryLocationSpan")] string? DeliveryLocationSpan,
         [property: JsonPropertyName("AgreementReference")] string? AgreementReference,
         [property: JsonPropertyName("AgreementReferenceSpan")] string? AgreementReferenceSpan,
-        [property: JsonPropertyName("OverallConfidence")] double? OverallConfidence);
+        [property: JsonPropertyName("OverallConfidence")] double? OverallConfidence,
+        // The organisation asking for the quotation, as the document writes it, and the quote it
+        // was read from. Optional: a provider that does not report it leaves the client unresolved.
+        [property: JsonPropertyName("BuyerOrganisation")] string? BuyerOrganisation = null,
+        [property: JsonPropertyName("BuyerOrganisationSpan")] string? BuyerOrganisationSpan = null);
     /// <summary>
     /// The result of one extraction call plus the reason it failed, if it failed.
     /// <paramref name="ErrorCode"/> is one of <see cref="AiErrorCodes"/> and is null on success.
