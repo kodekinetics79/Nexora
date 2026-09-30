@@ -1052,6 +1052,9 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.OfferedNote).HasMaxLength(OfferedPartKinds.MaxNote);
             entity.Property(e => e.OfferedSpecs).HasMaxLength(OfferedPartKinds.MaxSpecs);
             entity.Property(e => e.PricingNote).HasMaxLength(QuoteLinePricing.MaxNote);
+            entity.Property(e => e.CustomerMaterialCode).HasMaxLength(QuoteItem.MaxCustomerMaterialCode);
+            entity.Property(e => e.ManufacturerName).HasMaxLength(QuoteItem.MaxManufacturerName);
+            entity.Property(e => e.ManufacturerPartNumber).HasMaxLength(QuoteItem.MaxManufacturerPartNumber);
 
             // Wrong-quantity backstop: RfqController.ApproveAsync creates the Quote and
             // emails it in the same request, so no screen between approval and the

@@ -146,17 +146,47 @@ public sealed class DocxTableParser
                 headerBlock[RfqSpreadsheetFields.RfqNo] = fromName;
         }
 
+        // One date order for the whole document, read from its banner and header tables — text
+        // no single row carries. See DocumentDateOrder.
+        var dateOrder = firstLineTable < 0
+            ? null
+            : ReadDateOrder(grids, paragraphs, metadataTableLimit: firstLineTable);
+
         foreach (var rows in parsedTables)
         {
             foreach (var row in rows)
             {
                 ApplyHeaderBlock(row, headerBlock);
                 row.UnmappedHeaderLabels = unmatchedLabels;
+                row.DocumentDateOrder ??= dateOrder;
                 results.Add(row);
             }
         }
 
         return results;
+    }
+
+    /// <summary>Rows read from the top of each table when looking for a portal print's banner.</summary>
+    private const int DateOrderRowsPerTable = 20;
+
+    /// <summary>
+    /// The Ariba print signature anywhere near the top of the document (its banner sits in the
+    /// first table of the HTML print and the first paragraphs of the Word print), then the
+    /// unambiguous numeric dates of the paragraphs and metadata tables above the line items.
+    /// </summary>
+    private static ERP_RFQ_Automation.Extraction.DateOrderEvidence? ReadDateOrder(
+        IReadOnlyList<IReadOnlyList<IReadOnlyList<string?>>> grids,
+        IReadOnlyList<string> paragraphs,
+        int metadataTableLimit)
+    {
+        var top = paragraphs.Cast<string?>()
+            .Concat(grids.SelectMany(grid => grid.Take(DateOrderRowsPerTable)).SelectMany(row => row))
+            .ToList();
+        var metadata = paragraphs.Cast<string?>()
+            .Concat(grids.Take(metadataTableLimit).SelectMany(grid => grid.Take(HeaderTableRowLimit)).SelectMany(row => row))
+            .ToList();
+        return ERP_RFQ_Automation.Extraction.DocumentDateOrder.FromAribaPrint(top)
+               ?? ERP_RFQ_Automation.Extraction.DocumentDateOrder.FromUnambiguousDates(metadata);
     }
 
     /// <summary>

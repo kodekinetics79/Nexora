@@ -3,10 +3,13 @@ import { useQuery } from '@tanstack/react-query';
 import { Box, Button, Stack, Tooltip, Typography } from '@mui/material';
 import leadDecisionService, { type LeadDecisionEvidenceDTO } from '../../../api/services/leadDecisionService';
 
-/** The retained documents that can state terms: Word files kept as evidence. */
+/**
+ * The retained documents that can state terms: Word files, and portal prints saved as .doc or
+ * .html (every SEC print is an Ariba HTML page named .doc). Mirrors BuyerTerms.CanRead.
+ */
 const termSources = (evidence: LeadDecisionEvidenceDTO[]): LeadDecisionEvidenceDTO[] =>
   evidence.filter((item) => item.sourceAvailable && item.sourceDocumentId != null
-    && (/\.docx$/i.test(item.name) || /wordprocessingml/i.test(item.mediaType ?? '')));
+    && (/\.(docx?|html?)$/i.test(item.name) || /wordprocessingml|text\/html/i.test(item.mediaType ?? '')));
 
 /**
  * What the buyer requires, as the document states it: when bidding closes, delivery terms, where

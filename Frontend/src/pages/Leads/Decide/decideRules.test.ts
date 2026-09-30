@@ -304,7 +304,9 @@ describe('qualification and dates', () => {
   it('says how long is left in words a rep would use', () => {
     const now = new Date('2026-09-09T08:00:00Z');
     expect(dueSentence(daysUntil('2026-09-18T00:00:00Z', now))).toBe('9 days left');
-    expect(dueSentence(daysUntil('2026-09-09T20:00:00Z', now))).toBe('1 day left');
+    // Later the same calendar day is "Due today", as on the Leads list (it used to round the hours
+    // up and say "1 day left" here while the list said "Due today").
+    expect(dueSentence(daysUntil('2026-09-09T20:00:00Z', now))).toBe('Due today');
     expect(dueSentence(daysUntil('2026-09-01T00:00:00Z', now))).toBe('Closed 8 days ago');
     expect(dueSentence(daysUntil(null, now))).toBe('No deadline stated');
   });

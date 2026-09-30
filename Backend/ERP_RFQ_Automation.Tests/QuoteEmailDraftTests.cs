@@ -31,8 +31,9 @@ public sealed class QuoteEmailDraftTests
 
         var draft = await service.GetEmailDraftAsync(QuoteId, Tenant);
 
-        // The default the server has always composed, now visible before the send.
-        Assert.Equal("Quote #Q-DRAFT-1 from Noor Sons LLC", draft.Subject);
+        // The buyer's RFQ number leads the subject (Marafiq 1.1.2: "The RFQ Number shall be
+        // clearly indicated in the subject email" — pilot audit CB-05).
+        Assert.Equal("RFQ PO-REQ-7781 – Quotation Q-DRAFT-1 – Noor Sons LLC", draft.Subject);
         Assert.Contains("Dear Acme Trading", draft.Body);
         Assert.Contains("PO-REQ-7781", draft.Body);
         Assert.Contains("USD 4,600.00", draft.Body);

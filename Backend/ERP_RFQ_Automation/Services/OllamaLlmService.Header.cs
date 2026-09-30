@@ -17,8 +17,8 @@ namespace ERP_RFQ_Automation.Services
             if (string.IsNullOrWhiteSpace(headerText))
                 return null;
 
-            var processedText = PrepareProviderInput(headerText);
             var instructions = BuildHeaderCompletionInstructions();
+            var processedText = PrepareProviderInput(headerText, instructions);
             var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
             var governedContext = context with { ProviderClass = _providerClass };
             var reservation = await _governance.ReserveAsync(
@@ -143,7 +143,8 @@ namespace ERP_RFQ_Automation.Services
                 Stream: false,
                 Format: "json",
                 Think: false,
-                Options: new OllamaOptions(Temperature: TEMPERATURE, NumPredict: _maximumOutputTokens)
+                Options: RequestOptions(),
+                KeepAlive: _keepAlive
             );
 
             using var response = await _http.PostAsJsonAsync("api/chat", payload, _jsonOptions, ct);
@@ -236,6 +237,8 @@ namespace ERP_RFQ_Automation.Services
 6. ""RequiredDeliveryDate"" is when the BUYER wants the goods delivered — never the closing date. ""AgreementReference"" is a standing contract, framework or agreement number — never the RFQ number itself.
 7. Return null for anything the text does not state.
 8. ""OverallConfidence"" is your honest reading, 0.0–1.0.
+9. ""BuyerOrganisation"" is the company or organisation ASKING for the quotation, exactly as the text writes it (for example the company whose requirements, storage location or bid event this is). Never a person's name or user name, never the e-procurement platform or portal (SAP Ariba, Etimad and the like), never a supplier or manufacturer. Its Span is the verbatim sentence or phrase that names it.
+10. The text may end with a section headed ""OTHER TEXT FROM THE DOCUMENT"". Use that section ONLY for BuyerOrganisation; every other field comes from the text above it.
 
 **REQUIRED JSON SCHEMA (return exactly these keys):**
 {
@@ -249,6 +252,8 @@ namespace ERP_RFQ_Automation.Services
   ""DeliveryLocationSpan"": string | null,
   ""AgreementReference"": string | null,
   ""AgreementReferenceSpan"": string | null,
+  ""BuyerOrganisation"": string | null,
+  ""BuyerOrganisationSpan"": string | null,
   ""OverallConfidence"": number
 }
 

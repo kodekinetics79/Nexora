@@ -1,3 +1,4 @@
+import type { ClosingDateQuestionDTO } from './leadService';
 import axiosInstance from '../axiosInstance';
 
 export type LineParticipationDecision = 'Pending' | 'Bid' | 'NoBid' | 'Clarify';
@@ -168,6 +169,21 @@ export interface LeadDecisionWorkbenchDTO {
   uploadedByName?: string | null;
 }
 
+/**
+ * Who owns the request, and its RFQ number: what the decision screen needs from the lead record,
+ * without the record's 1,500 lines.
+ */
+export interface LeadOwnerDTO {
+  leadId: number;
+  assignedToId?: number | null;
+  assignedToFullName?: string | null;
+  assignmentMethod?: 'AUTOMATIC' | 'MANUAL';
+  assignmentVersion?: number | null;
+  rfqno?: string | null;
+  /** "Closes 9 Aug or 8 Sep?" when the document's closing date could be read two ways. */
+  closingDateQuestion?: ClosingDateQuestionDTO | null;
+}
+
 export interface ParticipationLineInput {
   revisionLineId: number;
   decision: LineParticipationDecision;
@@ -252,6 +268,12 @@ const leadDecisionService = {
     return response.data;
   },
 
+  /** The request's owner and RFQ number, without its lines. */
+  getOwner: async (leadId: number): Promise<LeadOwnerDTO> => {
+    const response = await axiosInstance.get<LeadOwnerDTO>(`/api/leads/${leadId}/owner`);
+    return response.data;
+  },
+
   /**
    * The rows of a retained spreadsheet source (.xlsx, .xls, .csv), read from the same bytes the
    * parser read. `documentPath` is the evidence's download path; the grid sits beside it.
@@ -259,6 +281,17 @@ const leadDecisionService = {
   getSourceGrid: async (documentPath: string): Promise<SourceGridDTO> => {
     const response = await axiosInstance.get<SourceGridDTO>(`${documentPath}/grid`);
     return response.data;
+  },
+
+  /**
+   * The rows of a large Word source around the line being checked (`table` and `row` from its
+   * `'Table 7'!R23823`), read on the server. `null` when the file is small enough to draw whole.
+   */
+  getWordRows: async (documentPath: string, table?: number | null, row?: number | null): Promise<SourceGridDTO | null> => {
+    const response = await axiosInstance.get<SourceGridDTO | ''>(`${documentPath}/word-rows`, {
+      params: table && row ? { table, row } : undefined,
+    });
+    return response.status === 204 || !response.data ? null : response.data;
   },
 
   /** What the buyer requires (delivery terms, currency, validity, agreement, …), read from the retained document. */

@@ -38,6 +38,9 @@ public sealed class PlatformControlPlaneHardeningPostgreSqlTests
     [InlineData("nexora_tenant_app", "ImpersonationSessions", "ExpiresAtUtc", true)]
     [InlineData("nexora_identity_app", "Tenants", "Status", true)]
     [InlineData("nexora_identity_app", "Plans", "MaxSeats", true)]
+    // Closing dates are read on the company's clock (20260929030000).
+    [InlineData("nexora_tenant_app", "Tenants", "TimeZoneId", true)]
+    [InlineData("nexora_identity_app", "Tenants", "TimeZoneId", true)]
     // Confidential columns the checks never read: customer directory, internal status
     // reasons, support-impersonation context, and the revoking operator's identity.
     [InlineData("nexora_tenant_app", "Tenants", "Name", false)]

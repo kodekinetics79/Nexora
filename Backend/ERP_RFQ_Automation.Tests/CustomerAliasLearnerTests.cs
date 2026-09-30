@@ -71,6 +71,22 @@ public sealed class CustomerAliasLearnerTests
     }
 
     [Fact]
+    public async Task An_all_digit_rfq_number_teaches_no_numbering_shape()
+    {
+        // Pilot audit HT-02: an Aramco RFQ "6000000028" linked to SEC taught ^\d{10}$ -> SEC, and
+        // every ten-digit RFQ after it (SABIC, Marafiq, MaSa, Aramco) was offered to SEC.
+        using var db = new TestDb();
+        await using var context = await SeedAsync(db);
+        var lead = await LoadLeadAsync(context, 8401);
+        lead.Rfqno = "6000000028";
+
+        await new CustomerAliasLearner(context).LearnFromReviewAsync(Tenant, lead, Sec, null, 99);
+        await context.SaveChangesAsync();
+
+        Assert.DoesNotContain(await LearnedAsync(context), i => i.IdentifierType == CustomerIdentifierType.RfqNumberPattern);
+    }
+
+    [Fact]
     public async Task P6_a_machine_match_never_teaches_itself()
     {
         // THE poisoning path: one machine mistake bootstrapping into an authoritative alias

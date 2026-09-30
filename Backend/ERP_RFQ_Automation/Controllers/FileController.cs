@@ -377,6 +377,68 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
+        /// The rows of a large Word source around the line being checked (<c>?table=7&amp;row=23823</c>,
+        /// from the line's <c>'Table 7'!R23823</c>), so the decision screen shows it in a second
+        /// instead of the browser drawing the whole file (54–183 s for the 6.8 MB Aramco RFP).
+        /// 204 when the file is small enough to draw whole, as before. Same authorization and
+        /// verified bytes as the download; 415 when the file is not a Word file.
+        /// </summary>
+        [HttpGet("source-document/{sourceDocumentId:long}/word-rows")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
+        public async Task<IActionResult> SourceDocumentWordRows(
+            long sourceDocumentId, [FromQuery] int? table, [FromQuery] int? row, CancellationToken ct)
+        {
+            try
+            {
+                var (refusal, document, job) = await ResolveReadableSourceDocumentAsync(sourceDocumentId, ct);
+                if (refusal is not null) return refusal;
+                var name = document!.OriginalFileName ?? string.Empty;
+                var mime = document.DetectedMimeType ?? string.Empty;
+                if (!name.EndsWith(".docx", StringComparison.OrdinalIgnoreCase)
+                    && !mime.Contains("wordprocessingml", StringComparison.OrdinalIgnoreCase))
+                    return StatusCode(StatusCodes.Status415UnsupportedMediaType, "This document is not a Word file.");
+
+                byte[] bytes;
+                await using (var stream = await _evidenceStorage.OpenVerifiedReadAsync(job!.StoragePath!, document.ContentHash, ct))
+                {
+                    using var buffer = new MemoryStream();
+                    await stream.CopyToAsync(buffer, ct);
+                    bytes = buffer.ToArray();
+                }
+                var xmlLength = WordTableWindowReader.DocumentXmlLength(bytes);
+                if (xmlLength is null)
+                    return StatusCode(StatusCodes.Status415UnsupportedMediaType, "This document is not a Word file.");
+                if (xmlLength <= WordTableWindowReader.PageViewMaxXmlBytes)
+                    return NoContent();
+
+                var grid = WordTableWindowReader.Read(bytes, table, row);
+                Response.Headers[IntegrityHeader] = IntegrityVerified;
+                return Ok(grid);
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound("The requested source document was not found in evidence storage.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Rejected unsafe storage identity for source document {SourceDocumentId}.", sourceDocumentId);
+                return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Evidence integrity verification failed for source document {SourceDocumentId}.", sourceDocumentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The evidence object failed integrity verification.");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Source document {SourceDocumentId} could not be read as Word rows.", sourceDocumentId);
+                return StatusCode(StatusCodes.Status422UnprocessableEntity,
+                    "The Word file could not be read as rows. Open the file instead.");
+            }
+        }
+
+        /// <summary>
         /// Terms read per stored object. The evidence is immutable and addressed by its content hash,
         /// so a reading never goes stale; the cap only bounds memory.
         /// </summary>
@@ -384,12 +446,12 @@ namespace ERP_RFQ_Automation.Controllers
         private const int BuyerTermsCacheCap = 500;
 
         /// <summary>
-        /// What the buyer requires, read from the retained Word document the lead came from: delivery
+        /// What the buyer requires, read from the retained Word document (or Ariba print) the lead came from: delivery
         /// terms, where to deliver, the agreement length, the currencies a quote may use, the exchange
         /// rates, how long the price must hold, VAT, and what must be accepted or attached. Each term
         /// carries the buyer's own sentence. Read on demand from the same verified bytes the download
         /// serves, so every lead already on file shows its terms too. Same authorization as the
-        /// download; an empty list when the document states none or is not a Word file.
+        /// download; an empty list when the document states none or is neither a Word file nor an HTML print.
         /// </summary>
         [HttpGet("source-document/{sourceDocumentId:long}/buyer-terms")]
         [RequireModulePermission("Leads", PermissionAction.View)]
@@ -399,9 +461,9 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var (refusal, document, job) = await ResolveReadableSourceDocumentAsync(sourceDocumentId, ct);
                 if (refusal is not null) return refusal;
-                var isWord = (document!.OriginalFileName ?? string.Empty).EndsWith(".docx", StringComparison.OrdinalIgnoreCase)
-                    || (document.DetectedMimeType ?? string.Empty).Contains("wordprocessingml", StringComparison.OrdinalIgnoreCase);
-                if (!isWord) return Ok(new { terms = Array.Empty<object>() });
+                // A Word file, or an Ariba print saved as .doc (an HTML page) — every SEC print.
+                if (!ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.CanRead(document!.OriginalFileName, document.DetectedMimeType))
+                    return Ok(new { terms = Array.Empty<object>() });
 
                 if (!BuyerTermsByContent.TryGetValue(document.ContentHash, out var terms))
                 {
@@ -412,8 +474,7 @@ namespace ERP_RFQ_Automation.Controllers
                         await stream.CopyToAsync(buffer, ct);
                         bytes = buffer.ToArray();
                     }
-                    terms = ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.Read(
-                        DocxTableParser.ReadLeadingGrids(bytes, ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.LeadingRows), document.OriginalFileName);
+                    terms = ERP_RFQ_Automation.Extraction.Templates.BuyerTerms.ReadDocument(bytes, document.OriginalFileName);
                     if (BuyerTermsByContent.Count >= BuyerTermsCacheCap) BuyerTermsByContent.Clear();
                     BuyerTermsByContent[document.ContentHash] = terms;
                 }

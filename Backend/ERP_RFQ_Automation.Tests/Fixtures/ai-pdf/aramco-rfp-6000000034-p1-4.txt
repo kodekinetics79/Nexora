@@ -1,0 +1,231 @@
+[[page 1]]
+  Content 
+Name Alternative Value
+1 INTRODUCTION   
+This Request for Proposal (RFP) is issued to invite Vendor to s
+ubmit an electronic bid, in accordance with the instructions an
+d conditions contained in this RFP, for a Purchase Order (Orde
+r)/ Purchase Agreement (PA) for supply of Goods as detailed i
+n this RFP under. 
+Vendor shall quote for supply and delivery of Goods to ASMO
+or ASMO customer's delivery point in Saudi Arabia. 
+Operation and governance of any Orders that might result fro
+m this RFP and general instructions on how to use ASMO’s S
+upplier Collaboration system are given below and which shall
+form an integral part of this RFP and any resultant Orders/ Agr
+eements. 
+Vendor shall ensure that the prices set out in its Proposal to Bu
+yer do not include VAT amounts. All prices must be exclusive
+of VAT. Vendor shall separately identify in its Proposal any V
+AT amounts to be assessed on top of the quoted prices. 
+This is not a Purchase Order. Vendor shall not undertake Work
+or supply Goods unless issued with an Order. 
+2 IKTVA Values   
+3 Incoterms   
+3.1 Incoterms Value  
+4 BIDDING INSTRUCTIONS AND CONDITIONS   
+4.1 Do you accept the bidding instructions & conditions in
+this section?  
+4.3 ASMO - RFP Clause - VENDOR WAREHOUSING P
+A.pdf ASMO - RFP Clause - VENDOR WAREHOUSING
+PA.pdf  
+4.4 ASMO - Terms and Conditions.pdf ASMO - Terms an
+d Conditions.pdf  
+4.5 1- Required Incoterms - The preferred Incoterms for t
+his bidding process are AMC/SAC. (submit alternative bi
+d for (VDD/VTC). 2- Required Currency - Quotations sha
+ll be submitted in either USD or SAR. 3- Alternative Offer
+s - Bidders may submit alternative offers for each item, w
+here applicable. 4- Quantity Disclaimer - The quantities st
+ated in the RFQ are hypothetical estimatesand do not nece
+ssarily reflect actual consumption or future demand. 5- C
+ompliance -Bidders are expected to review all RFQ requir
+ements carefully and ensure full compliance with the state
+d commercial and technical conditions. 6- contract duratio
+n – Option 1: offer for two-year agreement. Option 2: An
+alternative offer for a three-year agreement. *The preferr
+ed option will be selected upon finalization of the award.  
+5 GENERAL REQUIREMENTS   
+5.1 BID VALIDITY What is the last date for bid validity?
+Ensure bid validity of at least sixty (60) days from the bid clo
+sing date, unless otherwise requested.  
+5.2 PACKING AND LABELING Are you complying with
+Saudi Aramco's packing labeling and marking requireme
+nts as detailed in the bidding instructions, or do you wish t
+o deliver using your own packing standards? You must pro
+vide details in your bid. 
+6 TECHNICAL ENVELOPE    
+[[page 2]]
+6.1 Technical Documents Please attach all relevant technic
+al documents of the items quoted. This will be used for the
+purpose of technical evaluation as required. DO NOT ATT
+ACH COMMERCIAL DETAILS YOUR BID WILL BE
+SUBJECT TO DISQUALIFICATION IF ATTACHMEN
+TS CONTAIN COMMERCIAL DETAILS  
+6.2 Part Number Revision/Obsolescence Is Vendor's quota
+tion for all items matching with the product, part or mode
+l number that Saudi Aramco has requested? Vendor shall
+advise in his quotation in accordance with section 4.4 'GOO
+DS/Article Substitutions and Part Number Update'.  
+7 INCOTERMS and COMMERCIAL DOCUMENTS   
+7.1 Commercial Documents Please attach all relevant com
+mercial documents of items quoted (if any). Note: If discre
+pancies arise between the electronic bid and the attachment(
+s), the electronic bid will be used.  
+8 BASE, LAMP, 230 VAC, FOR INDICATOR LIGHT   
+BASE, LAMP, 230 VAC, FOR INDICATOR LIGHT    
+Price   
+Quantity   1 each 
+Extended Price   
+Lead Time (In Days)   
+Requested Delivery Date   Sat, 2 Jan, 2027 
+Material Number   000000002000162772 
+Material Type   9CAT 
+Discount Amount   
+Discount Percentage   
+HS Code   
+Manufacturing Part Text  
+4000632401 - 0060001109 -
+ABB BV - NL 000000005001
+235921 - 10002185 - ABB B
+V - NL CUSTOMER_MATE
+RIAL_DESCRIPTION2 - CA
+TOR CUSTOMER_MATERI
+AL_DESCRIPTION1 - BASE
+: LAMP, 230 VAC, FOR IND
+I ED_PART_NUMBER - GH
+G4171801R0001 PART_NU
+MBER - GHG4171801R0001
+CUSTOMER_MATERIAL_C
+ODE - 000000005001235921
+4000632372 - 0060003469 -
+COOPER CROUSE HINDS
+GMBH - DE 0000000050012
+12044 - 10014483 - COOPER
+CROUSE HINDS GMBH - D
+E CUSTOMER_MATERIAL
+_DESCRIPTION1 - BASE: L
+AMP, 230 VAC, FOR INDI C
+USTOMER_MATERIAL_DE
+SCRIPTION2 - CATOR SUP
+ERSEDED_NUMBER - GHG
+4171801R0001 CUSTOMER
+_MATERIAL_CODE - 00000
+0005001212044 ED_PART_
+NUMBER - GHG4101901R0
+295 PART_NUMBER - GHG
+410 1901 R0295 ED_SUPER
+[[page 3]]
+SEDED_NUMBER - GHG41
+71801R0001 4000631923 - 00
+60001430 - ** ABB SERVIC
+E - NL 000000005000715385
+- 10000255 - ** ABB SERVI
+CE - NL CUSTOMER_MAT
+ERIAL_CODE - 0000000050
+00715385 CUSTOMER_MA
+TERIAL_DESCRIPTION1 -
+BASE: LAMP, 230 VAC, FO
+R INDI PART_NUMBER - G
+HG 417 1801 R0001 ED_PA
+RT_NUMBER - GHG417180
+1R0001 CUSTOMER_MATE
+RIAL_DESCRIPTION2 - CA
+TOR 
+Material Code   
+Manufacturer Name (Enter only if Material Code selected is
+OTHERS)   
+Model / Part Number (Enter only if Material code selected is
+OTHERS)   
+Country Of Origin (Enter only if Material Code selected is O
+THERS)   
+Item Text   
+Delivery Text   
+Material PO Text   BASE; LAMP TYPE,230 VA
+C,FOR INDICATOR LIGHT 
+Inspection Text   
+Hazardous Indicator   No 
+SASO Indicator   No 
+Saudi Customs   
+Special Handling Code-1   
+Special Handling Code-2   
+Special Handling Code-3   
+Transportation Mode   
+Delivery Priority   
+Inspection Required   
+Storage Conditions   
+Shelf Life Code   
+Shelf Life Unit   
+Remarks   
+9 BATTERY, LEAD ACID, STATIONARY, 200 AH   
+BATTERY, LEAD ACID, STATIONARY, 200 AH    
+Price   
+Quantity   1 each 
+Extended Price   
+Lead Time (In Days)   
+Requested Delivery Date   Sat, 2 Jan, 2027 
+Material Number   000000002000165737 
+Material Type   9CAT 
+Discount Amount   
+Discount Percentage   
+HS Code    
+[[page 4]]
+Manufacturing Part Text  
+4000649047 - 0060001545 - E
+XIDE CORPORTION - US 0
+00000005002367585 - 10018
+395 - EXIDE CORPORTION
+- US ED_PART_NUMBER -
+N200 PART_NUMBER - N2
+00 CUSTOMER_MATERIA
+L_DESCRIPTION2 - Y, 200
+AH CUSTOMER_MATERIA
+L_CODE - 000000005002367
+585 CUSTOMER_MATERIA
+L_DESCRIPTION1 - BATTE
+RY, LEAD ACID, STATION
+AR 4000645735 - 006000126
+7 - SAUDI DIESEL EQUIPM
+ENT CO., LTD. - SA 000000
+005001592506 - 10005849 - S
+AUDI DIESEL EQUIPMENT
+CO., LTD. - SA PART_NUM
+BER - N200 CUSTOMER_M
+ATERIAL_DESCRIPTION1
+- BATTERY, LEAD ACID, S
+TATIONAR ED_PART_NU
+MBER - N200 CUSTOMER_
+MATERIAL_CODE - 000000
+005001592506 CUSTOMER_
+MATERIAL_DESCRIPTION
+2 - Y, 200 AH 
+Material Code   
+Manufacturer Name (Enter only if Material Code selected is
+OTHERS)   
+Model / Part Number (Enter only if Material code selected is
+OTHERS)   
+Country Of Origin (Enter only if Material Code selected is O
+THERS)   
+Item Text   
+Delivery Text   
+Material PO Text  
+BATTERY LEAD ACID ST
+ATIONARY; 12 V / 6 CELLS
+,200 AH DISCHRG,(AS APP
+LICABLE, SAFETY DATA
+SHEET SHOULD BE SUBM
+ITTED WITH PO OFFER A
+ND DURING MATERIAL D
+ELIVERY) 
+Inspection Text   
+Hazardous Indicator   No 
+SASO Indicator   No 
+Saudi Customs   
+Special Handling Code-1   
+Special Handling Code-2   
+Special Handling Code-3   
+Transportation Mode   
+Delivery Priority   
+Inspection Required   
+Storage Conditions   
+Shelf Life Code    

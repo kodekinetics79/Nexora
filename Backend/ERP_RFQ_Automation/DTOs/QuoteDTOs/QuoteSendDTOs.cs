@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
 {
@@ -135,6 +136,64 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         /// </summary>
         public string? DeliveryRecipient { get; set; }
         public DateTime? DeliveryRequestedOn { get; set; }
+
+        /// <summary>
+        /// Things the rep should know before the quote goes out, that do NOT stop it (owner rule:
+        /// inform, don't obstruct). A newer buyer revision, validity shorter than the buyer asks,
+        /// a bid already closed, lines sent as estimates or "price to follow", lines with no
+        /// delivery time, a currency the buyer does not accept. Never counted in
+        /// <see cref="CanSend"/>.
+        /// </summary>
+        public List<QuoteSendWarningDTO> Warnings { get; set; } = new();
+
+        /// <summary>The buyer's commercial terms this quote was checked against; null when the
+        /// RFQ document states none.</summary>
+        public QuoteBuyerTermsDTO? BuyerTerms { get; set; }
+    }
+
+    /// <summary>One thing to know before sending. It never blocks the send.</summary>
+    public sealed class QuoteSendWarningDTO
+    {
+        /// <summary>BUYER_REVISION_NEWER, VALIDITY_BELOW_BUYER_MINIMUM, BID_CLOSED, LINES_NOT_FIRM,
+        /// LEAD_TIME_MISSING, CURRENCY_NOT_ALLOWED. Stable; never rendered.</summary>
+        public string Code { get; set; } = string.Empty;
+
+        /// <summary>The sentence the rep reads.</summary>
+        public string Message { get; set; } = string.Empty;
+
+        /// <summary>VALIDITY_BELOW_BUYER_MINIMUM: the earliest date the buyer accepts, as a calendar day.</summary>
+        public DateTime? SuggestedValidUntil { get; set; }
+
+        /// <summary>BUYER_REVISION_NEWER: which revision the quote reflects, which one the buyer sent, what changed.</summary>
+        public QuoteRevisionImpactDTO? Revision { get; set; }
+
+        /// <summary>BUYER_REVISION_NEWER: true when the new quantities can be applied in one click (a draft).</summary>
+        public bool CanApply { get; set; }
+    }
+
+    /// <summary>
+    /// The buyer's commercial terms read from the RFQ document, for the send check and for the
+    /// printed quote. Clearly named so the quote document can print them: no quote column holds
+    /// Incoterm, payment or agreement yet.
+    /// </summary>
+    public sealed class QuoteBuyerTermsDTO
+    {
+        public int? MinimumValidityDays { get; set; }
+        /// <summary>CLOSING, SUBMISSION or UNSTATED.</summary>
+        public string? ValidityBasis { get; set; }
+        /// <summary>The buyer's own sentence.</summary>
+        public string? ValiditySentence { get; set; }
+        /// <summary>The earliest "valid until" the buyer accepts, today.</summary>
+        public DateTime? RequiredValidUntil { get; set; }
+        public DateTime? BidClosing { get; set; }
+        public List<string> AllowedCurrencies { get; set; } = new();
+        public string? CurrencySentence { get; set; }
+        /// <summary>Incoterms / delivery terms, e.g. "AMC/SAC; also price VDD/VTC as an alternative".</summary>
+        public string? DeliveryTerms { get; set; }
+        public string? DeliverTo { get; set; }
+        /// <summary>e.g. "2-year agreement; also offer 3-year as an alternative".</summary>
+        public string? Agreement { get; set; }
+        public string? Payment { get; set; }
     }
 
     /// <summary>What the rep submits when confirming where a quote's prices came from (R5).</summary>

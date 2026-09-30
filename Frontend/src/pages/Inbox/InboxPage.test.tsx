@@ -143,14 +143,14 @@ describe('enquiries without an owner tells the truth about unowned enquiries', (
   it('says how many unowned enquiries are still being checked instead of calling the queue clear', async () => {
     // The routing queue (accepted, unclaimed) is empty ...
     api.outstandingLeads.mockResolvedValue(empty);
-    // ... but the Leads list, Owner = Unassigned, has two open enquiries nobody has accepted yet.
+    // ... but the Leads list, Owner = Unassigned (its queue: not yet an RFQ), has two enquiries nobody has accepted yet.
     api.leadList.mockResolvedValue({ ...empty, totalCount: 2, pageSize: 1 });
 
     renderInbox();
 
     const owners = await screen.findByRole('region', { name: /enquiries without an owner.*2 still being checked/i });
     expect(within(owners).getByRole('button')).toBeInTheDocument();
-    expect(api.leadList).toHaveBeenCalledWith(expect.objectContaining({ view: 'open,unassigned', pageSize: 1 }));
+    expect(api.leadList).toHaveBeenCalledWith(expect.objectContaining({ view: 'queue,unassigned', pageSize: 1 }));
     // The screen is not "clear" while unowned work exists upstream of the routing queue.
     expect(screen.queryByText('You are clear.')).not.toBeInTheDocument();
   });
@@ -187,6 +187,11 @@ describe('what is waiting on you', () => {
       actionLabel: 'Open it',
     });
     expect(items[0].path).not.toContain('undefined');
+  });
+
+  it('asks for draft RFQs still to quote, as the RFQ list does', async () => {
+    await rowsOf('rfqs-in-draft', { businessUnitId: 1 });
+    expect(api.rfqs).toHaveBeenCalledWith(expect.objectContaining({ rfqStatusCode: 'DRAFT', readiness: 'open' }));
   });
 
   it('opens an assigned inquiry directly in the governed decision workbench', async () => {

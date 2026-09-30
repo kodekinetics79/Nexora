@@ -14,6 +14,18 @@ namespace ERP_RFQ_Automation.CommercialCases.Participation;
 public interface ILeadDecisionWorkbenchService
 {
     Task<LeadDecisionWorkbenchDto> GetAsync(long businessUnitId, long leadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// One saved fit assessment, shaped exactly as the workbench shows it. What the fit save
+    /// returns, without rebuilding every line of the request to find it (PERF-03).
+    /// </summary>
+    Task<FitAssessmentDto> GetFitAssessmentAsync(long businessUnitId, long fitAssessmentId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Who owns the request, and its RFQ number: the only facts the decision screen read from the
+    /// full lead record, which on a 1,500-line request is 2.46 MB (PERF-02).
+    /// </summary>
+    Task<LeadOwnerDto> GetOwnerAsync(long businessUnitId, long leadId, CancellationToken ct = default);
 }
 
 public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
@@ -153,7 +165,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         // Catalog matching and quantity/UOM normalization remain read-only decision support.
         // They are deliberately surfaced inside the governed workbench instead of reviving the
         // retired intelligence conversion door.
-        var conversionPreview = await _conversionIntelligence.PreviewAsync(leadId, businessUnitId, ct);
+        var conversionPreview = await _conversionIntelligence.PreviewAsync(lead, businessUnitId, ct);
         var previewByLeadItem = conversionPreview.Items.ToDictionary(x => x.LeadItemId);
 
         var evidence = new List<LeadDecisionEvidenceDto>();
@@ -429,6 +441,43 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                     NameFor(namesByEmail, PersonActor(promotion.PromotedBy)), promotedRevisionLineCount), blockers,
             sourceOccurrence?.SourceChannel, uploadBatch?.CreatedAtUtc, uploadedBy, NameFor(namesByEmail, uploadedBy),
             string.IsNullOrWhiteSpace(lead.CustomerCompanyNameExtracted) ? null : lead.CustomerCompanyNameExtracted.Trim());
+    }
+
+    public async Task<FitAssessmentDto> GetFitAssessmentAsync(long businessUnitId, long fitAssessmentId,
+        CancellationToken ct = default)
+    {
+        var fit = await _db.Set<LeadFitAssessment>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == fitAssessmentId, ct)
+            ?? throw new KeyNotFoundException($"Fit assessment {fitAssessmentId} was not found in this business unit.");
+        return FitDto(fit);
+    }
+
+    public async Task<LeadOwnerDto> GetOwnerAsync(long businessUnitId, long leadId, CancellationToken ct = default)
+    {
+        // The same values as the lead record's own read (LeadRepository.GetLeadByIdAsync), so the
+        // owner control reads one fact either way: no owner is a null name, not a word.
+        var owner = await _db.Leads.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == leadId)
+            .Select(x => new
+            {
+                x.AssignTo,
+                FirstName = x.AssignToNavigation == null ? null : x.AssignToNavigation.FirstName,
+                LastName = x.AssignToNavigation == null ? null : x.AssignToNavigation.LastName,
+                HasOwner = x.AssignToNavigation != null,
+                x.AssignmentMethod,
+                x.AssignmentVersion,
+                x.Rfqno,
+                x.HeaderRemarks,
+                x.BidClosingDate,
+            })
+            .SingleOrDefaultAsync(ct)
+            ?? throw new KeyNotFoundException($"Lead {leadId} was not found in this business unit.");
+        // The closing-date question rides on this read too: Decide no longer reads the full lead
+        // record, and the question is a header fact the rep must see on this screen.
+        return new LeadOwnerDto(leadId, owner.AssignTo,
+            owner.HasOwner ? $"{owner.FirstName} {owner.LastName}".Trim() : null,
+            owner.AssignmentMethod, owner.AssignmentVersion, owner.Rfqno,
+            ERP_RFQ_Automation.Extraction.ClosingDateQuestion.From(owner.HeaderRemarks, owner.BidClosingDate));
     }
 
     /// <summary>
@@ -750,6 +799,9 @@ public sealed record PromotionReceiptDto(long RfqId, string? RfqNumber, int Lead
     int ParticipationVersion, int PromotedLineCount, DateTimeOffset PromotedAtUtc, string? PromotedBy,
     string? PromotedByName = null, int? PromotedRevisionLineCount = null);
 public sealed record SourceCoverageDto(int CoveredLines, int TotalLines);
+public sealed record LeadOwnerDto(long LeadId, long? AssignedToId, string? AssignedToFullName,
+    string AssignmentMethod, long AssignmentVersion, string? Rfqno,
+    ERP_RFQ_Automation.Extraction.ClosingDateQuestionDTO? ClosingDateQuestion = null);
 public sealed record DecisionBlockerDto(string Code, string Message, string? ActionLabel = null, string? ActionPath = null);
 public sealed record DecisionValueOptionDto(string Code, string Label);
 public sealed record LeadDecisionWorkbenchDto(long LeadId, long LeadRevisionId, int LeadRevisionNumber,

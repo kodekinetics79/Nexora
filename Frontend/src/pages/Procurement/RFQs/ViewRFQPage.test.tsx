@@ -82,6 +82,8 @@ vi.mock('../../../context/AuthContext', () => ({
   }),
 }));
 vi.mock('notistack', () => ({ useSnackbar: () => ({ enqueueSnackbar: vi.fn() }) }));
+// The line's price cell asks the stock-price service; unstubbed it gets a partial reply and throws.
+vi.mock('../../../api/services/stockPriceService', () => ({ default: { get: vi.fn().mockResolvedValue(null), saveMargin: vi.fn() } }));
 // Panels with their own data of their own; not what this spec is about.
 vi.mock('../../../components/common/CommercialLineIntelligence', () => ({ default: () => null }));
 vi.mock('../../../components/common/CommercialProcessingEvidence', () => ({ default: () => null }));

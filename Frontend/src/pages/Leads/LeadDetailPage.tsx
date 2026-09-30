@@ -7,7 +7,7 @@ import {
   CircularProgress, Stack, Table, TableHead, TableContainer,
   TableRow, TableCell, TableBody, IconButton,
   Breadcrumbs, Link, Dialog, DialogTitle, DialogContent,
-  DialogActions, Alert, AlertTitle,
+  DialogActions, Alert, AlertTitle, TablePagination,
 } from '@mui/material';
 import {
   Description as FileIcon,
@@ -22,7 +22,7 @@ import LateIngestedBadge from './LateIngestedBadge';
 import ClientIdentityPanel from './ClientIdentityPanel';
 import ResolveClientDialog from './ResolveClientDialog';
 import { clientDisplayName } from './ClientCell';
-import { parseDateSafe, formatDateSafe } from '../../utils/dates';
+import { calendarDaysUntil, formatDateSafe, formatDeadline } from '../../utils/dates';
 import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 import { useAuth } from '../../context/AuthContext';
 import { displayDataValue } from '../../utils/displayDataValue';
@@ -44,11 +44,9 @@ import { commercialActionPermissions } from '../../utils/commercialActionPermiss
  * render nothing — parseDateSafe handles that.
  */
 const DeadlineChip: React.FC<{ bidClosingDate?: string | null }> = ({ bidClosingDate }) => {
-  const close = parseDateSafe(bidClosingDate);
-  if (!close) return null;
-
-  const msPerDay = 24 * 60 * 60 * 1000;
-  const daysLeft = Math.ceil((close.getTime() - Date.now()) / msPerDay);
+  // The one calendar-day count every screen uses (utils/dates calendarDaysUntil).
+  const daysLeft = calendarDaysUntil(bidClosingDate);
+  if (daysLeft == null) return null;
 
   const label = daysLeft < 0
     ? `Overdue by ${Math.abs(daysLeft)} day${Math.abs(daysLeft) === 1 ? '' : 's'}`
@@ -66,7 +64,7 @@ const DeadlineChip: React.FC<{ bidClosingDate?: string | null }> = ({ bidClosing
     <Chip
       size="small"
       label={label}
-      title={`Bid closes ${formatDateSafe(bidClosingDate)}`}
+      title={`Bid closes ${formatDeadline(bidClosingDate)}`}
       sx={{ fontWeight: 900, height: 24, fontSize: '0.7rem', border: '1px solid', ...palette }}
     />
   );
@@ -91,6 +89,9 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
     </Typography>
   </Box>
 );
+
+/** Lines drawn per page on the lead page; the same page size the decision screen uses. */
+const LINES_PER_PAGE = 100;
 
 const LeadDetailPage: React.FC = () => {
   const { hasPermission } = useAuth();
@@ -122,6 +123,9 @@ const LeadDetailPage: React.FC = () => {
   // Information. Shares the query cache with ClientIdentityPanel's own dialog.
   const [resolveClientOpen, setResolveClientOpen] = React.useState(false);
   const [intakeRecordOpen, setIntakeRecordOpen] = React.useState(false);
+  // One page of lines at a time. A 1,500-line bid list drew every line and its extra-columns row
+  // at once: 59,000 DOM nodes and a page that froze for seconds (PERF-08).
+  const [linesPage, setLinesPage] = React.useState(0);
 
   // WP-A3: duplicate-flag resolution ("Not a duplicate" unblocks conversion;
   // "Confirm duplicate" keeps it blocked).
@@ -173,6 +177,10 @@ const LeadDetailPage: React.FC = () => {
     );
   }
   if (!lead) return <Box sx={{ p: 4 }}><Typography>Lead not found.</Typography></Box>;
+
+  const lineCount = lead.leadItems?.length ?? 0;
+  // A page past the end (the lead was re-read with fewer lines) shows the last page instead.
+  const shownLinesPage = Math.min(linesPage, Math.max(0, Math.ceil(lineCount / LINES_PER_PAGE) - 1));
 
   // Review state, from facts the platform records — not from a model score.
   const awaitingReview = (lead.headerRemarks ?? '').startsWith('[NEEDS REVIEW]');
@@ -359,7 +367,7 @@ const LeadDetailPage: React.FC = () => {
                   are shown together and the cross-check is a glance rather than a
                   conversion someone has to do in their head. */}
               <Grid size={{ xs: 12, md: 4 }} component="div">
-                <DataField label="Bid Close" value={formatDate(lead.bidClosingDate)} />
+                <DataField label="Bid Close" value={formatDeadline(lead.bidClosingDate)} />
                 {lead.bidClosingDateHijri && (
                   <Typography
                     variant="caption"
@@ -566,7 +574,7 @@ const LeadDetailPage: React.FC = () => {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {lead.leadItems?.map((item: any) => (
+                  {(lead.leadItems ?? []).slice(shownLinesPage * LINES_PER_PAGE, (shownLinesPage + 1) * LINES_PER_PAGE).map((item: any) => (
                     <React.Fragment key={item.id}>
                     <TableRow sx={{ '&:hover': { bgcolor: 'action.selected' } }}>
                       <TableCell sx={{ width: '35%', py: 2 }}>
@@ -631,6 +639,17 @@ const LeadDetailPage: React.FC = () => {
                 </TableBody>
               </Table>
               </TableContainer>
+              {lineCount > LINES_PER_PAGE && (
+                <TablePagination
+                  component="div"
+                  count={lineCount}
+                  page={shownLinesPage}
+                  onPageChange={(_event, next) => setLinesPage(next)}
+                  rowsPerPage={LINES_PER_PAGE}
+                  rowsPerPageOptions={[LINES_PER_PAGE]}
+                  labelDisplayedRows={({ from, to, count }) => `Lines ${from}–${to} of ${count}`}
+                />
+              )}
             </Paper>
           </Box>
         </Grid>

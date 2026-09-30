@@ -164,8 +164,18 @@ public sealed class EventPrintAccuracyTests
     }
 
     [Fact]
-    public void A_currency_word_nobody_knows_is_kept_as_written()
-        => Assert.Equal("Galleons", Assert.Single(Normalise(Arrived, Row(2, "Relay", currency: "Galleons")).LineItems).Currency.Value);
+    public void A_currency_word_nobody_knows_is_left_blank_and_held_for_review()
+    {
+        // XS-15: kept verbatim, the word reached the evidence ledger, which accepts a three-letter
+        // code or nothing, and the whole document dead-lettered. The word stays in the evidence.
+        var line = Assert.Single(Normalise(Arrived, Row(2, "Relay", currency: "Galleons")).LineItems);
+
+        Assert.Null(line.Currency.Value);
+        Assert.Equal("Galleons", line.Currency.OriginalValue);
+        Assert.Equal(ValidationStatus.NeedsReview, line.Currency.ValidationStatus);
+        Assert.Equal(ValidationStatus.NeedsReview, line.ValidationStatus);
+        Assert.Contains(line.Currency.Transformations, t => t.StartsWith("currency_unrecognised", StringComparison.Ordinal));
+    }
 
     // ------------------------------------------------------------------ line numbering
 

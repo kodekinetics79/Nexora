@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
-  Tooltip, Stack, Alert,
+  Tooltip, Stack, Alert, Collapse, ToggleButton, ToggleButtonGroup,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -14,22 +14,29 @@ import {
   Refresh as RefreshIcon,
   Layers as ItemsIcon,
   CloudUpload as UploadIcon,
+  Tune as TuneIcon,
 } from '@mui/icons-material';
 import rfqService, { type RfqResponseDTO } from '../../../api/services/rfqService';
 import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../../components/common/ExportExcelButton';
 import SearchField from '../../../components/common/SearchField';
 import gridEmptyOverlay from '../../../components/common/gridOverlays';
 import ViewTabs from '../../../components/layout/ViewTabs';
+import ColumnPreferences from '../../../components/common/ColumnPreferences';
+import ClientFilter, { type ClientChoice } from '../../../components/common/ClientFilter';
+import useColumnPreferences from '../../../hooks/useColumnPreferences';
+import { loadDensity, loadView, saveChoice, type DensityChoice, type ViewChoice } from '../../../utils/listPreferences';
 import { useAuth } from '../../../context/AuthContext';
-import { formatDateSafe, formatDateTimeSafe } from '../../../utils/dates';
+import { formatDateSafe, formatDateTimeSafe, formatDeadline } from '../../../utils/dates';
 import { DEADLINE_COLOR, deadlineWords } from '../../../utils/deadline';
 
 /**
  * Same defect as QuotesPage: two rail entries point here at a FILTERED address while the page
  * heads itself "All RFQs / Manage and track all Request for Quotations" either way.
  *
- * RfqRepository.GetAllAsync narrows on 'ready-for-quote' and nothing else, so it is the only value
- * that earns a filter chip. "Sourcing Cases" sends ?state=requires-sourcing, which the server drops
+ * RfqRepository.GetAllAsync narrows on 'open' (no sent quote, not finished — the plain list's
+ * default) and 'ready-for-quote' (the same, narrowed further). Only 'ready-for-quote' is a filter a
+ * link can ask for, so it is the only value that earns a filter chip. "Sourcing Cases" sends
+ * ?state=requires-sourcing, which the server drops
  * on the floor — that rail entry lands the user on EVERY RFQ under a heading promising a sourcing
  * subset, so it gets a stated warning rather than a silently complete list.
  */
@@ -49,7 +56,7 @@ const RFQ_EXPORT_COLUMNS: ExportColumn<RfqResponseDTO>[] = [
   { header: 'Opportunity owner', value: (r) => r.opportunityOwnerName },
   { header: 'Lines', value: (r) => r.noOfLineItems ?? 0 },
   { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
-  { header: 'Closing date', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Closing date', value: (r) => formatDeadline(r.bidClosingDate, '') },
   { header: 'Closing date (Hijri)', value: (r) => r.bidClosingDateHijri },
   { header: 'Required delivery', value: (r) => formatDateSafe(r.requiredDeliveryDate, '') },
   { header: 'Delivery location', value: (r) => r.deliveryLocation },
@@ -74,6 +81,39 @@ const RFQ_EXPORT_COLUMNS: ExportColumn<RfqResponseDTO>[] = [
   { header: 'Modified', value: (r) => formatDateTimeSafe(r.modifiedDate, '') },
 ];
 
+/** Local Simple/Spreadsheet and density choices, like the Leads list. */
+const PREFERENCE_KEY = 'nexora.rfqsPage';
+
+type OwnerView = 'unassigned' | 'mine' | 'all';
+
+/**
+ * The Spreadsheet view's plain columns. Keys match ListViewCatalog "rfqs.list"; the columns the
+ * Simple view already draws (deadline, customer, RFQ #, serial, lines, owner, quote, open) are
+ * reused as they are.
+ */
+const RFQ_SHEET_TEXT: { field: string; headerName: string; width: number; value: (r: RfqResponseDTO) => string | number | null | undefined }[] = [
+  { field: 'customerRfqReference', headerName: 'Customer RFQ reference', width: 170, value: (r) => r.customerRfqReference },
+  { field: 'customerEmail', headerName: 'Customer email', width: 200, value: (r) => r.customerEmail || r.leadEmail },
+  { field: 'buyersName', headerName: 'Buyer', width: 170, value: (r) => r.buyersName },
+  { field: 'contactName', headerName: 'Contact', width: 160, value: (r) => r.contactName },
+  { field: 'accountOwnerName', headerName: 'Account owner', width: 150, value: (r) => r.accountOwnerName },
+  { field: 'recDate', headerName: 'Received', width: 120, value: (r) => formatDateSafe(r.recDate, '') },
+  { field: 'bidClosingDateHijri', headerName: 'Deadline (Hijri)', width: 130, value: (r) => r.bidClosingDateHijri },
+  { field: 'requiredDeliveryDate', headerName: 'Required delivery', width: 140, value: (r) => formatDateSafe(r.requiredDeliveryDate, '') },
+  { field: 'deliveryLocation', headerName: 'Delivery location', width: 200, value: (r) => r.deliveryLocation },
+  { field: 'agreementReference', headerName: 'Agreement reference', width: 170, value: (r) => r.agreementReference },
+  { field: 'opportunityNo', headerName: 'Opportunity #', width: 140, value: (r) => r.opportunityNo },
+  { field: 'rfqtype', headerName: 'RFQ type', width: 120, value: (r) => r.rfqtype },
+  { field: 'inquiryType', headerName: 'Inquiry type', width: 130, value: (r) => r.inquiryType },
+  { field: 'biddingDecision', headerName: 'Bidding decision', width: 140, value: (r) => r.biddingDecision },
+  { field: 'subDate', headerName: 'Submitted', width: 120, value: (r) => formatDateSafe(r.subDate, '') },
+  { field: 'status', headerName: 'Status', width: 120, value: (r) => r.rfqstatusValue },
+  { field: 'readiness', headerName: 'Readiness', width: 130, value: (r) => r.readiness },
+  { field: 'promotedBy', headerName: 'Made from lead by', width: 160, value: (r) => r.promotedBy },
+  { field: 'createdDate', headerName: 'Created', width: 150, value: (r) => formatDateTimeSafe(r.createdDate, '') },
+  { field: 'modifiedDate', headerName: 'Modified', width: 150, value: (r) => formatDateTimeSafe(r.modifiedDate, '') },
+];
+
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -83,17 +123,55 @@ const AllRFQsPage: React.FC = () => {
   const { userData, hasPermission } = useAuth();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 25, page: 0 });
   const [search, setSearch] = useState('');
+  const [client, setClient] = useState<ClientChoice | null>(null);
+  const [ownerView, setOwnerView] = useState<OwnerView>('all');
+  const myUserId = userData?.id ?? null;
+  const [listView, setListView] = useState<ViewChoice>(() => loadView(PREFERENCE_KEY));
+  const [density, setDensity] = useState<DensityChoice>(() => loadDensity(PREFERENCE_KEY));
+  const [displayOpen, setDisplayOpen] = useState(false);
+  const columnPreferences = useColumnPreferences('rfqs.list');
+
+  // The plain list is "open": RFQs whose quote has not been sent. Once sent, the work is on the
+  // Quotes list, so the RFQ leaves this one. A typed search still reaches every RFQ.
+  const listReadiness = readiness ?? (search.trim() ? undefined : 'open');
+
+  // The filters the list and its Excel export share.
+  const filters = {
+    search: search || undefined,
+    businessUnitId: userData?.businessUnitId || undefined,
+    readiness: listReadiness,
+    customerId: client?.id,
+    assignedToId: ownerView === 'mine' && myUserId != null ? myUserId : undefined,
+    unassigned: ownerView === 'unassigned' ? true : undefined,
+  };
+  const resetPage = () => setPaginationModel((current) => ({ ...current, page: 0 }));
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['rfqs', paginationModel, search, readiness],
+    queryKey: ['rfqs', paginationModel, search, listReadiness, client?.id ?? null, ownerView],
     queryFn: () => rfqService.getAll({
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
-      search: search || undefined,
-      businessUnitId: userData?.businessUnitId || undefined,
-      readiness,
+      ...filters,
     }),
   });
+
+  /**
+   * Every RFQ, open or quoted, so an empty default list can say which nothing it is: no RFQs at
+   * all, or every one already quoted. One row is enough; only the count is read. Silent because
+   * the main query reports its own failures. Under the ['rfqs'] prefix so the same invalidations
+   * refresh it.
+   */
+  const totalQuery = useQuery({
+    queryKey: ['rfqs', 'total', userData?.businessUnitId ?? null],
+    queryFn: () => rfqService.getAll({
+      pageNumber: 1,
+      pageSize: 1,
+      businessUnitId: userData?.businessUnitId || undefined,
+    }),
+    meta: { silenceGlobalError: true },
+  });
+  const filtered = Boolean(search) || Boolean(readiness) || client != null || ownerView !== 'all';
+  const isCaughtUp = !filtered && (totalQuery.data?.totalItems ?? 0) > 0;
 
   /**
    * The three highest-traffic grids in the product — this one, Leads and Quotes — shipped MUI's
@@ -101,7 +179,15 @@ const AllRFQsPage: React.FC = () => {
    * and it offers no way out of any of them. Memoised because DataGrid takes a component TYPE
    * here: rebuilding the factory each render would remount the overlay for nothing.
    */
-  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay(isCaughtUp ? {
+    title: 'Nothing to quote',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    action: (
+      <Button variant="contained" onClick={() => navigate('/sales/quotes')} sx={{ fontWeight: 700 }}>
+        Open quotes
+      </Button>
+    ),
+  } : {
     title: 'No RFQs yet',
     message: 'An RFQ is created when you qualify an enquiry. Qualify one and it lands here, ready to price.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
@@ -110,7 +196,7 @@ const AllRFQsPage: React.FC = () => {
         See all inquiries
       </Button>
     ),
-    filtered: Boolean(search) || Boolean(readiness),
+    filtered,
     filteredTitle: 'No RFQ matches this view',
     filteredMessage: readiness
       ? 'Nothing in the list matches this filter. Clear it to see every RFQ.'
@@ -118,13 +204,13 @@ const AllRFQsPage: React.FC = () => {
     filteredAction: (
       <Button
         variant="outlined"
-        onClick={() => { setSearch(''); navigate('/procurement/rfqs/all'); }}
+        onClick={() => { setSearch(''); setClient(null); setOwnerView('all'); navigate('/procurement/rfqs/all'); }}
         sx={{ fontWeight: 700 }}
       >
-        Show all RFQs
+        {search && !readiness ? 'Clear search' : 'Show all RFQs'}
       </Button>
     ),
-  }), [search, readiness, navigate]);
+  }), [isCaughtUp, filtered, search, readiness, client, ownerView, navigate]);
 
   const openRfq = (id: number) => navigate(`/procurement/rfqs/view/${id}`);
   const cellText = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const;
@@ -139,7 +225,7 @@ const AllRFQsPage: React.FC = () => {
         const sent = Boolean(p.row.latestQuoteSentOn);
         const { text, tone } = deadlineWords(p.row.bidClosingDate);
         return (
-          <Tooltip title={p.row.bidClosingDate ? formatDateSafe(p.row.bidClosingDate) : ''} placement="top-start">
+          <Tooltip title={p.row.bidClosingDate ? formatDeadline(p.row.bidClosingDate) : ''} placement="top-start">
             <Typography sx={{ ...cellText, fontSize: '0.85rem', fontWeight: sent ? 500 : 700, color: sent ? 'text.secondary' : DEADLINE_COLOR[tone] }}>
               {text}
             </Typography>
@@ -248,6 +334,27 @@ const AllRFQsPage: React.FC = () => {
     },
   ];
 
+  // Spreadsheet: every field, in the column order this user saved under Display.
+  const byField = new Map(columns.map((column) => [column.field, column]));
+  const sheetColumns: GridColDef<RfqResponseDTO>[] = [
+    byField.get('nexoraSerial')!,
+    byField.get('rfqno')!,
+    byField.get('customerName')!,
+    byField.get('ownerName')!,
+    byField.get('itemCount')!,
+    byField.get('bidClosingDate')!,
+    byField.get('quote')!,
+    ...RFQ_SHEET_TEXT.map((spec): GridColDef<RfqResponseDTO> => ({
+      field: spec.field,
+      headerName: spec.headerName,
+      width: spec.width,
+      sortable: false,
+      valueGetter: (_value, row) => spec.value(row) ?? '',
+    })),
+    byField.get('open')!,
+  ];
+  const gridColumns = listView === 'simple' ? columns : columnPreferences.arrangeColumns(sheetColumns);
+
   return (
     <Box sx={{ p: 2 }}>
       <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', rowGap: 1 }}>
@@ -255,7 +362,16 @@ const AllRFQsPage: React.FC = () => {
           RFQs
           {data && <Box component="span" className="tabular-nums" sx={{ color: 'text.secondary', fontWeight: 600 }}> · {data.totalItems}</Box>}
         </Typography>
-        <SearchField width={340} value={search} onChange={setSearch} placeholder="Search RFQ, serial, customer or buyer" />
+        <SearchField
+          width={340}
+          value={search}
+          onChange={(value) => {
+            setSearch(value);
+            // A new search is a new result set; page 3 of it may not exist.
+            setPaginationModel((current) => ({ ...current, page: 0 }));
+          }}
+          placeholder="Search RFQ, serial, customer or buyer"
+        />
         <Box sx={{ flex: 1 }} />
         {hasPermission('RFQ Management', 'create') && (
           <Tooltip title="Upload a customer inquiry for Lead reconciliation">
@@ -275,9 +391,7 @@ const AllRFQsPage: React.FC = () => {
           loadRows={() => loadAllPages((pageNumber, pageSize) => rfqService.getAll({
             pageNumber,
             pageSize,
-            search: search || undefined,
-            businessUnitId: userData?.businessUnitId || undefined,
-            readiness,
+            ...filters,
           }))}
         />
         <Tooltip title="Refresh">
@@ -295,7 +409,76 @@ const AllRFQsPage: React.FC = () => {
       {/* All / Drafts / Ready for quote: one list to a rep, so tabs rather than rail rows. */}
       <ViewTabs primaryKey="rfqs" ariaLabel="RFQ views" />
 
-      <Paper sx={{ height: 'calc(100vh - 196px)', minHeight: 360, width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      {/* Filters + view controls: the same row the Leads list has. */}
+      <Box sx={{ mb: 1, display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', '& .MuiToggleButton-root': { py: 0.5, minHeight: 34 }, '& .MuiButton-root': { minHeight: 34 } }}>
+        <ClientFilter value={client} onChange={(next) => { setClient(next); resetPage(); }} />
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={ownerView}
+          onChange={(_e, value: OwnerView | null) => {
+            if (!value) return;
+            setOwnerView(value);
+            resetPage();
+          }}
+          aria-label="Owner"
+        >
+          <ToggleButton value="unassigned" aria-label="Unassigned">Unassigned</ToggleButton>
+          <ToggleButton value="mine" aria-label="Mine" disabled={myUserId == null}>Mine</ToggleButton>
+          <ToggleButton value="all" aria-label="Everyone">Everyone</ToggleButton>
+        </ToggleButtonGroup>
+        <Box sx={{ flexGrow: 1 }} />
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={listView}
+          onChange={(_e, value: ViewChoice | null) => {
+            if (!value) return;
+            setListView(value);
+            saveChoice(PREFERENCE_KEY, 'view', value);
+          }}
+          aria-label="List view"
+        >
+          <Tooltip title="The working columns, no sideways scrolling." describeChild><ToggleButton value="simple" aria-label="Simple view">Simple</ToggleButton></Tooltip>
+          <Tooltip title="Every field, in the column order you saved under Display." describeChild><ToggleButton value="spreadsheet" aria-label="Spreadsheet view">Spreadsheet</ToggleButton></Tooltip>
+        </ToggleButtonGroup>
+        <Button
+          size="small"
+          variant="text"
+          startIcon={<TuneIcon />}
+          onClick={() => setDisplayOpen((open) => !open)}
+          aria-expanded={displayOpen}
+          sx={{ fontWeight: 700, textTransform: 'none' }}
+        >
+          Display
+        </Button>
+        <Collapse in={displayOpen} sx={{ width: '100%' }}>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', pt: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
+            {listView === 'spreadsheet' ? (
+              <ColumnPreferences preferences={columnPreferences} />
+            ) : (
+              <Typography variant="caption" color="text.secondary">Switch to the Spreadsheet view to choose and order columns.</Typography>
+            )}
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={density}
+              onChange={(_e, value: DensityChoice | null) => {
+                if (!value) return;
+                setDensity(value);
+                saveChoice(PREFERENCE_KEY, 'density', value);
+              }}
+              aria-label="Row density"
+            >
+              <ToggleButton value="comfortable" aria-label="Comfortable rows">Comfortable</ToggleButton>
+              <ToggleButton value="standard" aria-label="Standard rows">Standard</ToggleButton>
+              <ToggleButton value="compact" aria-label="Compact rows">Compact</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
+        </Collapse>
+      </Box>
+
+      <Paper sx={{ height: 'calc(100vh - 250px)', minHeight: 360, width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         {isError ? (
           <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
             <Stack spacing={2} sx={{ alignItems: 'center', maxWidth: 480 }}>
@@ -305,7 +488,7 @@ const AllRFQsPage: React.FC = () => {
           </Box>
         ) : <DataGrid
           rows={data?.items ?? []}
-          columns={columns}
+          columns={gridColumns}
           rowCount={data?.totalItems ?? 0}
           loading={isLoading}
           slots={{ noRowsOverlay }}
@@ -316,6 +499,13 @@ const AllRFQsPage: React.FC = () => {
           disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={48}
+          density={density}
+          {...(listView === 'spreadsheet'
+            ? {
+                columnVisibilityModel: columnPreferences.columnVisibilityModel,
+                onColumnVisibilityModelChange: columnPreferences.onColumnVisibilityModelChange,
+              }
+            : {})}
           columnHeaderHeight={40}
           onRowClick={(p) => openRfq(p.row.id)}
           onCellKeyDown={(p, event) => { if (event.key === 'Enter') openRfq(p.row.id); }}

@@ -11,6 +11,7 @@ using ERP_RFQ_Automation.Services.Interfaces;
 using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge;
+using ERP_RFQ_Automation.Extraction.Anchoring;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -93,6 +94,13 @@ public sealed class DocumentExtractionInput
     public string HeaderText { get; init; } = "";
 
     /// <summary>
+    /// The first rows of each table of a structured document, as plain text ("cell | cell"), so the
+    /// buyer's organisation can be read where prints state it (terms, storage location) rather than
+    /// only from the prose around the tables. Null when the reader has none.
+    /// </summary>
+    public string? DocumentOpeningText { get; init; }
+
+    /// <summary>
     /// One entry per parsed body region. For STRUCTURED sources (spreadsheet/CSV) a region
     /// is a real row, so the count is a real item count. For UNSTRUCTURED sources the
     /// reader produces one region per non-empty TEXT LINE — several lines routinely form
@@ -103,6 +111,14 @@ public sealed class DocumentExtractionInput
     /// auto-split off for all of them.
     /// </summary>
     public IReadOnlyList<string> LineItemRegions { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// True when <see cref="LineItemRegions"/> together are the WHOLE document from its first line
+    /// (a PDF grouped one region per page), so <see cref="HeaderText"/> is a copy of the top of the
+    /// document rather than lines that precede the regions. Only used to number lines when a
+    /// checked value is cited ("Page 3, line 12").
+    /// </summary>
+    public bool RegionsCoverWholeDocument { get; init; }
 
     /// <summary>True when the document is a structured spreadsheet/CSV and can skip the LLM.</summary>
     public bool IsStructured { get; init; }
@@ -359,6 +375,12 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     /// </summary>
     internal const int MaxChunksPerDocument = 30;
     private const int HeaderContextBudget = 6_000;
+
+    /// <summary>Header context carried by a call that no longer asks for the header.</summary>
+    private const int LaterHeaderContextBudget = 1_500;
+
+    /// <summary>The fixed "[DOCUMENT HEADER …]" / "[LINE ITEMS …]" framing around a chunk.</summary>
+    private const int ChunkFramingChars = 400;
     private const double MinAcceptableConfidence = 0.60;
 
     /// <summary>
@@ -423,7 +445,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 line.ManufacturerName.Value,
                 JoinText(line.ProductName.Value, line.ItemText.Value),
                 line.ManufacturerPartNumber.Value,
-                snapshot.Patterns, snapshot.KnownManufacturers);
+                snapshot.Patterns, snapshot.KnownManufacturers,
+                buyerListsApprovedMakers: line.ExtraFields?.ContainsKey(Templates.ManufacturingPartText.ApprovedManufacturersField) == true);
             if (result is null) continue;
 
             // The evidence points at the cell the answer was read FROM — the description or
@@ -571,7 +594,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         // A refusal is a routing decision, not a failure — the document falls through and is
         // read by the model exactly as before. Nothing is lost by trying.
         if (Templates.AramcoBidListExtraction.TryRead(
-                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } reading)
+                AnchorText.WithoutPageMarkers(DocumentTextOf(input)), input.SourceDocumentName,
+                out var templateRejection) is { } reading)
         {
             // The rows take the structured path from here — normaliser, canonical import,
             // evidence ledger — so a line read by the template can cite its source exactly
@@ -686,7 +710,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             try
             {
                 wholeDocument = await _llm.ExtractLeadDataDetailedAsync(
-                    Clip(input.HeaderText, MaxChunkChars),
+                    Clip(input.HeaderText, ExtractionOutputBudget.MaxDocumentCharacters(_llm.MaxDocumentInputTokens, MaxChunkChars)),
                     new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
                         $"extraction:{input.SourceId}:a{input.AttemptNumber}:whole",
                         AiPromptVersions.StructuredRfqExtraction,
@@ -706,12 +730,21 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     $"AI governance refused this request before any model call was made ({ex.Code}).",
                     input, diagnostics);
             }
+            var wholeDocumentText = AnchorText.Build(
+                [Clip(input.HeaderText, ExtractionOutputBudget.MaxDocumentCharacters(_llm.MaxDocumentInputTokens, MaxChunkChars))]);
+            var checkedWhole = wholeDocument.Result is null
+                ? null
+                : AiItemAnchoring.AnchorChunk(
+                    (wholeDocument.Result.Items ?? []).Select(WithoutServerOwnedEvidence).ToList(),
+                    wholeDocumentText, headerContext: null);
             var single = wholeDocument.Result is null
                 ? null
-                : wholeDocument.Result with
+                : WithFileNameRfqNumber(wholeDocument.Result with
                 {
-                    Items = (wholeDocument.Result.Items ?? []).Select(WithoutServerOwnedEvidence).ToList()
-                };
+                    Items = checkedWhole!.Where(x => x.Disposition != AnchorDisposition.HeaderEcho)
+                        .Select(x => x.Item).ToList()
+                }, input.SourceDocumentName, diagnostics);
+            if (checkedWhole is not null) diagnostics.Add(CheckedDiagnostic(checkedWhole));
             if (single is null)
                 return Failed(0, wholeDocument.OutputTruncated
                     ? $"The model ran out of output budget ({_llm.MaxOutputTokens} tokens) before it finished "
@@ -760,7 +793,22 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         }
 
         var itemsPerChunk = ItemsPerChunk();
-        var chunks = BuildChunks(input.LineItemRegions, itemsPerChunk);
+        // INPUT budget. The chunk must fit the context window beside the instructions and the
+        // whole output ceiling; the provider silently cuts the START of a prompt that does not,
+        // and the start is where the instructions are. The header context is part of the input.
+        var maxDocumentChars = ExtractionOutputBudget.MaxDocumentCharacters(_llm.MaxDocumentInputTokens, MaxChunkChars);
+        var headerContext = Clip(input.HeaderText, Math.Min(HeaderContextBudget, maxDocumentChars / 3));
+        // A later chunk no longer asks for the header, so it carries less of it: enough for the
+        // currency and delivery terms its lines may lean on, not another copy of the whole block.
+        var laterHeaderContext = Clip(input.HeaderText, Math.Min(LaterHeaderContextBudget, maxDocumentChars / 3));
+        var regionBudget = Math.Max(1_000, maxDocumentChars - headerContext.Length - ChunkFramingChars);
+        // A page is one region but may print many lines: size page-grouped calls by the lines the
+        // pages visibly print, so a dense bid list is not sent eleven pages at a time.
+        var itemsInRegion = input.RegionsCoverWholeDocument
+            ? input.LineItemRegions.Select(r => AiItemAnchoring.EstimateLines(AnchorText.Build([r ?? string.Empty]))).ToList()
+            : null;
+        var chunks = BuildChunkSpans(input.LineItemRegions, itemsPerChunk, regionBudget, itemsInRegion);
+        var positions = RegionPositions(input);
 
         // PRE-FLIGHT COST GATE. Refuse before the first model call, not after the fortieth.
         if (chunks.Count > MaxChunksPerDocument)
@@ -796,12 +844,19 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         diagnostics.Add($"Document split into {chunks.Count} chunk(s) for {expected} line item(s).");
         _log.LogInformation(
             "Chunk plan for {Document}: {Chunks} chunk(s), {Expected} item(s), <={ItemsPerChunk} item(s) per chunk "
-            + "(projected <={ProjectedTokens} output tokens against a {MaxOutputTokens}-token ceiling).",
+            + "(projected <={ProjectedTokens} output tokens against a {MaxOutputTokens}-token ceiling; <={Chars} "
+            + "document characters per call for a {Window}-token context window).",
             input.SourceDocumentName, chunks.Count, expected, itemsPerChunk,
-            ExtractionOutputBudget.ProjectedOutputTokens(itemsPerChunk), _llm.MaxOutputTokens);
+            ExtractionOutputBudget.ProjectedOutputTokens(itemsPerChunk), _llm.MaxOutputTokens,
+            maxDocumentChars, _llm.ContextWindowTokens);
 
-        var headerContext = Clip(input.HeaderText, HeaderContextBudget);
         var mergedItems = new List<LeadItemData>(expected);
+        var checkedItems = new List<AnchoredItem>();
+        var echoesDropped = 0;
+        // Lines the pages visibly print (one per printed quantity) that no call returned, and
+        // lines printed in pages whose call failed. Both are what "read 3 of about 42" counts.
+        var printedButNotReturned = 0;
+        var printedInUnreadParts = 0;
         var seenAcrossChunks = new HashSet<string>(StringComparer.Ordinal);
         var duplicatesAcrossChunks = 0;
         LeadExtractionResult? headerSource = null;
@@ -816,7 +871,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         // size is derived from an ESTIMATE, so an unusually verbose document can still
         // overflow it; this is the honest correction, and it re-issues a SMALLER request
         // rather than replaying the identical failing one.
-        var pending = new List<List<string>>(chunks);
+        var pending = new List<ChunkSpan>(chunks);
         var attemptedCalls = 0;
         var callBudget = TruncationCallBudget(expected, chunks.Count);
         var governanceRefusalCodes = new List<string>();
@@ -824,8 +879,13 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         for (var i = 0; i < pending.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            var chunk = pending[i];
-            var prompt = BuildChunkText(headerContext, chunk);
+            var span = pending[i];
+            var chunk = input.LineItemRegions.Skip(span.Start).Take(span.Count).ToList();
+            // The header is asked for until one call has returned it, then never again: each
+            // later copy cost ~650 output tokens and was thrown away.
+            var headerRequested = headerSource is null;
+            var contextSent = headerRequested ? headerContext : laterHeaderContext;
+            var prompt = BuildChunkText(contextSent, chunk);
             LlmExtractionOutcome outcome;
             var chunkStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
             try
@@ -839,7 +899,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 outcome = await _llm.ExtractLeadDataDetailedAsync(prompt,
                     new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
                         $"extraction:{input.SourceId}:a{input.AttemptNumber}:chunk:{i + 1}:{chunk.Count}",
-                        AiPromptVersions.StructuredRfqExtraction,
+                        headerRequested ? AiPromptVersions.StructuredRfqExtraction : AiPromptVersions.StructuredRfqItemsOnly,
                         ExtractionJobId: input.ExtractionJobId,
                         SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId,
                         ItemsInPayload: chunk.Count), ct);
@@ -861,6 +921,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 // attempts_exhausted and then into "All chunks failed", which is how a job
                 // whose 12 calls all succeeded dead-lettered as a model problem.
                 failedChunks++;
+                printedInUnreadParts += AiItemAnchoring.EstimateLines(AnchorText.Build(chunk));
                 governanceRefusalCodes.Add(ex.Code);
                 diagnostics.Add(
                     $"Chunk {i + 1}/{pending.Count} refused by AI governance before any model call "
@@ -884,6 +945,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 if (chunk.Count <= 1)
                 {
                     failedChunks++;
+                    printedInUnreadParts += Math.Max(1, AiItemAnchoring.EstimateLines(AnchorText.Build(chunk)));
                     var reason =
                         $"Chunk {i + 1}/{pending.Count} failed: one line item alone exceeds the model's "
                         + $"{_llm.MaxOutputTokens}-token output budget (1 item not extracted).";
@@ -898,6 +960,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 if (attemptedCalls >= callBudget)
                 {
                     failedChunks++;
+                    printedInUnreadParts += AiItemAnchoring.EstimateLines(AnchorText.Build(chunk));
                     diagnostics.Add(
                         $"Chunk {i + 1}/{pending.Count} failed: output truncated and the re-split budget "
                         + $"is exhausted ({chunk.Count} item(s) not extracted).");
@@ -905,8 +968,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 }
 
                 var half = chunk.Count / 2;
-                pending[i] = chunk.Skip(half).ToList();
-                pending.Insert(i, chunk.Take(half).ToList());
+                pending[i] = new ChunkSpan(span.Start + half, span.Count - half);
+                pending.Insert(i, new ChunkSpan(span.Start, half));
                 diagnostics.Add(
                     $"Chunk {i + 1} output was truncated at {chunk.Count} item(s); retrying as "
                     + $"{half} + {chunk.Count - half} item(s).");
@@ -921,38 +984,57 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             if (outcome.Result is null)
             {
                 failedChunks++;
+                printedInUnreadParts += AiItemAnchoring.EstimateLines(AnchorText.Build(chunk));
                 diagnostics.Add(
                     $"Chunk {i + 1}/{pending.Count} failed ({chunk.Count} item(s) not extracted)."
                     + (outcome.ErrorCode is null ? "" : $" [{outcome.ErrorCode}]"));
                 continue;
             }
 
-            headerSource ??= outcome.Result; // header fields come from the first successful chunk
-            if (outcome.Result.Items is { Count: > 0 })
+            // Header fields come from the call that was asked for them: the first successful one.
+            if (headerRequested) headerSource = outcome.Result;
+
+            // CHECK every value against this call's own pages, and cite what is found. A model's
+            // provenance fields are never trusted; the check writes them.
+            var ownText = AnchorText.Build(chunk, positions[span.Start].Page, positions[span.Start].Line);
+            var modelItems = (outcome.Result.Items ?? new List<LeadItemData>()).Select(WithoutServerOwnedEvidence).ToList();
+            var anchored = AiItemAnchoring.AnchorChunk(modelItems, ownText, contextSent);
+            var returnedHere = anchored.Count(x => x.Disposition != AnchorDisposition.HeaderEcho);
+            printedButNotReturned += Math.Max(0, AiItemAnchoring.EstimateLines(ownText) - returnedHere);
+
+            if (anchored.Count > 0)
             {
                 // REDUCE: union in order — but an item an EARLIER chunk already returned is not
                 // a new item. Every chunk carries the same header context, and a model that
                 // finds a line item in that context returns it on every call: a one-item
                 // Marafiq RFQ read in five chunks came back as five copies of the same
-                // transformer, and all five were saved on the lead. Duplicates are only ever
-                // dropped ACROSS chunks; what one chunk returns is that chunk's reading.
+                // transformer, and all five were saved on the lead. A line found only in that
+                // context and nowhere in the call's own pages is dropped outright; a line read
+                // twice is recognised by the model's own values, before the check rewrote them.
+                // Duplicates are only ever dropped ACROSS chunks; what one chunk returns is that
+                // chunk's reading.
                 var added = 0;
-                foreach (var item in outcome.Result.Items)
+                for (var k = 0; k < anchored.Count; k++)
                 {
-                    var key = CrossChunkKey(item);
+                    if (anchored[k].Disposition == AnchorDisposition.HeaderEcho) { echoesDropped++; continue; }
+                    var key = CrossChunkKey(modelItems[k]);
                     if (key is not null && seenAcrossChunks.Contains(key)) { duplicatesAcrossChunks++; continue; }
-                    mergedItems.Add(item);
+                    mergedItems.Add(anchored[k].Item);
+                    checkedItems.Add(anchored[k]);
                     added++;
                 }
-                foreach (var item in outcome.Result.Items)
+                foreach (var item in modelItems)
                     if (CrossChunkKey(item) is { } key) seenAcrossChunks.Add(key);
-                if (added < outcome.Result.Items.Count)
+                if (added < anchored.Count)
                     _log.LogWarning(
                         "Chunk {Index}/{Total} for {Document} repeated {Dropped} item(s) an earlier chunk "
-                        + "already returned; kept {Kept}.", i + 1, pending.Count, input.SourceDocumentName,
-                        outcome.Result.Items.Count - added, added);
+                        + "already returned or found only in the header context; kept {Kept}.",
+                        i + 1, pending.Count, input.SourceDocumentName, anchored.Count - added, added);
             }
         }
+        if (echoesDropped > 0)
+            diagnostics.Add(
+                $"Dropped {echoesDropped} item(s) found only in the header context and not in the pages they were read from.");
         if (duplicatesAcrossChunks > 0)
             diagnostics.Add(
                 $"Dropped {duplicatesAcrossChunks} item(s) repeated across chunks "
@@ -987,14 +1069,29 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         mergedItems = await InferManufacturersAsync(mergedItems, input.BusinessUnitId, diagnostics, ct);
         var extracted = mergedItems.Count;
         var overall = ComputeOverallConfidence(headerSource, mergedItems);
-        var merged = WithItems(headerSource, mergedItems, overall);
+        var merged = WithFileNameRfqNumber(WithItems(headerSource, mergedItems, overall),
+            input.SourceDocumentName, diagnostics);
         diagnostics.Add($"Extracted {extracted} item(s) from {expected} parsed text region(s).");
+        if (checkedItems.Count > 0) diagnostics.Add(CheckedDiagnostic(checkedItems));
+
+        // A document is never "fully read" when a part of it was not: a failed or cut-off call,
+        // or pages that visibly print more lines than came back. Said as one fact, with the
+        // numbers, so the decision screen can say it in one line.
+        PartialReadFact? partialRead = null;
+        if (failedChunks > 0 || printedButNotReturned > 0)
+        {
+            var missing = printedButNotReturned + printedInUnreadParts;
+            partialRead = new PartialReadFact(extracted, missing > 0 ? extracted + missing : null, failedChunks);
+            diagnostics.Add(partialRead.Describe());
+        }
 
         string? reviewReason = null;
         if (input.OcrTruncated || input.OcrStatus is ExtractionOcrStatus.Partial or ExtractionOcrStatus.Failed)
-            reviewReason = "OCR was incomplete; omitted content requires review.";
-        else if (failedChunks > 0)
-            reviewReason = $"{failedChunks} chunk(s) failed to extract.";
+            reviewReason = "OCR was incomplete; omitted content requires review."
+                           + (partialRead is null ? string.Empty : " " + partialRead.Describe());
+        else if (partialRead is not null)
+            reviewReason = partialRead.Describe()
+                           + (failedChunks > 0 ? $" ({failedChunks} chunk(s) failed to extract.)" : string.Empty);
         else if (extracted == 0)
             reviewReason = $"No line items were extracted from {expected} parsed text region(s).";
         else if (overall < MinAcceptableConfidence)
@@ -1061,7 +1158,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var primary = import.Documents.First();
         var items = InheritStatedCurrency(allItems.Select(MapCanonicalItem).ToList());
         var overall = ComputeOverallConfidence(items, header: primary);
-        var result = BuildStructuredResult(primary, items, overall);
+        var result = WithBuyerOrganisation(BuildStructuredResult(primary, items, overall), rows);
 
         var anyNeedsReview = import.Documents.Any(d => d.ValidationStatus != ValidationStatus.Valid)
                              || allItems.Any(i => i.ValidationStatus != ValidationStatus.Valid);
@@ -1081,7 +1178,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     .Select(d =>
                     {
                         var groupItems = InheritStatedCurrency(d.LineItems.Select(MapCanonicalItem).ToList());
-                        return BuildStructuredResult(d, groupItems, ComputeOverallConfidence(groupItems, d));
+                        return WithBuyerOrganisation(BuildStructuredResult(d, groupItems, ComputeOverallConfidence(groupItems, d)), rows);
                     })
                     .ToList();
                 diagnostics.Add($"Multi-inquiry document: split into {splitResults.Count} RFQ group(s).");
@@ -1124,27 +1221,114 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         => Math.Min(MaxItemsPerChunk, ExtractionOutputBudget.MaxItemsPerChunk(_llm.MaxOutputTokens));
 
     internal static List<List<string>> BuildChunks(IReadOnlyList<string> regions, int maxItemsPerChunk)
+        => BuildChunkSpans(regions, maxItemsPerChunk, MaxChunkChars)
+            .Select(span => regions.Skip(span.Start).Take(span.Count).Select(r => r ?? "").ToList())
+            .ToList();
+
+    /// <summary>A run of consecutive regions sent in one call: where it starts and how many.</summary>
+    internal readonly record struct ChunkSpan(int Start, int Count);
+
+    /// <summary>
+    /// Consecutive regions packed into calls of at most <paramref name="maxItemsPerChunk"/> regions
+    /// and <paramref name="maxChars"/> characters. Spans rather than copies, so a checked value can
+    /// be cited at its page and line.
+    /// </summary>
+    /// <param name="itemsInRegion">
+    /// How many line items each region is expected to hold; one each when null. A PDF page is one
+    /// region but may print a dozen lines, and the output budget is paid per LINE.
+    /// </param>
+    internal static List<ChunkSpan> BuildChunkSpans(
+        IReadOnlyList<string> regions, int maxItemsPerChunk, int maxChars, IReadOnlyList<int>? itemsInRegion = null)
     {
         var itemCap = Math.Clamp(maxItemsPerChunk, 1, MaxItemsPerChunk);
-        var chunks = new List<List<string>>();
-        var current = new List<string>();
+        var spans = new List<ChunkSpan>();
+        var start = 0;
+        var count = 0;
+        var items = 0;
         var currentChars = 0;
 
-        foreach (var region in regions)
+        for (var i = 0; i < regions.Count; i++)
         {
-            var len = region?.Length ?? 0;
-            if (current.Count > 0 && (current.Count >= itemCap || currentChars + len > MaxChunkChars))
+            var len = regions[i]?.Length ?? 0;
+            var weight = itemsInRegion is null ? 1 : Math.Max(1, itemsInRegion[i]);
+            if (count > 0 && (items + weight > itemCap || currentChars + len > maxChars))
             {
-                chunks.Add(current);
-                current = new List<string>();
+                spans.Add(new ChunkSpan(start, count));
+                start = i;
+                count = 0;
+                items = 0;
                 currentChars = 0;
             }
-            current.Add(region ?? "");
+            count++;
+            items += weight;
             currentChars += len;
         }
-        if (current.Count > 0)
-            chunks.Add(current);
-        return chunks;
+        if (count > 0)
+            spans.Add(new ChunkSpan(start, count));
+        return spans;
+    }
+
+    /// <summary>
+    /// The page and line each region starts on, for citing a checked value. Regions are consecutive
+    /// document lines after the header — or, for a PDF grouped by page, the whole document.
+    /// </summary>
+    private static (int Page, int Line)[] RegionPositions(DocumentExtractionInput input)
+    {
+        var regions = input.LineItemRegions;
+        var positions = new (int Page, int Line)[regions.Count];
+        var (page, line) = input.RegionsCoverWholeDocument || string.IsNullOrEmpty(input.HeaderText)
+            ? (0, 0)
+            : AnchorText.Advance(input.HeaderText, 0, 0);
+        for (var i = 0; i < regions.Count; i++)
+        {
+            positions[i] = (page, line + 1);
+            (page, line) = AnchorText.Advance(regions[i] ?? string.Empty, page, line);
+        }
+        return positions;
+    }
+
+    /// <summary>One line saying what the document check did, for the diagnostics a reviewer reads.</summary>
+    private static string CheckedDiagnostic(IReadOnlyCollection<AnchoredItem> checkedItems)
+    {
+        var notFound = checkedItems.Count(x => x.Disposition == AnchorDisposition.NotFound);
+        var cleared = checkedItems.Sum(x => x.Cleared.Count);
+        var corrected = checkedItems.Sum(x => x.Corrected.Count);
+        var cited = checkedItems.Count(x => x.Item.VerifiedEvidence is { Count: > 0 });
+        return $"Checked {checkedItems.Count} line(s) against the document: {cited} cite their source, "
+               + $"{corrected} value(s) corrected to what the page prints, {cleared} value(s) cleared because the "
+               + $"page does not print them, {notFound} line(s) not found on the page.";
+    }
+
+    /// <summary>
+    /// The buyer's RFQ number from the file name when the pages do not print it (HT-08). MaSa and
+    /// Marafiq prints carry only a collective number ("MKA-26-133") while the RFQ number the buyer
+    /// requires on the quote is in the file name ("MaSa RFQ No 9500202307 … .pdf"); an Aramco print
+    /// carries none at all. A number the document itself prints with nine or more digits wins; a
+    /// shorter reference the model read is kept as the opportunity number.
+    /// </summary>
+    internal static LeadExtractionResult WithFileNameRfqNumber(
+        LeadExtractionResult result, string? sourceDocumentName, List<string>? diagnostics = null)
+    {
+        var fromName = ERP_RFQ_Automation.Services.DocumentIntelligence.DocxTableParser.RfqNumberFromFileName(sourceDocumentName);
+        if (fromName is null) return result;
+        var read = result.Rfqno?.Trim();
+        if (string.Equals(read, fromName, StringComparison.OrdinalIgnoreCase)) return result;
+        if (!string.IsNullOrEmpty(read) && System.Text.RegularExpressions.Regex.IsMatch(read, @"\d{9,}"))
+            return result; // the document prints its own long number; the page wins over the name
+        diagnostics?.Add(string.IsNullOrEmpty(read)
+            ? $"RFQ number {fromName} taken from the file name; the document does not print one."
+            : $"RFQ number {fromName} taken from the file name; the document's \"{read}\" kept as the opportunity number.");
+        return result with
+        {
+            Rfqno = fromName,
+            RfqnoConfidence = 0.75,
+            OpportunityNo = string.IsNullOrEmpty(read) || !string.IsNullOrWhiteSpace(result.OpportunityNo)
+                ? result.OpportunityNo
+                : read,
+            OpportunityNoConfidence = string.IsNullOrEmpty(read) || !string.IsNullOrWhiteSpace(result.OpportunityNo)
+                ? result.OpportunityNoConfidence
+                : result.RfqnoConfidence
+        };
     }
 
     /// <summary>
@@ -1155,6 +1339,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     /// </summary>
     internal static string? CrossChunkKey(LeadItemData item)
     {
+        // The LINE NUMBER is not part of a code-anchored key. The same Marafiq line came back as
+        // "00010201195514" from one call and "1" from another — the glued code and the model's own
+        // count — and the two copies were both saved.
         static string N(string? s) => string.IsNullOrWhiteSpace(s)
             ? string.Empty
             : System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"\s+", " ").ToUpperInvariant();
@@ -1171,7 +1358,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var codeAnchored = !string.IsNullOrWhiteSpace(item.ItemMaterialCode)
             || !string.IsNullOrWhiteSpace(item.ManufacturerPartNumber);
         return string.Join("\u001f",
-            N(item.InquiryGroup), N(item.LineItemNo), N(item.ItemMaterialCode), N(item.ManufacturerPartNumber),
+            N(item.InquiryGroup), codeAnchored ? "" : N(item.LineItemNo), N(item.ItemMaterialCode), N(item.ManufacturerPartNumber),
             qty, N(item.UnitOfMeasure),
             codeAnchored ? "" : N(item.ProductShortName), codeAnchored ? "" : N(item.ProductShortDescription));
     }
@@ -1268,20 +1455,40 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     /// Chunking starts at 11 items and SEC bids are 12+ lines, so this hit exactly the
     /// documents that matter most. Using a <c>with</c> expression instead of a positional
     /// call makes the same mistake impossible for every field added from now on.
+    ///
+    /// The items are taken as given: every model-supplied provenance field was cleared when the
+    /// call returned, and the evidence they now carry was written by the document check.
     /// </summary>
     private static LeadExtractionResult WithItems(LeadExtractionResult header, List<LeadItemData> items, double overall)
         => header with
         {
             OverallConfidence = overall,
-            Items = items.Select(WithoutServerOwnedEvidence).ToList()
+            Items = items.ToList()
         };
 
     private static LeadItemData WithoutServerOwnedEvidence(LeadItemData item) => item with
     {
         SourceSpanVerified = false,
         SourceExtractionJobId = null,
-        VerifiedEvidence = null
+        VerifiedEvidence = null,
+        EvidenceFromDocumentCheck = false
     };
+
+    /// <summary>
+    /// The buyer's organisation read from the document's own text (HeaderCompletionService), with the
+    /// sentence it was read from. The resolver matches it against the tenant's customers; a name no
+    /// customer carries is offered to the rep as a new client, never created on its own.
+    /// </summary>
+    private static LeadExtractionResult WithBuyerOrganisation(LeadExtractionResult result, IReadOnlyList<RfqSpreadsheetRow> rows)
+    {
+        var read = rows.FirstOrDefault(row => !string.IsNullOrWhiteSpace(row.BuyerOrganisation));
+        return read is null ? result : result with
+        {
+            CustomerCompanyName = read.BuyerOrganisation!.Trim(),
+            CustomerCompanyNameConfidence = (double)ERP_RFQ_Automation.Extraction.HeaderCompletion.HeaderCompletionService.CompletionConfidence,
+            CustomerCompanyEvidence = read.BuyerOrganisationEvidence,
+        };
+    }
 
     /// <summary>
     /// The deterministic spreadsheet/CSV path. It produces no document-level classification

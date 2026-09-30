@@ -61,7 +61,24 @@ public class LeadController : ControllerBase
         [FromQuery] DateTime? endDate = null,
         [FromQuery] string? emailSource = null,
         [FromQuery] string? clientemail = null,
-        [FromQuery] string? view = null)
+        [FromQuery] string? view = null,
+        [FromQuery] string? search = null,
+        [FromQuery] string? customer = null,
+        [FromQuery] string? due = null,
+        [FromQuery] DateTime? today = null,
+        [FromQuery] string? serial = null,
+        [FromQuery] string? rfq = null,
+        [FromQuery] string? buyer = null,
+        [FromQuery] string? agreement = null,
+        [FromQuery] DateTime? dueFrom = null,
+        [FromQuery] DateTime? dueTo = null,
+        [FromQuery] DateTime? requiredFrom = null,
+        [FromQuery] DateTime? requiredTo = null,
+        [FromQuery] int? itemsMin = null,
+        [FromQuery] int? itemsMax = null,
+        [FromQuery] string? status = null,
+        [FromQuery] DateTimeOffset? ingestedFrom = null,
+        [FromQuery] DateTimeOffset? ingestedBefore = null)
     {
         try
         {
@@ -82,7 +99,16 @@ public class LeadController : ControllerBase
             view = BindMineFilterToActor(view, actor.UserId);
 
             // Use explicit types for deconstruction to avoid inference errors
-            (IEnumerable<LeadResponseDTO> leads, int totalCount) = await _repository.GetLeadListAsync(pageNumber, pageSize, id, rfqno, buyersName, leadSource, targetBUId, startDate, endDate, emailSource, clientemail, view, actor.AccountScope);
+            (IEnumerable<LeadResponseDTO> leads, int totalCount) = await _repository.GetLeadListAsync(pageNumber, pageSize, id, rfqno, buyersName, leadSource, targetBUId, null, null, emailSource, clientemail, view, actor.AccountScope, search, customer, due, today,
+                new LeadListColumnFilters
+                {
+                    Serial = serial, Rfq = rfq, Buyer = buyer, Agreement = agreement,
+                    // "Received" rides on the existing startDate/endDate pair, now as whole days.
+                    ReceivedFrom = startDate, ReceivedTo = endDate,
+                    DueFrom = dueFrom, DueTo = dueTo, RequiredFrom = requiredFrom, RequiredTo = requiredTo,
+                    ItemsMin = itemsMin, ItemsMax = itemsMax, Status = status,
+                    IngestedFrom = ingestedFrom, IngestedBefore = ingestedBefore,
+                });
 
             var response = new PaginatedResponseDTO<LeadResponseDTO>
             {
@@ -97,6 +123,29 @@ public class LeadController : ControllerBase
         {
             return Unexpected(ex, "list");
         }
+    }
+
+    /// <summary>
+    /// The Customer choices for the leads list the reader is on: the customers of the leads they
+    /// can see under the same queue and owner, with counts, plus how many have no customer yet.
+    /// Gated by the Leads permission, so a reader without Customers access still gets the filter.
+    /// </summary>
+    [HttpGet("customers")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<IActionResult> GetLeadListCustomers([FromQuery] string? view = null, [FromQuery] string? due = null, [FromQuery] DateTime? today = null)
+    {
+        var actor = await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+        if (actor == null) return Forbid();
+        view = BindMineFilterToActor(view, actor.UserId);
+        var (customers, noCustomer) = await _repository.GetLeadListCustomersAsync(actor.BusinessUnitId, view, actor.AccountScope, due, today);
+        var (statuses, notOpened) = await _repository.GetLeadListStatusesAsync(actor.BusinessUnitId, view, actor.AccountScope);
+        return Ok(new
+        {
+            customers = customers.Select(c => new { customerId = c.CustomerId, name = c.Name, count = c.Count }),
+            noCustomer,
+            statuses = statuses.Select(st => new { statusId = st.StatusId, code = st.Code, label = st.Label, count = st.Count }),
+            notOpened,
+        });
     }
 
     [HttpGet("email-configurations")]
@@ -397,6 +446,43 @@ public class LeadController : ControllerBase
         catch (Exception ex)
         {
             return Unexpected(ex, "link-client");
+        }
+    }
+
+    // A person answering "Closes 8 Sep or 9 Aug?" on the decision screen. One field, its own
+    // audit row; see LeadRepository.ConfirmClosingDateAsync.
+    [HttpPut("{id}/closing-date")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public async Task<ActionResult<LeadResponseDTO>> ConfirmClosingDate(long id, [FromBody] LeadClosingDateAnswerDTO answer)
+    {
+        try
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
+
+            var answeredBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? string.Empty;
+
+            var lead = await _repository.ConfirmClosingDateAsync(id, businessUnitId, answer, answeredBy);
+            if (lead == null) return NotFound($"Lead with ID {id} not found.");
+            return Ok(lead);
+        }
+        catch (LeadReviewConflictException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
+        catch (LeadReviewValidationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return Unexpected(ex, "closing-date");
         }
     }
 

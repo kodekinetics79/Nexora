@@ -12,6 +12,7 @@ import { jwtDecode } from "jwt-decode";
 import { getImpersonation } from "../api/impersonation";
 import userService from "../api/services/userService";
 import { presentableErrorMessage, toPresentableError } from "../utils/apiErrors";
+import { setCompanyTimeZone } from "../utils/dates";
 
 // FE-12: proactively handle JWT expiry instead of waiting for a failed call.
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
@@ -108,6 +109,8 @@ export interface UserData {
    * snapshot would also throw away login-written identity fields the refresh does not restore.
    */
   entitlements?: string[];
+  /** The company's time zone: closing dates count their days left on this calendar. */
+  timeZoneId?: string | null;
   /** Written by `setUserData`; checked on load. See `PERMISSION_SCHEMA_VERSION`. */
   schemaVersion?: number;
 }
@@ -266,6 +269,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             // A server that predates the field omits it; that must read as "none", not "keep
             // whatever the previous snapshot claimed".
             entitlements: me.entitlements ?? [],
+            timeZoneId: me.timeZoneId ?? null,
             schemaVersion: PERMISSION_SCHEMA_VERSION,
           };
           // An identical answer keeps the SAME object, so nothing that reads the session
@@ -452,6 +456,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     permissionsStale,
     refreshPermissions,
   ]);
+
+  // Set before the children render, so the first paint already counts days on the company's
+  // calendar. Idempotent: it only records the session's zone for calendarDaysUntil.
+  setCompanyTimeZone(userData.timeZoneId);
 
   return (
     <AuthContext.Provider value={value}>

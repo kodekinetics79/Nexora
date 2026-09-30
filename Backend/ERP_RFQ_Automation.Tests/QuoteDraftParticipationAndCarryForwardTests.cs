@@ -229,10 +229,14 @@ public sealed class QuoteDraftParticipationAndCarryForwardTests
     }
 
     [Fact]
-    public async Task TheRequestedValuesAreNotCopiedOntoTheQuoteLine()
+    public async Task TheBuyersMaterialMakerAndPartAreKeptOnTheQuoteLine_AndTheRequestIsStillReadLive()
     {
-        // They are projected through QuoteItem.RfqitemId. Copying them would create a second
-        // version of the buyer's request that can silently drift from the governed one.
+        // Reversed 2026-09-29 (pilot audit UX-03 / CB-08, CTO decision). The quote is a document:
+        // it must print what it said when it went out, and the RFQ line can change after that (a
+        // .doc re-upload of the same RFP once wiped every maker on 1,514 lines). So the three
+        // values the buyer matches on are copied onto the quote line when it is made. The
+        // Requested* projection still reads the RFQ line live, so a later change on the request
+        // is visible to the rep beside what the quote says.
         var (db, ctx, rfq) = await SeedAsync(96700);
         using var _ = db;
         await using var __ = ctx;
@@ -246,8 +250,17 @@ public sealed class QuoteDraftParticipationAndCarryForwardTests
         ctx.ChangeTracker.Clear();
         var quoteLine = await ctx.Set<QuoteItem>().SingleAsync();
         Assert.NotNull(quoteLine.RfqitemId); // the link IS the lineage
-        var columns = typeof(QuoteItem).GetProperties().Select(p => p.Name).ToArray();
-        Assert.DoesNotContain("ManufacturerName", columns);
-        Assert.DoesNotContain("ManufacturerPartNumber", columns);
+        Assert.Equal("SEC-MAT-889120", quoteLine.CustomerMaterialCode);
+        Assert.Equal("GOULDS PUMPS", quoteLine.ManufacturerName);
+        Assert.Equal("P/N#HTGD337039P0002", quoteLine.ManufacturerPartNumber);
+
+        // The request changes afterwards: the quote keeps what it said, the projection shows the new ask.
+        var rfqLine = await ctx.Rfqitems.SingleAsync(x => x.Id == quoteLine.RfqitemId);
+        rfqLine.ManufacturerName = "FLOWSERVE";
+        await ctx.SaveChangesAsync();
+        ctx.ChangeTracker.Clear();
+        var view = Assert.Single((await service.GetQuoteAsync(quoteLine.QuoteId)).QuoteItems);
+        Assert.Equal("GOULDS PUMPS", view.ManufacturerName);
+        Assert.Equal("FLOWSERVE", view.RequestedManufacturerName);
     }
 }

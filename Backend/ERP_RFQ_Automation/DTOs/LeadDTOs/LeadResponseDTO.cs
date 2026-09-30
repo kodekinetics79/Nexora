@@ -66,6 +66,19 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? BidClosingDateHijri { get; set; }
 
         /// <summary>
+        /// Set when extraction could read the closing date two ways and nothing on the document
+        /// said which ("9/8/2026": 9 Aug or 8 Sep). The rep answers it on Decide; null otherwise.
+        /// Detail only.
+        /// </summary>
+        public ERP_RFQ_Automation.Extraction.ClosingDateQuestionDTO? ClosingDateQuestion { get; set; }
+
+        /// <summary>
+        /// True once an RFQ was made from this lead. Until then a person may change the lead's
+        /// client; after it the client travels with the RFQ and is fixed. Detail only.
+        /// </summary>
+        public bool HasRfq { get; set; }
+
+        /// <summary>
         /// FR-RFQ-03. The standing agreement / frame contract this inquiry is called off
         /// against. Distinct from <see cref="Rfqno"/> (the inquiry's own reference) and
         /// from <see cref="DurationAgreement"/> (free-text description, not an identifier).

@@ -54,7 +54,9 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] string? createdBy = null,
             [FromQuery] long? rfqStatusId = null,
             [FromQuery] string? rfqStatusCode = null,
-            [FromQuery] string? readiness = null)
+            [FromQuery] string? readiness = null,
+            [FromQuery] long? customerId = null,
+            [FromQuery] bool unassigned = false)
         {
             try
             {
@@ -72,7 +74,7 @@ namespace ERP_RFQ_Automation.Controllers
 
                 var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
                 if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
-                var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness, actor.AccountScope);
+                var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness, actor.AccountScope, customerId, unassigned);
                 
                 return Ok(new PaginatedRfqResponseDTO
                 {

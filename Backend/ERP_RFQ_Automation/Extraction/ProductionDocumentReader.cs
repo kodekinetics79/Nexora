@@ -370,7 +370,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 _log.LogInformation(
                     "{Name} is an HTML page named .{Ext}; read deterministically from its tables: {Rows} line(s), no model involved.",
                     name, ext, htmlRows.Count);
-                return Structured(job, name, htmlRows.ToList(), RetainedProse(reading.Paragraphs));
+                return Structured(job, name, htmlRows.ToList(), RetainedProse(reading.Paragraphs), OpeningText(reading.Grids));
             }
             _log.LogInformation(
                 "{Name} is an HTML page named .{Ext} with no readable line table; reading it as HTML text.", name, ext);
@@ -426,7 +426,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 _log.LogInformation(
                     "DOCX {Name} was read deterministically from its table: {Rows} line(s), no model involved.",
                     name, tableRows.Count);
-                return Structured(job, name, tableRows.ToList(), ProseOutsideTables(bytes, name));
+                return Structured(job, name, tableRows.ToList(), ProseOutsideTables(bytes, name), WordOpeningText(bytes, name));
             }
             // No mappable table — an ordinary prose document. Falls through to the text path
             // below, byte for byte as before: a prose RFQ is not a "layout not recognized"
@@ -551,11 +551,47 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         }
     }
 
+    /// <summary>Rows per table the buyer's organisation is looked for in.</summary>
+    private const int OpeningRowsPerTable = 40;
+
+    /// <summary>
+    /// The first rows of each table as plain text, "cell | cell" per row. Prints name the buyer in
+    /// their terms and storage-location rows, not under a "Buyer" label.
+    /// </summary>
+    internal static string? OpeningText(IReadOnlyList<IReadOnlyList<IReadOnlyList<string?>>> grids)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var grid in grids)
+            foreach (var row in grid.Take(OpeningRowsPerTable))
+            {
+                var cells = row.Where(cell => !string.IsNullOrWhiteSpace(cell)).Select(cell => cell!.Trim()).Distinct().ToList();
+                if (cells.Count > 0) sb.AppendLine(string.Join(" | ", cells));
+                if (sb.Length > 12_000) return sb.ToString();
+            }
+        return sb.Length == 0 ? null : sb.ToString();
+    }
+
+    private string? WordOpeningText(byte[] bytes, string name)
+    {
+        try
+        {
+            return OpeningText(DocxTableParser.ReadLeadingGrids(bytes, OpeningRowsPerTable));
+        }
+        catch (Exception ex)
+        {
+            // Only the buyer's name is read from it; the lines are already read.
+            _log.LogDebug(ex, "Opening table text of {Name} could not be read.", name);
+            return null;
+        }
+    }
+
     private static DocumentExtractionInput Structured(
-        ExtractionJob job, string name, List<RfqSpreadsheetRow> rows, string? documentNarrative = null)
+        ExtractionJob job, string name, List<RfqSpreadsheetRow> rows, string? documentNarrative = null,
+        string? documentOpeningText = null)
         => new()
         {
             DocumentNarrative = documentNarrative,
+            DocumentOpeningText = documentOpeningText,
             BusinessUnitId = job.BusinessUnitId,
             ReceivedOn = DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc),
             SourceId = $"job:{job.Id}",
@@ -586,7 +622,11 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // per-line split made a chunk a slice of one item's specification rather than a set of
         // whole items, and cost 250 of 259 line items on a real customer bid list. The header
         // is cut at the first item so no line item rides along as "context" on every chunk.
-        var (header, regions) = LineItemRegionGrouper.SplitHeaderAndRegions(lines, HeaderLineCount);
+        // A PDF (it carries page markers) is grouped by PAGE instead — see PdfPageRegions.
+        var paged = PdfPageRegions.HasPageMarkers(lines);
+        var (header, regions) = paged
+            ? PdfPageRegions.Split(lines, HeaderLineCount)
+            : LineItemRegionGrouper.SplitHeaderAndRegions(lines, HeaderLineCount);
 
         return new DocumentExtractionInput
         {
@@ -607,6 +647,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             IsStructured = false,
             HeaderText = header,
             LineItemRegions = regions,
+            RegionsCoverWholeDocument = paged,
             // The reader's own note (why OCR was or was not taken, what an email container
             // refused) travels on the SAME field the spreadsheet fallback uses, because the
             // worker already prefixes that field onto the failure reason a reviewer reads.
@@ -960,14 +1001,25 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     {
         var pdfText = string.Empty;
         var pageCount = 0;
+        var nativeCharacters = 0;
         try
         {
             using var doc = PdfDocument.Open(bytes);
             pageCount = doc.NumberOfPages;
             var sb = new StringBuilder();
+            var characters = 0;
             foreach (var page in doc.GetPages())
-                sb.AppendLine(page.Text);
+            {
+                // One marker line per page, so a value found on the page can be cited by page and
+                // the model path can divide the document where the document divides itself. The
+                // markers are not counted as text: a scan stays a scan.
+                var pageText = PdfPageText(page);
+                characters += CountNonWhitespace(pageText);
+                sb.Append(Anchoring.AnchorText.PageMarker(page.Number)).Append('\n');
+                sb.AppendLine(pageText);
+            }
             pdfText = sb.ToString();
+            nativeCharacters = characters;
         }
         catch (PdfDocumentEncryptedException ex)
         {
@@ -989,7 +1041,6 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             _log.LogWarning(ex, "PDF text extraction failed; the document may be scanned or damaged.");
         }
 
-        var nativeCharacters = CountNonWhitespace(pdfText);
         var threshold = NativeTextThreshold(pageCount);
         var density = pageCount > 0 ? nativeCharacters / (double)pageCount : nativeCharacters;
 
@@ -1061,6 +1112,33 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                    + "character recognition could not process, or the file is damaged. Ask the sender "
                    + "for a text-based PDF, or for the original document."
         };
+    }
+
+    /// <summary>
+    /// One page's text in reading order, LINE BY LINE.
+    ///
+    /// <para><c>Page.Text</c> — what this used to call — joins the page's glyphs with no line breaks
+    /// and no geometric spaces, so every page reached the extractor as one run-on line:
+    /// "…-----00010201195514TRANSFORMER:STEP UP,400 TO 480VAC,40KVA 1 eachTRANSFORMER…". The item
+    /// number was glued to the material number, "40KVA" to "PRIMARY", a quantity to the next
+    /// column, and every rule downstream that assumes lines (the header, item boundaries) counted
+    /// pages. The content-order extractor keeps the producer's reading order and inserts the line
+    /// breaks and spaces the page geometry implies: "00010 201195514 TRANSFORMER…" / "1     each".</para>
+    ///
+    /// <para>A page the layout extractor cannot handle falls back to the old text rather than
+    /// losing the page.</para>
+    /// </summary>
+    internal static string PdfPageText(UglyToad.PdfPig.Content.Page page)
+    {
+        try
+        {
+            var text = UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor.ContentOrderTextExtractor.GetText(page);
+            return string.IsNullOrWhiteSpace(text) ? page.Text : text;
+        }
+        catch (Exception)
+        {
+            return page.Text;
+        }
     }
 
     /// <summary>

@@ -20,12 +20,31 @@ namespace ERP_RFQ_Automation.Repositories
     {
         private readonly ErpRfqAutomationContext _context;
 
-        public RfqRepository(ErpRfqAutomationContext context)
+        private readonly ERP_RFQ_Automation.MultiTenancy.ICompanyClock _companyClock;
+
+        public RfqRepository(ErpRfqAutomationContext context,
+            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null)
         {
             _context = context;
+            _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
         }
 
-        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null)
+        private async Task<List<long>> FinishedRfqStatusIdsAsync(long businessUnitId)
+        {
+            var statuses = await _context.SetupMasters.AsNoTracking()
+                .Where(s => s.BusinessUnitId == businessUnitId
+                    && s.SetupType.ToLower().Replace(" ", "") == "rfqstatus")
+                .Select(s => new { s.SetupId, s.SetupCode, s.SetupValue })
+                .ToListAsync();
+
+            return statuses
+                .Where(s => LifecyclePolicy.IsTerminal(
+                    "Rfq", LifecyclePolicy.Canonicalize("Rfq", s.SetupCode, s.SetupValue)))
+                .Select(s => s.SetupId)
+                .ToList();
+        }
+
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false)
         {
             IQueryable<Rfq> query = _context.Rfqs
                 .AsNoTracking()
@@ -50,7 +69,21 @@ namespace ERP_RFQ_Automation.Repositories
                     (r.Rfqstatus.SetupCode != null && r.Rfqstatus.SetupCode.ToUpper() == code ||
                      r.Rfqstatus.SetupValue.ToUpper() == code));
             }
-            if (string.Equals(readiness, "ready-for-quote", StringComparison.OrdinalIgnoreCase))
+            // "open" is the RFQ list's default: RFQs whose quote has not gone to the customer. Once
+            // a quote is SENT (emailed, marked submitted or uploaded) the work lives on the Quotes
+            // list. A draft does not count: pricing the first line creates the draft
+            // (PriceRfqLineAsync), and a half-priced RFQ must stay where the rep prices it.
+            // "Ready for quote" is the same queue narrowed further, so it drops sent RFQs too.
+            // An RFQ closed without a quote (cancelled, lost, expired) is finished work too; which
+            // states those are comes from the lifecycle policy, as on the Leads list.
+            var readyForQuote = string.Equals(readiness, "ready-for-quote", StringComparison.OrdinalIgnoreCase);
+            if (readyForQuote || string.Equals(readiness, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                var finished = await FinishedRfqStatusIdsAsync(businessUnitId);
+                query = query.Where(r => (r.RfqstatusId == null || !finished.Contains(r.RfqstatusId.Value))
+                    && !_context.Quotes.Any(q => q.Rfqid == r.Id && q.RemovedOn == null && q.SentOn != null));
+            }
+            if (readyForQuote)
             {
                 query = query.Where(r => r.CustomerId != null && r.LeadId != null
                     && r.Rfqitems.Any()
@@ -68,6 +101,13 @@ namespace ERP_RFQ_Automation.Repositories
                     (!string.IsNullOrWhiteSpace(createdBy) && r.CreatedBy == createdBy)
                 );
             }
+
+            // The list's Client and Unassigned filters. The owner is the lead's owner, the same
+            // person the Owner column shows.
+            if (customerId.HasValue)
+                query = query.Where(r => r.CustomerId == customerId.Value);
+            if (unassigned)
+                query = query.Where(r => r.Lead == null || r.Lead.AssignTo == null);
 
             if (!string.IsNullOrWhiteSpace(search))
             {
@@ -288,7 +328,7 @@ namespace ERP_RFQ_Automation.Repositories
                 RequiredDeliveryDate = rfq.RequiredDeliveryDate,
                 DeliveryLocation = rfq.DeliveryLocation,
                 AgreementReference = rfq.AgreementReference,
-                BidClosingDateHijri = rfq.BidClosingDateHijri,
+                BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(rfq.BidClosingDate) ?? rfq.BidClosingDateHijri,
                 InquiryType = rfq.InquiryType,
                 LeadId = rfq.LeadId,
                 PromotionId = rfq.PromotionId,
@@ -637,6 +677,8 @@ namespace ERP_RFQ_Automation.Repositories
             if (rfq.RecDate != default)
                 existing.RecDate = rfq.RecDate;
             existing.BidClosingDate = rfq.BidClosingDate;
+            // The Hijri date follows the closing date it renders (it went stale on every edit).
+            existing.BidClosingDateHijri = ERP_RFQ_Automation.Extraction.RfqDateParser.ToHijri(existing.BidClosingDate);
             existing.BiddingDecision = rfq.BiddingDecision;
             existing.AcknowledgmentDate = rfq.AcknowledgmentDate;
             existing.SubDate = rfq.SubDate;
@@ -791,6 +833,10 @@ namespace ERP_RFQ_Automation.Repositories
                     // buyer match our line back to their RFQ line (SAP "00010", "OPT-29", …).
                     UnitOfMeasure = i.UnitOfMeasure,
                     CustomerLineRef = i.LineItemNo,
+                    // The buyer's material number, maker and part number (QuoteItem.BuyerIdentity).
+                    CustomerMaterialCode = QuoteItem.Clean(i.ItemMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                    ManufacturerName = QuoteItem.Clean(i.ManufacturerName, QuoteItem.MaxManufacturerName),
+                    ManufacturerPartNumber = QuoteItem.Clean(i.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                     UnitPrice = i.UnitPrice ?? 0,
                     TotalAmount = i.Quantity!.Value * (i.UnitPrice ?? 0),
                     CreatedBy = approvedBy,
@@ -923,7 +969,8 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
             var rfqs = await query.ToListAsync();
 
-            var now = DateTime.UtcNow;
+            // Closing dates are the buyer's wall-clock time, so "soon" is counted on the company's clock.
+            var now = await _companyClock.NowAsync(businessUnitId);
             var sevenDaysLater = now.AddDays(7);
 
             return new RfqStatsDTO

@@ -1528,6 +1528,10 @@ public sealed class LeadPersister : ILeadPersister
         var items = results[0].Items;
         if (items is not { Count: > 0 }) return AutoVerification.None;
         if (!items.All(item => item.Quantity is > 0)) return AutoVerification.None;
+        // A model-read line whose values were found on the page is checkable, not checked: its
+        // evidence came from the document check, and a model-read commercial fact always goes
+        // to a person (Extraction/Anchoring/AiItemAnchoring).
+        if (items.Any(item => item.EvidenceFromDocumentCheck)) return AutoVerification.None;
         if (!items.All(item => HasCompleteCriticalEvidence(item, jobId))) return AutoVerification.None;
         if (IsDeterministicRead(outcome)) return AutoVerification.DeterministicRead;
         if (minConfidence is null) return AutoVerification.None;
@@ -1535,6 +1539,9 @@ public sealed class LeadPersister : ILeadPersister
             ? AutoVerification.HighConfidence
             : AutoVerification.None;
     }
+
+    /// <summary>The clock the persist-lease keep-alive reads; replaced only by tests.</summary>
+    internal TimeProvider PersistClock { get; set; } = TimeProvider.System;
 
     public LeadPersister(
         ErpRfqAutomationContext context,
@@ -1628,7 +1635,8 @@ public sealed class LeadPersister : ILeadPersister
         ChunkedExtractionOutcome outcome,
         bool enrichAfterPersistence,
         bool bypassAssemblyFence,
-        CancellationToken ct)
+        CancellationToken ct,
+        PersistLeaseKeepAlive? keepAlive = null)
     {
         if (outcome.Result is null)
             throw new InvalidOperationException("Cannot persist a null extraction result.");
@@ -1911,6 +1919,7 @@ public sealed class LeadPersister : ILeadPersister
                         LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey,
                         ThreadReferencedMessageIds = threadAncestorKeys
                     }, ct));
+                if (keepAlive is not null) await keepAlive.RenewIfDueAsync(ct);
             }
             if (job.SourceDocumentOccurrenceId.HasValue)
             {
@@ -1954,7 +1963,8 @@ public sealed class LeadPersister : ILeadPersister
 
         if (outcome.CanonicalImport is not null && leads.Count == results.Count)
         {
-            var evidencePersister = new StructuredEvidenceLedgerPersister(_context);
+            var evidencePersister = new StructuredEvidenceLedgerPersister(_context,
+                keepAlive is null ? null : keepAlive.RenewIfDueAsync);
             await evidencePersister.PersistAsync(job, outcome, leads, ct);
         }
         else
@@ -1964,6 +1974,7 @@ public sealed class LeadPersister : ILeadPersister
             if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
                 await PersistUnstructuredRunAsync(job, outcome, leads, reconciliation, ct);
         }
+        if (keepAlive is not null) await keepAlive.RenewIfDueAsync(ct);
 
         _log.LogInformation(
             "Persisted {LeadCount} lead(s) ({LeadIds}) with {Count} item(s) total from job {JobId}.",
@@ -2107,6 +2118,7 @@ public sealed class LeadPersister : ILeadPersister
             .MaxAsync(ct) ?? 0) + 1;
 
         var pending = new List<(LeadItemData Item, CanonicalLineItem Line, int Ordinal)>();
+        var partialReadFindings = 0;
         for (var groupIndex = 0; hasCanonicalOutput && groupIndex < groups.Count; groupIndex++)
         {
             var result = groups[groupIndex];
@@ -2120,6 +2132,17 @@ public sealed class LeadPersister : ILeadPersister
             inquiry.RequireReview();
             _context.Add(inquiry);
             await _context.SaveChangesAsync(ct);
+            // "Read 3 of about 42 lines": kept as a finding on the run, where the decision screen
+            // reads it. It used to live only in a free-text remark nothing displayed.
+            if (ERP_RFQ_Automation.Extraction.Anchoring.PartialReadFact.TryParse(outcome.ReviewReason, out var partialRead)
+                && runs.TryGetValue(job.Id, out var anchorRun))
+            {
+                _context.Add(ValidationFinding.ForInquiry(job.BusinessUnitId, anchorRun.Id, inquiry.Id,
+                    ERP_RFQ_Automation.Extraction.Anchoring.PartialReadFact.FindingCode,
+                    ERP_RFQ_Automation.DocumentIntelligence.Persistence.ValidationSeverity.Warning,
+                    partialRead.Describe()));
+                partialReadFindings++;
+            }
 
             var leadItemIds = await ResolveEvidenceLeadItemIdsAsync(
                 job, lead, reconciliation.Count == groups.Count ? reconciliation[groupIndex] : null,
@@ -2133,7 +2156,13 @@ public sealed class LeadPersister : ILeadPersister
                                   ?? "[description requires review]";
                 var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
                     description, item.Quantity is > 0 ? item.Quantity : null, item.UnitOfMeasure);
-                line.Enrich(item.ManufacturerName, item.ManufacturerPartNumber, item.Currency,
+                // The ledger accepts a three-letter code or nothing. A model answer such as
+                // "Saudi Riyal" or "Currency" must not dead-letter the document; the line is
+                // already held as Warning for a person.
+                var currency = item.Currency?.Trim().ToUpperInvariant();
+                if (currency is not null && !StructuredEvidenceLedgerPersister.IsCurrencyCode(currency))
+                    currency = null;
+                line.Enrich(item.ManufacturerName, item.ManufacturerPartNumber, currency,
                     item.UnitPrice, ParseNonNegativeInt(item.LeadTime), JsonSerializer.Serialize(item),
                     CanonicalValidationStatus.Warning);
                 line.BindLeadItem(leadItemIds[lineIndex]);
@@ -2258,7 +2287,7 @@ public sealed class LeadPersister : ILeadPersister
             runs[sourceJob.Id].Complete(1, regionCounts[sourceJob.Id],
                 isAnchor && hasCanonicalOutput ? groups.Count : 0,
                 isAnchor && hasCanonicalOutput ? groups.Sum(x => x.Items.Count) : 0,
-                evidenceCounts[sourceJob.Id], 0);
+                evidenceCounts[sourceJob.Id], isAnchor ? partialReadFindings : 0);
         }
         await _context.SaveChangesAsync(ct);
     }
@@ -2442,13 +2471,18 @@ public sealed class LeadPersister : ILeadPersister
             await transaction.RollbackAsync(ct);
             return null;
         }
+        // Renewed again at the persist's own checkpoints whenever a third of the lease has gone:
+        // a CPU-starved persist of even a small document outlived the single renewal above and
+        // fenced its own completion (XS-09). Same connection, same transaction, row already locked.
+        var keepAlive = new PersistLeaseKeepAlive(job.Id, persistLease,
+            token => queue.RenewLeaseAsync(job.Id, workerId, leaseAttempt, persistLease, token), PersistClock);
 
         var previouslyTrackedLeadIds = _context.ChangeTracker.Entries<Lead>()
             .Select(entry => entry.Entity.Id)
             .Where(id => id > 0)
             .ToHashSet();
         var leadId = await PersistInternalAsync(
-            job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: false, ct);
+            job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: false, ct, keepAlive);
         var persistedLeads = _context.ChangeTracker.Entries<Lead>()
             .Where(entry => entry.Entity.Id > 0 && !previouslyTrackedLeadIds.Contains(entry.Entity.Id))
             .Select(entry => entry.Entity)
@@ -2503,6 +2537,8 @@ public sealed class LeadPersister : ILeadPersister
         // NOT wrapped in a try/catch, deliberately. Unbilled usage is a silent revenue loss that
         // nobody discovers; a failed extraction job is loud, retried and visible. If metering
         // cannot record, this transaction must roll back.
+        // Before the platform-plane block: a renewal re-enters the tenant role on this connection.
+        await keepAlive.RenewIfDueAsync(ct);
         if (_usageMetering is not null)
         {
             // Fail closed on the one way the block below could be misused. Inside it the
@@ -2547,6 +2583,7 @@ public sealed class LeadPersister : ILeadPersister
             if (restoreRole is not null)
                 await SetLocalRoleAsync(restoreRole, ct);
         }
+        await keepAlive.RenewIfDueAsync(ct);
         if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
             throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
 

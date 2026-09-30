@@ -90,7 +90,8 @@ public sealed class TenantAccessService : ITenantAccessService
     private enum PrivilegeProbe
     {
         BillingTerms,
-        ExemptionReason
+        ExemptionReason,
+        TimeZone
     }
 
     private readonly ErpRfqAutomationContext _context;
@@ -255,6 +256,7 @@ public sealed class TenantAccessService : ITenantAccessService
             Entitlements = core.Entitlements ?? "{}"
         };
         snapshot = await AddBillingTermsAsync(snapshot, core.TenantId, ct);
+        snapshot = await AddTimeZoneAsync(snapshot, core.TenantId, ct);
 
         // The exemption flag decides nothing for a mode that IS charged: for Billable and
         // Trial the floor turns on plan absence alone. Asking anyway would spend a round trip
@@ -310,6 +312,46 @@ public sealed class TenantAccessService : ITenantAccessService
                     PrivilegeScope, PrivilegeRefusalTtl.TotalMinutes);
             else
                 _log.LogDebug(ex, "Billing-term columns still unreadable in the {Scope} privilege scope.", PrivilegeScope);
+            return snapshot;
+        }
+    }
+
+    /// <summary>
+    /// The company's time zone: what a buyer's closing time is read in. Granted by
+    /// 20260929030000. Its own probe, so an ungranted column only costs deadlines their zone
+    /// (they stay in UTC, as before) and never touches status, plan or billing terms.
+    /// </summary>
+    private async Task<TenantAccessSnapshot> AddTimeZoneAsync(
+        TenantAccessSnapshot snapshot, long tenantId, CancellationToken ct)
+    {
+        if (IsRefused(PrivilegeProbe.TimeZone))
+            return snapshot;
+
+        try
+        {
+            var timeZoneId = await _context.Set<Tenant>()
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(t => t.Id == tenantId)
+                .Select(t => t.TimeZoneId)
+                .FirstOrDefaultAsync(ct);
+
+            return snapshot with { TimeZoneId = string.IsNullOrWhiteSpace(timeZoneId) ? null : timeZoneId.Trim() };
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsInsufficientPrivilege(ex))
+        {
+            if (RememberRefusal(PrivilegeProbe.TimeZone))
+                _log.LogWarning(ex,
+                    "platform.\"Tenants\".\"TimeZoneId\" is not readable in the {Scope} privilege scope, so closing "
+                    + "dates are compared in UTC there instead of the company's time zone. Access, plan and billing "
+                    + "are UNAFFECTED. Grant SELECT (\"TimeZoneId\") to nexora_tenant_app and nexora_identity_app.",
+                    PrivilegeScope);
+            else
+                _log.LogDebug(ex, "Tenant time zone still unreadable in the {Scope} privilege scope.", PrivilegeScope);
             return snapshot;
         }
     }

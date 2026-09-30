@@ -53,6 +53,7 @@ vi.mock('@mui/x-data-grid', () => ({
 }));
 
 import DraftRFQsPage from './DraftRFQsPage';
+import rfqService from '../../../api/services/rfqService';
 
 const renderPage = () => {
   const client = new QueryClient({
@@ -78,6 +79,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   testState.grants.clear();
   testState.grants.add('RFQ Management:view');
+});
+
+describe('Draft RFQ list', () => {
+  it('drops RFQs whose quote was sent, as the RFQ list does', async () => {
+    renderPage();
+    await screen.findByText('RFQ-MANUAL-7');
+    expect(rfqService.getAll).toHaveBeenCalledWith(expect.objectContaining({ rfqStatusCode: 'DRAFT', readiness: 'open' }));
+  });
 });
 
 describe('Draft RFQ destructive action', () => {

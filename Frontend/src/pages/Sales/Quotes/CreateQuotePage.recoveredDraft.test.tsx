@@ -59,14 +59,14 @@ describe('CreateQuotePage — a draft left in this browser', () => {
     expect(await screen.findByText(/unsaved quote recovered/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /restore/i }));
 
-    expect(screen.getByLabelText(/header remarks \/ terms/i)).toHaveValue('Delivery within 4 weeks, DAP Dammam');
+    expect(screen.getByLabelText(/notes to customer/i)).toHaveValue('Delivery within 4 weeks, DAP Dammam');
     expect(screen.queryByText(/unsaved quote recovered/i)).not.toBeInTheDocument();
     expect(sessionStorage.getItem('nexora.quote.create')).toBeNull();
   });
 
   it('shows no banner when there is nothing to recover (the control)', async () => {
     renderCreate();
-    expect(await screen.findByLabelText(/header remarks \/ terms/i)).toHaveValue('');
+    expect(await screen.findByLabelText(/notes to customer/i)).toHaveValue('');
     expect(screen.queryByText(/unsaved quote recovered/i)).not.toBeInTheDocument();
   });
 });

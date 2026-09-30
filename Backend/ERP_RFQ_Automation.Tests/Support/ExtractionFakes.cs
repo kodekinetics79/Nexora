@@ -40,6 +40,12 @@ public sealed class StubLlm : ILLMService
     /// </summary>
     public int MaxOutputTokens { get; init; } = 4096;
 
+    /// <summary>Document tokens one call may carry; null (the default) means no context window is known.</summary>
+    public int? MaxDocumentInputTokens { get; init; }
+
+    /// <summary>The governed prompt version of each successive call, in order.</summary>
+    public List<string> PromptVersions { get; } = new();
+
     public StubLlm(params LeadExtractionResult?[] responses)
         : this(AiProviderClass.Local, responses) { }
 
@@ -55,6 +61,7 @@ public sealed class StubLlm : ILLMService
         CallCount++;
         Prompts.Add(fullText);
         IdempotencyKeys.Add(context.IdempotencyKey);
+        PromptVersions.Add(context.PromptVersion);
         RequestedItemCounts.Add(context.ItemsInPayload);
         var result = _responses.Count > 0 ? _responses.Dequeue() : null;
         return Task.FromResult(result);

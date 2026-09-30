@@ -157,8 +157,9 @@ public sealed class OllamaOutputTruncationTests
     }
 
     [Theory]
-    // Unset stays modest: the 180s client timeout, not the provider, binds next.
-    [InlineData(null, 4096)]
+    // Unset is 8,192, the value appsettings.json ships: 4,096 truncated nearly every
+    // spec-heavy chunk (a single Aramco or Marafiq line costs 450–650 output tokens).
+    [InlineData(null, 8192)]
     [InlineData("8192", 8192)]
     [InlineData("32768", 32768)]
     // ollama.com rejects num_predict above 65,536 for deepseek-v4-pro (ollama/ollama#16890),
@@ -168,8 +169,9 @@ public sealed class OllamaOutputTruncationTests
     public async Task ConfiguredOutputCeiling_IsHonouredUpToTheProviderLimit(
         string? configured, int expected)
     {
+        // A context window big enough that the output ceiling is the only limit in play.
         var handler = new RecordingHandler(_ => Reply("{\"Items\":[]}", doneReason: "stop", evalCount: 12));
-        var service = CreateService(handler, new PermissiveGovernance(), maxOutputTokens: configured);
+        var service = CreateService(handler, new PermissiveGovernance(), maxOutputTokens: configured, numCtx: "131072");
 
         Assert.Equal(expected, service.MaxOutputTokens);
 
@@ -178,6 +180,137 @@ public sealed class OllamaOutputTruncationTests
         using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
         Assert.Equal(expected,
             request.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+    }
+
+    // ---- context window + keep-alive (P0 #13) ----------------------------
+    // Ollama picked a VRAM-based 262,144-token context when the request named none: 24.6 GB
+    // of KV cache beside 17.5 GB of weights, the laptop in 51 GB of swap, for prompts of
+    // 4,000–6,600 tokens. And it unloaded the model after 5 idle minutes, costing 13–27 s a
+    // reload. Every request now names both.
+
+    [Fact]
+    public async Task EveryExtractionRequest_NamesTheContextWindowAndTheKeepAlive_ByDefault()
+    {
+        var handler = new RecordingHandler(_ => Reply("{\"Items\":[]}", doneReason: "stop", evalCount: 12));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        await service.ExtractLeadDataDetailedAsync("PART-1 quantity 10", Context());
+
+        using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal(16384, request.RootElement.GetProperty("options").GetProperty("num_ctx").GetInt32());
+        Assert.Equal(8192, request.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+        Assert.Equal("30m", request.RootElement.GetProperty("keep_alive").GetString());
+        Assert.Equal(16384, service.ContextWindowTokens);
+    }
+
+    [Fact]
+    public async Task ConfiguredContextWindowAndKeepAlive_AreSentAsConfigured()
+    {
+        var handler = new RecordingHandler(_ => Reply("{\"Items\":[]}", doneReason: "stop", evalCount: 12));
+        var service = CreateService(handler, new PermissiveGovernance(), numCtx: "32768", keepAlive: "2h");
+
+        await service.ExtractLeadDataDetailedAsync("PART-1 quantity 10", Context());
+
+        using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal(32768, request.RootElement.GetProperty("options").GetProperty("num_ctx").GetInt32());
+        Assert.Equal("2h", request.RootElement.GetProperty("keep_alive").GetString());
+    }
+
+    [Fact]
+    public async Task ZeroContextWindowAndBlankKeepAlive_SendNeither()
+    {
+        // The escape hatch for a provider that refuses the fields: configuration can turn them off.
+        var handler = new RecordingHandler(_ => Reply("{\"Items\":[]}", doneReason: "stop", evalCount: 12));
+        var service = CreateService(handler, new PermissiveGovernance(), numCtx: "0", keepAlive: "");
+
+        await service.ExtractLeadDataDetailedAsync("PART-1 quantity 10", Context());
+
+        using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.False(request.RootElement.GetProperty("options").TryGetProperty("num_ctx", out _));
+        Assert.False(request.RootElement.TryGetProperty("keep_alive", out _));
+        Assert.Null(service.ContextWindowTokens);
+        Assert.Null(service.MaxDocumentInputTokens);
+    }
+
+    [Fact]
+    public async Task HeaderCompletionAndBoqRequests_AlsoNameTheContextWindowAndKeepAlive()
+    {
+        var handler = new RecordingHandler(_ => Reply("{}", doneReason: "stop", evalCount: 4));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        await service.CompleteHeaderAsync("RFQ No: 1234567890", new AiCallContext(
+            1, AiPurposes.RfqExtraction, Guid.NewGuid().ToString("N"), AiPromptVersions.HeaderCompletion));
+        await service.DraftServiceBoqAsync("overhaul the pump", BoqContext());
+
+        Assert.True(handler.RequestBodies.Count >= 2);
+        foreach (var body in handler.RequestBodies)
+        {
+            using var request = JsonDocument.Parse(body);
+            Assert.Equal(16384, request.RootElement.GetProperty("options").GetProperty("num_ctx").GetInt32());
+            Assert.Equal("30m", request.RootElement.GetProperty("keep_alive").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task AnOutputCeilingThatLeavesNoRoomForThePrompt_GivesWayToTheContextWindow()
+    {
+        // Prompt + output must fit num_ctx. Ollama silently drops the START of a prompt that does
+        // not fit — the instructions — so the ceiling gives way and the chunker re-splits instead.
+        var handler = new RecordingHandler(_ => Reply("{\"Items\":[]}", doneReason: "stop", evalCount: 12));
+        var service = CreateService(handler, new PermissiveGovernance(), maxOutputTokens: "32768", numCtx: "16384");
+
+        Assert.Equal(16384 - OllamaLlmService.MINIMUM_INPUT_RESERVE_TOKENS, service.MaxOutputTokens);
+        Assert.NotNull(service.MaxDocumentInputTokens);
+        Assert.True(service.MaxDocumentInputTokens < 16384 - service.MaxOutputTokens,
+            "the document budget must leave room for the instructions as well");
+
+        await service.ExtractLeadDataDetailedAsync("PART-1 quantity 10", Context());
+        using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var options = request.RootElement.GetProperty("options");
+        Assert.True(options.GetProperty("num_predict").GetInt32() < options.GetProperty("num_ctx").GetInt32());
+    }
+
+    [Fact]
+    public async Task TheDocumentReachesTheModelLineByLine_NotFlattenedIntoOneRunOnLine()
+    {
+        // Every line break used to be collapsed to a space before the model saw the text, which
+        // re-glued the table the PDF reader had just laid out ("… BOARD 6 SAR" / "978596 EA 1").
+        var handler = new RecordingHandler(_ => Reply("{\"Items\":[]}", doneReason: "stop", evalCount: 12));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        await service.ExtractLeadDataDetailedAsync(
+            "00010 201195514 TRANSFORMER:STEP UP,400  TO 480VAC,40KVA\n2     Assembley\n\n\n\nnext", Context());
+
+        using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        var user = request.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+        Assert.Contains("00010 201195514 TRANSFORMER:STEP UP,400 TO 480VAC,40KVA\n2 Assembley\n\nnext", user,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ALaterChunk_IsAskedForItsItemsOnly_WithoutTheHeaderSchema()
+    {
+        var handler = new RecordingHandler(_ => Reply("{\"Items\":[]}", doneReason: "stop", evalCount: 12));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        await service.ExtractLeadDataDetailedAsync("rows", new AiCallContext(
+            1, AiPurposes.RfqExtraction, Guid.NewGuid().ToString("N"), AiPromptVersions.StructuredRfqItemsOnly));
+        await service.ExtractLeadDataDetailedAsync("rows", new AiCallContext(
+            1, AiPurposes.RfqExtraction, Guid.NewGuid().ToString("N"), AiPromptVersions.StructuredRfqExtraction));
+
+        string System(int i)
+        {
+            using var request = JsonDocument.Parse(handler.RequestBodies[i]);
+            return request.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
+        }
+        var itemsOnly = System(0);
+        var full = System(1);
+        Assert.DoesNotContain("\"RfqnoConfidence\"", itemsOnly, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"OverallConfidence\": number", itemsOnly, StringComparison.Ordinal);
+        Assert.Contains("\"ItemMaterialCode\"", itemsOnly, StringComparison.Ordinal);
+        Assert.Contains("LINE ITEMS ONLY", itemsOnly, StringComparison.Ordinal);
+        Assert.Contains("\"RfqnoConfidence\"", full, StringComparison.Ordinal);
+        Assert.True(itemsOnly.Length < full.Length);
     }
 
     // ---- quantity tolerance (ship-before-pilot ②) ------------------------
@@ -324,13 +457,16 @@ public sealed class OllamaOutputTruncationTests
 
     private static OllamaLlmService CreateService(
         HttpMessageHandler handler, IAiGovernanceService governance,
-        ILogger<OllamaLlmService>? logger = null, string? maxOutputTokens = null)
+        ILogger<OllamaLlmService>? logger = null, string? maxOutputTokens = null,
+        string? numCtx = null, string? keepAlive = null)
         => new(new HttpClient(handler), logger ?? new CapturingLogger<OllamaLlmService>(),
             new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Ollama:BaseUrl"] = "http://127.0.0.1:11434/",
                 ["Ollama:Model"] = "test-model",
-                ["Ollama:MaxOutputTokens"] = maxOutputTokens
+                ["Ollama:MaxOutputTokens"] = maxOutputTokens,
+                ["Ollama:NumCtx"] = numCtx,
+                ["Ollama:KeepAlive"] = keepAlive
             }).Build(), governance);
 
     private static AiCallContext Context()

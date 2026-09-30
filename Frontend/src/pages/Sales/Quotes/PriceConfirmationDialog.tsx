@@ -36,6 +36,11 @@ interface PriceConfirmationDialogProps {
   recipientEmail: string;
   /** true while the confirm + send round trip is in flight. */
   submitting?: boolean;
+  /**
+   * 'pdf' when the rep asked for the PDF (a portal quote: SEC, Aramco) rather than an email —
+   * the same confirmation, then the download (pilot audit CP-04). Default 'send'.
+   */
+  purpose?: 'send' | 'pdf';
   onCancel: () => void;
   onConfirm: (source: PriceAttestationSource, sourceReference: string) => void;
 }
@@ -86,9 +91,11 @@ const PriceConfirmationDialog: React.FC<PriceConfirmationDialogProps> = ({
   quoteNo,
   recipientEmail,
   submitting = false,
+  purpose = 'send',
   onCancel,
   onConfirm,
 }) => {
+  const forPdf = purpose === 'pdf';
   const [source, setSource] = React.useState<PriceAttestationSource | ''>('');
   const [reference, setReference] = React.useState('');
   const [touched, setTouched] = React.useState(false);
@@ -124,20 +131,28 @@ const PriceConfirmationDialog: React.FC<PriceConfirmationDialogProps> = ({
   return (
     <Dialog open={open} onClose={submitting ? undefined : onCancel} maxWidth="md" fullWidth>
       <DialogTitle sx={{ fontWeight: 900 }}>
-        Confirm the prices before sending
+        {forPdf ? 'Confirm the prices for the PDF' : 'Confirm the prices before sending'}
       </DialogTitle>
       <DialogContent dividers>
-        <Typography variant="body2" sx={{ mb: 2 }}>
-          {quoteNo ? `Quote ${quoteNo}` : 'This quote'} is about to be emailed to{' '}
-          <strong>{recipientEmail}</strong>. Check every price below, then record where the
-          prices came from. If anything is wrong, cancel and correct the quote first.
-        </Typography>
+        {forPdf ? (
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            {quoteNo ? `Quote ${quoteNo}` : 'This quote'} is about to be downloaded for the customer. Check every
+            price below, then record where the prices came from. If anything is wrong, cancel and correct the
+            quote first.
+          </Typography>
+        ) : (
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            {quoteNo ? `Quote ${quoteNo}` : 'This quote'} is about to be emailed to{' '}
+            <strong>{recipientEmail}</strong>. Check every price below, then record where the
+            prices came from. If anything is wrong, cancel and correct the quote first.
+          </Typography>
+        )}
 
         {data?.supersededByPriceChange && data.confirmedBy && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             {data.confirmedBy} confirmed the prices on{' '}
             {new Date(data.confirmedOn as string).toLocaleString()}, but a price has changed since.
-            The prices must be confirmed again before this quote can be sent.
+            The prices must be confirmed again before this quote can {forPdf ? 'be downloaded' : 'be sent'}.
           </Alert>
         )}
 
@@ -248,7 +263,9 @@ const PriceConfirmationDialog: React.FC<PriceConfirmationDialogProps> = ({
           disabled={!canSubmit}
           startIcon={submitting ? <CircularProgress size={16} color="inherit" /> : undefined}
         >
-          {submitting ? 'Sending…' : 'Confirm prices and send'}
+          {forPdf
+            ? (submitting ? 'Downloading…' : 'Confirm prices and download')
+            : (submitting ? 'Sending…' : 'Confirm prices and send')}
         </Button>
       </DialogActions>
     </Dialog>

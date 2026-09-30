@@ -125,8 +125,20 @@ namespace ERP_RFQ_Automation.Services
         /// <summary>Every recorded validity move on one quote, newest first (R7 "visible").</summary>
         Task<IReadOnlyList<QuoteValidityExtensionDTO>> GetValidityExtensionsAsync(
             long quoteId, long businessUnitId, CancellationToken ct = default);
+        /// <summary>
+        /// "Keep as quoted": records that the rep reviewed the buyer's newer revision and keeps the
+        /// quoted quantities, WITH the reason and the lines that differ (D-04). Resolves any open
+        /// revision impact on the quote; for a quote built after the revision arrived (no impact,
+        /// D-01) it records the review so the send warning clears.
+        /// </summary>
+        /// <exception cref="ArgumentException">No reason given.</exception>
         Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
-            string idempotencyKey, CancellationToken ct = default);
+            string idempotencyKey, CancellationToken ct = default, string? reason = null);
+
+        /// <summary>The buyer's commercial terms for this quote's RFQ document (validity floor,
+        /// allowed currencies, delivery terms, agreement, payment), for the send dialog and the
+        /// printed quote. Empty when the document states none.</summary>
+        Task<QuoteBuyerTermsDTO?> GetBuyerTermsAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
 
         /// <summary>
         /// "Apply the new quantities": for every draft line that exists on the arriving lead
@@ -142,6 +154,7 @@ namespace ERP_RFQ_Automation.Services
 
     public class QuoteService : IQuoteService
     {
+        private readonly ERP_RFQ_Automation.MultiTenancy.ICompanyClock _companyClock;
         private readonly ErpRfqAutomationContext _context;
         private readonly IEmailService _emailService;
         private readonly IQuoteConfigurationRepository _quoteConfigRepository;
@@ -152,6 +165,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly CommercialLearningService? _commercialLearning;
         private readonly Microsoft.Extensions.Logging.ILogger<QuoteService>? _logger;
         private readonly ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? _outboundSenders;
+        private readonly ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService? _buyerTerms;
 
         // Optional collaborators preserve existing direct constructions used by focused
         // tests; production DI supplies the lifecycle and sales services.
@@ -167,9 +181,15 @@ namespace ERP_RFQ_Automation.Services
             ERP_RFQ_Automation.Notifications.Runtime.IOutboundSenderResolver? outboundSenders = null,
             // Optional and last, so every existing caller and fixture keeps compiling unchanged.
             // It exists for one reason: a sent quote that cannot be chased must say so.
-            Microsoft.Extensions.Logging.ILogger<QuoteService>? logger = null)
+            Microsoft.Extensions.Logging.ILogger<QuoteService>? logger = null,
+            // Buyer-terms slice 2: the RFQ document's validity floor, currency rule and delivery
+            // terms become the draft's defaults and the send warnings. Optional for the same reason.
+            ERP_RFQ_Automation.Services.QuoteTerms.IBuyerQuoteTermsService? buyerTerms = null,
+            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null)
         {
+            _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
             _logger = logger;
+            _buyerTerms = buyerTerms;
             _context = context;
             _emailService = emailService;
             _quoteConfigRepository = quoteConfigRepository;
@@ -307,10 +327,14 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = QuoteLineTaxCategories.Normalize(i.TaxCategory),
                     TaxCategoryReason = i.TaxCategoryReason?.Trim(),
                     DeliveryLeadTime = i.DeliveryLeadTime,
+                    CustomerMaterialCode = QuoteItem.Clean(i.CustomerMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                    ManufacturerName = QuoteItem.Clean(i.ManufacturerName, QuoteItem.MaxManufacturerName),
+                    ManufacturerPartNumber = QuoteItem.Clean(i.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                     CreatedBy = Actor(request.CreatedBy),
                     CreatedDate = DateTime.UtcNow
                 }).ToList()
             };
+            await CarryBuyerIdentityFromRfqLinesAsync(quote.QuoteItems, request.BusinessUnitId);
 
             // The controller validates access and customer consistency; the service owns the
             // atomic persistence invariant. Every RFQ-origin quote therefore receives the case
@@ -389,6 +413,13 @@ namespace ERP_RFQ_Automation.Services
                     throw new InvalidOperationException(
                         $"Customer Quote preparation is blocked: {intelligence.NextBestAction.Explanation}");
             }
+
+            // Buyer-terms slice 2 (HT-03/CB-02): read the buyer's validity floor and currency rule
+            // BEFORE the serializable transaction — it can open the retained RFQ document — so the
+            // draft is born with dates and a currency the buyer accepts instead of none at all.
+            var buyerTerms = _buyerTerms is null
+                ? ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTerms.None
+                : await _buyerTerms.ForLeadAsync(businessUnitId, leadId, ct);
 
             var strategy = _context.Database.CreateExecutionStrategy();
             var quoteId = await strategy.ExecuteAsync(async () =>
@@ -506,6 +537,16 @@ namespace ERP_RFQ_Automation.Services
                 }
 
                 var now = DateTime.UtcNow;
+                var tenantCurrencies = buyerTerms.AllowedCurrencies.Count == 0
+                    ? new List<(long Id, string Code, bool IsBase)>()
+                    : (await _context.Currencies.AsNoTracking()
+                        .Where(c => c.BusinessUnitId == businessUnitId && c.IsActive != false)
+                        .Select(c => new { c.Id, c.Code, c.IsBaseCurrency })
+                        .ToListAsync(ct))
+                        .Select(c => (Id: c.Id, Code: c.Code.Trim(), IsBase: c.IsBaseCurrency == true)).ToList();
+                var defaultCurrencyCode = ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTermRules.DefaultCurrency(
+                    buyerTerms.AllowedCurrencies, tenantCurrencies.Select(c => c.Code).ToList(),
+                    tenantCurrencies.Where(c => c.IsBase).Select(c => c.Code).FirstOrDefault());
                 var quote = new Quote
                 {
                     QuoteNo = await GenerateNextQuoteNumber(businessUnitId),
@@ -513,11 +554,23 @@ namespace ERP_RFQ_Automation.Services
                     CustomerId = rfq.CustomerId,
                     BusinessUnitId = businessUnitId,
                     QuoteDate = now,
-                    ValidUntil = null,
+                    // max(today + 30, the buyer's floor): SEC "valid for 90 days from bid due date"
+                    // → closing + 90; Aramco "at least 60 days from the bid closing date" → closing
+                    // + 60. The rep can still change it; the send dialog warns if it goes short.
+                    // Counted from the company's today, the calendar the closing date is written in.
+                    ValidUntil = ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTermRules.DefaultValidUntil(
+                        (await _companyClock.NowAsync(businessUnitId, ct)).Date, rfq.BidClosingDate, buyerTerms.Validity),
                     StatusId = await ResolveQuoteStatusIdAsync("DRAFT", businessUnitId),
-                    CurrencyId = null,
+                    // Only when the buyer states a rule and exactly names a currency this tenant
+                    // quotes in (Aramco "USD or SAR" with a SAR-only tenant → SAR). Otherwise the
+                    // rep chooses, as before. Nothing is converted.
+                    CurrencyId = defaultCurrencyCode is null ? null
+                        : tenantCurrencies.First(c => string.Equals(c.Code, defaultCurrencyCode, StringComparison.OrdinalIgnoreCase)).Id,
                     TotalAmount = 0m,
-                    HeaderRemarks = "Commercial Review Required: pricing, inventory, lead time, tax, freight and validity remain pending.",
+                    // Remarks are the rep's words to the customer. The draft used to be seeded with
+                    // "Commercial Review Required: pricing, inventory…" — internal state that would
+                    // print on the buyer's copy the moment remarks are printed (CB-03).
+                    HeaderRemarks = null,
                     CreatedBy = actor.Trim(),
                     OwnerUserId = await QuoteOwnerAttribution.ResolveAsync(_context, businessUnitId, actor, ct),
                     CreatedDate = now,
@@ -550,6 +603,9 @@ namespace ERP_RFQ_Automation.Services
                     }).ToList()
                 };
                 quote.InheritCommercialIdentity(rfq);
+                // The buyer's material number, maker and part number travel with the line (UX-03).
+                foreach (var line in quote.QuoteItems)
+                    line.CarryBuyerIdentityFrom(markedForQuote.FirstOrDefault(item => item.Id == line.RfqitemId));
                 _context.Quotes.Add(quote);
                 await _context.SaveChangesAsync(ct);
                 await transaction.CommitAsync(ct);
@@ -777,7 +833,15 @@ namespace ERP_RFQ_Automation.Services
                 if (line.Quantity <= 0m) throw new InvalidOperationException("This RFQ line has no quantity to quote.");
                 quote.QuoteItems.Add(line);
             }
-            if (quote.CurrencyId is null && currencyId is not null)
+            // New lines take the buyer's material number, maker and part number; a line made
+            // before those columns existed is filled now, and one that has them keeps them.
+            line.CarryBuyerIdentityFrom(rfqLine, onlyWhenMissing: true);
+            // The draft may carry the buyer's currency as a DEFAULT (PrepareDraftFromRfqAsync). While
+            // no line has a price, a currency the rep picks in the pricing window replaces it —
+            // otherwise a price typed in USD would be stored on a SAR quote without a word. Once a
+            // line is priced the currency is fixed, as before.
+            var nothingPricedYet = quote.QuoteItems.All(i => i.UnitPrice <= 0m);
+            if (currencyId is not null && (quote.CurrencyId is null || (quote.CurrencyId != currencyId && nothingPricedYet)))
             {
                 var known = await _context.Currencies.AnyAsync(c => c.Id == currencyId && c.BusinessUnitId == businessUnitId, ct);
                 if (!known) throw new InvalidOperationException("Choose one of your company's currencies.");
@@ -838,6 +902,27 @@ namespace ERP_RFQ_Automation.Services
             if (unlinked.Count != 1) return null;
             unlinked[0].RfqitemId = rfqLine.Id;
             return unlinked[0];
+        }
+
+        /// <summary>
+        /// Fills the buyer's material number, maker and maker part number on every line that points
+        /// at an RFQ line and does not carry them yet. Tenant-scoped through the RFQ, so a line id
+        /// from another tenant resolves to nothing rather than to someone else's part.
+        /// </summary>
+        private async Task CarryBuyerIdentityFromRfqLinesAsync(IEnumerable<QuoteItem> lines, long businessUnitId)
+        {
+            var wanting = lines.Where(line => line.RfqitemId is not null
+                    && (string.IsNullOrWhiteSpace(line.CustomerMaterialCode)
+                        || string.IsNullOrWhiteSpace(line.ManufacturerName)
+                        || string.IsNullOrWhiteSpace(line.ManufacturerPartNumber)))
+                .ToList();
+            if (wanting.Count == 0) return;
+            var ids = wanting.Select(line => line.RfqitemId!.Value).Distinct().ToList();
+            var rfqLines = await _context.Rfqitems.AsNoTracking()
+                .Where(item => ids.Contains(item.Id) && item.Rfq.BusinessUnitId == businessUnitId)
+                .ToDictionaryAsync(item => item.Id);
+            foreach (var line in wanting)
+                line.CarryBuyerIdentityFrom(rfqLines.GetValueOrDefault(line.RfqitemId!.Value), onlyWhenMissing: true);
         }
 
         public async Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request)
@@ -933,6 +1018,13 @@ namespace ERP_RFQ_Automation.Services
                                 ? existingItem.TaxCategoryReason
                                 : itemDto.TaxCategoryReason?.Trim();
                             existingItem.DeliveryLeadTime = itemDto.DeliveryLeadTime;
+                            // Preserve-when-absent, like the unit and line reference above.
+                            existingItem.CustomerMaterialCode = QuoteItem.Clean(itemDto.CustomerMaterialCode, QuoteItem.MaxCustomerMaterialCode)
+                                ?? existingItem.CustomerMaterialCode;
+                            existingItem.ManufacturerName = QuoteItem.Clean(itemDto.ManufacturerName, QuoteItem.MaxManufacturerName)
+                                ?? existingItem.ManufacturerName;
+                            existingItem.ManufacturerPartNumber = QuoteItem.Clean(itemDto.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber)
+                                ?? existingItem.ManufacturerPartNumber;
                             existingItem.ModifiedBy = request.ModifiedBy;
                             existingItem.ModifiedDate = DateTime.UtcNow;
                         }
@@ -955,12 +1047,16 @@ namespace ERP_RFQ_Automation.Services
                         TaxCategory = QuoteLineTaxCategories.Normalize(itemDto.TaxCategory),
                         TaxCategoryReason = itemDto.TaxCategoryReason?.Trim(),
                         DeliveryLeadTime = itemDto.DeliveryLeadTime,
+                        CustomerMaterialCode = QuoteItem.Clean(itemDto.CustomerMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                        ManufacturerName = QuoteItem.Clean(itemDto.ManufacturerName, QuoteItem.MaxManufacturerName),
+                        ManufacturerPartNumber = QuoteItem.Clean(itemDto.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                         CreatedBy = request.ModifiedBy,
                         CreatedDate = DateTime.UtcNow
                     });
                 }
             }
 
+            await CarryBuyerIdentityFromRfqLinesAsync(quote.QuoteItems, quote.BusinessUnitId);
             await CalculateQuoteTotals(quote);
 
             await _context.SaveChangesAsync();
@@ -1017,6 +1113,12 @@ namespace ERP_RFQ_Automation.Services
             for (var index = 0; index < items.Count; index++)
             {
                 var item = items[index];
+
+                // D-11 / CB-10: the unit price is stored at the scale it is printed at, so the
+                // buyer's "qty x unit price" on paper is the line total on paper. A 6-decimal price
+                // printed as 2,338.54 against a total built from 2,338.541625 read 12 x 2,338.54 =
+                // 28,062.50, and an Ariba portal that recomputes the extended price drifted from it.
+                item.UnitPrice = RoundUnitPrice(item.UnitPrice);
 
                 // FIN-09: round the gross line value to currency scale before applying discount.
                 decimal itemTotal = RoundCurrency(item.Quantity * item.UnitPrice);
@@ -1175,6 +1277,16 @@ namespace ERP_RFQ_Automation.Services
         // Rounds a monetary value to the 2-decimal currency scale used on printed documents
         // (FIN-09). Half-away-from-zero matches standard commercial/accounting rounding.
         private static decimal RoundCurrency(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+        /// <summary>
+        /// A customer unit price at the currency scale it is printed at (D-11). A positive price
+        /// below half a halala is left as it is rather than turned into a zero price.
+        /// </summary>
+        internal static decimal RoundUnitPrice(decimal unitPrice)
+        {
+            var rounded = Math.Round(unitPrice, 2, MidpointRounding.AwayFromZero);
+            return rounded == 0m && unitPrice > 0m ? unitPrice : rounded;
+        }
 
         /// <summary>
         /// Deterministic line order for every read surface (PDF + DTO): lines carrying the
@@ -1562,6 +1674,10 @@ namespace ERP_RFQ_Automation.Services
                     PricingNote = i.PricingNote,
                     OfferedNote = i.OfferedNote,
                     OfferedSpecs = i.OfferedSpecs,
+                    // What the quote itself carries and prints (QuoteItem.BuyerIdentity).
+                    CustomerMaterialCode = i.CustomerMaterialCode,
+                    ManufacturerName = i.ManufacturerName,
+                    ManufacturerPartNumber = i.ManufacturerPartNumber,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
                     RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
@@ -1668,14 +1784,20 @@ namespace ERP_RFQ_Automation.Services
 
             string logoBase64 = config?.Logo;
             string primaryColor = config?.PrimaryColor ?? "#1e3a8a";
-            string termsContent = config?.TermsAndConditions ??
-                                "1. Prices are valid for 30 days from the date of the quote.\n" +
-                                "2. Payment terms: Net 30 days from invoice date.\n" +
-                                "3. Delivery dates are estimates and subject to confirmation.\n" +
-                                "4. All products remain the property of the seller until fully paid.\n" +
-                                "5. Any applicable taxes or duties are not included unless specified.\n" +
-                                "6. Warranty and liability are as per the manufacturer's standard terms.\n" +
-                                "7. This quote is confidential and intended solely for the recipient.";
+            // CB-01 / UX-02 / D-12. The terms the buyer reads first are GENERATED from this quote
+            // (QuoteDocumentText.CommercialTerms), so they cannot contradict its validity date or its
+            // VAT line. The tenant's own text prints after them as "Additional terms"; the stock seven
+            // clauses every tenant was seeded with ("valid for 30 days", "taxes not included", "Net
+            // 30") count as none. There is no hard-coded fallback any more: a tenant with no terms
+            // prints only what its quote states.
+            string? additionalTerms = QuoteDocumentText.AdditionalTerms(config?.TermsAndConditions);
+
+            // P0 #3: the rep's own "Notes to customer" field now reaches the buyer. The internal
+            // draft marker ("Commercial Review Required: …") never does.
+            string? buyerNotes = QuoteDocumentText.BuyerNotes(quote.HeaderRemarks);
+
+            // Signer (quote owner) and the quotation this one replaces (CB-06, CB-12).
+            var facts = await LoadDocumentFactsAsync(quote, config?.CompanyPhone, ct);
 
             // THE ISSUER, read from the tenant's own records and nowhere else — the same rule the
             // delivery note already operates under (DeliveryNoteReadService.IssuerIdentity): every
@@ -1764,14 +1886,25 @@ namespace ERP_RFQ_Automation.Services
                 ? $" {decimal.Round(appliedRates[0], 2).ToString("0.##")}%"
                 : string.Empty;
 
-            // The buyer's own RFQ number: Lead.Rfqno is the value the customer sent us;
-            // Rfq.Rfqno equals it when it existed and is a synthetic internal serial otherwise,
-            // so it is only a fallback. A procurement buyer files our quote under THEIR number.
-            string customerRfqReference = quote.Rfq?.Lead?.Rfqno ?? quote.Rfq?.Rfqno;
+            // The buyer's own RFQ number, from one source for the PDF and the e-mail (CB-14):
+            // never Rfq.Rfqno, which is Nexora's serial when the buyer gave none. "—" when unknown,
+            // so the line is visibly empty rather than filled with our number.
+            string customerRfqReference = QuoteDocumentText.BuyerRfqReference(quote) ?? QuoteDocumentText.UnknownReference;
 
             // Deterministic print order: buyer's line references first (numeric-aware), then
             // unreferenced lines by insertion order. See OrderQuoteLines.
             var orderedItems = OrderQuoteLines(quote.QuoteItems);
+
+            var deliveryPlace = QuoteDocumentText.DeliveryPlace(quote);
+            var commercialTerms = QuoteDocumentText.CommercialTerms(quote.ValidUntil, currencyCode, orderedItems,
+                deliveryPlace, supersedesQuoteNo: facts.SupersedesQuoteNo, supersedesDate: facts.SupersedesDate);
+            var supersedes = string.IsNullOrWhiteSpace(facts.SupersedesQuoteNo) ? null
+                : facts.SupersedesDate is DateTime supersededOn
+                    ? $"{facts.SupersedesQuoteNo} dated {QuoteDocumentText.Date(supersededOn)}"
+                    : facts.SupersedesQuoteNo;
+            var signerLine = string.IsNullOrWhiteSpace(facts.SignerName)
+                ? "Name: ______________________________"
+                : string.IsNullOrWhiteSpace(facts.SignerTitle) ? facts.SignerName! : $"{facts.SignerName}, {facts.SignerTitle}";
 
             QuestPDF.Settings.License = LicenseType.Community;
 
@@ -1788,7 +1921,7 @@ namespace ERP_RFQ_Automation.Services
                     page.Header().Column(col =>
                     {
                         col.Item().Height(3).Background(primaryColor);
-                        col.Item().PaddingBottom(20).PaddingTop(20).Row(row =>
+                        col.Item().PaddingBottom(12).PaddingTop(12).Row(row =>
                         {
                             // Company Info (Left)
                             row.RelativeItem().Column(c =>
@@ -1840,8 +1973,9 @@ namespace ERP_RFQ_Automation.Services
                                 });
                             });
 
-                            // Quote Info (Right)
-                            row.ConstantItem(180).AlignRight().Column(c =>
+                            // Quote Info (Right). 220 wide so a buyer reference such as
+                            // "AJP-RFQ-2026-0917" does not wrap mid-number (CB-23).
+                            row.ConstantItem(220).AlignRight().Column(c =>
                             {
                                 c.Item().Text("QUOTATION")
                                     .FontSize(22).ExtraBold().FontColor(Colors.Grey.Lighten2);
@@ -1850,8 +1984,10 @@ namespace ERP_RFQ_Automation.Services
                                 {
                                     info.Spacing(2);
                                     info.Item().Text(t => { t.Span("Reference No: ").SemiBold(); t.Span(quote.QuoteNo); });
-                                    if (!string.IsNullOrWhiteSpace(customerRfqReference))
-                                        info.Item().Text(t => { t.Span("Your RFQ Reference: ").SemiBold(); t.Span(customerRfqReference); });
+                                    // CB-12: a revision says which offer it withdraws.
+                                    if (supersedes is not null)
+                                        info.Item().Text(t => { t.Span("Supersedes: ").SemiBold(); t.Span(supersedes); });
+                                    info.Item().Text(t => { t.Span("Your RFQ Reference: ").SemiBold(); t.Span(customerRfqReference); });
                                     info.Item().Text(t => { t.Span("Quote Date: ").SemiBold(); t.Span($"{quote.QuoteDate:MMM dd, yyyy}"); });
                                     info.Item().Text(t => { t.Span("Valid Until: ").SemiBold(); t.Span($"{quote.ValidUntil:MMM dd, yyyy}"); });
                                 });
@@ -1864,7 +2000,9 @@ namespace ERP_RFQ_Automation.Services
                     // 2. Content
                     page.Content().PaddingVertical(10).Column(col =>
                     {
-                        col.Spacing(30);
+                        // Tight enough that a short quote, with its terms and the signature block
+                        // every page now carries, still fits on one page.
+                        col.Spacing(16);
 
                         // Address Section
                         col.Item().Row(row =>
@@ -1892,19 +2030,12 @@ namespace ERP_RFQ_Automation.Services
 
                             row.ConstantItem(30); // Gap
 
-                            // The shipping address falls back to billing as a WHOLE, never field by
-                            // field: a shipping street paired with a billing city is an address
-                            // nobody has.
-                            var hasShipping = !string.IsNullOrWhiteSpace(customer?.ShippingAddressLine1)
-                                || !string.IsNullOrWhiteSpace(customer?.ShippingCity)
-                                || !string.IsNullOrWhiteSpace(customer?.ShippingCountry);
-                            AddressBlock("SHIP TO",
-                                customer?.Name ?? "Customer",
-                                hasShipping
-                                    ? AddressLines(customer?.ShippingAddressLine1, customer?.ShippingAddressLine2,
-                                        customer?.ShippingCity, customer?.ShippingCountry)
-                                    : AddressLines(customer?.BillingAddressLine1, customer?.BillingAddressLine2,
-                                        customer?.BillingCity, customer?.BillingCountry));
+                            // HT-10: the delivery point the buyer named on THIS enquiry ("SEC Materials
+                            // East Plant"), then the customer's shipping address, then billing — each
+                            // as a WHOLE, never field by field (a shipping street with a billing city
+                            // is an address nobody has).
+                            AddressBlock("SHIP TO", customer?.Name ?? "Customer",
+                                QuoteDocumentText.ShipToLines(deliveryPlace, customer));
                         });
 
                         // Items Table
@@ -1928,8 +2059,8 @@ namespace ERP_RFQ_Automation.Services
                                 header.Cell().Element(CellStyle).Text("Description");
                                 header.Cell().Element(CellStyle).AlignRight().Text("Qty");
                                 header.Cell().Element(CellStyle).Text("UOM");
-                                header.Cell().Element(CellStyle).AlignRight().Text("Unit Price");
-                                header.Cell().Element(CellStyle).AlignRight().Text("Total");
+                                header.Cell().Element(CellStyle).AlignRight().Text($"Unit Price ({currencyCode})");
+                                header.Cell().Element(CellStyle).AlignRight().Text($"Total ({currencyCode})");
                             });
 
                             foreach (var item in orderedItems.Select((x, i) => new { x, i }))
@@ -1945,6 +2076,11 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
+                                    // UX-03 / CB-08: what the BUYER calls this line, so their
+                                    // evaluator can match it to their material and part.
+                                    if (QuoteDocumentText.BuyerIdentityLine(item.x.CustomerMaterialCode, item.x.ManufacturerName,
+                                            item.x.ManufacturerPartNumber, item.x.ItemDescription) is { } buyerIdentity)
+                                        c.Item().Text(buyerIdentity).FontSize(8).FontColor(Colors.Grey.Darken2);
                                     if (!string.IsNullOrWhiteSpace(item.x.OfferedNote))
                                         c.Item().Text(item.x.OfferedNote).FontSize(8).SemiBold().FontColor(Colors.Blue.Darken2);
                                     if (!string.IsNullOrWhiteSpace(item.x.OfferedSpecs))
@@ -1966,13 +2102,14 @@ namespace ERP_RFQ_Automation.Services
                                     if (item.x.Discount > 0)
                                         c.Item().Text($"Discount: {quote.Currency?.Code} {item.x.Discount:N2}").FontSize(8).Italic().FontColor(Colors.Red.Medium);
                                 });
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
+                                // CB-11: 2.5 M prints as 2.5, not 3.
+                                table.Cell().Element(RowStyle).AlignRight().Text(QuoteDocumentText.QuantityText(item.x.Quantity));
                                 table.Cell().Element(RowStyle).Text(item.x.UnitOfMeasure ?? string.Empty);
                                 var unpricedByChoice = QuoteLinePricing.IsUnpricedByChoice(item.x.PricingStatus);
                                 table.Cell().Element(RowStyle).AlignRight().Text(
                                     item.x.PricingStatus == QuoteLinePricing.ToFollow ? "To follow"
                                     : item.x.PricingStatus == QuoteLinePricing.NotQuoted ? "Not quoted"
-                                    : item.x.UnitPrice.ToString("N2"));
+                                    : QuoteDocumentText.UnitPriceText(item.x.UnitPrice));
                                 // The line's own consideration, tax EXCLUDED. The stored TotalAmount
                                 // carries the line's tax inside it (calculation version 2), so
                                 // printing it here put VAT in the line column and then added the
@@ -1982,78 +2119,96 @@ namespace ERP_RFQ_Automation.Services
                             }
                         });
 
-                        // Lower Section: Terms and Financials
-                        col.Item().Row(row =>
+                        // Totals, directly under the lines they add up. Read top to bottom this is
+                        // the arithmetic itself: gross, what came off it, the net the tax is charged
+                        // on, the tax, then the grand total (CB-09: the rows used to be written to
+                        // the OUTER column, after the grand-total bar, so the total printed above its
+                        // own arithmetic). Kept on one page, so "VAT 15%" never sits alone on the
+                        // next one. No currency fallback: the gate above refuses a quote without one.
+                        col.Item().PreventPageBreak().AlignRight().Width(270).Column(totals =>
                         {
-                            // Terms (Left)
-                            row.RelativeItem(1.5f).Column(c =>
+                            void FinancialRow(string label, decimal value)
                             {
-                                c.Item().PaddingTop(10).Text("Terms & Conditions").Bold().FontSize(10).FontColor(primaryColor);
-                                c.Item().PaddingTop(5).Text(termsContent).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
-                                if (orderedItems.Any(x => x.DeliveryLeadTime == 0 || x.ExStockQuantity > 0))
-                                    c.Item().PaddingTop(5).Text("Items marked ex stock are offered subject to prior sale. Stock is held for you once we receive your purchase order.").FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
-
-                                c.Item().PaddingTop(30).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
-                            });
-
-                            row.ConstantItem(40);
-
-                            // Financials (Right)
-                            row.RelativeItem(1f).Column(c =>
-                            {
-                                // No fallback. This used to be `quote.Currency?.Code ?? "USD"`,
-                                // which printed a US-dollar grand total on every currency-less
-                                // quote — a 3.75x misstatement of a SAR price. The gate above now
-                                // refuses the document instead, so currencyCode is never blank here.
-                                var currency = currencyCode;
-
-                                void FinancialRow(string label, decimal value, bool isTotal = false)
+                                totals.Item().PaddingVertical(3).Row(r =>
                                 {
-                                    c.Item().PaddingVertical(isTotal ? 8 : 3).Row(r =>
-                                    {
-                                        var text = r.RelativeItem().Text(label).FontSize(isTotal ? 11 : 9);
-                                        if (isTotal) text.Bold();
-
-                                        var valueText = r.RelativeItem().AlignRight().Text($"{currency} {value:N2}").FontSize(isTotal ? 12 : 9);
-                                        if (isTotal) valueText.Bold();
-                                    });
-                                }
-
-                                c.Item().PaddingTop(10).Column(inner =>
-                                {
-                                    // Read top to bottom this is the arithmetic itself: gross, what
-                                    // came off it, the net the tax is charged on, the tax, the total.
-                                    // "Total excluding VAT" is the line column's own sum, so a buyer
-                                    // can add up the page and arrive here.
-                                    FinancialRow("Subtotal", subTotal);
-                                    if (totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
-                                    if (headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
-                                    FinancialRow("Total excluding VAT", netExcludingTax);
-                                    if (totalTax > 0) FinancialRow($"VAT{taxRateLabel}", totalTax);
-
-                                    inner.Item().PaddingVertical(5).LineHorizontal(1).LineColor(Colors.Grey.Lighten3);
-
-                                    inner.Item().Background(primaryColor).Padding(10).Row(r =>
-                                    {
-                                        r.RelativeItem().Text("GRAND TOTAL").FontSize(12).Bold().FontColor(Colors.White);
-                                        r.RelativeItem().AlignRight().Text($"{currency} {(quote.TotalAmount ?? 0):N2}").FontSize(14).Bold().FontColor(Colors.White);
-                                    });
+                                    r.RelativeItem().Text(label).FontSize(9);
+                                    r.RelativeItem().AlignRight().Text($"{currencyCode} {value:N2}").FontSize(9);
                                 });
+                            }
+
+                            FinancialRow("Subtotal", subTotal);
+                            if (totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
+                            if (headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
+                            // "Total excluding VAT" is the line column's own sum, so a buyer can add
+                            // up the page and arrive here.
+                            FinancialRow("Total excluding VAT", netExcludingTax);
+                            if (totalTax > 0) FinancialRow($"VAT{taxRateLabel}", totalTax);
+
+                            totals.Item().PaddingVertical(5).LineHorizontal(1).LineColor(Colors.Grey.Lighten3);
+
+                            totals.Item().Background(primaryColor).Padding(10).Row(r =>
+                            {
+                                r.RelativeItem().Text("GRAND TOTAL").FontSize(12).Bold().FontColor(Colors.White);
+                                r.RelativeItem().AlignRight().Text($"{currencyCode} {(quote.TotalAmount ?? 0):N2}").FontSize(14).Bold().FontColor(Colors.White);
                             });
+                        });
+
+                        // Terms. First what THIS quote states (generated, CB-01), then the rep's
+                        // notes (P0 #3), then the tenant's own clauses as "Additional terms".
+                        // Each heading stays with its text (PreventPageBreak), so "Notes" never
+                        // closes one page with its words on the next.
+                        col.Item().Column(c =>
+                        {
+                            c.Item().PreventPageBreak().Column(section =>
+                            {
+                                section.Item().Text("Commercial terms").Bold().FontSize(10).FontColor(primaryColor);
+                                for (var index = 0; index < commercialTerms.Count; index++)
+                                    section.Item().PaddingTop(3).Text($"{index + 1}. {commercialTerms[index]}").FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken2);
+                            });
+
+                            if (buyerNotes is not null)
+                                c.Item().PaddingTop(10).PreventPageBreak().Column(section =>
+                                {
+                                    section.Item().Text("Notes").Bold().FontSize(10).FontColor(primaryColor);
+                                    section.Item().PaddingTop(3).Text(buyerNotes).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken2);
+                                });
+
+                            if (additionalTerms is not null)
+                                c.Item().PaddingTop(10).PreventPageBreak().Column(section =>
+                                {
+                                    section.Item().Text("Additional terms").Bold().FontSize(10).FontColor(primaryColor);
+                                    section.Item().PaddingTop(3).Text(additionalTerms).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
+                                });
+
+                            c.Item().PaddingTop(12).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
                         });
                     });
 
-                    // 3. Footer
-                    page.Footer().PaddingTop(20).Column(col =>
+                    // 3. Footer. The signature and stamp block sits on EVERY page, because every
+                    // page of a quotation carries prices and Marafiq-type buyers reject a proposal
+                    // whose price pages are not signed and stamped (CB-06).
+                    page.Footer().PaddingTop(8).Column(col =>
                     {
-                        col.Item().LineHorizontal(0.5f).LineColor(Colors.Grey.Lighten2);
-                        col.Item().PaddingTop(10).Row(row =>
+                        col.Item().Row(row =>
                         {
+                            row.RelativeItem().Column(sign =>
+                            {
+                                sign.Spacing(2);
+                                sign.Item().Text($"For and on behalf of {sellerLegalName}").FontSize(8).SemiBold();
+                                sign.Item().Text(signerLine).FontSize(8);
+                                sign.Item().PaddingTop(10).Text("Authorised signature: ______________________     Date: ______________").FontSize(8);
+                            });
+                            row.ConstantItem(130).Height(46).Border(0.75f).BorderColor(Colors.Grey.Lighten1)
+                                .AlignCenter().AlignMiddle().Text("Company stamp").FontSize(7).FontColor(Colors.Grey.Medium);
+                        });
+                        col.Item().PaddingTop(6).LineHorizontal(0.5f).LineColor(Colors.Grey.Lighten2);
+                        col.Item().PaddingTop(4).Row(row =>
+                        {
+                            // CB-21: who prepared it, not "Generated by System" at a server-local time.
                             row.RelativeItem().Text(x =>
                             {
-                                x.Span("Generated by ").FontSize(8).FontColor(Colors.Grey.Medium);
-                                x.Span("System").FontSize(8).SemiBold().FontColor(Colors.Grey.Medium);
-                                x.Span($" | {DateTime.Now:MMMM dd, yyyy HH:mm}").FontSize(8).FontColor(Colors.Grey.Medium);
+                                if (!string.IsNullOrWhiteSpace(facts.SignerName))
+                                    x.Span($"Prepared by {facts.SignerName}").FontSize(8).FontColor(Colors.Grey.Medium);
                             });
 
                             row.RelativeItem().AlignRight().Text(x =>
@@ -2117,15 +2272,18 @@ namespace ERP_RFQ_Automation.Services
 
             // Reported in the order the send applies them, so the first thing the rep reads is
             // the first thing that would actually stop them.
-            // The same predicate the quote detail uses (LeadRevisionImpactQueries): an impact
-            // resolved through POST {id}/revision-impact/resolve is an audit event, not a status
-            // change, because the impact table is append-only. Reading Status alone here kept
-            // refusing a quote whose screen already said the revision was resolved.
-            if (await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
-                    .OpenQuoteImpacts(_context, businessUnitId, quoteId).AsNoTracking().AnyAsync(ct))
-                Block("CUSTOMER_REVISION_UNRESOLVED",
-                    "This quote is stale because a customer revision was received. Review and resolve "
-                    + "the revision impact before sending it.");
+            //
+            // A newer buyer revision is a WARNING, not a blocker (owner rule: inform, don't
+            // obstruct). It used to be a blocker only when an impact row existed — which is only
+            // when the quote existed BEFORE the revision arrived. A quote built afterwards from an
+            // RFQ still frozen on the old revision had no impact and sent clean with the old
+            // quantities (D-01: QT-0926-0001, 20 contactors against the buyer's 35). The warning
+            // now compares the quote with the buyer's latest revision either way; the send dialog
+            // offers "Use the new quantities" or "Keep as quoted" (with a reason), and "Send
+            // anyway" records the keep. The sender itself still refuses an unresolved impact, so
+            // nothing old goes out silently.
+            var revisionWarning = await BuyerRevisionWarningAsync(quote, businessUnitId, ct);
+            if (revisionWarning is not null) readiness.Warnings.Add(revisionWarning);
 
             var isDraft = string.Equals(quote.Status?.SetupCode, "DRAFT", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
@@ -2242,8 +2400,61 @@ namespace ERP_RFQ_Automation.Services
                     attestation.Reason
                     ?? "Confirm where these prices came from - your sales manager, or a supplier quote - before sending.");
 
+            // Buyer-terms slice 2 and CB-07: what the buyer asked for, checked against this quote.
+            // Warnings only — each names the problem and the rep decides.
+            if (isDraft)
+            {
+                var closing = quote.Rfqid is long rfqIdForTerms
+                    ? await _context.Rfqs.AsNoTracking().Where(r => r.Id == rfqIdForTerms && r.BusinessUnitId == businessUnitId)
+                        .Select(r => r.BidClosingDate).SingleOrDefaultAsync(ct)
+                    : null;
+                var terms = _buyerTerms is null
+                    ? ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTerms.None
+                    : await _buyerTerms.ForQuoteAsync(businessUnitId, quote.Id, ct);
+                var currencyCode = quote.CurrencyId is long currencyIdForTerms
+                    ? await _context.Currencies.AsNoTracking().Where(c => c.Id == currencyIdForTerms)
+                        .Select(c => c.Code).SingleOrDefaultAsync(ct)
+                    : null;
+                readiness.Warnings.AddRange(ERP_RFQ_Automation.Services.QuoteTerms.QuoteSendWarnings.Evaluate(
+                    DateTime.UtcNow.Date, quote.ValidUntil, closing, currencyCode, quote.QuoteItems, terms));
+                readiness.BuyerTerms = ToBuyerTermsDto(terms, closing, DateTime.UtcNow.Date);
+            }
+
             readiness.CanSend = readiness.Blockers.Count == 0;
             return readiness;
+        }
+
+        public async Task<QuoteBuyerTermsDTO?> GetBuyerTermsAsync(long quoteId, long businessUnitId, CancellationToken ct = default)
+        {
+            var quote = await _context.Quotes.AsNoTracking()
+                .Where(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
+                .Select(q => new { q.Id, Closing = q.Rfq != null ? q.Rfq.BidClosingDate : null })
+                .SingleOrDefaultAsync(ct)
+                ?? throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+            if (_buyerTerms is null) return null;
+            var terms = await _buyerTerms.ForQuoteAsync(businessUnitId, quote.Id, ct);
+            return ToBuyerTermsDto(terms, quote.Closing, DateTime.UtcNow.Date);
+        }
+
+        private static QuoteBuyerTermsDTO? ToBuyerTermsDto(ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTerms terms,
+            DateTime? closing, DateTime today)
+        {
+            if (terms.IsEmpty) return null;
+            var required = ERP_RFQ_Automation.Services.QuoteTerms.BuyerQuoteTermRules.RequiredValidUntil(today, closing, terms.Validity);
+            return new QuoteBuyerTermsDTO
+            {
+                MinimumValidityDays = terms.Validity?.Days,
+                ValidityBasis = terms.Validity?.Basis,
+                ValiditySentence = terms.Validity?.Sentence,
+                RequiredValidUntil = required is null ? null : DateTime.SpecifyKind(required.Value.Date, DateTimeKind.Unspecified),
+                BidClosing = closing,
+                AllowedCurrencies = terms.AllowedCurrencies.ToList(),
+                CurrencySentence = terms.CurrencySentence,
+                DeliveryTerms = terms.DeliveryTerms,
+                DeliverTo = terms.DeliverTo,
+                Agreement = terms.Agreement,
+                Payment = terms.Payment,
+            };
         }
 
         /// <summary>
@@ -2261,30 +2472,69 @@ namespace ERP_RFQ_Automation.Services
         /// CustomerRfqReference is the buyer's OWN number for the enquiry; it matters more than
         /// ours, because it is how they match this quote to the request they raised.</para>
         /// </summary>
-        internal static (string Subject, string PlainBody) ComposeDefaultQuoteEmail(Quote quote)
+        internal static (string Subject, string PlainBody) ComposeDefaultQuoteEmail(Quote quote, QuoteDocumentFacts? facts = null)
+            => QuoteDocumentText.Email(quote, facts ?? QuoteDocumentFacts.None);
+
+        /// <summary>
+        /// The facts the PDF and the e-mail both print that live outside the quote row: the signer
+        /// (the quote's owner — name, and the role name as a title unless it is an administrator
+        /// role, which is not a job title), the company phone as the contact number, and the
+        /// quotation this revision replaces with the date the buyer received it.
+        /// </summary>
+        internal async Task<QuoteDocumentFacts> LoadDocumentFactsAsync(Quote quote, string? companyPhone,
+            CancellationToken ct = default)
         {
-            var subject = $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
-
-            var greetingName = quote.Customer?.Name;
-            var greeting = string.IsNullOrWhiteSpace(greetingName) ? "Dear Customer" : $"Dear {greetingName}";
-
-            var facts = new List<string> { $"Please find attached our quotation #{quote.QuoteNo}." };
-            if (!string.IsNullOrWhiteSpace(quote.Rfq?.CustomerRfqReference))
-                facts.Add($"Your reference: {quote.Rfq!.CustomerRfqReference}");
-            if (quote.TotalAmount is decimal total && !string.IsNullOrWhiteSpace(quote.Currency?.Code))
-                facts.Add($"Total: {quote.Currency!.Code} {total:N2}");
-            if (quote.ValidUntil is DateTime validUntil)
-                facts.Add($"Valid until: {validUntil:d MMMM yyyy}");
-
-            var body = string.Join("\n\n", new[]
+            string? signerName = null, signerTitle = null, signerEmail = null;
+            if (quote.OwnerUserId is long ownerId)
             {
-                $"{greeting},",
-                string.Join("\n", facts),
-                "If anything here needs revisiting, reply to this message and we will pick it up.",
-                $"Kind regards,\n{quote.BusinessUnit?.BusinessUnitName}"
-            });
-            return (subject, body);
+                var owner = await _context.Users.AsNoTracking()
+                    .Where(user => user.Id == ownerId && user.Buid == quote.BusinessUnitId)
+                    .Select(user => new
+                    {
+                        user.FirstName, user.LastName, user.Email,
+                        RoleCode = user.Role != null ? user.Role.SetupCode : null,
+                        RoleName = user.Role != null ? user.Role.SetupValue : null
+                    })
+                    .FirstOrDefaultAsync(ct);
+                if (owner is not null)
+                {
+                    var name = $"{owner.FirstName} {owner.LastName}".Trim();
+                    signerName = name.Length == 0 ? null : name;
+                    signerTitle = SignerTitle(owner.RoleCode, owner.RoleName);
+                    signerEmail = string.IsNullOrWhiteSpace(owner.Email) ? null : owner.Email.Trim();
+                }
+            }
+
+            string? supersedesNo = null;
+            DateTime? supersedesOn = null;
+            if (quote.RevisionOfQuoteId is long previousId)
+            {
+                var previous = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.Id == previousId && q.BusinessUnitId == quote.BusinessUnitId)
+                    .Select(q => new { q.QuoteNo, q.SentOn, q.QuoteDate })
+                    .FirstOrDefaultAsync(ct);
+                supersedesNo = previous?.QuoteNo;
+                supersedesOn = previous?.SentOn ?? previous?.QuoteDate;
+            }
+
+            return new QuoteDocumentFacts(signerName, signerTitle, signerEmail,
+                string.IsNullOrWhiteSpace(companyPhone) ? null : companyPhone.Trim(), supersedesNo, supersedesOn);
         }
+
+        private async Task<QuoteDocumentFacts> LoadEmailFactsAsync(Quote quote, CancellationToken ct = default)
+        {
+            var companyPhone = await _context.QuoteConfigurations.AsNoTracking()
+                .Where(x => x.BusinessUnitId == quote.BusinessUnitId)
+                .Select(x => x.CompanyPhone)
+                .FirstOrDefaultAsync(ct);
+            return await LoadDocumentFactsAsync(quote, companyPhone, ct);
+        }
+
+        internal static string? SignerTitle(string? roleCode, string? roleName) =>
+            string.IsNullOrWhiteSpace(roleName)
+            || (roleCode?.Contains("ADMIN", StringComparison.OrdinalIgnoreCase) ?? false)
+                ? null
+                : roleName.Trim();
 
         /// <summary>
         /// Plain text → the HTML the mail carries: blank lines become paragraphs, single line
@@ -2313,11 +2563,13 @@ namespace ERP_RFQ_Automation.Services
                 .Include(q => q.BusinessUnit)
                 .Include(q => q.Currency)
                 .Include(q => q.Customer)
+                .Include(q => q.QuoteItems)
                 .Include(q => q.Rfq)
+                    .ThenInclude(r => r.Lead)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
                 ?? throw new KeyNotFoundException("Quote not found");
 
-            var composed = ComposeDefaultQuoteEmail(quote);
+            var composed = ComposeDefaultQuoteEmail(quote, await LoadEmailFactsAsync(quote, ct));
             // No address on the customer's record: offer the one their last quote actually went to,
             // so the rep does not retype it for every quote and every revision.
             var recipient = string.IsNullOrWhiteSpace(quote.Customer?.ContactEmail) ? null : quote.Customer!.ContactEmail!.Trim();
@@ -2356,6 +2608,7 @@ namespace ERP_RFQ_Automation.Services
                 // note, not a quotation.
                 .Include(q => q.Currency)
                 .Include(q => q.Customer)
+                .Include(q => q.QuoteItems) // the ex-VAT / VAT / incl. VAT figures in the body (CB-17)
                 .Include(q => q.Rfq)
                     .ThenInclude(r => r.Lead)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
@@ -2420,7 +2673,7 @@ namespace ERP_RFQ_Automation.Services
             // whatever goes out (PlainTextToHtml), so the draft the rep reviews in the send dialog
             // IS the mail the customer receives — edited or not. A blank custom field means "use
             // the default", which is what the callers that post no body at all rely on.
-            var composed = ComposeDefaultQuoteEmail(quote);
+            var composed = ComposeDefaultQuoteEmail(quote, await LoadEmailFactsAsync(quote));
             var subject = !string.IsNullOrWhiteSpace(customSubject) ? customSubject.Trim() : composed.Subject;
             var body = PlainTextToHtml(!string.IsNullOrWhiteSpace(customBody) ? customBody : composed.PlainBody);
 
@@ -2851,6 +3104,14 @@ namespace ERP_RFQ_Automation.Services
                         : OfferedPartKinds.Sentence(i.Rfqitem.OfferedKind, i.Rfqitem.OfferedMakerName, i.Rfqitem.OfferedPartNumber,
                             i.Rfqitem.ManufacturerPartNumber, i.Rfqitem.OfferedNote),
                     OfferedSpecs = i.Rfqitem is null ? i.OfferedSpecs : i.Rfqitem.OfferedSpecs,
+                    // What the buyer calls the line stays what the sent quote said it was; only a
+                    // line that never carried it is filled from its RFQ line.
+                    CustomerMaterialCode = i.CustomerMaterialCode
+                        ?? QuoteItem.Clean(i.Rfqitem?.ItemMaterialCode, QuoteItem.MaxCustomerMaterialCode),
+                    ManufacturerName = i.ManufacturerName
+                        ?? QuoteItem.Clean(i.Rfqitem?.ManufacturerName, QuoteItem.MaxManufacturerName),
+                    ManufacturerPartNumber = i.ManufacturerPartNumber
+                        ?? QuoteItem.Clean(i.Rfqitem?.ManufacturerPartNumber, QuoteItem.MaxManufacturerPartNumber),
                     CreatedBy = actor,
                     CreatedDate = now
                 }).ToList()
@@ -3272,21 +3533,29 @@ namespace ERP_RFQ_Automation.Services
         /// which <c>NpgsqlRetryingExecutionStrategy</c> refuses outside a strategy delegate.
         /// </summary>
         public Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
-            string idempotencyKey, CancellationToken ct = default)
+            string idempotencyKey, CancellationToken ct = default, string? reason = null)
         {
+            // D-04: "Keep as quoted" sent the buyer superseded quantities with nothing on record but
+            // "resolved". The reason is now required and stored with the lines that differ.
+            reason = reason?.Trim();
+            if (string.IsNullOrWhiteSpace(reason))
+                throw new ArgumentException("Say why the quote keeps its quantities.", nameof(reason));
+            if (reason.Length > 500)
+                throw new ArgumentException("Keep the reason under 500 characters.", nameof(reason));
+
             if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
-                return ResolveRevisionImpactCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+                return ResolveRevisionImpactCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, reason, ct);
 
             var strategy = _context.Database.CreateExecutionStrategy();
             return strategy.ExecuteAsync(() =>
             {
                 _context.ChangeTracker.Clear();
-                return ResolveRevisionImpactCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+                return ResolveRevisionImpactCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, reason, ct);
             });
         }
 
         private async Task ResolveRevisionImpactCoreAsync(long quoteId, long businessUnitId, string actor,
-            string idempotencyKey, CancellationToken ct = default)
+            string idempotencyKey, string reason, CancellationToken ct = default)
         {
             await using var transaction = _context.Database.IsNpgsql() && _context.Database.CurrentTransaction is null
                 ? await _context.Database.BeginTransactionAsync(ct)
@@ -3299,11 +3568,35 @@ namespace ERP_RFQ_Automation.Services
                     $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0))", ct);
             }
 
-            if (!await _context.Quotes.AsNoTracking()
-                .AnyAsync(x => x.Id == quoteId && x.BusinessUnitId == businessUnitId, ct))
-                throw new KeyNotFoundException();
+            var quote = await _context.Quotes.AsNoTracking()
+                .Include(x => x.QuoteItems)
+                .SingleOrDefaultAsync(x => x.Id == quoteId && x.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException();
 
-            var impacts = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+            var impacts = await OpenQuoteImpactRowsAsync(quoteId, businessUnitId, ct);
+            var state = await EvaluateBuyerRevisionAsync(quote, businessUnitId, ct);
+            if (impacts.Count == 0 && state is not { NewerBuyerRevision: true })
+            {
+                if (transaction is not null) await transaction.CommitAsync(ct);
+                return;
+            }
+
+            // What the quote keeps against what the buyer now asks — the record D-04 lacked.
+            var differing = state?.Changes() ?? new List<QuoteRevisionLineChangeDTO>();
+            if (impacts.Count > 0)
+                AddImpactResolutionEvents(impacts, quoteId, businessUnitId, actor, idempotencyKey,
+                    applied: null, reason, differing);
+            if (state is { NewerBuyerRevision: true })
+                AddBuyerRevisionReviewedEvent(state, quoteId, businessUnitId, actor, idempotencyKey,
+                    "KEPT_AS_QUOTED", reason, differing, rfqLinesUpdated: null, outdated: null);
+            await _context.SaveChangesAsync(ct);
+            if (transaction is not null) await transaction.CommitAsync(ct);
+        }
+
+        private async Task<List<(ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact Impact, long OccurrenceId)>> OpenQuoteImpactRowsAsync(
+            long quoteId, long businessUnitId, CancellationToken ct)
+        {
+            var rows = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
                 .OpenQuoteImpacts(_context, businessUnitId, quoteId)
                 .AsNoTracking()
                 .OrderBy(x => x.Id)
@@ -3316,28 +3609,21 @@ namespace ERP_RFQ_Automation.Services
                         .Single()
                 })
                 .ToListAsync(ct);
-            if (impacts.Count == 0)
-            {
-                if (transaction is not null) await transaction.CommitAsync(ct);
-                return;
-            }
-
-            AddImpactResolutionEvents(impacts.Select(row => (row.Impact, row.OccurrenceId)), quoteId, businessUnitId,
-                actor, idempotencyKey, applied: null);
-            await _context.SaveChangesAsync(ct);
-            if (transaction is not null) await transaction.CommitAsync(ct);
+            return rows.Select(row => (row.Impact, row.OccurrenceId)).ToList();
         }
 
         /// <summary>
         /// The one way an impact is resolved: an append-only <c>REVISION_IMPACT_RESOLVED</c> audit
         /// event whose correlation id names the impact (<see cref="ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries"/>).
         /// "Keep as quoted" and "Apply the new quantities" both end here, so every reader agrees
-        /// the quote is no longer stale whichever the rep chose; the payload records which.
+        /// the quote is no longer stale whichever the rep chose; the payload records which — and,
+        /// for a keep, why, and which lines still differ from the buyer's document (D-04).
         /// </summary>
         private void AddImpactResolutionEvents(
             IEnumerable<(ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact Impact, long OccurrenceId)> impacts,
             long quoteId, long businessUnitId, string actor, string idempotencyKey,
-            IReadOnlyList<QuoteRevisionLineChangeDTO>? applied)
+            IReadOnlyList<QuoteRevisionLineChangeDTO>? applied, string? reason = null,
+            IReadOnlyList<QuoteRevisionLineChangeDTO>? differing = null)
         {
             foreach (var (impact, occurrenceId) in impacts)
             {
@@ -3348,7 +3634,12 @@ namespace ERP_RFQ_Automation.Services
                     OccurrenceId = occurrenceId,
                     EventType = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.ResolvedEventType,
                     PayloadJson = applied is null
-                        ? System.Text.Json.JsonSerializer.Serialize(new { impactId = impact.Id, quoteId, resolution = "KEPT_AS_QUOTED" })
+                        ? System.Text.Json.JsonSerializer.Serialize(new
+                        {
+                            impactId = impact.Id, quoteId, resolution = "KEPT_AS_QUOTED", reason,
+                            kept = (differing ?? Array.Empty<QuoteRevisionLineChangeDTO>())
+                                .Select(x => new { line = x.Line, field = x.Field, quoted = x.From, buyerAsks = x.To })
+                        })
                         : System.Text.Json.JsonSerializer.Serialize(new
                         {
                             impactId = impact.Id, quoteId, resolution = "QUANTITIES_APPLIED",
@@ -3361,6 +3652,47 @@ namespace ERP_RFQ_Automation.Services
                     OccurredAtUtc = DateTimeOffset.UtcNow
                 });
             }
+        }
+
+        /// <summary>
+        /// Records that the rep reviewed the buyer's latest revision on this quote: which revision,
+        /// what was done (KEPT_AS_QUOTED with a reason, or QUANTITIES_APPLIED), the lines, and the
+        /// RFQ lines and supplier requests it touched. It is also what clears the send warning for
+        /// a quote that has no impact row (D-01): the review is the quote reflecting that revision.
+        /// </summary>
+        private void AddBuyerRevisionReviewedEvent(BuyerRevisionState state, long quoteId, long businessUnitId,
+            string actor, string idempotencyKey, string resolution, string? reason,
+            IReadOnlyList<QuoteRevisionLineChangeDTO> lines, IReadOnlyList<QuoteRevisionLineChangeDTO>? rfqLinesUpdated,
+            IReadOnlyList<OutdatedSupplierRequestDTO>? outdated)
+        {
+            _context.Add(new ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent
+            {
+                BusinessUnitId = businessUnitId,
+                LeadId = state.LeadId,
+                OccurrenceId = state.TargetOccurrenceId,
+                EventType = BuyerRevisionReviewedEventType,
+                PayloadJson = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    quoteId,
+                    fromRevision = state.ReflectedRevision,
+                    toRevision = state.TargetRevisionNumber,
+                    buyerRevision = state.LatestBuyerRevision,
+                    resolution,
+                    reason,
+                    lines = lines.Select(x => new { line = x.Line, field = x.Field, from = x.From, to = x.To }),
+                    rfqLinesUpdated = rfqLinesUpdated?.Select(x => new { line = x.Line, from = x.From, to = x.To }),
+                    outdatedSupplierRequests = outdated?.Select(x => new
+                    {
+                        solicitationId = x.SolicitationId, supplierRfq = x.SupplierRfqNumber, line = x.Line,
+                        asked = x.AskedQuantity, now = x.NewQuantity
+                    })
+                }),
+                ActorType = "User",
+                ActorId = actor,
+                CorrelationId = $"{BuyerRevisionReviewedPrefix}{quoteId}:{state.TargetRevisionNumber}",
+                IdempotencyKey = $"{idempotencyKey}:quote-revision:{quoteId}:{state.TargetRevisionNumber}",
+                OccurredAtUtc = DateTimeOffset.UtcNow
+            });
         }
 
         public Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesAsync(long quoteId, long businessUnitId, string actor,
@@ -3379,10 +3711,14 @@ namespace ERP_RFQ_Automation.Services
 
         /// <summary>
         /// Draft line → its RFQ line → the lead item revision the RFQ line was promoted from → that
-        /// item's row on the ARRIVING revision. The lead item id is the stable identity across
+        /// item's row on the buyer's LATEST revision. The lead item id is the stable identity across
         /// revisions; the buyer's line number is the fallback for legacy RFQ lines promoted before
         /// <c>SourceLeadItemRevisionId</c> existed. A draft line with neither is the rep's own
         /// addition and is left exactly as they wrote it.
+        ///
+        /// <para>D-05: the RFQ lines take the new quantities too, and every open supplier request
+        /// that asked for the old quantity is flagged on its sourcing case and returned, so the
+        /// customer is never quoted 10 while the supplier is asked for 8.</para>
         /// </summary>
         private async Task<QuoteRevisionApplyResultDTO> ApplyRevisionQuantitiesCoreAsync(long quoteId, long businessUnitId,
             string actor, string idempotencyKey, CancellationToken ct)
@@ -3411,46 +3747,332 @@ namespace ERP_RFQ_Automation.Services
                     $"Quote {quote.QuoteNo} is already with the customer, so its quantities cannot be changed in place. "
                     + "Issue it as a new revision and apply the customer's changes there.");
 
-            var impacts = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
-                .OpenQuoteImpacts(_context, businessUnitId, quoteId)
-                .AsNoTracking()
-                .OrderBy(x => x.Id)
-                .Select(impact => new
-                {
-                    Impact = impact,
-                    OccurrenceId = _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>()
-                        .Where(revision => revision.BusinessUnitId == businessUnitId && revision.Id == impact.LeadRevisionId)
-                        .Select(revision => revision.EstablishedByOccurrenceId)
-                        .Single()
-                })
-                .ToListAsync(ct);
-            if (impacts.Count == 0)
+            var impacts = await OpenQuoteImpactRowsAsync(quoteId, businessUnitId, ct);
+            var state = await EvaluateBuyerRevisionAsync(quote, businessUnitId, ct);
+            if (state is null || (impacts.Count == 0 && !state.NewerBuyerRevision))
                 throw new InvalidOperationException("There is no open customer revision on this quote to apply.");
 
             var described = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
                 .DescribeOpenQuoteImpactAsync(_context, businessUnitId, quoteId, ct);
-            var arrivingRevisionId = impacts[^1].Impact.LeadRevisionId;
 
-            // The arriving revision's lines, by lead item and by the buyer's line number.
-            var arrivingLines = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().AsNoTracking()
-                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == arrivingRevisionId)
-                .Select(x => new { x.LeadItemId, x.SnapshotJson })
-                .ToListAsync(ct);
-            var byLeadItem = new Dictionary<long, (string Line, decimal? Quantity)>();
-            var byLineNo = new Dictionary<string, (string Line, decimal? Quantity)>(StringComparer.Ordinal);
-            var arrivingLabels = new List<string>();
-            foreach (var arriving in arrivingLines)
+            var result = new QuoteRevisionApplyResultDTO
             {
-                using var snapshot = System.Text.Json.JsonDocument.Parse(arriving.SnapshotJson);
-                var label = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
-                    .Text(snapshot.RootElement, "lineItemNo", "line") ?? string.Empty;
-                var quantity = ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.QuantityValue(snapshot.RootElement);
-                if (arriving.LeadItemId is long leadItemId) byLeadItem[leadItemId] = (label, quantity);
-                if (NormalizeLineNo(label) is { } key) byLineNo.TryAdd(key, (label, quantity));
-                arrivingLabels.Add(label);
+                QuoteId = quote.Id,
+                FromRevision = described?.FromRevision ?? state.ReflectedRevision,
+                ToRevision = Math.Max(described?.ToRevision ?? 0, state.LatestBuyerRevision)
+            };
+            var now = DateTime.UtcNow;
+            var newQuantityByRfqItem = new Dictionary<long, (string Line, decimal Quantity)>();
+            foreach (var match in state.Matched)
+            {
+                if (match.BuyerQuantity is not { } newQuantity || newQuantity <= 0m) continue;
+                if (match.RfqItemId is long rfqItemId) newQuantityByRfqItem[rfqItemId] = (match.Line, newQuantity);
+                if (newQuantity == match.Item.Quantity) continue;
+                result.Applied.Add(new QuoteRevisionLineChangeDTO
+                {
+                    Line = match.Line,
+                    Field = "quantity",
+                    From = Qty(match.Item.Quantity),
+                    To = Qty(newQuantity)
+                });
+                match.Item.Quantity = newQuantity;
+                match.Item.ModifiedBy = actor;
+                match.Item.ModifiedDate = now;
+            }
+            result.LinesUpdated = result.Applied.Count;
+            result.LinesNotOnQuote = state.LinesNotOnQuote.ToList();
+
+            // D-05: the RFQ lines the quote was built from take the same quantities.
+            if (newQuantityByRfqItem.Count > 0)
+            {
+                var rfqItemIds = newQuantityByRfqItem.Keys.ToList();
+                var rfqLines = await _context.Rfqitems
+                    .Where(r => rfqItemIds.Contains(r.Id) && r.Rfqid == quote.Rfqid)
+                    .ToListAsync(ct);
+                foreach (var rfqLine in rfqLines)
+                {
+                    var (line, quantity) = newQuantityByRfqItem[rfqLine.Id];
+                    if (rfqLine.Quantity == quantity) continue;
+                    result.RfqLinesUpdated.Add(new QuoteRevisionLineChangeDTO
+                    {
+                        Line = line, Field = "quantity",
+                        From = rfqLine.Quantity is { } old ? Qty(old) : null, To = Qty(quantity)
+                    });
+                    rfqLine.Quantity = quantity;
+                    rfqLine.ModifiedBy = actor;
+                    rfqLine.ModifiedDate = now;
+                }
+
+                // Supplier requests still open that asked for the old quantity: flag the sourcing
+                // case (its next action says so) and tell the rep which ones to ask again.
+                var changedRfqItems = rfqItemIds.ToHashSet();
+                var oldRfqQuantity = result.RfqLinesUpdated
+                    .Where(x => x.From is not null)
+                    .ToDictionary(x => x.Line, x => decimal.Parse(x.From!, System.Globalization.CultureInfo.InvariantCulture));
+                var openCases = await _context.SourcingCases
+                    .Where(c => c.BusinessUnitId == businessUnitId && changedRfqItems.Contains(c.RfqItemId)
+                        && c.Status != ERP_RFQ_Automation.Procurement.SourcingCaseStatuses.Closed
+                        && c.Status != "CANCELLED")
+                    .ToListAsync(ct);
+                foreach (var sourcingCase in openCases)
+                {
+                    var (line, quantity) = newQuantityByRfqItem[sourcingCase.RfqItemId];
+                    if (sourcingCase.RequestedQuantity == quantity) continue;
+                    var next = $"Buyer changed line {line} to {Qty(quantity)} (rev {result.ToRevision}); suppliers were asked for {Qty(sourcingCase.RequestedQuantity)}. Ask again.";
+                    sourcingCase.NextAction = next.Length <= 255 ? next : next[..255];
+                    sourcingCase.UpdatedOn = now;
+                    sourcingCase.UpdatedBy = actor;
+                    sourcingCase.Version++;
+                }
+                var caseQuantity = openCases.ToDictionary(c => c.Id, c => c.RequestedQuantity);
+                var openStatuses = new[]
+                {
+                    ERP_RFQ_Automation.Agent.Models.SolicitationStatus.PendingDispatch,
+                    ERP_RFQ_Automation.Agent.Models.SolicitationStatus.Dispatching,
+                    ERP_RFQ_Automation.Agent.Models.SolicitationStatus.Sent,
+                    ERP_RFQ_Automation.Agent.Models.SolicitationStatus.Responded,
+                };
+                var solicitations = await _context.Set<ERP_RFQ_Automation.Agent.Models.SupplierSolicitation>().AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == quote.Rfqid && openStatuses.Contains(x.Status))
+                    .Select(x => new { x.Id, x.SupplierId, x.SupplierRfqNumber, x.SourcingCaseId, x.RequestedRfqItemIdsJson })
+                    .ToListAsync(ct);
+                var supplierIds = solicitations.Select(x => x.SupplierId).Distinct().ToList();
+                var supplierNames = supplierIds.Count == 0
+                    ? new Dictionary<long, string>()
+                    : await _context.Suppliers.AsNoTracking().Where(x => supplierIds.Contains(x.Id))
+                        .ToDictionaryAsync(x => x.Id, x => x.Name, ct);
+                foreach (var solicitation in solicitations)
+                {
+                    long[] asked;
+                    try { asked = System.Text.Json.JsonSerializer.Deserialize<long[]>(solicitation.RequestedRfqItemIdsJson) ?? []; }
+                    catch (System.Text.Json.JsonException) { asked = []; }
+                    foreach (var rfqItemId in asked.Where(changedRfqItems.Contains))
+                    {
+                        var (line, quantity) = newQuantityByRfqItem[rfqItemId];
+                        // What the supplier was asked: its sourcing case's quantity, else the RFQ
+                        // line's quantity before this change. Unknown → not reported as outdated.
+                        decimal? askedQuantity = solicitation.SourcingCaseId is long caseId && caseQuantity.TryGetValue(caseId, out var q)
+                            ? q
+                            : oldRfqQuantity.TryGetValue(line, out var old) ? old : null;
+                        if (askedQuantity is not { } asked2 || asked2 == quantity) continue;
+                        result.OutdatedSupplierRequests.Add(new OutdatedSupplierRequestDTO
+                        {
+                            SolicitationId = solicitation.Id,
+                            SupplierRfqNumber = solicitation.SupplierRfqNumber,
+                            SupplierName = supplierNames.GetValueOrDefault(solicitation.SupplierId),
+                            Line = line,
+                            AskedQuantity = asked2,
+                            NewQuantity = quantity
+                        });
+                    }
+                }
+
+                // The RFQ now carries the buyer's quantities: the open "RFQ revision required"
+                // impacts up to this revision are resolved the same append-only way Decide does,
+                // with the lines that were changed rather than "historical RFQ unchanged".
+                if (result.RfqLinesUpdated.Count > 0 && quote.Rfqid is long rfqIdForImpacts)
+                {
+                    var rfqImpacts = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact>().AsNoTracking()
+                        .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == state.LeadId
+                            && x.AggregateType == "RFQ" && x.AggregateId == rfqIdForImpacts
+                            && x.ImpactType == "RFQ_REVISION_REQUIRED" && x.Status == "OPEN")
+                        .Where(impact => !_context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent>().Any(audit =>
+                            audit.BusinessUnitId == businessUnitId
+                            && audit.EventType == RfqRevisionImpactResolutionService.ResolutionEventType
+                            && audit.CorrelationId == RfqRevisionImpactResolutionService.CorrelationPrefix + impact.Id))
+                        .Select(impact => new
+                        {
+                            impact.Id,
+                            impact.LeadId,
+                            RevisionNumber = _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>()
+                                .Where(r => r.BusinessUnitId == businessUnitId && r.Id == impact.LeadRevisionId)
+                                .Select(r => r.RevisionNumber).Single(),
+                            OccurrenceId = _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>()
+                                .Where(r => r.BusinessUnitId == businessUnitId && r.Id == impact.LeadRevisionId)
+                                .Select(r => r.EstablishedByOccurrenceId).Single()
+                        })
+                        .ToListAsync(ct);
+                    foreach (var impact in rfqImpacts.Where(x => x.RevisionNumber <= state.TargetRevisionNumber))
+                        _context.Add(new ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent
+                        {
+                            BusinessUnitId = businessUnitId,
+                            LeadId = impact.LeadId,
+                            OccurrenceId = impact.OccurrenceId,
+                            EventType = RfqRevisionImpactResolutionService.ResolutionEventType,
+                            PayloadJson = System.Text.Json.JsonSerializer.Serialize(new
+                            {
+                                impactId = impact.Id,
+                                rfqId = rfqIdForImpacts,
+                                reviewedThroughLeadRevisionId = state.TargetRevisionId,
+                                resolution = "QUANTITIES_APPLIED",
+                                quoteId,
+                                historicalRfqUnchanged = false,
+                                rfqLinesUpdated = result.RfqLinesUpdated.Select(x => new { line = x.Line, from = x.From, to = x.To })
+                            }),
+                            ActorType = "User",
+                            ActorId = actor,
+                            CorrelationId = RfqRevisionImpactResolutionService.CorrelationPrefix + impact.Id,
+                            IdempotencyKey = $"{idempotencyKey}:rfq-impact:{impact.Id}",
+                            OccurredAtUtc = DateTimeOffset.UtcNow
+                        });
+                }
             }
 
-            // The draft's RFQ lines and the lead item each was promoted from.
+            if (result.LinesUpdated > 0)
+            {
+                // Same arithmetic as every other write path: line nets, header discount, derived
+                // tax, and the stored total the customer's document prints.
+                await CalculateQuoteTotals(quote);
+                quote.ModifiedBy = actor;
+                quote.ModifiedDate = now;
+            }
+            result.TotalAmount = quote.TotalAmount;
+
+            if (impacts.Count > 0)
+                AddImpactResolutionEvents(impacts, quoteId, businessUnitId, actor, idempotencyKey, applied: result.Applied);
+            if (state.NewerBuyerRevision)
+                AddBuyerRevisionReviewedEvent(state, quoteId, businessUnitId, actor, idempotencyKey,
+                    "QUANTITIES_APPLIED", reason: null, result.Applied, result.RfqLinesUpdated, result.OutdatedSupplierRequests);
+            await _context.SaveChangesAsync(ct);
+            if (transaction is not null) await transaction.CommitAsync(ct);
+            return result;
+        }
+
+        private static string Qty(decimal value) => value.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+
+        // ------------------------------------------------------------ buyer revision (D-01)
+
+        public const string BuyerRevisionReviewedEventType = "QUOTE_BUYER_REVISION_REVIEWED";
+        private const string BuyerRevisionReviewedPrefix = "quote-revision:";
+
+        private sealed record RevisionLineMatch(QuoteItem Item, long? RfqItemId, string Line, decimal? BuyerQuantity);
+
+        /// <summary>Where a quote stands against the buyer's latest document.</summary>
+        private sealed class BuyerRevisionState
+        {
+            public long LeadId { get; init; }
+            /// <summary>The lead revision the quote's lines reflect: the RFQ's frozen revision, or a later one the rep reviewed.</summary>
+            public int ReflectedRevision { get; init; }
+            /// <summary>The newest revision a BUYER document established (not a rep's review or client link).</summary>
+            public int LatestBuyerRevision { get; init; }
+            /// <summary>The lead's current revision: the buyer's latest plus any correction made on it.</summary>
+            public long TargetRevisionId { get; init; }
+            public int TargetRevisionNumber { get; init; }
+            public long TargetOccurrenceId { get; init; }
+            public bool NewerBuyerRevision => LatestBuyerRevision > ReflectedRevision;
+            public List<RevisionLineMatch> Matched { get; } = new();
+            public List<string> LinesNotOnQuote { get; } = new();
+            public List<QuoteRevisionLineChangeDTO> NotOnQuoteChanges { get; } = new();
+
+            /// <summary>Every difference between the quote and the buyer's latest document.</summary>
+            public List<QuoteRevisionLineChangeDTO> Changes()
+            {
+                var changes = Matched
+                    .Where(m => m.BuyerQuantity is > 0m && m.BuyerQuantity != m.Item.Quantity)
+                    .Select(m => new QuoteRevisionLineChangeDTO
+                    {
+                        Line = m.Line, Field = "quantity", From = Qty(m.Item.Quantity), To = Qty(m.BuyerQuantity!.Value)
+                    })
+                    .ToList();
+                changes.AddRange(NotOnQuoteChanges);
+                return changes;
+            }
+        }
+
+        /// <summary>
+        /// Compares the quote with the buyer's latest revision. Null when the quote has no RFQ or
+        /// lead to compare with.
+        ///
+        /// <para>The revision the quote reflects is the RFQ's FROZEN revision — not
+        /// <c>Quote.SourceLeadRevision</c>, which is stamped from the lead's current revision when
+        /// the draft is made and so claimed revision 4 for a quote built from an RFQ frozen on 3
+        /// (D-01) — or any later revision the rep already reviewed on this quote or the quote it
+        /// revises. Only a revision a buyer document established counts as "newer": the rep's own
+        /// review or client link also writes lead revisions and must not raise the warning.</para>
+        /// </summary>
+        private async Task<BuyerRevisionState?> EvaluateBuyerRevisionAsync(Quote quote, long businessUnitId, CancellationToken ct)
+        {
+            if (quote.Rfqid is not long rfqId) return null;
+            var rfq = await _context.Rfqs.AsNoTracking()
+                .Where(r => r.Id == rfqId && r.BusinessUnitId == businessUnitId)
+                .Select(r => new { r.LeadId, r.SourceLeadRevisionId })
+                .SingleOrDefaultAsync(ct);
+            if (rfq?.LeadId is not long leadId) return null;
+
+            var revisions = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>().AsNoTracking()
+                .Where(r => r.BusinessUnitId == businessUnitId && r.LeadId == leadId)
+                .Select(r => new { r.Id, r.RevisionNumber, r.EstablishedByOccurrenceId, r.EstablishedByOccurrence.RecordKind })
+                .ToListAsync(ct);
+            if (revisions.Count == 0) return null;
+            var target = revisions.OrderByDescending(r => r.RevisionNumber).ThenByDescending(r => r.Id).First();
+            var latestBuyer = revisions
+                .Where(r => r.RecordKind == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceRecordKind.Ingestion)
+                .Select(r => r.RevisionNumber).DefaultIfEmpty(0).Max();
+            // The RFQ header names its frozen revision; an RFQ promoted before that column existed
+            // still names it on each line.
+            var sourceRevisionId = rfq.SourceLeadRevisionId
+                ?? await _context.Rfqitems.AsNoTracking()
+                    .Where(r => r.Rfqid == rfqId && r.SourceLeadRevisionId != null)
+                    .MaxAsync(r => r.SourceLeadRevisionId, ct);
+            var source = sourceRevisionId is long frozenId
+                ? revisions.FirstOrDefault(r => r.Id == frozenId)
+                : null;
+            var built = source?.RevisionNumber ?? quote.SourceLeadRevision;
+
+            // Reviews already made on this quote, or on the quote it revises (same RFQ, earlier id).
+            var chain = await _context.Quotes.AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId && q.Rfqid == rfqId && q.Id <= quote.Id)
+                .Select(q => q.Id).ToListAsync(ct);
+            var resolvedImpactRevisionIds = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact>().AsNoTracking()
+                .Where(i => i.BusinessUnitId == businessUnitId && i.AggregateType == "QUOTE" && chain.Contains(i.AggregateId))
+                .Where(i => _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent>().Any(a =>
+                    a.BusinessUnitId == businessUnitId
+                    && a.EventType == ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.ResolvedEventType
+                    && a.CorrelationId == "quote-impact:" + i.Id))
+                .Select(i => i.LeadRevisionId).ToListAsync(ct);
+            var reviewedCorrelations = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent>().AsNoTracking()
+                .Where(a => a.BusinessUnitId == businessUnitId && a.LeadId == leadId && a.EventType == BuyerRevisionReviewedEventType)
+                .Select(a => a.CorrelationId).ToListAsync(ct);
+            var reviewed = resolvedImpactRevisionIds
+                .Select(id => revisions.FirstOrDefault(r => r.Id == id)?.RevisionNumber ?? 0)
+                .Concat(reviewedCorrelations.Select(c => ReviewedRevision(c, chain)))
+                .DefaultIfEmpty(0).Max();
+
+            var state = new BuyerRevisionState
+            {
+                LeadId = leadId,
+                ReflectedRevision = Math.Max(built, reviewed),
+                LatestBuyerRevision = latestBuyer,
+                TargetRevisionId = target.Id,
+                TargetRevisionNumber = target.RevisionNumber,
+                TargetOccurrenceId = target.EstablishedByOccurrenceId
+            };
+            if (!state.NewerBuyerRevision
+                && !await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                    .OpenQuoteImpacts(_context, businessUnitId, quote.Id).AnyAsync(ct))
+                return state;
+
+            // The target revision's lines, by lead item and by the buyer's line number.
+            var byLeadItem = new Dictionary<long, (string Line, decimal? Quantity)>();
+            var byLineNo = new Dictionary<string, (string Line, decimal? Quantity)>(StringComparer.Ordinal);
+            var targetLabels = new List<(string Label, decimal? Quantity, long? LeadItemId)>();
+            foreach (var line in await RevisionLinesAsync(businessUnitId, target.Id, ct))
+            {
+                if (line.LeadItemId is long leadItemId) byLeadItem[leadItemId] = (line.Label, line.Quantity);
+                if (NormalizeLineNo(line.Label) is { } key) byLineNo.TryAdd(key, (line.Label, line.Quantity));
+                targetLabels.Add(line);
+            }
+            // What the quote was built from, so a line the rep chose not to quote (and the buyer did
+            // not change) is not reported as new.
+            var sourceByLabel = new Dictionary<string, decimal?>(StringComparer.Ordinal);
+            var sourceLeadItemIds = new HashSet<long>();
+            if (source is not null)
+                foreach (var line in await RevisionLinesAsync(businessUnitId, source.Id, ct))
+                {
+                    if (NormalizeLineNo(line.Label) is { } key) sourceByLabel.TryAdd(key, line.Quantity);
+                    if (line.LeadItemId is long id) sourceLeadItemIds.Add(id);
+                }
+
             var rfqItemIds = quote.QuoteItems.Where(i => i.RfqitemId.HasValue).Select(i => i.RfqitemId!.Value).Distinct().ToList();
             var rfqLines = await _context.Rfqitems.AsNoTracking()
                 .Where(r => rfqItemIds.Contains(r.Id))
@@ -3463,63 +4085,94 @@ namespace ERP_RFQ_Automation.Services
                 .Select(x => new { x.Id, x.LeadItemId })
                 .ToDictionaryAsync(x => x.Id, x => x.LeadItemId, ct);
 
-            var result = new QuoteRevisionApplyResultDTO
-            {
-                QuoteId = quote.Id,
-                FromRevision = described?.FromRevision ?? 0,
-                ToRevision = described?.ToRevision ?? 0
-            };
             var matchedLabels = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in quote.QuoteItems.OrderBy(i => i.Id))
             {
-                (string Line, decimal? Quantity)? target = null;
+                (string Line, decimal? Quantity)? found = null;
                 if (item.RfqitemId is long rfqItemId && rfqLines.TryGetValue(rfqItemId, out var rfqLine))
                 {
                     if (rfqLine.SourceLeadItemRevisionId is long sourceId
                         && sourceLeadItems.TryGetValue(sourceId, out var leadItemId)
                         && leadItemId is long id && byLeadItem.TryGetValue(id, out var byItem))
-                        target = byItem;
+                        found = byItem;
                     else if (NormalizeLineNo(rfqLine.LineItemNo ?? item.CustomerLineRef) is { } key
                         && byLineNo.TryGetValue(key, out var byNo))
-                        target = byNo;
+                        found = byNo;
                 }
-                if (target is null) continue;
-
-                matchedLabels.Add(target.Value.Line);
-                if (target.Value.Quantity is not { } newQuantity || newQuantity <= 0m || newQuantity == item.Quantity) continue;
-
-                result.Applied.Add(new QuoteRevisionLineChangeDTO
-                {
-                    Line = target.Value.Line,
-                    Field = "quantity",
-                    From = item.Quantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture),
-                    To = newQuantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)
-                });
-                item.Quantity = newQuantity;
-                item.ModifiedBy = actor;
-                item.ModifiedDate = DateTime.UtcNow;
+                if (found is null) continue;
+                matchedLabels.Add(found.Value.Line);
+                state.Matched.Add(new RevisionLineMatch(item, item.RfqitemId, found.Value.Line, found.Value.Quantity));
             }
-            result.LinesUpdated = result.Applied.Count;
-            result.LinesNotOnQuote = arrivingLabels
-                .Where(label => !string.IsNullOrEmpty(label) && !matchedLabels.Contains(label))
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
 
-            if (result.LinesUpdated > 0)
+            foreach (var (label, quantity, leadItemId) in targetLabels)
             {
-                // Same arithmetic as every other write path: line nets, header discount, derived
-                // tax, and the stored total the customer's document prints.
-                await CalculateQuoteTotals(quote);
-                quote.ModifiedBy = actor;
-                quote.ModifiedDate = DateTime.UtcNow;
+                if (string.IsNullOrEmpty(label) || matchedLabels.Contains(label)) continue;
+                var key = NormalizeLineNo(label);
+                var wasThere = key is not null && sourceByLabel.ContainsKey(key)
+                    || leadItemId is long id && sourceLeadItemIds.Contains(id);
+                var before = key is not null && sourceByLabel.TryGetValue(key, out var q) ? q : null;
+                if (wasThere && before == quantity) continue; // not quoted before, unchanged now
+                if (!state.LinesNotOnQuote.Contains(label)) state.LinesNotOnQuote.Add(label);
+                state.NotOnQuoteChanges.Add(wasThere
+                    ? new QuoteRevisionLineChangeDTO
+                    {
+                        Line = label, Field = "quantity",
+                        From = before is { } b ? Qty(b) : null, To = quantity is { } n ? Qty(n) : null
+                    }
+                    : new QuoteRevisionLineChangeDTO { Line = label, Field = "added", To = quantity is { } a ? Qty(a) : null });
             }
-            result.TotalAmount = quote.TotalAmount;
+            return state;
+        }
 
-            AddImpactResolutionEvents(impacts.Select(row => (row.Impact, row.OccurrenceId)), quoteId, businessUnitId,
-                actor, idempotencyKey, applied: result.Applied);
-            await _context.SaveChangesAsync(ct);
-            if (transaction is not null) await transaction.CommitAsync(ct);
-            return result;
+        private async Task<List<(string Label, decimal? Quantity, long? LeadItemId)>> RevisionLinesAsync(
+            long businessUnitId, long revisionId, CancellationToken ct)
+        {
+            var rows = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revisionId)
+                .OrderBy(x => x.LineNumber)
+                .Select(x => new { x.LeadItemId, x.SnapshotJson })
+                .ToListAsync(ct);
+            var lines = new List<(string Label, decimal? Quantity, long? LeadItemId)>();
+            foreach (var row in rows)
+            {
+                using var snapshot = System.Text.Json.JsonDocument.Parse(row.SnapshotJson);
+                lines.Add((ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.Text(snapshot.RootElement, "lineItemNo", "line") ?? string.Empty,
+                    ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries.QuantityValue(snapshot.RootElement),
+                    row.LeadItemId));
+            }
+            return lines;
+        }
+
+        private static int ReviewedRevision(string correlationId, IReadOnlyCollection<long> chain)
+        {
+            if (!correlationId.StartsWith(BuyerRevisionReviewedPrefix, StringComparison.Ordinal)) return 0;
+            var parts = correlationId[BuyerRevisionReviewedPrefix.Length..].Split(':');
+            return parts.Length == 2 && long.TryParse(parts[0], out var quoteId) && chain.Contains(quoteId)
+                && int.TryParse(parts[1], out var revision) ? revision : 0;
+        }
+
+        /// <summary>
+        /// The send-readiness warning for a quote behind the buyer's latest document: an open
+        /// revision impact (the quote existed when the revision arrived), or a quote built from an
+        /// RFQ still frozen on an older revision (D-01). Null when the quote is current.
+        /// </summary>
+        private async Task<QuoteSendWarningDTO?> BuyerRevisionWarningAsync(Quote quote, long businessUnitId, CancellationToken ct)
+        {
+            var open = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
+                .DescribeOpenQuoteImpactAsync(_context, businessUnitId, quote.Id, ct);
+            var state = await EvaluateBuyerRevisionAsync(quote, businessUnitId, ct);
+            if (open is null && state is not { NewerBuyerRevision: true }) return null;
+
+            var isDraft = string.Equals(quote.Status?.SetupCode, "DRAFT", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
+            var changes = state?.Changes() ?? new List<QuoteRevisionLineChangeDTO>();
+            if (changes.Count == 0 && open is not null) changes = open.Changes;
+            var reflected = open?.FromRevision ?? state!.ReflectedRevision;
+            var newer = Math.Max(open?.ToRevision ?? 0, state is { NewerBuyerRevision: true } ? state.LatestBuyerRevision : 0);
+            if (newer <= reflected) newer = reflected + 1;
+            var canApply = isDraft && state is not null
+                && state.Matched.Any(m => m.BuyerQuantity is > 0m && m.BuyerQuantity != m.Item.Quantity);
+            return ERP_RFQ_Automation.Services.QuoteTerms.QuoteSendWarnings.NewerBuyerRevision(reflected, newer, changes, canApply);
         }
 
         /// <summary>"00020", "20" and "20 " are the same buyer line; "OPT-3" stays as it is.</summary>

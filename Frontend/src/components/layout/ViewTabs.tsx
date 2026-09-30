@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Tabs, Tab } from '@mui/material';
+import { Tabs, Tab, type SxProps, type Theme } from '@mui/material';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { PRIMARY_NAV, pathnameOf, type NavView } from './navCatalog';
@@ -78,6 +78,8 @@ interface ViewTabsProps {
   primaryKey: string;
   /** Screen-reader name for the strip. Defaults to the destination's label. */
   ariaLabel?: string;
+  /** Layout overrides, for a screen that puts its own controls on the same line as the tabs. */
+  sx?: SxProps<Theme>;
 }
 
 /**
@@ -86,7 +88,7 @@ interface ViewTabsProps {
  * Renders nothing when fewer than two views survive the permission filter — a single tab is a
  * label pretending to be a control.
  */
-const ViewTabs: React.FC<ViewTabsProps> = ({ primaryKey, ariaLabel }) => {
+const ViewTabs: React.FC<ViewTabsProps> = ({ primaryKey, ariaLabel, sx }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { hasPermission } = useAuth();
@@ -113,7 +115,7 @@ const ViewTabs: React.FC<ViewTabsProps> = ({ primaryKey, ariaLabel }) => {
       scrollButtons="auto"
       allowScrollButtonsMobile
       aria-label={ariaLabel ?? `${item?.label ?? ''} views`}
-      sx={{ borderBottom: '1px solid', borderColor: 'divider', mb: 2, minHeight: 44 }}
+      sx={[{ borderBottom: '1px solid', borderColor: 'divider', mb: 2, minHeight: 44 }, ...(Array.isArray(sx) ? sx : [sx])]}
     >
       {views.map((view) => (
         <Tab

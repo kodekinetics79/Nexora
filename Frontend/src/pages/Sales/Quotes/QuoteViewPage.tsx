@@ -27,6 +27,9 @@ import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import ExtendValidityDialog from './ExtendValidityDialog';
 import FollowUpDialog from './FollowUpDialog';
 import PriceConfirmationDialog from './PriceConfirmationDialog';
+import KeepAsQuotedDialog from './KeepAsQuotedDialog';
+import QuoteTermsDialog from './QuoteTermsDialog';
+import rfqService from '../../../api/services/rfqService';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards';
 import { useAuth } from '../../../context/AuthContext';
@@ -34,6 +37,7 @@ import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
 import { summariseStoredQuote } from './quoteTotals';
 import { describeRevisionImpact } from './revisionImpactText';
+import { buyerIdentityLine, buyerNotes, isUnpricedByChoice, lineTotalExVat, pricingStatusText } from './quoteLineText';
 import { alpha } from '@mui/material/styles';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
@@ -72,6 +76,12 @@ const QuoteViewPage: React.FC = () => {
     retry: 1,
   });
 
+  // Export PDF is how a portal quote (SEC, Aramco) goes out: the rep uploads it to the buyer's
+  // portal. It used to die on a toast whenever the prices were unconfirmed or the quote had no
+  // validity date, with no way to fix either from here (pilot audit CP-04 / UX-06). Both refusals
+  // now open the step that fixes them, and the download runs again once it is done.
+  const [pdfConfirmOpen, setPdfConfirmOpen] = React.useState(false);
+  const [termsOpen, setTermsOpen] = React.useState(false);
   const pdfMutation = useMutation({
     mutationFn: () => quoteService.downloadPdf(Number(id)),
     onSuccess: (blob) => {
@@ -82,11 +92,29 @@ const QuoteViewPage: React.FC = () => {
       anchor.click();
       URL.revokeObjectURL(url);
     },
-    // R5: the PDF can now be refused because nobody has confirmed where the prices came
-    // from. That reason is actionable, so it must reach the rep verbatim instead of being
-    // flattened into "export failed".
-    onError: (error: unknown) =>
-      toast.error(presentableErrorMessage(error, 'The quote PDF could not be exported.'), { duration: 6000 })
+    onError: (error: unknown) => {
+      const response = (error as { response?: { status?: number; data?: { priceAttestationRequired?: boolean; commercialReviewRequired?: boolean } } })?.response;
+      if (response?.status === 409 && response.data?.priceAttestationRequired) {
+        setPdfConfirmOpen(true);
+        return;
+      }
+      if (response?.status === 409 && response.data?.commercialReviewRequired && (!quote?.validUntil || !quote?.currencyId)) {
+        setTermsOpen(true);
+        return;
+      }
+      toast.error(presentableErrorMessage(error, 'The quote PDF could not be exported.'), { duration: 6000 });
+    }
+  });
+  const confirmPriceForPdfMutation = useMutation({
+    mutationFn: ({ source, reference }: { source: PriceAttestationSource; reference: string }) =>
+      quoteService.confirmPriceAttestation(Number(id), source, reference),
+    onSuccess: () => {
+      setPdfConfirmOpen(false);
+      queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
+      queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] });
+      pdfMutation.mutate();
+    },
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The price confirmation could not be recorded.'), { duration: 6000 })
   });
 
   // WP-B4 revisions-lite: chain facts drive the "Rev n" chip + Revise button.
@@ -232,25 +260,48 @@ const QuoteViewPage: React.FC = () => {
     queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] }),
     queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] }),
   ]);
+  // D-04: keeping the old quantities needs a reason. 'send' = the rep pressed Send with the
+  // buyer's newer version still open: the keep is recorded, then the send goes on.
+  const [keepDialog, setKeepDialog] = React.useState<null | 'keep' | 'send'>(null);
   const resolveImpactMutation = useMutation({
-    mutationFn: () => quoteService.resolveRevisionImpact(Number(id)),
-    onSuccess: async () => {
+    mutationFn: ({ reason }: { reason: string; thenSend?: boolean }) => quoteService.resolveRevisionImpact(Number(id), reason),
+    onSuccess: async (_, { thenSend }) => {
+      setKeepDialog(null);
       await refreshAfterRevisionReview();
-      toast.success('Kept as quoted. The customer revision is recorded as reviewed.');
+      if (thenSend) {
+        setEmailOpen(true);
+        return;
+      }
+      toast.success('Kept as quoted. The reason is recorded.');
     },
     onError: (error) => toast.error(presentableErrorMessage(error, 'The revision review could not be completed'), { duration: 8000 })
   });
   const applyImpactMutation = useMutation({
     mutationFn: () => quoteService.applyRevisionQuantities(Number(id)),
     onSuccess: async (result) => {
+      setKeepDialog(null);
       await refreshAfterRevisionReview();
       const updated = result.linesUpdated === 1 ? '1 line' : `${result.linesUpdated} lines`;
       const notOnQuote = result.linesNotOnQuote.length
         ? ` Line${result.linesNotOnQuote.length === 1 ? '' : 's'} ${result.linesNotOnQuote.join(', ')} ${result.linesNotOnQuote.length === 1 ? 'is' : 'are'} new on the customer's document and not on this quote — add ${result.linesNotOnQuote.length === 1 ? 'it' : 'them'} if you are quoting ${result.linesNotOnQuote.length === 1 ? 'it' : 'them'}.`
         : '';
-      toast.success(`New quantities applied to ${updated} and the quote re-totalled.${notOnQuote}`, { duration: notOnQuote ? 10000 : 5000 });
+      const rfq = result.rfqLinesUpdated?.length ? ' The RFQ lines were updated too.' : '';
+      const suppliers = result.outdatedSupplierRequests?.length
+        ? ` ${result.outdatedSupplierRequests.length} supplier request${result.outdatedSupplierRequests.length === 1 ? '' : 's'} asked for the old quantity: ask again from Sourcing.`
+        : '';
+      toast.success(`New quantities applied to ${updated} and the quote re-totalled.${rfq}${notOnQuote}${suppliers}`, { duration: notOnQuote || suppliers ? 10000 : 5000 });
     },
     onError: (error) => toast.error(presentableErrorMessage(error, 'The new quantities could not be applied'), { duration: 8000 })
+  });
+
+  // VALIDITY_BELOW_BUYER_MINIMUM: one click sets the date the buyer asks for.
+  const setValidityMutation = useMutation({
+    mutationFn: (validUntil: string) => rfqService.saveQuoteTerms(Number(id), { validUntil }),
+    onSuccess: async () => {
+      await refreshAfterRevisionReview();
+      toast.success('Validity updated to what the buyer asks for.');
+    },
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The validity date could not be changed'), { duration: 8000 })
   });
 
   const [awardOpen, setAwardOpen] = React.useState(false);
@@ -371,6 +422,10 @@ const QuoteViewPage: React.FC = () => {
                 link: { label: 'Open Commercial Policy', to: '/setup/commercial-policy' },
               }
             : null;
+  // The buyer's newer version, whether or not an impact row exists (D-01: a quote built after the
+  // revision arrived had none, and sent with the old quantities without a word).
+  const revisionWarning = (sendReadiness?.warnings ?? []).find((w) => w.code === 'BUYER_REVISION_NEWER') ?? null;
+  const otherWarnings = (sendReadiness?.warnings ?? []).filter((w) => w.code !== 'BUYER_REVISION_NEWER');
   const revisionImpactPresentation = quote.revisionImpact === 'INVENTORY_REVALIDATION_REQUIRED'
     ? {
         title: 'Inventory Revalidation Required',
@@ -378,20 +433,29 @@ const QuoteViewPage: React.FC = () => {
         action: 'Mark revalidation complete',
         hasQuantityChanges: false,
       }
-    : quote.revisionImpact
+    : quote.revisionImpact || revisionWarning
       ? {
           // Says which revision ARRIVED, which one the draft was built on, and what changed —
           // from the server's projection of the identity spine's own diff. It used to print the
           // built-from revision as the thing to review against, and nothing about the change.
-          ...describeRevisionImpact(quote.revisionImpactDetail, quote.sourceLeadRevision, isDraftQuote),
+          ...describeRevisionImpact(quote.revisionImpactDetail ?? revisionWarning?.revision, quote.sourceLeadRevision, isDraftQuote),
           action: 'Keep as quoted',
         }
       : null;
   // A draft can take the customer's new quantities in place. A quote already with the customer
   // cannot — it is revised — so there the only in-panel move is to record the review.
-  const isCustomerRevision = Boolean(quote.revisionImpact) && quote.revisionImpact !== 'INVENTORY_REVALIDATION_REQUIRED';
+  const isCustomerRevision = (Boolean(quote.revisionImpact) && quote.revisionImpact !== 'INVENTORY_REVALIDATION_REQUIRED')
+    || Boolean(revisionWarning);
   const canApplyRevision = isCustomerRevision && isDraftQuote
-    && (quote.revisionImpactDetail == null || revisionImpactPresentation?.hasQuantityChanges === true);
+    && (revisionWarning
+      ? revisionWarning.canApply === true
+      : quote.revisionImpactDetail == null || revisionImpactPresentation?.hasQuantityChanges === true);
+  // Send with the buyer's newer version still open asks first: keep (with a reason) and send, or
+  // use the new quantities. Never a dead end, never silent.
+  const startSend = () => (isCustomerRevision && isDraftQuote ? setKeepDialog('send') : setEmailOpen(true));
+  const keepAsQuoted = () => (quote.revisionImpact === 'INVENTORY_REVALIDATION_REQUIRED'
+    ? resolveImpactMutation.mutate({ reason: 'Inventory revalidated' })
+    : setKeepDialog('keep'));
 
   // Which control is THE next step. Exactly one contained button per state; a contained button
   // that is also disabled points the rep at a dead end, so a blocked draft promotes Edit instead.
@@ -424,10 +488,12 @@ const QuoteViewPage: React.FC = () => {
   // Pre-send gates only matter while the quote can still be sent; on an ordered or closed
   // quote they would argue with the sentence that says it is finished.
   const showPreSendGates = isDraftQuote || isSentQuote;
-  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || deliveryPending !== null || (showPreSendGates && (supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null));
+  const showWarnings = isDraftQuote && otherWarnings.length > 0;
+  const showBlockerPanel = isUnpricedDraft || blockerRows.length > 0 || deliveryPending !== null || showWarnings || (showPreSendGates && (supplierValidityWarnings.length > 0 || revisionImpactPresentation !== null));
   // The sentence that tells the rep what happens next, in every state, derived from facts the
   // page already holds. The screen drives; the rep never has to work out the next move.
-  const blockerCount = blockerRows.length + (showPreSendGates && revisionImpactPresentation ? 1 : 0) + (showPreSendGates && supplierValidityWarnings.length > 0 ? 1 : 0);
+  const blockerCount = blockerRows.length + (showPreSendGates && revisionImpactPresentation ? 1 : 0) + (showPreSendGates && supplierValidityWarnings.length > 0 ? 1 : 0)
+    + (showWarnings ? otherWarnings.length : 0);
   const nextStepText = revisionInfo?.supersededByQuoteNo
     ? `A newer revision replaces this quote. Work on ${revisionInfo.supersededByQuoteNo} instead.`
     : deliveryPendingText && (isDraftQuote || isSentQuote)
@@ -445,7 +511,9 @@ const QuoteViewPage: React.FC = () => {
               ? 'The customer replied. Record the outcome: won, lost or expired.'
               : 'Waiting for the customer. Mark "Customer responded" when they reply, or record the outcome.')
             : isDraftQuote && isCustomerRevision
-              ? (canApplyRevision
+              ? (!quote.revisionImpact && revisionWarning
+                ? `The buyer sent a newer version (rev ${revisionWarning.revision?.toRevision ?? '?'}). ${canApplyRevision ? 'Apply the new quantities, or keep it as quoted.' : 'Review what changed, then keep it as quoted or edit the lines.'}`
+                : canApplyRevision
                 ? `Revision ${quote.revisionImpactDetail?.toRevision ?? 'from the customer'} arrived after this draft. Apply the new quantities, or keep it as quoted.`
                 : 'A customer revision arrived after this draft. Review what changed, then keep it as quoted or edit the lines.')
             : isDraftQuote
@@ -475,7 +543,7 @@ const QuoteViewPage: React.FC = () => {
             startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
             disabled={sendBlockedReason !== null}
             title={sendBlockedReason?.text}
-            onClick={() => setEmailOpen(true)}
+            onClick={startSend}
             sx={{ borderRadius: 2, fontWeight: primaryAction === 'send' ? 800 : undefined, whiteSpace: 'nowrap' }}
           >
             {isDraftQuote ? 'Send to customer' : 'Send again'}
@@ -770,7 +838,7 @@ const QuoteViewPage: React.FC = () => {
                         size="small"
                         variant={canApplyRevision || primaryAction !== 'revision' ? 'outlined' : 'contained'}
                         disabled={resolveImpactMutation.isPending || applyImpactMutation.isPending}
-                        onClick={() => resolveImpactMutation.mutate()}
+                        onClick={keepAsQuoted}
                         sx={{ whiteSpace: 'nowrap' }}
                       >
                         {revisionImpactPresentation.action}
@@ -795,6 +863,20 @@ const QuoteViewPage: React.FC = () => {
                   </>
                 )}
               </Typography>
+            ))}
+            {/* What the buyer asked for, checked against this quote. Warnings, not blockers: each
+                names the problem, the rep decides (owner rule: inform, don't obstruct). */}
+            {showWarnings && otherWarnings.map((warning) => (
+              <Stack key={warning.code} component="li" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
+                <Typography variant="body2">{warning.message}</Typography>
+                {warning.code === 'VALIDITY_BELOW_BUYER_MINIMUM' && warning.suggestedValidUntil && hasPermission('Quotations', 'edit') && (
+                  <Button color="inherit" size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }}
+                    disabled={setValidityMutation.isPending}
+                    onClick={() => setValidityMutation.mutate(warning.suggestedValidUntil!.split('T')[0])}>
+                    Set to {dayjs(warning.suggestedValidUntil.split('T')[0]).format('D MMM YYYY')}
+                  </Button>
+                )}
+              </Stack>
             ))}
             {showPreSendGates && supplierValidityWarnings.length > 0 && (
               <Stack component="li" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
@@ -831,13 +913,21 @@ const QuoteViewPage: React.FC = () => {
           <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'action.hover' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
           <Box sx={{ overflowX: 'auto' }}>
             <Table size="small">
-              <TableHead><TableRow sx={{ bgcolor: 'action.hover' }}><TableCell sx={{ fontWeight: 700 }}>Ref</TableCell><TableCell sx={{ fontWeight: 700 }}>Description</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell><TableCell sx={{ fontWeight: 700 }}>UOM</TableCell><TableCell sx={{ fontWeight: 700 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Total</TableCell></TableRow></TableHead>
+              <TableHead><TableRow sx={{ bgcolor: 'action.hover' }}><TableCell sx={{ fontWeight: 700 }}>Ref</TableCell><TableCell sx={{ fontWeight: 700 }}>Description</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell><TableCell sx={{ fontWeight: 700 }}>UOM</TableCell><TableCell sx={{ fontWeight: 700 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 700 }} align="right">Total excl. VAT</TableCell></TableRow></TableHead>
               <TableBody>
                 {quote.quoteItems.map((item, idx) => (
                   <TableRow key={item.id} hover>
                     {/* The buyer's own line reference (their RFQ line, e.g. SAP "00010"); synthetic index only for legacy lines */}
                     <TableCell>{item.customerLineRef || idx + 1}</TableCell>
-                    <TableCell><Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography><Typography variant="caption" color="text.secondary">{item.itemDescription}</Typography></TableCell>
+                    {/* The same line the customer's PDF prints: description, what the buyer calls it
+                        (material, maker, part no.), what is offered, and how it is priced. */}
+                    <TableCell>
+                      <Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{item.itemDescription}</Typography>
+                      {buyerIdentityLine(item) && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{buyerIdentityLine(item)}</Typography>}
+                      {item.offeredNote && <Typography variant="caption" color="info.main" sx={{ display: 'block', fontWeight: 700 }}>{item.offeredNote}</Typography>}
+                      {pricingStatusText(item) && <Typography variant="caption" color={item.pricingStatus === 'NOT_QUOTED' ? 'error.main' : 'warning.main'} sx={{ display: 'block', fontWeight: 700 }}>{pricingStatusText(item)}</Typography>}
+                    </TableCell>
                     <TableCell align="right">{item.quantity}</TableCell>
                     <TableCell>{item.unitOfMeasure || '—'}</TableCell>
                     <TableCell>
@@ -850,7 +940,7 @@ const QuoteViewPage: React.FC = () => {
                         </Stack>;
                       })()}
                     </TableCell>
-                    <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
+                    <TableCell align="right">{item.pricingStatus === 'TO_FOLLOW' ? 'To follow' : item.pricingStatus === 'NOT_QUOTED' ? 'Not quoted' : Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
                     <TableCell align="right">
                       {(item.discount ?? 0) > 0 ? (
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
@@ -860,7 +950,9 @@ const QuoteViewPage: React.FC = () => {
                         </Typography>
                       ) : '—'}
                     </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(item.totalAmount, quote.currencyCode)}</TableCell>
+                    {/* Ex-VAT, as the PDF prints it: the stored totalAmount carries the line's VAT, so
+                        showing it here put 2,876.15 on screen where the customer reads 2,501.00. */}
+                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : isUnpricedByChoice(item) ? '—' : formatMoney(lineTotalExVat(item), quote.currencyCode)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -893,7 +985,8 @@ const QuoteViewPage: React.FC = () => {
           </Box>
         </Paper>
 
-        {quote.headerRemarks && <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
+        {/* The rep's notes print on the customer's PDF and e-mail; the internal draft marker does not, so it is not shown as if it would. */}
+        {buyerNotes(quote.headerRemarks) && <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>NOTES TO CUSTOMER</Typography><Typography variant="body2">{buyerNotes(quote.headerRemarks)}</Typography></Box>}
 
         {/* Evidence and record, folded. Nothing is removed; it is simply not in the rep's way. */}
         <Accordion variant="outlined" disableGutters sx={{ borderRadius: 3, '&::before': { display: 'none' } }}>
@@ -992,6 +1085,48 @@ const QuoteViewPage: React.FC = () => {
           setEmailOpen(false);
           setPriceConfirmOpen(true);
         }}
+      />
+
+      <PriceConfirmationDialog
+        open={pdfConfirmOpen}
+        purpose="pdf"
+        quoteId={Number(id)}
+        quoteNo={quote.quoteNo}
+        recipientEmail=""
+        submitting={confirmPriceForPdfMutation.isPending || pdfMutation.isPending}
+        onCancel={() => setPdfConfirmOpen(false)}
+        onConfirm={(source, reference) => confirmPriceForPdfMutation.mutate({ source, reference })}
+      />
+
+      <QuoteTermsDialog
+        open={termsOpen}
+        quoteId={Number(id)}
+        businessUnitId={businessUnitId}
+        currencyId={quote.currencyId}
+        validUntil={quote.validUntil}
+        suggestedValidUntil={sendReadiness?.buyerTerms?.requiredValidUntil}
+        allowedCurrencies={sendReadiness?.buyerTerms?.allowedCurrencies}
+        onCancel={() => setTermsOpen(false)}
+        onSaved={async () => {
+          setTermsOpen(false);
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['quote-detail', id] }),
+            queryClient.invalidateQueries({ queryKey: ['quote-send-readiness', id] }),
+          ]);
+          pdfMutation.mutate();
+        }}
+      />
+
+      <KeepAsQuotedDialog
+        open={keepDialog !== null}
+        mode={keepDialog ?? 'keep'}
+        message={revisionWarning?.message ?? revisionImpactPresentation?.detail}
+        changes={revisionWarning?.revision?.changes ?? quote.revisionImpactDetail?.changes}
+        canApply={canApplyRevision}
+        busy={resolveImpactMutation.isPending || applyImpactMutation.isPending}
+        onApply={() => applyImpactMutation.mutate()}
+        onCancel={() => setKeepDialog(null)}
+        onKeep={(reason) => resolveImpactMutation.mutate({ reason, thenSend: keepDialog === 'send' })}
       />
 
       <PriceConfirmationDialog

@@ -22,9 +22,31 @@ public sealed class StructuredEvidenceLedgerPersister
         "^row (?<row>[1-9][0-9]*)(?:, column (?<column>[A-Z]+[0-9]*))?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
-    private readonly ErpRfqAutomationContext _context;
+    /// <summary>
+    /// Canonical lines saved per SaveChanges. They used to be saved one at a time: a 1,500-line
+    /// DOCX spent 177 of its 237 ingest seconds on 1,500 separate saves, each one re-scanning
+    /// every entity the persist transaction tracks (PERF-04). The regions and evidence below were
+    /// always one save each; the lines' ids are only needed after the loop.
+    /// </summary>
+    internal const int LineBatchSize = 500;
 
-    public StructuredEvidenceLedgerPersister(ErpRfqAutomationContext context) => _context = context;
+    private readonly ErpRfqAutomationContext _context;
+    private readonly Func<CancellationToken, Task>? _keepAlive;
+
+    /// <param name="keepAlive">Called after every save, so a long persist keeps its job lease
+    /// (see <see cref="PersistLeaseKeepAlive"/>). Null outside the fenced worker path.</param>
+    public StructuredEvidenceLedgerPersister(ErpRfqAutomationContext context,
+        Func<CancellationToken, Task>? keepAlive = null)
+    {
+        _context = context;
+        _keepAlive = keepAlive;
+    }
+
+    private async Task SaveAsync(CancellationToken ct)
+    {
+        await _context.SaveChangesAsync(ct);
+        if (_keepAlive is not null) await _keepAlive(ct);
+    }
 
     public async Task PersistAsync(
         ExtractionJob job,
@@ -81,7 +103,7 @@ public sealed class StructuredEvidenceLedgerPersister
             replayRun.Start();
             replayRun.Complete(0, 0, 0, 0, 0, 0);
             _context.Add(replayRun);
-            await _context.SaveChangesAsync(ct);
+            await SaveAsync(ct);
             return;
         }
 
@@ -92,12 +114,19 @@ public sealed class StructuredEvidenceLedgerPersister
         run.RecordCostStatus("LocalNoCharge", "NotRequired", 0m, "USD");
         run.Start();
         _context.Add(run);
-        await _context.SaveChangesAsync(ct);
+        await SaveAsync(ct);
 
         var pendingFields = new List<PendingField>();
         var inquiryByDocument = new Dictionary<CanonicalRfqDocument, CanonicalInquiry>();
         var lineByCanonical = new Dictionary<CanonicalRfqLineItem, CanonicalLineItem>();
-        var boundLeadItemIds = leads.ToDictionary(x => x.Id, _ => new HashSet<long>());
+        // Each lead's current projection items not yet bound to a source line, in collection
+        // order. Built once and shrunk as lines bind, instead of re-filtering every item of the
+        // lead (3,000 on a 1,500-line bid list) for every line.
+        var availableLeadItems = new Dictionary<long, List<LeadItem>>();
+        foreach (var lead in leads)
+            if (!availableLeadItems.ContainsKey(lead.Id))
+                availableLeadItems[lead.Id] = lead.LeadItems.Where(x => x.IsCurrentRevisionProjection).ToList();
+        var unsavedLines = 0;
         var firstInquiryNumber = await ReserveInquiryNumbersAsync(
             source.CorpusId, import.Documents.Count, ct);
 
@@ -117,7 +146,7 @@ public sealed class StructuredEvidenceLedgerPersister
             else
                 inquiry.RequireReview();
             _context.Add(inquiry);
-            await _context.SaveChangesAsync(ct);
+            await SaveAsync(ct);
             inquiryByDocument[document] = inquiry;
 
             AddField(pendingFields, inquiry, null, "RfqNo", document.RfqNo);
@@ -147,21 +176,34 @@ public sealed class StructuredEvidenceLedgerPersister
                 var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
                     description, quantity is > 0 ? quantity : null,
                     canonical.UnitOfMeasure.Value);
+                // Same rule for the currency: the ledger accepts a three-letter code or nothing,
+                // and a word in the currency cell ("Currency" on an Ariba help row) used to
+                // dead-letter the whole document from here. The normaliser already leaves an
+                // unknown word blank and holds the line; this keeps one cell from ever doing it
+                // again, and the line is held for a person rather than certified.
+                var currency = canonical.Currency.Value;
+                var lineStatus = MapLineStatus(canonical.ValidationStatus);
+                if (currency is not null && !IsCurrencyCode(currency))
+                {
+                    currency = null;
+                    if (lineStatus == CanonicalValidationStatus.Valid) lineStatus = CanonicalValidationStatus.Warning;
+                }
                 line.Enrich(canonical.ManufacturerName.Value, canonical.ManufacturerPartNumber.Value,
-                    canonical.Currency.Value, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),
-                    JsonSerializer.Serialize(canonical), MapLineStatus(canonical.ValidationStatus));
-                var availableLeadItems = lead.LeadItems
-                    .Where(x => x.IsCurrentRevisionProjection
-                        && !boundLeadItemIds[lead.Id].Contains(x.Id))
-                    .ToArray();
-                var leadItem = ResolveEvidenceLeadItem(canonical, availableLeadItems);
+                    currency, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),
+                    JsonSerializer.Serialize(canonical), lineStatus);
+                var available = availableLeadItems[lead.Id];
+                var leadItem = ResolveEvidenceLeadItem(canonical, available);
                 if (leadItem is not null)
                 {
                     line.BindLeadItem(leadItem.Id);
-                    boundLeadItemIds[lead.Id].Add(leadItem.Id);
+                    available.RemoveAll(x => x.Id == leadItem.Id);
                 }
                 _context.Add(line);
-                await _context.SaveChangesAsync(ct);
+                if (++unsavedLines >= LineBatchSize)
+                {
+                    await SaveAsync(ct);
+                    unsavedLines = 0;
+                }
                 lineByCanonical[canonical] = line;
 
                 AddField(pendingFields, null, line, "LineItemNo", canonical.LineItemNo);
@@ -179,6 +221,9 @@ public sealed class StructuredEvidenceLedgerPersister
             }
         }
 
+        if (unsavedLines > 0)
+            await SaveAsync(ct);
+
         var coordinates = pendingFields.Select(x => ParseCoordinate(x.Evidence.Location, job.FileType))
             .Distinct().OrderBy(x => x.Sheet, StringComparer.Ordinal).ThenBy(x => x.Row).ThenBy(x => x.Column)
             .ToArray();
@@ -195,7 +240,7 @@ public sealed class StructuredEvidenceLedgerPersister
             pages.Add(sheet.Key, page);
             _context.Add(page);
         }
-        await _context.SaveChangesAsync(ct);
+        await SaveAsync(ct);
 
         // The document's own prose outside the table, retained as evidence rather than
         // discarded. It carries the warranty, validity, country-of-origin and Incoterms
@@ -209,7 +254,7 @@ public sealed class StructuredEvidenceLedgerPersister
             _context.Add(DocumentRegion.Create(job.BusinessUnitId, narrativePage.Id,
                 DocumentRegionType.Text, 0, 0, 1, 1, outcome.DocumentNarrative.Trim(),
                 confidence: 1m, sourceAddress: null));
-            await _context.SaveChangesAsync(ct);
+            await SaveAsync(ct);
         }
 
         var regions = new Dictionary<string, DocumentRegion>(StringComparer.Ordinal);
@@ -226,7 +271,7 @@ public sealed class StructuredEvidenceLedgerPersister
             regions.Add(field.Evidence.Location, region);
             _context.Add(region);
         }
-        await _context.SaveChangesAsync(ct);
+        await SaveAsync(ct);
 
         foreach (var field in pendingFields)
         {
@@ -242,7 +287,7 @@ public sealed class StructuredEvidenceLedgerPersister
                     transformationsJson: field.TransformationsJson);
             _context.Add(evidence);
         }
-        await _context.SaveChangesAsync(ct);
+        await SaveAsync(ct);
 
         var findingCount = 0;
         foreach (var document in import.Documents)
@@ -284,7 +329,7 @@ public sealed class StructuredEvidenceLedgerPersister
         }
         run.Complete(pages.Count, regions.Count, import.Documents.Count,
             import.Documents.Sum(x => x.LineItems.Count), pendingFields.Count, findingCount);
-        await _context.SaveChangesAsync(ct);
+        await SaveAsync(ct);
     }
 
     private async Task<int> ReserveInquiryNumbersAsync(
@@ -330,6 +375,9 @@ public sealed class StructuredEvidenceLedgerPersister
                 JsonSerializer.Serialize(value.Transformations)));
         }
     }
+
+    /// <summary>What <see cref="EvidenceLedgerGuard.CurrencyCode"/> accepts: exactly three upper-case ASCII letters.</summary>
+    internal static bool IsCurrencyCode(string value) => value.Length == 3 && value.All(char.IsAsciiLetterUpper);
 
     private static decimal? ValueOrNull(CanonicalValue<decimal> value) =>
         value.Confidence == 0 && value.Value == 0 ? null : value.Value;

@@ -79,12 +79,27 @@ namespace ERP_RFQ_Automation.Extraction;
 /// room absorbs the cases the average cannot: unusually verbose ItemText /
 /// ProductShortDescription values, a populated ExtraFields map, and tokenizer variance.
 ///
-/// Resulting chunk sizes: 9 items at a 4,096-token ceiling, 22 items at 8,192.
+/// RE-DERIVED FROM THE LEDGER (2026-09-28). The 225-token arithmetic above assumed ~10
+/// characters per value. Real bid lines are specification-heavy: the AiRequests ledger for
+/// the Aramco and Marafiq PDFs shows 1,962 output tokens for 3 items plus the header and
+/// 1,101–1,184 tokens for 1 item plus the header, i.e. ~440–530 tokens per item. With 225 the
+/// planner packed 3 items into a 2,048-token call that needed ~2,000, and 47 of 48 calls on one
+/// document were cut off. <see cref="EstimatedOutputTokensPerItem"/> is now 450 — the measured
+/// cost before rule 17 of rfq-extraction-v8 (omit null keys) lowered it, so the estimate errs
+/// toward smaller, safer chunks exactly as the original derivation intended.
+///
+/// Resulting chunk sizes: 4 items at a 4,096-token ceiling, 11 items at 8,192.
+///
+/// INPUT is the second budget. A call must also fit the provider's context window: instructions
+/// + document + the whole output ceiling. <see cref="MaxDocumentCharacters"/> turns the
+/// client's <c>MaxDocumentInputTokens</c> into characters at
+/// <see cref="DocumentCharactersPerToken"/>, pessimistic on purpose because part numbers and
+/// material codes tokenize digit by digit.
 /// </summary>
 public static class ExtractionOutputBudget
 {
     /// <summary>Estimated OUTPUT tokens the schema costs for one extracted line item.</summary>
-    public const int EstimatedOutputTokensPerItem = 225;
+    public const int EstimatedOutputTokensPerItem = 450;
 
     /// <summary>Estimated OUTPUT tokens for the document-level header fields emitted once per call.</summary>
     public const int EstimatedHeaderOutputTokens = 650;
@@ -116,6 +131,25 @@ public static class ExtractionOutputBudget
             return 1;
         var items = (int)(usable / EstimatedOutputTokensPerItem);
         return Math.Clamp(items, 1, AbsoluteMaxItemsPerChunk);
+    }
+
+    /// <summary>
+    /// Characters of document text per token, pessimistic. Prose runs ~4; SAP prints full of
+    /// material codes and part numbers run far lower, because digits tokenize one by one.
+    /// </summary>
+    public const double DocumentCharactersPerToken = 2.5;
+
+    /// <summary>
+    /// Most characters of document text (header context + regions) one call may carry. The
+    /// smaller of <paramref name="characterCeiling"/> and what
+    /// <paramref name="maximumDocumentInputTokens"/> allows; the ceiling alone when the client
+    /// knows no context window. Never below 2,000, so one ordinary page always fits.
+    /// </summary>
+    public static int MaxDocumentCharacters(int? maximumDocumentInputTokens, int characterCeiling)
+    {
+        if (maximumDocumentInputTokens is not { } tokens || tokens <= 0) return characterCeiling;
+        var fromWindow = (int)Math.Floor(tokens * DocumentCharactersPerToken);
+        return Math.Max(2_000, Math.Min(characterCeiling, fromWindow));
     }
 
     /// <summary>Projected output tokens for a chunk carrying <paramref name="itemsInChunk"/> items.</summary>

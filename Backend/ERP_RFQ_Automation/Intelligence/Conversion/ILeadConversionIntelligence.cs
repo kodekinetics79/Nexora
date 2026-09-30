@@ -16,6 +16,14 @@ public interface ILeadConversionIntelligence
     Task<ConversionPreview> PreviewAsync(long leadId, long businessUnitId, CancellationToken ct);
 
     /// <summary>
+    /// The same dry-run for a lead the caller has ALREADY read with its items (untracked). The
+    /// decision workbench reads the lead and its lines anyway; reading 3,000 lead items a second
+    /// time for a 1,500-line bid list only doubled the heaviest query of the screen.
+    /// </summary>
+    Task<ConversionPreview> PreviewAsync(Models.Lead loadedLead, long businessUnitId, CancellationToken ct)
+        => PreviewAsync(loadedLead.Id, businessUnitId, ct);
+
+    /// <summary>
     /// Convert the lead into an RFQ, mirroring the legacy field mapping and applying
     /// the request's per-line choices (include/exclude, product, corrected qty/UoM).
     /// </summary>

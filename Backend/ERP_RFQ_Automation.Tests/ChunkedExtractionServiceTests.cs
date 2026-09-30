@@ -175,7 +175,8 @@ public class ChunkedExtractionServiceTests
             Ext.Item(0.9, "Relay") with { InquiryGroup = "RFQ-A", InquiryGroupConfidence = 0.9 },
             Ext.Item(0.9, "Cable") with { InquiryGroup = "RFQ-B", InquiryGroupConfidence = 0.9 },
         };
-        var llm = new StubLlm(Ext.Result(items, 0.9));
+        // An 8,192-token ceiling (the shipped default) keeps the 8 lines in one call.
+        var llm = new StubLlm(Ext.Result(items, 0.9)) { MaxOutputTokens = 8192 };
         // 8 text lines -> 3 items: the exact shape production sees on every PDF.
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(8)));
 
@@ -602,21 +603,18 @@ public class ChunkedExtractionServiceTests
         // extractor must respond by asking for LESS — halving, floor 1 — not by replaying
         // the identical failing request.
         //
-        // 22, not 11: rfq-extraction-v2 stopped asking for a "<Field>Confidence" number
-        // beside each of the 24 per-item value fields. Those numbers were parsed and then
-        // discarded (LeadItem has ONE Aiconfidence column, fed from ItemConfidence), so half
-        // of every item's output budget was being spent on output nobody read.
-        // EstimatedOutputTokensPerItem went 450 -> 225 and the planned chunk doubled.
+        // 11: EstimatedOutputTokensPerItem is 450, the per-item cost measured in the AiRequests
+        // ledger on real spec-heavy lines (the old 225 undercounted it by half).
         var llm = new BudgetedStubLlm(maxOutputTokens: 8192, truncateAboveItems: 4);
         var planned = ExtractionOutputBudget.MaxItemsPerChunk(8192);
-        Assert.Equal(22, planned); // guards the documented arithmetic
+        Assert.Equal(11, planned); // guards the documented arithmetic
 
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(planned)));
 
-        // Depth-first halving, left half reprocessed first: 22 -> 11 + 11; each 11 -> 5 + 6;
-        // 5 -> 2 + 3 and 6 -> 3 + 3. Anything <= 4 succeeds.
+        // Depth-first halving, left half reprocessed first: 11 -> 5 + 6; 5 -> 2 + 3 and
+        // 6 -> 3 + 3. Anything <= 4 succeeds.
         Assert.Equal(
-            new[] { 22, 11, 5, 2, 3, 6, 3, 3, 11, 5, 2, 3, 6, 3, 3 },
+            new[] { 11, 5, 2, 3, 6, 3, 3 },
             llm.RequestedItemCounts);
         // No truncated request is ever replayed at the same size: a truncation is always
         // followed immediately by a STRICTLY SMALLER request (the left half).
@@ -857,6 +855,32 @@ public class ChunkedExtractionServiceTests
         Assert.True(samples[4] < 10_000, $"p95 local parse took {samples[4]:F2} ms");
     }
 
+    [Fact]
+    public async Task The_buyer_organisation_read_from_a_structured_document_reaches_the_lead_with_its_quote()
+    {
+        var rows = Enumerable.Range(2, 3).Select(row => SpreadsheetRow(row, "6000000028", $"Relay {row}", "1", "")).ToArray();
+        foreach (var row in rows)
+        {
+            row.BuyerOrganisation = "Saudi Aramco";
+            row.BuyerOrganisationEvidence = "part or model number that Saudi Aramco has requested";
+        }
+
+        var outcome = await NewService(new StubLlm()).ExtractStructuredAsync(rows, 7, "RFP - 6000000028.docx");
+
+        Assert.Equal("Saudi Aramco", outcome.Result!.CustomerCompanyName);
+        Assert.Equal("part or model number that Saudi Aramco has requested", outcome.Result.CustomerCompanyEvidence);
+    }
+
+    [Fact]
+    public async Task A_structured_document_that_names_no_buyer_leaves_the_client_unnamed()
+    {
+        var rows = Enumerable.Range(2, 3).Select(row => SpreadsheetRow(row, "RFQ-1", $"Relay {row}", "1", "")).ToArray();
+
+        var outcome = await NewService(new StubLlm()).ExtractStructuredAsync(rows, 7, "bid.xlsx");
+
+        Assert.Null(outcome.Result!.CustomerCompanyName);
+    }
+
     private static RfqSpreadsheetRow SpreadsheetRow(int row, string rfqNo, string product, string qty, string price)
         => new()
         {
@@ -885,6 +909,16 @@ public class ChunkedExtractionServiceTests
     private static LeadItemData Marafiq(string name = "TRANSFORMER: STEP UP, 400 TO 480VAC, 40KVA")
         => Ext.Item(0.95, name) with { LineItemNo = "00010", ItemMaterialCode = "201195514", UnitOfMeasure = "EA" };
 
+    /// <summary>Rows carrying the lines the Marafiq tests return, where the document check can find them.</summary>
+    private static List<string> MarafiqRows(int count)
+    {
+        var rows = Rows(count);
+        rows[0] = "00010 201195514 TRANSFORMER: STEP UP, 400 TO 480VAC, 40KVA\n1 each";
+        rows[1] = "00020 300000001 Item A";
+        rows[ExtractionOutputBudget.MaxItemsPerChunk(4096)] = "00030 300000002 Item B";
+        return rows;
+    }
+
     [Fact]
     public async Task An_item_an_earlier_chunk_already_returned_is_kept_once()
     {
@@ -894,7 +928,7 @@ public class ChunkedExtractionServiceTests
             Ext.Result([Marafiq("TRANSFORMER: STEP UP ,400  TO 480VAC ,40KVA"), Ext.Item(0.9, "Item B") with { LineItemNo = "00030", ItemMaterialCode = "300000002" }], 0.9),
             Ext.Result([Marafiq()], 0.9));
 
-        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk * 2 + 1)));
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(MarafiqRows(perChunk * 2 + 1)));
 
         Assert.Equal(3, llm.CallCount);
         Assert.NotNull(outcome.Result);
@@ -934,6 +968,124 @@ public class ChunkedExtractionServiceTests
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk + 1)));
 
         Assert.Equal(2, outcome.Result!.Items.Count);
+    }
+
+    [Fact]
+    public async Task The_same_line_numbered_two_ways_is_still_one_line()
+    {
+        // X6. One call returned the Marafiq line numbered by the glued code, the next by its own
+        // count ("1"). The line number is not part of a code-anchored identity.
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var llm = new StubLlm(
+            Ext.Result([Marafiq() with { LineItemNo = "00010201195514" }], 0.9),
+            Ext.Result([Marafiq() with { LineItemNo = "1" }], 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(MarafiqRows(perChunk + 1)));
+
+        Assert.Equal(2, llm.CallCount);
+        var line = Assert.Single(outcome.Result!.Items);
+        Assert.Equal("201195514", line.ItemMaterialCode);
+        Assert.Contains(outcome.Diagnostics, d => d.StartsWith("Dropped 1 item(s) repeated across chunks"));
+    }
+
+    [Fact]
+    public void The_cross_chunk_key_leaves_the_line_number_out_when_a_code_identifies_the_line()
+    {
+        var a = Marafiq() with { LineItemNo = "00010" };
+        var b = Marafiq() with { LineItemNo = "1" };
+        Assert.Equal(ChunkedExtractionService.CrossChunkKey(a), ChunkedExtractionService.CrossChunkKey(b));
+
+        // Anchored by a line number alone, the number (and the description) still decide.
+        var c = Ext.Item(0.9, "BOLT M10") with { LineItemNo = "1" };
+        var d = Ext.Item(0.9, "BOLT M10") with { LineItemNo = "2" };
+        Assert.NotEqual(ChunkedExtractionService.CrossChunkKey(c), ChunkedExtractionService.CrossChunkKey(d));
+    }
+
+    [Fact]
+    public async Task A_line_found_only_in_the_header_context_is_dropped_not_saved_again()
+    {
+        // The header context rides along on every call. A line printed in it (a compact print
+        // puts its only line on the first page) and returned again by a later call that cannot
+        // see it in its own pages is an echo, not a second line.
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var header = "RFQ 9500202307\n00010 201195514 TRANSFORMER: STEP UP, 400 TO 480VAC, 40KVA\n1 each";
+        var rows = Rows(perChunk + 1);
+        rows[0] = "00010 201195514 TRANSFORMER: STEP UP, 400 TO 480VAC, 40KVA\n1 each";
+        var llm = new StubLlm(
+            Ext.Result([Marafiq()], 0.9),
+            Ext.Result([Marafiq() with { ItemMaterialCode = "00010201195514", LineItemNo = "1" }], 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(rows, header));
+
+        var line = Assert.Single(outcome.Result!.Items);
+        Assert.Equal("00010", line.LineItemNo);
+        Assert.Contains(outcome.Diagnostics, d => d.Contains("found only in the header context"));
+    }
+
+    [Fact]
+    public async Task Only_the_first_call_is_asked_for_the_document_header()
+    {
+        // Every call used to be asked for the ~40 header keys again (~650 output tokens) and
+        // every copy after the first was thrown away.
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var llm = new StubLlm(Ext.Result(Ext.Items(1, 0.9), 0.9), Ext.Result(Ext.Items(1, 0.9), 0.9),
+            Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk * 2 + 1)));
+
+        Assert.Equal(3, llm.CallCount);
+        Assert.Equal(
+            new[] { AiPromptVersions.StructuredRfqExtraction, AiPromptVersions.StructuredRfqItemsOnly, AiPromptVersions.StructuredRfqItemsOnly },
+            llm.PromptVersions);
+        Assert.Equal("RFQ-1", outcome.Result!.Rfqno);
+    }
+
+    [Fact]
+    public async Task A_failed_first_call_passes_the_header_request_to_the_next_one()
+    {
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var llm = new StubLlm(null, Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk + 1)));
+
+        Assert.Equal(
+            new[] { AiPromptVersions.StructuredRfqExtraction, AiPromptVersions.StructuredRfqExtraction },
+            llm.PromptVersions);
+    }
+
+    [Fact]
+    public async Task Chunks_fit_the_context_window_the_client_asks_for()
+    {
+        // P0 #13: instructions + document + the full output ceiling must fit num_ctx. A client
+        // that can carry ~2,000 document tokens gets calls of at most ~5,000 characters, however
+        // few items they hold.
+        var llm = new StubLlm(Enumerable.Range(0, 20).Select(_ => (LeadExtractionResult?)Ext.Result(Ext.Items(1, 0.9), 0.9)).ToArray())
+        {
+            MaxOutputTokens = 8192,
+            MaxDocumentInputTokens = 2_000
+        };
+        var rows = Enumerable.Range(0, 8).Select(i => $"row {i} " + new string('x', 1_500)).ToList();
+
+        await NewService(llm).ExtractUnstructuredAsync(Doc(rows));
+
+        var budget = ExtractionOutputBudget.MaxDocumentCharacters(2_000, int.MaxValue);
+        Assert.Equal(5_000, budget);
+        Assert.True(llm.CallCount >= 3, $"8 x 1.5k-char rows must not fit one ~5k-char call ({llm.CallCount} call(s))");
+        Assert.All(llm.Prompts, prompt => Assert.True(prompt.Length <= budget + 1_000,
+            $"a {prompt.Length}-character call does not fit the {budget}-character window budget"));
+    }
+
+    [Fact]
+    public void A_page_that_prints_many_lines_counts_as_many_lines_against_the_output_budget()
+    {
+        // A PDF page is one region but may print a dozen lines; the output budget is paid per line.
+        var regions = new List<string> { "page 1", "page 2", "page 3" };
+
+        var spans = ChunkedExtractionService.BuildChunkSpans(regions, 11, 24_000, itemsInRegion: [10, 10, 1]);
+
+        Assert.Equal(new[] { new ChunkedExtractionService.ChunkSpan(0, 1), new ChunkedExtractionService.ChunkSpan(1, 2) }, spans);
+        // Unweighted, the same three regions are one call.
+        Assert.Single(ChunkedExtractionService.BuildChunkSpans(regions, 11, 24_000));
     }
 
     [Fact]

@@ -193,6 +193,9 @@ public sealed class CommercialIntelligenceControllerFocusedTests
             group => group.GetProperty("currencyCode").GetString()!,
             group => group);
 
+        // The tiles count what the lists they open show: both leads are RFQs now, so neither is an
+        // enquiry being worked; the RFQ whose quote was sent has left the RFQ list, the draft has not.
+        Assert.Equal(0, rep.GetProperty("activeLeads").GetInt32());
         Assert.Equal(1, rep.GetProperty("openRfqs").GetInt32());
         Assert.Equal(1, rep.GetProperty("draftQuotes").GetInt32());
         Assert.Equal(2, groups.Count);

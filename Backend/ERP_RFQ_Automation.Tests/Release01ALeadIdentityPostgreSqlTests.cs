@@ -282,7 +282,7 @@ public sealed class Release01ALeadIdentityPostgreSqlTests
         async Task Resolve(string key)
         {
             await using var context = _database.ContextFor(tenant);
-            await new QuoteService(context, null!, null!).ResolveRevisionImpactAsync(quoteId, tenant, "reviewer", key);
+            await new QuoteService(context, null!, null!).ResolveRevisionImpactAsync(quoteId, tenant, "reviewer", key, reason: "Reviewed; keep as quoted.");
         }
 
         await Task.WhenAll(Resolve("impact-resolution-a"), Resolve("impact-resolution-b"));

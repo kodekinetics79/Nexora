@@ -69,11 +69,11 @@ describe('EditQuotePage — a draft left in this browser', () => {
     renderEdit();
 
     expect(await screen.findByText(/unsaved pricing recovered/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/remarks \/ terms/i)).toHaveValue('Saved terms');
+    expect(screen.getByLabelText(/notes to customer/i)).toHaveValue('Saved terms');
 
     fireEvent.click(screen.getByRole('button', { name: /restore/i }));
 
-    expect(screen.getByLabelText(/remarks \/ terms/i)).toHaveValue('Terms typed before the browser died');
+    expect(screen.getByLabelText(/notes to customer/i)).toHaveValue('Terms typed before the browser died');
     expect(screen.queryByText(/unsaved pricing recovered/i)).not.toBeInTheDocument();
     expect(sessionStorage.getItem('nexora.quote.edit.9')).toBeNull();
   });
@@ -85,14 +85,14 @@ describe('EditQuotePage — a draft left in this browser', () => {
     await screen.findByText(/unsaved pricing recovered/i);
     fireEvent.click(screen.getByRole('button', { name: /discard/i }));
 
-    expect(screen.getByLabelText(/remarks \/ terms/i)).toHaveValue('Saved terms');
+    expect(screen.getByLabelText(/notes to customer/i)).toHaveValue('Saved terms');
     expect(screen.queryByText(/unsaved pricing recovered/i)).not.toBeInTheDocument();
     expect(sessionStorage.getItem('nexora.quote.edit.9')).toBeNull();
   });
 
   it('shows no banner when there is nothing to recover (the control)', async () => {
     renderEdit();
-    expect(await screen.findByLabelText(/remarks \/ terms/i)).toHaveValue('Saved terms');
+    expect(await screen.findByLabelText(/notes to customer/i)).toHaveValue('Saved terms');
     expect(screen.queryByText(/unsaved pricing recovered/i)).not.toBeInTheDocument();
   });
 });

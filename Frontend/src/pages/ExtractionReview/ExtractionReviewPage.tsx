@@ -84,7 +84,7 @@ const ExtractionReviewPage: React.FC = () => {
       width: 170,
       renderCell: (p) => (
         <Typography noWrap title={p.row.rfqno ?? ''} sx={{ fontWeight: 700, fontSize: '0.9rem', fontVariantNumeric: 'tabular-nums', color: p.row.rfqno ? 'text.primary' : 'text.disabled' }}>
-          {p.row.rfqno || 'No RFQ # yet'}
+          {p.row.rfqno || 'No RFQ/Bid # yet'}
         </Typography>
       ),
     },

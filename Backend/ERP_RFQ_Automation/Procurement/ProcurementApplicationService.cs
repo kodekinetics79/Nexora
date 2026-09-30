@@ -3091,7 +3091,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     /// <para>A supplier quoting EXW or FOB has, by definition, not paid Saudi import duty — the
     /// buyer will, at the border, after the price is agreed. When such a quote records zero duty,
     /// the landed cost is short by the whole duty, and the customer price derived from it is short
-    /// by <c>duty / (1 - margin)</c>: at 5% duty and a 20% target margin, 6.25% under on every
+    /// by <c>duty × (1 + margin on cost)</c>: at 5% duty and a 20% margin, 6% of cost under on every
     /// import. Nothing in the platform used to say so; the offer simply sorted best on landed cost
     /// and won the comparison for being incomplete.</para>
     ///
@@ -3344,7 +3344,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     /// charges are costs of getting the goods here; recoverable input tax is not a cost at all and
     /// is filtered out by <see cref="LandedCostFormula.CostBearingTax"/> against the tenant's
     /// <c>CommercialMatchingPolicy.SupplierInputTaxRecoverablePercent</c>. Leaving it in overstated cost
-    /// and then had the margin applied to it, because customer price is landed / (1 - margin).
+    /// and then had the margin applied to it, because customer price is landed × (1 + margin on cost).
     /// </summary>
     private static decimal CalculateLandedUnitCost(CaptureSupplierQuoteLine line, decimal supplierInputTaxRecoverablePercent)
     {
@@ -3366,7 +3366,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     /// (9% understated). Both figures land on <c>SourcingAward.LandedUnitCost</c> and
     /// <c>TotalValue</c>, then on <c>SupplierPurchaseOrderLine.LandedUnitCost</c> and the purchase
     /// order's committed-spend total, and then on the customer price via
-    /// <c>landed / (1 - margin)</c>.</para>
+    /// <c>landed × (1 + margin on cost)</c>.</para>
     ///
     /// <para>Pro-rating restores the property that matters: any set of awards that between them
     /// take the whole quoted quantity costs exactly what the whole line costs, and each award on

@@ -99,7 +99,7 @@ public sealed class PricingEngine : IPricingEngine
 
         // THE COST FLOOR. Not a signal and not a blend: the awarded supplier's landed unit cost,
         // recorded on CustomerQuoteSourcingDecision by the governed award-to-quote pricing bridge.
-        // It is the same number the customer price was derived from (landed / (1 - margin)), which
+        // It is the same number the customer price was derived from (landed x (1 + margin on cost)), which
         // is exactly why it is the honest floor — the two cannot drift apart.
         //
         // MOST RECENT decision per RFQ line wins. Re-pricing a line appends a new decision row

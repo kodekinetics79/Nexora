@@ -50,6 +50,8 @@ const DraftRFQsPage: React.FC = () => {
       pageSize: paginationModel.pageSize,
       search: search || undefined,
       rfqStatusCode: 'DRAFT',
+      // Same queue rule as the RFQ list: an RFQ whose quote was sent is no longer waiting here.
+      readiness: 'open',
       businessUnitId: userData?.businessUnitId || undefined,
     }),
   });

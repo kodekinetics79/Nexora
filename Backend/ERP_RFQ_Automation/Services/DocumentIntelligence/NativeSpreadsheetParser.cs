@@ -563,7 +563,82 @@ public sealed class NativeSpreadsheetParser
         => new[] { row.RfqNo, row.BuyerName, row.ProductName, row.Quantity, row.UnitOfMeasure,
                 row.UnitPrice, row.Currency, row.ManufacturerName, row.ManufacturerPartNumber,
                 row.LeadTimeDays }
-            .Any(value => !string.IsNullOrWhiteSpace(value));
+            .Any(value => !string.IsNullOrWhiteSpace(value))
+           && !IsHelpRow(row);
+
+    /// <summary>Header echoes on one row that mark it as the sheet explaining its own columns.</summary>
+    private const int HelpRowHeaderEchoes = 2;
+
+    /// <summary>
+    /// A row under the header that explains the columns instead of stating a line.
+    ///
+    /// <para>SAP Ariba's own Excel bid sheet — the file Aramco hands a bidder — prints help rows
+    /// under its header: "Hierarchical, unique number of the section, lot, or question" under
+    /// Number, "Question, item, or lot name" under Name, and the headings themselves again under
+    /// Currency, Unit of Measure, Intend To Respond. The help row has a name, so it passed as a
+    /// line; its currency was the word "Currency", which dead-lettered both real Aramco sheets
+    /// (377 and 1,383 lines) on every retry; and its text under "Number" stopped that column
+    /// reading as the line numbers, so every line of the sheet took its line number as a part
+    /// number.</para>
+    ///
+    /// <para>The test is the shape, not the portal: two or more cells repeating their own column
+    /// heading, which no real line does, or Ariba's fixed help wording.</para>
+    /// </summary>
+    private static bool IsHelpRow(RfqSpreadsheetRow row)
+    {
+        if (StartsWithHelpWording(row.ProductName) || row.UnmappedColumns.Values.Any(StartsWithHelpWording))
+            return true;
+
+        var echoes = 0;
+        foreach (var (field, column) in row.FieldColumnNumbers)
+            if (row.HeadersByColumn.TryGetValue(column, out var heading) && SameWords(MappedValue(row, field), heading))
+                echoes++;
+        foreach (var (heading, value) in row.UnmappedColumns)
+            if (SameWords(value, heading))
+                echoes++;
+        return echoes >= HelpRowHeaderEchoes;
+
+        static bool SameWords(string? value, string? heading)
+        {
+            var left = RfqHeaderVocabulary.Normalize(value);
+            return left.Length > 0 && left == RfqHeaderVocabulary.Normalize(heading);
+        }
+    }
+
+    /// <summary>The help wording SAP Ariba prints under a bid sheet's Number and Name columns.</summary>
+    private static readonly string[] AribaHelpWording =
+    {
+        "Hierarchical, unique number of the section",
+        "Question, item, or lot name",
+        "Help And Options. Click on the + sign",
+    };
+
+    private static bool StartsWithHelpWording(string? value)
+        => value is not null
+           && AribaHelpWording.Any(help => value.TrimStart().StartsWith(help, StringComparison.OrdinalIgnoreCase));
+
+    private static string? MappedValue(RfqSpreadsheetRow row, string field) => field switch
+    {
+        RfqSpreadsheetFields.RfqNo => row.RfqNo,
+        RfqSpreadsheetFields.BuyerName => row.BuyerName,
+        RfqSpreadsheetFields.ReceivedDate => row.ReceivedDate,
+        RfqSpreadsheetFields.BidClosingDate => row.BidClosingDate,
+        RfqSpreadsheetFields.ProductName => row.ProductName,
+        RfqSpreadsheetFields.Quantity => row.Quantity,
+        RfqSpreadsheetFields.UnitOfMeasure => row.UnitOfMeasure,
+        RfqSpreadsheetFields.UnitPrice => row.UnitPrice,
+        RfqSpreadsheetFields.Currency => row.Currency,
+        RfqSpreadsheetFields.ManufacturerName => row.ManufacturerName,
+        RfqSpreadsheetFields.ManufacturerPartNumber => row.ManufacturerPartNumber,
+        RfqSpreadsheetFields.CustomerMaterialCode => row.CustomerMaterialCode,
+        RfqSpreadsheetFields.MaterialPoText => row.MaterialPoText,
+        RfqSpreadsheetFields.LeadTimeDays => row.LeadTimeDays,
+        RfqSpreadsheetFields.ItemText => row.ItemText,
+        RfqSpreadsheetFields.DeliveryLocation => row.DeliveryLocation,
+        RfqSpreadsheetFields.RequiredDeliveryDate => row.RequiredDeliveryDate,
+        RfqSpreadsheetFields.AgreementReference => row.AgreementReference,
+        _ => null,
+    };
 
     internal static string QualifyAddress(string worksheetName, int column, int row)
         => $"'{worksheetName.Replace("'", "''", StringComparison.Ordinal)}'!{ColumnName(column)}{row}";

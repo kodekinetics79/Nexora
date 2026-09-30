@@ -69,9 +69,13 @@ vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ hasPermission: () => true, userData: authUser }),
 }));
 
+// One navigate for the whole run, like the real hook: a fresh function per render rebuilt the
+// memoised empty-state overlay on every render and remounted it under the assertions.
+const stableNavigate = vi.hoisted(() => ({ fn: null as null | (() => void) }));
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>();
-  return { ...actual, useNavigate: () => vi.fn() };
+  stableNavigate.fn ??= vi.fn();
+  return { ...actual, useNavigate: () => stableNavigate.fn };
 });
 
 vi.mock('react-i18next', () => ({
@@ -154,6 +158,12 @@ const click = (element: Element | null) => {
   if (!element) throw new Error('Nothing to click.');
   clickCount += 1;
   fireEvent.click(element);
+};
+
+/** The Owner column header's filter: open it and pick one choice — two counted clicks. */
+const pickOwner = (choice: string) => {
+  click(screen.getByRole('button', { name: 'Filter by owner' }));
+  click(within(screen.getByRole('menu')).getByRole('menuitem', { name: choice }));
 };
 
 /** Handing a lead to a COLLEAGUE is a manager's action; the server answers 403 otherwise. */
@@ -403,24 +413,26 @@ describe('LeadsPage — assigning a lead from the list', () => {
   // R2 — one filter
   // -------------------------------------------------------------------------
 
-  it('opensOnEveryonesInquiries_withMineOneClickAway', async () => {
+  it('opensOnEveryonesInquiries_withMineInTheOwnerHeader', async () => {
     renderPage();
-    // "All inquiries" means all: 'open' is the default queue (everything still live) and the
-    // owner filter starts on Everyone. The reader's own pile is one click, not a hidden default.
-    await waitFor(() => expect(lastListView()).toBe('open'));
+    // "All inquiries" means all: 'queue' is the default (everything live, not yet an RFQ) and the
+    // owner filter starts on Anyone. The reader's own pile is in the Owner header, not a hidden default.
+    await waitFor(() => expect(lastListView()).toBe('queue'));
     await screen.findByText('Tariq Al-Harbi');
 
-    click(screen.getByRole('button', { name: /^mine$/i }));
-    await waitFor(() => expect(lastListView()).toBe(`open,mine:${ME}`));
-    expect(clickCount).toBe(1);
+    pickOwner('Mine');
+    await waitFor(() => expect(lastListView()).toBe(`queue,mine:${ME}`));
+    // MEASURED: open the Owner header, pick Mine. (It was one click on the old toggle row, which the
+    // owner removed on 2026-09-29 to give the grid its height back.)
+    expect(clickCount).toBe(2);
   });
 
   it('opensOnEveryonesInquiries_forAManagerToo', async () => {
     authUser.isManager = true;
     authUser.roleName = 'Sales Manager';
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe('open'));
-    expect(screen.getByRole('button', { name: /^everyone$/i })).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(lastListView()).toBe('queue'));
+    expect(screen.getByRole('button', { name: 'Filter by owner' })).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('opensOnEverything_whenTheSessionCannotNameTheReader', async () => {
@@ -428,21 +440,21 @@ describe('LeadsPage — assigning a lead from the list', () => {
     // for is worse than no filter.
     authUser.id = undefined;
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe('open'));
+    await waitFor(() => expect(lastListView()).toBe('queue'));
   });
 
   it('narrowsToUnassignedAndBackToEveryone_fromOneControl', async () => {
     renderPage();
     await screen.findByText('Tariq Al-Harbi');
 
-    click(screen.getByRole('button', { name: /^unassigned$/i }));
-    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
-    // MEASURED: finding the unclaimed pile from the leads list costs one click. Before this it
-    // could not be done on this screen at all.
-    expect(clickCount).toBe(1);
+    pickOwner('Unassigned');
+    await waitFor(() => expect(lastListView()).toBe('queue,unassigned'));
+    // MEASURED: finding the unclaimed pile from the leads list costs two clicks in the Owner
+    // header. Before the toggle it could not be done on this screen at all.
+    expect(clickCount).toBe(2);
 
-    fireEvent.click(screen.getByRole('button', { name: /^everyone$/i }));
-    await waitFor(() => expect(lastListView()).toBe('open'));
+    pickOwner('Anyone');
+    await waitFor(() => expect(lastListView()).toBe('queue'));
   });
 
   it('narrowsTheQueueItIsOn_ratherThanReplacingIt', async () => {
@@ -450,7 +462,7 @@ describe('LeadsPage — assigning a lead from the list', () => {
     renderPage('/procurement/leads/all?view=revisions');
     await screen.findByText('Tariq Al-Harbi');
 
-    fireEvent.click(screen.getByRole('button', { name: /^unassigned$/i }));
+    pickOwner('Unassigned');
     await waitFor(() => expect(lastListView()).toBe('revisions,unassigned'));
   });
 
@@ -461,19 +473,22 @@ describe('LeadsPage — assigning a lead from the list', () => {
       params.pageSize === 1 ? { ...page([]), totalCount: 3 } : page([]),
     ));
     renderPage();
-    await waitFor(() => expect(lastListView()).toBe('open'));
+    await waitFor(() => expect(lastListView()).toBe('queue'));
 
     // Narrowed to the reader's own, "no rows" means "none of yours" — and says so.
-    fireEvent.click(screen.getByRole('button', { name: /^mine$/i }));
+    pickOwner('Mine');
     expect(await screen.findByText(/nothing is assigned to you/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /show unassigned inquiries/i }));
 
     expect(await screen.findByText(/every inquiry here already has an owner/i)).toBeInTheDocument();
-    await waitFor(() => expect(lastListView()).toBe('open,unassigned'));
+    await waitFor(() => expect(lastListView()).toBe('queue,unassigned'));
 
-    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
-    await waitFor(() => expect(lastListView()).toBe('open'));
-    expect(await screen.findByText(/no inquiries yet/i)).toBeInTheDocument();
+    // The tabs line carries its own "Clear filters" while a filter is on; this is the empty
+    // state's own button, the last one on the page.
+    fireEvent.click(screen.getAllByRole('button', { name: /clear filters/i }).at(-1)!);
+    await waitFor(() => expect(lastListView()).toBe('queue'));
+    // Unfiltered and empty, on a tenant with live inquiries: they have all become RFQs.
+    expect(await screen.findByText(/nothing to decide/i)).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------

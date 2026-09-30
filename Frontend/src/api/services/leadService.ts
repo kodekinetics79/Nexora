@@ -14,10 +14,49 @@ export interface LeadFilters {
   leadSource?: string;
   startDate?: string;
   endDate?: string;
+  /** Ingested window as instants (the reader's local midnights), matching the Ingested cell. */
+  ingestedFrom?: string;
+  ingestedBefore?: string;
   emailSource?: string;
   clientemail?: string;
   search?: string;
+  /**
+   * Comma-joined queue + owner tokens (`queue`, `unassigned`, `mine:{id}`, `rep:{id}`).
+   * `rep:{id}` narrows to one rep's inquiries and is never combined with `mine`/`unassigned`.
+   */
   view?: string;
+  /** A customer id, or `none` for inquiries with no customer linked yet. */
+  customer?: string;
+  /** Bid due date window; absent means any date. Always sent with `today`. */
+  due?: 'overdue' | '7d' | '14d';
+  /** The reader's local calendar day, `yyyy-MM-dd`, that `due` counts from. */
+  today?: string;
+  /** Column filters, each "contains": Nexora serial, RFQ/Bid number, buyer name or email, agreement. */
+  serial?: string;
+  rfq?: string;
+  buyer?: string;
+  agreement?: string;
+  /** A custom Deadline range, `yyyy-MM-dd` inclusive; sent instead of `due`. */
+  dueFrom?: string;
+  dueTo?: string;
+  /** Required delivery range, `yyyy-MM-dd` inclusive. */
+  requiredFrom?: string;
+  requiredTo?: string;
+  itemsMin?: number;
+  itemsMax?: number;
+  /** A lead status id, or `none` for inquiries nobody has opened yet. */
+  status?: string;
+}
+
+/** The Customer choices for a leads list: customers of the leads in that view, with counts. */
+export interface LeadListCustomers {
+  customers: { customerId: number; name: string; count: number }[];
+  /** How many leads in the view have no customer linked yet. */
+  noCustomer: number;
+  /** The statuses of the leads in the view, with counts. */
+  statuses: { statusId: number; code: string; label: string; count: number }[];
+  /** How many leads in the view nobody has opened yet (no status). */
+  notOpened: number;
 }
 
 export interface LeadClarificationRequest {
@@ -59,6 +98,16 @@ export interface ClientResolutionRunDTO {
   ambiguous: number;
   unresolved: number;
   failed: number;
+}
+
+/** "Closes 8 Sep or 9 Aug?" — the two readings of a closing date the document left ambiguous. */
+export interface ClosingDateQuestionDTO {
+  /** The date exactly as the document printed it, e.g. "9/8/2026 5:00 PM". */
+  documentText: string;
+  /** What the lead holds now (Nexora's guess). */
+  currentReading: string;
+  /** The same token read the other way round, same time of day. */
+  otherReading: string;
 }
 
 export interface LeadResponseDTO {
@@ -129,6 +178,13 @@ export interface LeadResponseDTO {
   // FR-RFQ-04. bidClosingDate in the Umm al-Qura calendar, shown ALONGSIDE the Gregorian
   // date, never instead of it — a Hijri deadline read as a Gregorian one loses the bid.
   bidClosingDateHijri?: string | null;
+  /**
+   * Detail only. Set when the document's closing date could be read two ways and nothing on it
+   * said which ("9/8/2026": 9 Aug or 8 Sep); the rep answers it on Decide.
+   */
+  closingDateQuestion?: ClosingDateQuestionDTO | null;
+  /** Detail only. True once an RFQ was made from this lead: its client can no longer change. */
+  hasRfq?: boolean;
   // FR-RFQ-03. The standing agreement / frame contract this inquiry is called off
   // against. Distinct from rfqno (the inquiry's own reference).
   agreementReference?: string | null;
@@ -747,6 +803,21 @@ const leadService = {
     return r.data;
   },
 
+  /**
+   * GET /api/Lead/customers — the customers of the leads under `view` (the same composed view the
+   * grid sends) and the same date button, with counts, plus how many have no customer yet; and the
+   * statuses of the leads under `view`, with counts, plus how many nobody has opened yet.
+   */
+  getListCustomers: async (view?: string, due?: { due?: string; today?: string }): Promise<LeadListCustomers> => {
+    const r = await axiosInstance.get<LeadListCustomers>('/api/Lead/customers', { params: { view, ...due } });
+    return {
+      customers: Array.isArray(r.data?.customers) ? r.data.customers : [],
+      noCustomer: r.data?.noCustomer ?? 0,
+      statuses: Array.isArray(r.data?.statuses) ? r.data.statuses : [],
+      notOpened: r.data?.notOpened ?? 0,
+    };
+  },
+
   getById: async (id: number): Promise<LeadResponseDTO> => {
     const r = await axiosInstance.get(`/api/Lead/${id}`);
     return r.data;
@@ -793,6 +864,12 @@ const leadService = {
    * inventing a version to satisfy the wire format would turn a stale render into a
    * spurious conflict.
    */
+  /** Answers "Closes 8 Sep or 9 Aug?" (or sets the closing date). The server keeps the stated time. */
+  confirmClosingDate: async (id: number, bidClosingDate: string): Promise<LeadResponseDTO> => {
+    const r = await axiosInstance.put<LeadResponseDTO>(`/api/Lead/${id}/closing-date`, { bidClosingDate });
+    return r.data;
+  },
+
   linkClient: async (
     id: number,
     body: { customerId: number; contactId?: number | null; reason?: string },

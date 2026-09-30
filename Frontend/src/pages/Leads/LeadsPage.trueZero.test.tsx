@@ -103,7 +103,8 @@ describe('LeadsPage — a tenant with no inquiries at all', () => {
     tenantHolds(0);
     renderPage();
     await screen.findByText(/no inquiries yet/i);
-    fireEvent.click(screen.getByRole('button', { name: /^unassigned$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by owner' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Unassigned' }));
     await waitFor(() => expect(getAll.mock.calls.some((call) => String((call[0] as { view?: string }).view).includes('unassigned'))).toBe(true));
 
     expect(await screen.findByText(/no inquiries yet/i)).toBeInTheDocument();
@@ -115,7 +116,8 @@ describe('LeadsPage — a tenant with no inquiries at all', () => {
   it('still says the filter emptied the list when the tenant does hold inquiries', async () => {
     tenantHolds(3);
     renderPage();
-    fireEvent.click(await screen.findByRole('button', { name: /^unassigned$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Filter by owner' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Unassigned' }));
 
     expect(await screen.findByText(/every inquiry here already has an owner/i)).toBeInTheDocument();
     expect(screen.queryByText(/no inquiries yet/i)).not.toBeInTheDocument();

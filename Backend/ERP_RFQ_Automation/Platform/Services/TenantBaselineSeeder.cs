@@ -147,19 +147,21 @@ public sealed class TenantBaselineSeeder(
     public const string ModuleSeedActor = "provisioning:tenant-baseline:v1";
 
     /// <summary>
-    /// Default terms printed on a quote until the customer replaces them. Deliberately the same
-    /// seven clauses <c>QuoteService.GenerateQuotePdfAsync</c> already falls back to, so seeding
-    /// changes WHERE the terms come from (a row the customer owns and can edit) without changing
-    /// what the first quote says.
+    /// The tenant's own clauses, printed on every quote under "Additional terms" AFTER the
+    /// commercial terms Nexora generates from the quote itself (validity date, currency and VAT,
+    /// delivery point, lead-time basis — QuoteDocumentText.CommercialTerms).
+    ///
+    /// <para>This used to be seven stock clauses, three of which contradicted the quote they were
+    /// printed on: "Prices are valid for 30 days" beside a Valid Until date that was not 30 days,
+    /// "taxes or duties are not included" beside a VAT 15% line, and "Net 30" to buyers who pay at
+    /// 60 days. Title retention and the manufacturer's warranty were deviations from SEC, Aramco
+    /// and Marafiq purchase terms that no tenant had chosen. A default must not create a
+    /// commercial exception nobody decided on, so only the confidentiality line stays; tenants add
+    /// their own clauses in Setup. Rows still holding the old seven are printed as if empty
+    /// (QuoteDocumentText.LegacySeededTerms).</para>
     /// </summary>
     private const string DefaultTermsAndConditions =
-        "1. Prices are valid for 30 days from the date of the quote.\n" +
-        "2. Payment terms: Net 30 days from invoice date.\n" +
-        "3. Delivery dates are estimates and subject to confirmation.\n" +
-        "4. All products remain the property of the seller until fully paid.\n" +
-        "5. Any applicable taxes or duties are not included unless specified.\n" +
-        "6. Warranty and liability are as per the manufacturer's standard terms.\n" +
-        "7. This quote is confidential and intended solely for the recipient.";
+        "This quotation is confidential and intended solely for the recipient.";
 
     /// <summary>The quote accent colour used when the customer has not supplied a brand colour —
     /// the same value the PDF writer already defaults to, so nothing changes visually.</summary>

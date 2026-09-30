@@ -59,6 +59,17 @@ export interface QuoteLineDTO {
   /** ESTIMATE (priced, subject to confirmation), TO_FOLLOW (price follows), NOT_QUOTED (with a reason), or null for a plain price. */
   pricingStatus?: 'ESTIMATE' | 'TO_FOLLOW' | 'NOT_QUOTED' | null;
   pricingNote?: string | null;
+  /** "Offered: GE THQL32010, replaces ABB AF96" when the part offered is not the one asked for. */
+  offeredNote?: string | null;
+  offeredSpecs?: string | null;
+  /**
+   * What the buyer calls this line, as the QUOTE stores and prints it (their material number, the
+   * maker and part number they asked for). Null on hand-typed and older lines; screens then fall
+   * back to the requested* values below.
+   */
+  customerMaterialCode?: string | null;
+  manufacturerName?: string | null;
+  manufacturerPartNumber?: string | null;
   // What the customer asked for, read through the linked RFQ line. Null when the quote has no RFQ.
   requestedManufacturerName?: string | null;
   requestedManufacturerPartNumber?: string | null;
@@ -170,6 +181,19 @@ export interface QuoteRevisionApplyResult {
   /** Lines the revision added that the draft does not have — nothing was invented for them. */
   linesNotOnQuote: string[];
   totalAmount?: number | null;
+  /** RFQ lines that took the new quantities too (D-05). */
+  rfqLinesUpdated?: QuoteRevisionLineChangeDTO[];
+  /** Open supplier requests that asked for the old quantity — ask those suppliers again. */
+  outdatedSupplierRequests?: OutdatedSupplierRequest[];
+}
+
+export interface OutdatedSupplierRequest {
+  solicitationId: number;
+  supplierRfqNumber?: string | null;
+  supplierName?: string | null;
+  line: string;
+  askedQuantity: number;
+  newQuantity: number;
 }
 
 // ==== The covering e-mail (mirrors DTOs/QuoteDTOs/QuoteEmailDraftDTOs.cs) ====
@@ -267,10 +291,41 @@ export interface QuoteSendBlocker {
   setupPath?: string | null;
 }
 
+/** Something to know before sending that never blocks it (owner rule: inform, don't obstruct). */
+export interface QuoteSendWarning {
+  /** BUYER_REVISION_NEWER · VALIDITY_BELOW_BUYER_MINIMUM · BID_CLOSED · LINES_NOT_FIRM · LEAD_TIME_MISSING · CURRENCY_NOT_ALLOWED. Never render. */
+  code: string;
+  message: string;
+  /** VALIDITY_BELOW_BUYER_MINIMUM: the earliest date the buyer accepts (yyyy-MM-dd…). */
+  suggestedValidUntil?: string | null;
+  /** BUYER_REVISION_NEWER: which revision the quote reflects, which one arrived, what changed. */
+  revision?: QuoteRevisionImpactDTO | null;
+  /** BUYER_REVISION_NEWER: the new quantities can be applied in one click. */
+  canApply?: boolean;
+}
+
+/** The buyer's commercial terms from the RFQ document (validity floor, currencies, delivery terms). */
+export interface QuoteBuyerTerms {
+  minimumValidityDays?: number | null;
+  validityBasis?: 'CLOSING' | 'SUBMISSION' | 'UNSTATED' | null;
+  validitySentence?: string | null;
+  requiredValidUntil?: string | null;
+  bidClosing?: string | null;
+  allowedCurrencies: string[];
+  currencySentence?: string | null;
+  deliveryTerms?: string | null;
+  deliverTo?: string | null;
+  agreement?: string | null;
+  payment?: string | null;
+}
+
 export interface QuoteSendReadiness {
   quoteId: number;
   canSend: boolean;
   blockers: QuoteSendBlocker[];
+  /** Never counted in canSend. */
+  warnings?: QuoteSendWarning[];
+  buyerTerms?: QuoteBuyerTerms | null;
   /**
    * UNCERTAIN when a previous delivery was interrupted and never confirmed — the customer may
    * already hold this quote, and nothing is resent automatically. NOT_DELIVERED when it
@@ -537,8 +592,9 @@ const quoteService = {
     return data;
   },
 
-  resolveRevisionImpact: async (id: number): Promise<void> => {
-    await axiosInstance.post(`/api/Quote/${id}/revision-impact/resolve`, null, {
+  /** "Keep as quoted": the reason is required and recorded with the lines that differ (D-04). */
+  resolveRevisionImpact: async (id: number, reason: string): Promise<void> => {
+    await axiosInstance.post(`/api/Quote/${id}/revision-impact/resolve`, { reason }, {
       headers: { 'Idempotency-Key': crypto.randomUUID() },
     });
   },

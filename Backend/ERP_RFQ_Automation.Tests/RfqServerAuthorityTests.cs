@@ -320,7 +320,7 @@ public sealed class RfqServerAuthorityTests
             long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null,
             bool? isActive = null, long? assignedToId = null, string? createdBy = null,
             long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null,
-            AccountTeamScope? accessScope = null)
+            AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false)
         {
             Record(businessUnitId);
             return Task.FromResult<(IEnumerable<RfqResponseDTO>, int)>(([], 0));

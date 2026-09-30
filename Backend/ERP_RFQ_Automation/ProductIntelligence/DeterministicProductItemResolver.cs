@@ -88,7 +88,10 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
             var references = (await _references.GetApprovedReferencesAsync(businessUnitId, cancellationToken))
                 .Where(reference => reference.BusinessUnitId == businessUnitId)
                 .ToArray();
-            cached = new CatalogSnapshot(products, references);
+            // Normalised once per snapshot. Match used to re-normalise and re-tokenise the whole
+            // catalogue for every line it resolved: lines × products regex passes on every
+            // decision-workbench read of a large request against a real-sized catalogue.
+            cached = new CatalogSnapshot(products.Select(IndexedProduct.From).ToArray(), references);
             _tenantSnapshots.TryAdd(businessUnitId, cached);
             return cached;
         }
@@ -99,7 +102,7 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
     }
 
     private static ProductMatch Match(
-        ProductIdentityCandidate[] products,
+        IndexedProduct[] products,
         ApprovedProductReference[] references,
         ProductResolutionRequest request,
         string? normalizedPart,
@@ -144,34 +147,27 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
     }
 
     private static IEnumerable<RankedProductCandidate> ExactMatches(
-        IEnumerable<ProductIdentityCandidate> products,
+        IndexedProduct[] catalog,
         string? normalizedPart,
         string? normalizedManufacturer)
     {
         if (normalizedPart is null) yield break;
 
-        var catalog = products.Select(product => new
-        {
-            Product = product,
-            Part = ProductIdentityNormalizer.NormalizePartNumber(product.PartNumber),
-            InternalCode = ProductIdentityNormalizer.NormalizePartNumber(product.InternalCode),
-        }).ToArray();
+        var compactPart = Compact(normalizedPart);
         var direct = catalog.Where(product => product.Part == normalizedPart
             || product.InternalCode == normalizedPart).ToArray();
         var candidates = direct.Length > 0
             ? direct
-            : catalog.Where(product => Compact(product.Part) == Compact(normalizedPart)
-                || Compact(product.InternalCode) == Compact(normalizedPart)).ToArray();
+            : catalog.Where(product => product.CompactPart == compactPart
+                || product.CompactInternalCode == compactPart).ToArray();
 
         foreach (var candidate in candidates)
         {
             var method = direct.Length == 0
                 ? ProductResolutionMethods.CanonicalCompactIdentity
                 : candidate.Part == normalizedPart
-                || (direct.Length == 0 && Compact(candidate.Part) == Compact(normalizedPart))
                 ? ProductResolutionMethods.ExactPartNumber
                 : candidate.InternalCode == normalizedPart
-                    || (direct.Length == 0 && Compact(candidate.InternalCode) == Compact(normalizedPart))
                     ? ProductResolutionMethods.ExactInternalCode
                     : null;
             if (method is null) continue;
@@ -191,7 +187,7 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
         : new string(value.Where(char.IsLetterOrDigit).ToArray());
 
     private static IEnumerable<RankedProductCandidate> ReferenceMatches(
-        IReadOnlyCollection<ProductIdentityCandidate> products,
+        IndexedProduct[] products,
         IEnumerable<ApprovedProductReference> references,
         string? normalizedPart,
         string? normalizedManufacturer)
@@ -205,7 +201,7 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
             if (normalizedManufacturer is not null && referenceManufacturer is not null
                 && normalizedManufacturer != referenceManufacturer) continue;
 
-            var product = products.SingleOrDefault(candidate => candidate.ProductId == reference.ProductId);
+            var product = products.SingleOrDefault(candidate => candidate.Product.ProductId == reference.ProductId)?.Product;
             if (product is null) continue;
             var method = reference.Kind == ProductReferenceKind.Alias
                 ? ProductResolutionMethods.ApprovedAlias
@@ -219,24 +215,23 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
     }
 
     private static IEnumerable<RankedProductCandidate> SimilarityMatches(
-        IEnumerable<ProductIdentityCandidate> products,
+        IndexedProduct[] products,
         ProductResolutionRequest request,
         string? normalizedManufacturer)
     {
         var sourceTokens = ProductIdentityNormalizer.Tokens(request.OriginalPartNumber, request.Description);
         if (sourceTokens.Count == 0) yield break;
 
-        foreach (var product in products)
+        foreach (var indexed in products)
         {
-            var candidateTokens = ProductIdentityNormalizer.Tokens(
-                product.PartNumber, product.InternalCode, product.ProductName, product.Description);
+            var candidateTokens = indexed.Tokens;
             if (candidateTokens.Count == 0) continue;
             var overlap = (decimal)sourceTokens.Intersect(candidateTokens).Count()
                 / sourceTokens.Union(candidateTokens).Count();
             if (overlap < FuzzyCandidateFloor) continue;
 
-            var manufacturer = ProductIdentityNormalizer.NormalizeManufacturer(product.Manufacturer);
-            var manufacturerMatches = normalizedManufacturer is not null && manufacturer == normalizedManufacturer;
+            var product = indexed.Product;
+            var manufacturerMatches = normalizedManufacturer is not null && indexed.Manufacturer == normalizedManufacturer;
             var confidence = Math.Min(0.89m, 0.35m + (0.45m * overlap) + (manufacturerMatches ? 0.09m : 0m));
             yield return Candidate(product, Math.Round(confidence, 4), ProductResolutionMethods.LocalSimilarity,
                 $"Local token similarity {Math.Round(overlap * 100m, 1)}%", null, normalizedManufacturer);
@@ -262,8 +257,29 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
     }
 
     private sealed record CatalogSnapshot(
-        ProductIdentityCandidate[] Products,
+        IndexedProduct[] Products,
         ApprovedProductReference[] References);
+
+    /// <summary>A catalogue product with every normalised form the matchers compare, computed once.</summary>
+    private sealed record IndexedProduct(
+        ProductIdentityCandidate Product,
+        string? Part,
+        string? InternalCode,
+        string? CompactPart,
+        string? CompactInternalCode,
+        IReadOnlySet<string> Tokens,
+        string? Manufacturer)
+    {
+        public static IndexedProduct From(ProductIdentityCandidate product)
+        {
+            var part = ProductIdentityNormalizer.NormalizePartNumber(product.PartNumber);
+            var internalCode = ProductIdentityNormalizer.NormalizePartNumber(product.InternalCode);
+            return new IndexedProduct(product, part, internalCode, Compact(part), Compact(internalCode),
+                ProductIdentityNormalizer.Tokens(product.PartNumber, product.InternalCode, product.ProductName,
+                    product.Description),
+                ProductIdentityNormalizer.NormalizeManufacturer(product.Manufacturer));
+        }
+    }
 
     private sealed record ProductMatchKey(
         long BusinessUnitId,

@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
-  Tooltip, Stack, TextField, MenuItem, CircularProgress,
+  Tooltip, Stack, MenuItem, CircularProgress,
   Alert,
   Link, Menu, ListItemIcon, ListItemText,
   ToggleButton, ToggleButtonGroup,
@@ -36,8 +36,14 @@ import SearchField from '../../components/common/SearchField';
 import ExportExcelButton, { loadAllPages, type ExportColumn } from '../../components/common/ExportExcelButton';
 import gridEmptyOverlay from '../../components/common/gridOverlays';
 import ViewTabs from '../../components/layout/ViewTabs';
+import HeaderFilter, { type HeaderFilterOption as ListFilterOption } from '../../components/common/HeaderFilter';
+import useListFilters, {
+  AHEAD_WINDOWS, AHEAD_WINDOW_LABELS, DUE_WINDOWS, DUE_WINDOW_LABELS, NOT_OPENED, NO_CUSTOMER,
+  RECEIVED_WINDOWS, RECEIVED_WINDOW_LABELS, aheadRange, anyListFilter, clearListFilterKeys, dueParams, localDayInstants, receivedRange,
+  type AheadWindow, type DueWindow, type ListFilterValues, type ReceivedWindow,
+} from '../../hooks/useListFilters';
 import { useSnackbar } from 'notistack';
-import { formatDateSafe, formatDateTimeSafe, parseDateSafe } from '../../utils/dates';
+import { formatDateSafe, formatDateTimeSafe, formatDeadline, formatDeadlineDate, parseDateSafe } from '../../utils/dates';
 import { DEADLINE_COLOR, deadlineWords } from '../../utils/deadline';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -48,7 +54,7 @@ import {
   OwnerPickerMenu, AssignReasonDialog, assignmentNeedsReason, useOwnerOptions,
 } from './LeadOwnerPicker';
 import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
-import { LEAD_STATUS_WORDS } from '../../utils/leadStatusWords';
+import { LEAD_STATUS_WORDS, leadStatusWords } from '../../utils/leadStatusWords';
 
 // ---------------------------------------------------------------------------
 // Column visibility and order are AA-01 server-side per-user preferences now
@@ -176,7 +182,7 @@ const yesNo = (value?: boolean | null) => (value == null ? '' : value ? 'Yes' : 
 
 const LEAD_EXPORT_COLUMNS: ExportColumn<LeadExportRow>[] = [
   { header: 'Nexora Serial', value: (r) => r.nexoraSerial || r.commercialCaseReference },
-  { header: 'RFQ #', value: (r) => r.rfqno },
+  { header: 'RFQ/Bid #', value: (r) => r.rfqno },
   { header: 'Client', value: (r) => r.customerName },
   { header: 'Client as written on document', value: (r) => r.customerCompanyNameExtracted },
   { header: 'Customer portal', value: (r) => r.customerPortalNameExtracted },
@@ -192,7 +198,7 @@ const LEAD_EXPORT_COLUMNS: ExportColumn<LeadExportRow>[] = [
   { header: 'Received', value: (r) => formatDateSafe(r.recDate, '') },
   { header: 'Ingested', value: (r) => formatDateTimeSafe(r.ingestedOn || r.ingestedAtUtc, '') },
   { header: 'Arrived late', value: (r) => yesNo(r.lateIngested) },
-  { header: 'Deadline', value: (r) => formatDateSafe(r.bidClosingDate, '') },
+  { header: 'Deadline', value: (r) => formatDeadline(r.bidClosingDate, '') },
   { header: 'Deadline (Hijri)', value: (r) => r.bidClosingDateHijri },
   { header: 'Required delivery', value: (r) => formatDateSafe(r.requiredDeliveryDate, '') },
   { header: 'Delivery location', value: (r) => r.deliveryLocation },
@@ -249,7 +255,8 @@ const withDecisions = async (leads: LeadResponseDTO[]): Promise<LeadExportRow[]>
 
 /**
  * The three questions a rep actually asks this list: what has nobody picked up, what is on me,
- * and show me everything. It is ONE control, not three rail rows and not a second grid.
+ * and show me everything. It is ONE control — the Owner column's header filter — not three rail rows
+ * and not a second grid.
  *
  * It travels to the server on the same `view` parameter as the queue tabs, comma-joined, because
  * it NARROWS the queue rather than replacing it — "Revisions" plus "Unassigned" means both.
@@ -265,7 +272,7 @@ type OwnerView = 'unassigned' | 'mine' | 'all';
  * narrowed lists. Opening it pre-narrowed to Unassigned made a manager's first screen read
  * "0 inquiries · Every inquiry here already has an owner" under a tab that promised everything —
  * a filtered-to-zero sentence on a list the reader had not filtered. The pile nobody has picked
- * up, and a rep's own pile, stay one click away on the toggle and one tab away on the strip.
+ * up, and a rep's own pile, stay one click away in the Owner header and one tab away on the strip.
  */
 export const DEFAULT_OWNER_VIEW: OwnerView = 'all';
 
@@ -283,15 +290,22 @@ const loadRepProfileNoticeDismissed = (): boolean => {
   }
 };
 
+/**
+ * `repUserId` is a manager's "one rep" filter. It only ever rides with Anyone: picking a rep drops
+ * Unassigned/Mine, and picking Unassigned or Mine drops the rep, so the server never receives
+ * `mine:` or `unassigned` together with `rep:`.
+ */
 export const composeLeadsView = (
   queueView: string | undefined,
   ownerView: OwnerView,
   myUserId: number | null | undefined,
+  repUserId: number | null = null,
 ): string | undefined => {
   const tokens: string[] = [];
   if (queueView) tokens.push(queueView);
   if (ownerView === 'unassigned') tokens.push('unassigned');
   else if (ownerView === 'mine' && myUserId != null) tokens.push(`mine:${myUserId}`);
+  else if (ownerView === 'all' && repUserId != null) tokens.push(`rep:${repUserId}`);
   return tokens.length > 0 ? tokens.join(',') : undefined;
 };
 
@@ -307,6 +321,77 @@ interface AssignFailure {
 
 const EMPTY_SELECTION: GridRowSelectionModel = { type: 'include', ids: new Set<GridRowId>() };
 
+// ---------------------------------------------------------------------------
+// Column-header filters
+// ---------------------------------------------------------------------------
+
+/** Where an inquiry came from, as the Source column and the "Came from" choices name it. */
+const SOURCE_OPTIONS: ListFilterOption<string>[] = [
+  { value: 'Email', label: 'Email' },
+  { value: 'Manual', label: 'Manual' },
+  { value: 'Bulk', label: 'Bulk upload' },
+];
+
+/** The Items buckets, as `min-max` (an open end is blank). */
+const ITEM_BUCKETS: { value: string; label: string; min: number; max: number | null }[] = [
+  { value: '1-10', label: '1–10', min: 1, max: 10 },
+  { value: '11-100', label: '11–100', min: 11, max: 100 },
+  { value: '101-', label: 'Over 100', min: 101, max: null },
+];
+const itemsBucket = (min: number | null, max: number | null): string | null => {
+  if (min == null && max == null) return null;
+  return ITEM_BUCKETS.find((bucket) => bucket.min === min && bucket.max === max)?.value ?? 'other';
+};
+const itemsWords = (min: number | null, max: number | null): string => {
+  const bucket = ITEM_BUCKETS.find((b) => b.min === min && b.max === max);
+  if (bucket) return `${bucket.label} items`;
+  if (min != null && max != null) return `${min}–${max} items`;
+  return min != null ? `${min} or more items` : `Up to ${max} items`;
+};
+
+/** "12 Sep 2026 – 30 Sep 2026", "From 12 Sep 2026", "Until 30 Sep 2026". */
+const rangeWords = (from: string | null, to: string | null): string => {
+  if (from && to) return `${formatDateSafe(from)} – ${formatDateSafe(to)}`;
+  if (from) return `From ${formatDateSafe(from)}`;
+  return `Until ${formatDateSafe(to)}`;
+};
+
+/** Drops the keys with nothing in them, so the request carries only the filters that are on. */
+const compact = <T extends Record<string, unknown>>(params: T): { [K in keyof T]?: NonNullable<T[K]> } =>
+  Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '')) as { [K in keyof T]?: NonNullable<T[K]> };
+
+/**
+ * The server's list parameters for the header filters. Presets are turned into day ranges here, on
+ * the reader's own calendar, so "Last 7 days" means the reader's week and not the server's.
+ */
+const columnFilterParams = (f: ListFilterValues, now: Date = new Date()) => {
+  const received = f.received ? receivedRange(f.received, now) : { from: f.receivedFrom, to: f.receivedTo };
+  const ingestedDays = f.ingested ? receivedRange(f.ingested, now) : { from: f.ingestedFrom, to: f.ingestedTo };
+  const ingested = localDayInstants(ingestedDays.from, ingestedDays.to);
+  const required = f.required ? aheadRange(f.required, now) : { from: f.requiredFrom, to: f.requiredTo };
+  return compact({
+    leadSource: f.source,
+    customer: f.customer,
+    ...dueParams(f.due, now),
+    // A custom Deadline range is sent INSTEAD of a window, never beside one.
+    dueFrom: f.due ? null : f.dueFrom,
+    dueTo: f.due ? null : f.dueTo,
+    startDate: received.from,
+    endDate: received.to,
+    ingestedFrom: ingested.from,
+    ingestedBefore: ingested.before,
+    requiredFrom: required.from,
+    requiredTo: required.to,
+    itemsMin: f.itemsMin,
+    itemsMax: f.itemsMax,
+    status: f.status,
+    serial: f.serial,
+    rfq: f.rfq,
+    buyer: f.buyer,
+    agreement: f.agreement,
+  });
+};
+
 const LeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -318,9 +403,8 @@ const LeadsPage: React.FC = () => {
   const myUserId = userData?.id ?? null;
   const isManager = userData?.isManager === true || Boolean(userData?.isSuperAdmin);
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 25, page: 0 });
-  const [search, setSearch] = useState('');
-  const [leadSource, setLeadSource] = useState('all');
-  const [ownerView, setOwnerView] = useState<OwnerView>(DEFAULT_OWNER_VIEW);
+  // Seeded from `?search=` so a link that names a reference (HumanActionCenterPage) lands on it.
+  const [search, setSearch] = useState(() => searchParams.get('search') ?? '');
   const [repProfileNoticeDismissed, setRepProfileNoticeDismissed] = useState<boolean>(loadRepProfileNoticeDismissed);
   const dismissRepProfileNotice = () => {
     setRepProfileNoticeDismissed(true);
@@ -330,19 +414,26 @@ const LeadsPage: React.FC = () => {
       // Storage unavailable — the notice returns next visit, which is the safe direction.
     }
   };
+  // Every column-header filter — owner and source included — lives on the URL (useListFilters),
+  // so Back and a link sent to a colleague keep them.
+  const listFilters = useListFilters();
+  const ownerView: OwnerView = listFilters.owner ?? DEFAULT_OWNER_VIEW;
+  // Rep is a manager's choice; a non-manager arriving on a link with `rep=` is not narrowed by a
+  // filter they cannot see or change.
+  const repFilter = isManager ? listFilters.rep : null;
   /**
    * "All inquiries" used to send NO queue view, and the server's default for no view is the
    * untriaged inbox (`LeadStatusId == null`, LeadRepository.GetLeadListAsync). Any lifecycle
    * transition stamps a status, so the list called "All" dropped every inquiry the moment
-   * someone advanced it — a rep who qualified a lead on Monday could not find it on Tuesday.
+   * someone advanced it. The old behaviour is now "Not opened yet" in the Status header
+   * (`status=none` within the queue).
    *
-   * The default is now the server's "open" view: everything still live, untriaged or not. The
-   * old behaviour survives as a filter the reader switches on, named for what it shows.
+   * A view carried on the URL (a dashboard tile, the Revisions tab) is a queue of its own and
+   * wins outright. The plain list is "queue": live leads that have not become an RFQ. Once a lead
+   * is an RFQ the work is on the RFQ list, so it leaves this one. A typed search still reaches it
+   * ("open"), so a rep who types an RFQ number finds the lead and its "Became an RFQ" status.
    */
-  const [untriagedOnly, setUntriagedOnly] = useState(false);
-  // A view carried on the URL (a dashboard tile, the Revisions tab) is a queue of its own and
-  // wins outright; the toggle only applies to the plain list.
-  const queueView = view ?? (untriagedOnly ? undefined : 'open');
+  const queueView = view ?? (search.trim() ? 'open' : 'queue');
   // Column layout and row density are settings, not the day's work. They stay one click away
   // rather than sitting on the default path beside the filters a salesperson actually uses.
   const [displayOpen, setDisplayOpen] = useState(false);
@@ -396,24 +487,29 @@ const LeadsPage: React.FC = () => {
   // Everything that can narrow this list. `view` is included because it is a filter the reader
   // did not type: arriving from a dashboard tile can empty the grid with nothing on screen
   // explaining it, which is exactly the "no data" / "filtered to zero" confusion below.
-  const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view) || ownerView !== 'all' || untriagedOnly;
-  // useCallback, not a bare closure: the no-rows overlay below is memoised because DataGrid
-  // takes a component TYPE, and a fresh function identity each render would rebuild that type
-  // and remount the overlay under the user.
-  const clearFilters = useCallback(() => {
+  const columnFiltersActive = anyListFilter({ ...listFilters.values, rep: repFilter });
+  const filtersActive = search.trim().length > 0 || Boolean(view) || columnFiltersActive;
+  /**
+   * useCallback, not a bare closure: the no-rows overlay below is memoised because DataGrid takes
+   * a component TYPE, and a fresh function identity each render would rebuild that type and remount
+   * the overlay under the user.
+   *
+   * `keepView` is the tabs-row button: it clears what the reader narrowed, and stays on the tab
+   * (Revisions) they are on. The empty state's button also drops a view that came from elsewhere.
+   */
+  const clearFilters = useCallback((keepView = false) => {
     setSearch('');
-    setLeadSource('all');
-    setOwnerView('all');
-    setUntriagedOnly(false);
     setPaginationModel((current) => ({ ...current, page: 0 }));
-    if (view) {
-      // Drop only the view/state keys; anything else on the URL belongs to someone else.
-      const next = new URLSearchParams(searchParams);
+    // One URL write for view/state and the filter keys: two writes in one click would each start
+    // from the same old URL and the second would put back what the first removed. Anything else on
+    // the URL belongs to someone else and stays.
+    const next = clearListFilterKeys(searchParams);
+    if (!keepView) {
       next.delete('view');
       next.delete('state');
-      setSearchParams(next, { replace: true });
     }
-  }, [view, searchParams, setSearchParams]);
+    if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const syncEmailsMutation = useMutation({
     mutationFn: () => leadService.fetchEmails(),
@@ -446,19 +542,75 @@ const LeadsPage: React.FC = () => {
     ),
   });
 
-  const requestedView = composeLeadsView(queueView, ownerView, myUserId);
+  const requestedView = composeLeadsView(queueView, ownerView, myUserId, repFilter);
+
+  /**
+   * Everything that narrows the list, in ONE object read by both the grid and Export to Excel, so
+   * the spreadsheet is always the list on screen. They used to be two hand copies of the same
+   * literal, and a filter added to one and not the other would have exported a different list.
+   */
+  // The search box already covers the RFQ number, so it travels once, as `search`, never as `rfqno`.
+  const listParams = useMemo(() => compact({
+    search: search || undefined,
+    view: requestedView,
+    ...columnFilterParams(listFilters.values),
+  }), [search, requestedView, listFilters.values]);
+
+  // A narrower list is a new result set; page 3 of it may not exist. Keyed on the values, not the
+  // controls, because Back and pasted links change them too. Adjusted during render, not in an
+  // effect: an effect runs after the grid query has already asked for page 3 of the new list.
+  const narrowingKey = JSON.stringify(listParams);
+  const [pagedNarrowingKey, setPagedNarrowingKey] = useState(narrowingKey);
+  if (pagedNarrowingKey !== narrowingKey) {
+    setPagedNarrowingKey(narrowingKey);
+    if (paginationModel.page !== 0) setPaginationModel({ ...paginationModel, page: 0 });
+  }
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['leads', paginationModel, search, leadSource, requestedView],
+    queryKey: ['leads', paginationModel, listParams],
     queryFn: () => leadService.getAll({
+      ...listParams,
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
-      rfqno: search || undefined,
-      search: search || undefined,
-      leadSource: leadSource === 'all' ? undefined : leadSource,
-      view: requestedView,
     }),
   });
+
+  /**
+   * The Customer choices: the customers of the inquiries in this same view (queue, owner, rep),
+   * with counts — never the whole customer book, most of which would empty the list. The date
+   * button narrows the counts too; the customer itself is left out so the choices do not shrink
+   * to the one already picked.
+   */
+  const customersQuery = useQuery({
+    queryKey: ['leads', 'customers', requestedView, listFilters.due],
+    queryFn: () => leadService.getListCustomers(requestedView, dueParams(listFilters.due)),
+    // The line prints its own failure in the Customer menu; the grid is unaffected.
+    meta: { silenceGlobalError: true },
+  });
+  const customerOptions = useMemo<ListFilterOption<string>[]>(() => {
+    const listed = customersQuery.data;
+    if (!listed) return [];
+    const options = listed.customers.map((c) => ({ value: String(c.customerId), label: `${c.name} (${c.count})` }));
+    if (listed.noCustomer > 0) options.push({ value: NO_CUSTOMER, label: `No customer yet (${listed.noCustomer})` });
+    return options;
+  }, [customersQuery.data]);
+
+  /**
+   * The Status choices, from the same read: "Not opened yet" first (the old untriaged inbox), then
+   * each status the inquiries in this view carry, in the words every other screen uses.
+   */
+  const statusOptions = useMemo<ListFilterOption<string>[]>(() => {
+    const listed = customersQuery.data;
+    const notOpened: ListFilterOption<string> = {
+      value: NOT_OPENED,
+      label: listed ? `Not opened yet (${listed.notOpened ?? 0})` : 'Not opened yet',
+    };
+    const statuses = (listed?.statuses ?? []).map((status) => ({
+      value: String(status.statusId),
+      label: `${leadStatusWords(status.code) ?? status.label} (${status.count})`,
+    }));
+    return [notOpened, ...statuses];
+  }, [customersQuery.data]);
 
   /**
    * Whether this business unit has ANY live inquiry, independent of every filter on screen.
@@ -469,6 +621,8 @@ const LeadsPage: React.FC = () => {
    * never read the same, and only an unfiltered count can tell them apart.
    * One row is enough: only `totalCount` is read. Failure is silent here because the main query
    * reports its own failures and this one only decides which empty-state copy is honest.
+   * It counts 'open' (every live inquiry, RFQ'd or not), not the 'queue' the grid opens on: a
+   * business unit whose every inquiry is now an RFQ is caught up, not missing a mailbox.
    */
   const totalQuery = useQuery({
     queryKey: ['leads-total'],
@@ -476,8 +630,65 @@ const LeadsPage: React.FC = () => {
     meta: { silenceGlobalError: true },
   });
   const isTrueZero = totalQuery.data?.totalCount === 0;
+  // The queue is empty with nothing narrowing it, yet live inquiries exist: they all became RFQs.
+  const isCaughtUp = !filtersActive && (totalQuery.data?.totalCount ?? 0) > 0;
   const canUploadDocuments = hasPermission('Leads', 'create');
   const canConnectMailbox = hasPermission('Email & SMTP');
+
+  /**
+   * The eligible-owner list, read once for the page: it says whether the reader can take a lead
+   * themselves (myOwnerOption below) and, for a manager, names the people the Rep filter offers.
+   */
+  const ownerOptions = useOwnerOptions(canEditLeads || isManager);
+  const repOptions = useMemo<ListFilterOption<number>[]>(
+    () => (ownerOptions.data ?? []).map((option) => ({ value: option.userId, label: option.name })),
+    [ownerOptions.data],
+  );
+
+  /**
+   * The words for whatever the header filters are narrowing by, e.g. "Saudi Electricity Company ·
+   * Overdue · Omar Rep", for the "No inquiries match" message.
+   */
+  const headerFilterWords = useMemo(() => {
+    const f = listFilters.values;
+    const words: string[] = [];
+    if (f.customer != null) {
+      words.push(f.customer === NO_CUSTOMER
+        ? 'No customer yet'
+        : customersQuery.data?.customers.find((c) => String(c.customerId) === f.customer)?.name ?? 'Chosen customer');
+    }
+    if (f.source != null) words.push(`Came from ${SOURCE_OPTIONS.find((o) => o.value === f.source)?.label ?? f.source}`);
+    if (f.due != null) words.push(DUE_WINDOW_LABELS[f.due]);
+    else if (f.dueFrom || f.dueTo) words.push(`Deadline ${rangeWords(f.dueFrom, f.dueTo)}`);
+    if (f.received != null) words.push(`Received ${RECEIVED_WINDOW_LABELS[f.received].toLowerCase()}`);
+    else if (f.receivedFrom || f.receivedTo) words.push(`Received ${rangeWords(f.receivedFrom, f.receivedTo)}`);
+    if (f.ingested != null) words.push(`Ingested ${RECEIVED_WINDOW_LABELS[f.ingested].toLowerCase()}`);
+    else if (f.ingestedFrom || f.ingestedTo) words.push(`Ingested ${rangeWords(f.ingestedFrom, f.ingestedTo)}`);
+    if (f.required != null) words.push(`Wanted in the ${AHEAD_WINDOW_LABELS[f.required].toLowerCase()}`);
+    else if (f.requiredFrom || f.requiredTo) words.push(`Wanted ${rangeWords(f.requiredFrom, f.requiredTo)}`);
+    if (f.itemsMin != null || f.itemsMax != null) words.push(itemsWords(f.itemsMin, f.itemsMax));
+    if (f.serial) words.push(`Serial contains "${f.serial}"`);
+    if (f.rfq) words.push(`RFQ/Bid # contains "${f.rfq}"`);
+    if (f.buyer) words.push(`Buyer contains "${f.buyer}"`);
+    if (f.agreement) words.push(`Agreement contains "${f.agreement}"`);
+    if (f.status != null) words.push(statusOptions.find((o) => o.value === f.status)?.label.replace(/ \(\d+\)$/, '') ?? 'Chosen status');
+    if (f.owner === 'unassigned') words.push('Unassigned');
+    if (f.owner === 'mine') words.push('Mine');
+    if (repFilter != null) words.push(repOptions.find((r) => r.value === repFilter)?.label ?? 'Chosen rep');
+    return words.join(' · ');
+  }, [listFilters.values, repFilter, customersQuery.data, repOptions, statusOptions]);
+
+  /**
+   * Owner, Unassigned-or-Mine and "Not opened yet" each have a sentence and a one-step widening
+   * button of their own when they alone empty the list. Any other header filter reads
+   * "No inquiries match" with the filters in words.
+   */
+  const otherColumnFiltersActive = anyListFilter({
+    ...listFilters.values, rep: repFilter, owner: null, status: listFilters.status === NOT_OPENED ? null : listFilters.status,
+  });
+  const onlyOwnerOrNotOpened = !otherColumnFiltersActive && !(listFilters.owner && listFilters.status === NOT_OPENED);
+  const notOpenedOnly = listFilters.status === NOT_OPENED;
+  const setListFilters = listFilters.set;
 
   /**
    * The top-of-funnel grid shipped MUI's bare "No rows" — the string a rep reads on day one when
@@ -485,7 +696,14 @@ const LeadsPage: React.FC = () => {
    * nothing. Neither reading tells them what to do, and one of the two is a setup problem they can
    * fix themselves. Memoised because DataGrid takes a component TYPE here.
    */
-  const noRowsOverlay = useMemo(() => gridEmptyOverlay({
+  const noRowsOverlay = useMemo(() => gridEmptyOverlay(isCaughtUp ? {
+    title: 'Nothing to decide',
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/rfqs/all')} sx={{ fontWeight: 700 }}>
+        Open RFQs
+      </Button>
+    ),
+  } : {
     title: 'No inquiries yet',
     message: 'Inquiries arrive on their own once a mailbox is connected — or you can upload a customer document from your machine right now.',
     action: (
@@ -528,48 +746,56 @@ const LeadsPage: React.FC = () => {
     // The list now OPENS on a working set, so "nothing here" most often means "nothing of
     // yours", not "nothing at all" — and the two must never read the same. Each says which
     // filter emptied it and offers the one button that widens it by a single step.
-    filteredTitle: ownerView === 'mine'
+    filteredTitle: !onlyOwnerOrNotOpened
+      ? 'No inquiries match'
+      : ownerView === 'mine'
       ? 'Nothing is assigned to you'
       : ownerView === 'unassigned'
         ? 'Every inquiry here already has an owner'
-        : untriagedOnly
+        : notOpenedOnly
           ? 'Nothing is waiting to be looked at'
           : 'No inquiries match these filters',
-    filteredMessage: ownerView === 'mine'
+    filteredMessage: !onlyOwnerOrNotOpened
+      ? headerFilterWords
+      : ownerView === 'mine'
       ? 'No inquiry in this list carries your name right now. The ones nobody has picked up are one click away.'
       : ownerView === 'unassigned'
         ? 'Nothing in this list is waiting to be picked up. Everything already belongs to somebody.'
-        : untriagedOnly
+        : notOpenedOnly
           ? 'Every inquiry has already been opened by someone. The ones in progress are one click away.'
           : 'Nothing matches the search and filters currently applied. Clearing them shows every inquiry this business unit has.',
-    filteredAction: (
+    filteredAction: !onlyOwnerOrNotOpened ? (
+      <Button variant="contained" startIcon={<ClearFiltersIcon />} onClick={() => clearFilters()} sx={{ fontWeight: 700 }}>
+        Clear filters
+      </Button>
+    ) : (
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
-        {untriagedOnly && ownerView === 'all' && (
-          <Button variant="contained" onClick={() => setUntriagedOnly(false)} sx={{ fontWeight: 700 }}>
+        {notOpenedOnly && ownerView === 'all' && (
+          <Button variant="contained" onClick={() => setListFilters({ status: null })} sx={{ fontWeight: 700 }}>
             Show inquiries in progress
           </Button>
         )}
         {ownerView === 'mine' && (
-          <Button variant="contained" onClick={() => setOwnerView('unassigned')} sx={{ fontWeight: 700 }}>
+          <Button variant="contained" onClick={() => setListFilters({ owner: 'unassigned', rep: null })} sx={{ fontWeight: 700 }}>
             Show unassigned inquiries
           </Button>
         )}
         {ownerView === 'unassigned' && (
-          <Button variant="contained" onClick={() => setOwnerView('all')} sx={{ fontWeight: 700 }}>
+          <Button variant="contained" onClick={() => setListFilters({ owner: null, rep: null })} sx={{ fontWeight: 700 }}>
             Show everyone&apos;s inquiries
           </Button>
         )}
         <Button
           variant="outlined"
           startIcon={<ClearFiltersIcon />}
-          onClick={clearFilters}
+          onClick={() => clearFilters()}
           sx={{ fontWeight: 700 }}
         >
           Clear filters
         </Button>
       </Box>
     ),
-  }), [filtersActive, isTrueZero, canUploadDocuments, canConnectMailbox, clearFilters, navigate, ownerView, untriagedOnly]);
+  }), [filtersActive, isTrueZero, isCaughtUp, canUploadDocuments, canConnectMailbox, clearFilters, navigate, ownerView, notOpenedOnly, onlyOwnerOrNotOpened, headerFilterWords, setListFilters]);
 
   const rows = useMemo(() => data?.items ?? [], [data]);
   // The simple view is a work queue: leads still waiting for a decision first, soonest deadline
@@ -586,8 +812,8 @@ const LeadsPage: React.FC = () => {
    * that is always offered is a false affordance that fails after the click. The eligible-owner
    * list is the server's own verdict, so it is read once for the page and the button appears only
    * when the answer is yes — with the reason printed above the grid when it is no.
+   * (`ownerOptions` is read further up: the Rep filter and the empty state need it too.)
    */
-  const ownerOptions = useOwnerOptions(canEditLeads);
   const myOwnerOption = useMemo(
     () => (ownerOptions.data ?? []).find((option) => option.userId === myUserId) ?? null,
     [ownerOptions.data, myUserId],
@@ -771,7 +997,7 @@ const LeadsPage: React.FC = () => {
     },
     {
       field: 'rfqno',
-      headerName: 'RFQ #',
+      headerName: 'RFQ/Bid #',
       width: 180,
       renderCell: (p) => {
         const raw = (p.row.rfqno ?? '').trim();
@@ -779,7 +1005,7 @@ const LeadsPage: React.FC = () => {
         if (isMissing) {
           return (
             <Typography variant="body2" sx={{ color: 'text.disabled', fontStyle: 'italic' }}>
-              No RFQ # yet
+              No RFQ/Bid # yet
             </Typography>
           );
         }
@@ -902,7 +1128,7 @@ const LeadsPage: React.FC = () => {
         const sx = deadlineSx(p.row.bidClosingDate);
         return (
           <Typography variant="body2" sx={{ fontSize: '0.8rem', ...sx }}>
-            {formatDateSafe(p.row.bidClosingDate)}
+            {formatDeadlineDate(p.row.bidClosingDate)}
           </Typography>
         );
       },
@@ -1242,7 +1468,7 @@ const LeadsPage: React.FC = () => {
       filterable: false,
       valueGetter: (_value, row) => row.bidClosingDate || '',
       renderCell: (p) => {
-        const due = formatDateSafe(p.row.bidClosingDate);
+        const due = formatDeadlineDate(p.row.bidClosingDate);
         const wanted = formatDateSafe(p.row.requiredDeliveryDate);
         // Once decided, the deadline is history, not urgency.
         const { text, tone } = deadlineWords(p.row.bidClosingDate);
@@ -1333,9 +1559,146 @@ const LeadsPage: React.FC = () => {
       },
     },
   ];
-  const gridColumns = listView === 'simple' ? simpleColumns : orderedColumns;
+  // Owner 2026-09-29: the filters live in the column headers they narrow — every column the server
+  // can filter carries a small filter button; the list, the count and Excel follow it. Columns that
+  // are worked out on screen (Nexora's read, Estimated value) have none.
+  type FilterKind = 'customer' | 'customerAndSource' | 'source' | 'due' | 'dueHijri' | 'received' | 'ingested' | 'required'
+    | 'items' | 'status' | 'owner' | 'serial' | 'rfq' | 'buyer' | 'agreement';
+  const filterFor: Record<string, FilterKind> = {
+    customerBid: 'customerAndSource', client: 'customer', leadSource: 'source',
+    when: 'due', bidClosingDate: 'due', bidClosingDateHijri: 'dueHijri',
+    recDate: 'received', ingestedAtUtc: 'ingested', requiredDeliveryDate: 'required', itemCount: 'items',
+    status: 'status', worth: 'status', assignee: 'owner',
+    nexoraSerial: 'serial', rfqno: 'rfq', buyer: 'buyer', agreementReference: 'agreement',
+  };
+  const f = listFilters.values;
+  const customerList = {
+    label: 'Customer', noun: 'Customer', anyLabel: 'Any customer', searchable: true,
+    options: customerOptions, value: f.customer,
+    loading: customersQuery.isLoading, error: customersQuery.isError,
+    onChange: (customer: string | null) => setListFilters({ customer }),
+  };
+  const sourceList = {
+    label: 'Came from', noun: 'Source', anyLabel: 'Any source',
+    options: SOURCE_OPTIONS, value: f.source,
+    onChange: (source: string | null) => setListFilters({ source }),
+  };
+  const textFilter = (key: 'serial' | 'rfq' | 'buyer' | 'agreement') => ({
+    value: f[key],
+    onChange: (value: string | null) => setListFilters({ [key]: value }),
+  });
+  // Owner: Anyone · Unassigned · Mine, then (a manager) each rep. A rep is a slice of Anyone.
+  const ownerFilterOptions: ListFilterOption<string>[] = [
+    { value: 'unassigned', label: 'Unassigned' },
+    ...(myUserId != null ? [{ value: 'mine', label: 'Mine' }] : []),
+    ...(isManager ? repOptions.map((option) => ({ value: `rep:${option.value}`, label: option.label })) : []),
+  ];
+  const ownerFilterValue = f.owner ?? (repFilter != null ? `rep:${repFilter}` : null);
+  const pickOwnerFilter = (choice: string | null) => {
+    if (choice?.startsWith('rep:')) setListFilters({ owner: null, rep: Number(choice.slice(4)) });
+    else setListFilters({ owner: choice === 'unassigned' || choice === 'mine' ? choice : null, rep: null });
+  };
+  const itemsValue = itemsBucket(f.itemsMin, f.itemsMax);
+  const dueHeader = (title: string, noun: string) => (
+    <HeaderFilter title={title} noun={noun} anyLabel="Any date" anyLast
+      options={DUE_WINDOWS.map((window) => ({ value: window, label: DUE_WINDOW_LABELS[window] }))}
+      value={f.due}
+      onChange={(due: DueWindow | null) => setListFilters({ due, dueFrom: null, dueTo: null })}
+      range={{ from: f.dueFrom, to: f.dueTo, onApply: (dueFrom, dueTo) => setListFilters({ due: null, dueFrom, dueTo }) }} />
+  );
+  const renderFilterHeader = (kind: FilterKind, title: string): React.ReactNode => {
+    switch (kind) {
+      case 'customer':
+        return <HeaderFilter title={title} {...customerList} />;
+      case 'customerAndSource':
+        // The simple view has no Source column, so "where it came from" rides with the customer.
+        return <HeaderFilter title={title} noun="Customer" groups={[customerList, sourceList]} />;
+      case 'source':
+        return <HeaderFilter title={title} {...sourceList} />;
+      case 'due':
+        return dueHeader(title, 'Bid due date');
+      case 'dueHijri':
+        return dueHeader(title, 'Bid due date (Hijri)');
+      case 'received':
+        return (
+          <HeaderFilter title={title} noun="Received date" anyLabel="Any date" anyLast
+            options={RECEIVED_WINDOWS.map((window) => ({ value: window, label: RECEIVED_WINDOW_LABELS[window] }))}
+            value={f.received}
+            onChange={(received: ReceivedWindow | null) => setListFilters({ received, receivedFrom: null, receivedTo: null })}
+            range={{ from: f.receivedFrom, to: f.receivedTo, onApply: (receivedFrom, receivedTo) => setListFilters({ received: null, receivedFrom, receivedTo }) }} />
+        );
+      case 'ingested':
+        return (
+          <HeaderFilter title={title} noun="Ingested date" anyLabel="Any date" anyLast
+            options={RECEIVED_WINDOWS.map((window) => ({ value: window, label: RECEIVED_WINDOW_LABELS[window] }))}
+            value={f.ingested}
+            onChange={(ingested: ReceivedWindow | null) => setListFilters({ ingested, ingestedFrom: null, ingestedTo: null })}
+            range={{ from: f.ingestedFrom, to: f.ingestedTo, onApply: (ingestedFrom, ingestedTo) => setListFilters({ ingested: null, ingestedFrom, ingestedTo }) }} />
+        );
+      case 'required':
+        return (
+          <HeaderFilter title={title} noun="Required delivery" anyLabel="Any date" anyLast
+            options={AHEAD_WINDOWS.map((window) => ({ value: window, label: AHEAD_WINDOW_LABELS[window] }))}
+            value={f.required}
+            onChange={(required: AheadWindow | null) => setListFilters({ required, requiredFrom: null, requiredTo: null })}
+            range={{ from: f.requiredFrom, to: f.requiredTo, onApply: (requiredFrom, requiredTo) => setListFilters({ required: null, requiredFrom, requiredTo }) }} />
+        );
+      case 'items':
+        return (
+          <HeaderFilter title={title} noun="Items" anyLabel="Any" anyLast
+            options={[
+              ...ITEM_BUCKETS.map((bucket) => ({ value: bucket.value, label: bucket.label })),
+              ...(itemsValue === 'other' ? [{ value: 'other', label: itemsWords(f.itemsMin, f.itemsMax) }] : []),
+            ]}
+            value={itemsValue}
+            onChange={(choice: string | null) => {
+              // "other" is a hand-edited range already on the URL; picking it again changes nothing.
+              if (choice === 'other') return;
+              const bucket = ITEM_BUCKETS.find((b) => b.value === choice);
+              setListFilters({ itemsMin: bucket?.min ?? null, itemsMax: bucket?.max ?? null });
+            }} />
+        );
+      case 'status':
+        return (
+          <HeaderFilter title={title} noun="Status" anyLabel="Any status"
+            options={statusOptions} value={f.status}
+            loading={customersQuery.isLoading} error={customersQuery.isError}
+            onChange={(status: string | null) => setListFilters({ status })} />
+        );
+      case 'owner':
+        return (
+          <HeaderFilter title={title} noun="Owner" anyLabel="Anyone"
+            options={ownerFilterOptions} value={ownerFilterValue} onChange={pickOwnerFilter} />
+        );
+      case 'serial':
+        return <HeaderFilter title={title} noun="Serial" text={textFilter('serial')} />;
+      case 'rfq':
+        return <HeaderFilter title={title} noun="RFQ/Bid number" text={textFilter('rfq')} />;
+      case 'buyer':
+        return <HeaderFilter title={title} noun="Buyer" text={textFilter('buyer')} />;
+      case 'agreement':
+        return <HeaderFilter title={title} noun="Agreement" text={textFilter('agreement')} />;
+      default:
+        return title;
+    }
+  };
+  const withHeaderFilter = (column: GridColDef<LeadResponseDTO>): GridColDef<LeadResponseDTO> => {
+    const kind = filterFor[column.field];
+    if (!kind) return column;
+    const title = column.headerName ?? '';
+    return { ...column, renderHeader: () => renderFilterHeader(kind, title) };
+  };
+  const gridColumns = (listView === 'simple' ? simpleColumns : orderedColumns).map(withHeaderFilter);
 
   const totalCount = data?.totalCount ?? 0;
+  /**
+   * The grid's row count holds its last known value while the next page loads. A new page is a new
+   * query key, so `data` is briefly undefined; a row count of 0 made DataGrid clamp the page back
+   * to the first one, and "next page" bounced straight back to page 1. (MUI's documented fix for
+   * server-side paging.) Adjusted during render rather than in an effect, so there is no stale frame.
+   */
+  const [gridRowCount, setGridRowCount] = useState(0);
+  if (data && data.totalCount !== gridRowCount) setGridRowCount(data.totalCount);
 
   return (
     <Box sx={{ p: { xs: 1, sm: 2 }, minWidth: 0 }}>
@@ -1350,7 +1713,16 @@ const LeadsPage: React.FC = () => {
           )}
         </Typography>
         <Box sx={{ width: { xs: '100%', sm: 340 }, maxWidth: '100%' }}>
-          <SearchField width="100%" value={search} onChange={setSearch} placeholder="Search by serial, RFQ number, buyer or email" />
+          <SearchField
+            width="100%"
+            value={search}
+            onChange={(value) => {
+              setSearch(value);
+              // A new search is a new result set; page 3 of it may not exist.
+              setPaginationModel((current) => ({ ...current, page: 0 }));
+            }}
+            placeholder="Search by serial, RFQ/Bid number, buyer or email"
+          />
         </Box>
         <Box sx={{ flexGrow: 1 }} />
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', sm: 'flex-end' } }}>
@@ -1373,12 +1745,9 @@ const LeadsPage: React.FC = () => {
             name="Leads"
             columns={LEAD_EXPORT_COLUMNS}
             loadRows={async () => withDecisions(await loadAllPages((pageNumber, pageSize) => leadService.getAll({
+              ...listParams,
               pageNumber,
               pageSize,
-              rfqno: search || undefined,
-              search: search || undefined,
-              leadSource: leadSource === 'all' ? undefined : leadSource,
-              view: requestedView,
             })))}
           />
           <Tooltip title="Refresh">
@@ -1389,68 +1758,25 @@ const LeadsPage: React.FC = () => {
         </Stack>
       </Stack>
 
-      {/* The lead queues, as one level of tabs on the screen they filter. "Unassigned", "Assigned"
-          and "Revisions" were separate rail destinations over what a rep reads as one list. */}
-      <ViewTabs primaryKey="leads" ariaLabel="Inquiry views" />
-
-      {/* Filters + view controls */}
-      <Box sx={{ mb: 1, display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', '& .MuiToggleButton-root': { py: 0.5, minHeight: 34 }, '& .MuiButton-root': { minHeight: 34 } }}>
-        <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ width: { xs: '100%', sm: 'auto' }, minWidth: { sm: 150 }, '& .MuiInputBase-input': { py: 0.75 } }} label="Where it came from">
-          <MenuItem value="all">All Sources</MenuItem>
-          <MenuItem value="Email">Email</MenuItem>
-          <MenuItem value="Manual">Manual</MenuItem>
-          <MenuItem value="Bulk">Bulk Upload</MenuItem>
-        </TextField>
-        {/* "What has nobody picked up" and "what is on me" were, until now, two other screens.
-            They are questions about THIS list, so they are a filter on it. */}
-        <ToggleButtonGroup
-          size="small"
-          exclusive
-          value={ownerView}
-          onChange={(_e, value: OwnerView | null) => {
-            if (!value) return;
-            setOwnerView(value);
-            setPaginationModel((current) => ({ ...current, page: 0 }));
-          }}
-          aria-label="Owner"
-        >
-          <ToggleButton value="unassigned" aria-label="Unassigned">Unassigned</ToggleButton>
-          <ToggleButton value="mine" aria-label="Mine" disabled={myUserId == null}>Mine</ToggleButton>
-          <ToggleButton value="all" aria-label="Everyone">Everyone</ToggleButton>
-        </ToggleButtonGroup>
-        {/* The old "All inquiries" — only what nobody has opened yet — as an opt-in filter. Hidden
-            when the URL already names a queue (Revisions, a dashboard tile): those are lists of
-            their own and the toggle would silently narrow them. */}
-        {!view && (
-          <Tooltip title={untriagedOnly
-            ? 'Showing only inquiries nobody has opened yet. Turn off to include the ones already in progress.'
-            : 'Show only inquiries nobody has opened yet.'} describeChild>
-            <ToggleButton
-              size="small"
-              value="untriaged"
-              selected={untriagedOnly}
-              onChange={() => {
-                setUntriagedOnly((current) => !current);
-                setPaginationModel((current) => ({ ...current, page: 0 }));
-              }}
-              aria-label="Not opened yet"
-              sx={{ textTransform: 'none', fontWeight: 700 }}
-            >
-              Not opened yet
-            </ToggleButton>
-          </Tooltip>
-        )}
-        {/* A disabled control that will not say why becomes a support call. */}
-        {myUserId == null && (
-          <Typography variant="caption" sx={{ color: 'text.secondary', maxWidth: 220 }}>
-            “Mine” needs to know who you are signed in as, and this session does not carry it. Sign
-            out and back in to use it.
-          </Typography>
-        )}
-        <Box sx={{ flexGrow: 1 }} />
-        {/* Progressive disclosure: the layout controls are still here, one click away, rather
-            than sitting on the default path competing with the day's work. */}
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+      {/* The lead queues, as one level of tabs on the screen they filter, with the view controls at
+          the right end of the same line. Every filter lives in its column's header, so there is no
+          filter row between the tabs and the grid. */}
+      <Box
+        sx={{
+          display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: 1, mb: 1,
+          borderBottom: '1px solid', borderColor: 'divider',
+          '& .MuiToggleButton-root': { py: 0.25, minHeight: 32 }, '& .MuiButton-root': { minHeight: 32 },
+        }}
+      >
+        <Box sx={{ flex: '1 1 auto', minWidth: 0 }}>
+          <ViewTabs primaryKey="leads" ariaLabel="Inquiry views" sx={{ borderBottom: 0, mb: 0 }} />
+        </Box>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', ml: 'auto', py: 0.5 }} aria-label="List controls" role="group">
+          {(columnFiltersActive || search.trim().length > 0) && (
+            <Button size="small" variant="text" startIcon={<ClearFiltersIcon />} onClick={() => clearFilters(true)} sx={{ fontWeight: 700, textTransform: 'none' }}>
+              Clear filters
+            </Button>
+          )}
           <ToggleButtonGroup
             size="small"
             exclusive
@@ -1463,40 +1789,41 @@ const LeadsPage: React.FC = () => {
             <Tooltip title="Five plain columns, no sideways scrolling." describeChild><ToggleButton value="simple" aria-label="Simple view">Simple</ToggleButton></Tooltip>
             <Tooltip title="Every field, in the column order you saved under Display." describeChild><ToggleButton value="spreadsheet" aria-label="Spreadsheet view">Spreadsheet</ToggleButton></Tooltip>
           </ToggleButtonGroup>
+          <Button
+            size="small"
+            variant="text"
+            startIcon={<TuneIcon />}
+            onClick={() => setDisplayOpen((open) => !open)}
+            aria-expanded={displayOpen}
+            sx={{ fontWeight: 700, textTransform: 'none' }}
+          >
+            Display
+          </Button>
         </Stack>
-        <Button
-          size="small"
-          variant="text"
-          startIcon={<TuneIcon />}
-          onClick={() => setDisplayOpen((open) => !open)}
-          aria-expanded={displayOpen}
-          sx={{ fontWeight: 700, textTransform: 'none' }}
-        >
-          Display
-        </Button>
-        <Collapse in={displayOpen} sx={{ width: '100%' }}>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', pt: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
-            {listView === 'spreadsheet' ? (
-              <ColumnPreferences preferences={columnPreferences} />
-            ) : (
-              <Typography variant="caption" color="text.secondary">Switch to the Spreadsheet view to choose and order columns.</Typography>
-            )}
-            <ToggleButtonGroup
-              size="small"
-              exclusive
-              value={density}
-              onChange={(_e, value: DensityChoice | null) => {
-                if (value) applyDensity(value);
-              }}
-              aria-label="Row density"
-            >
-              <ToggleButton value="comfortable" aria-label="Comfortable rows">Comfortable</ToggleButton>
-              <ToggleButton value="standard" aria-label="Standard rows">Standard</ToggleButton>
-              <ToggleButton value="compact" aria-label="Compact rows">Compact</ToggleButton>
-            </ToggleButtonGroup>
-          </Box>
-        </Collapse>
       </Box>
+      {/* Column layout and row density are settings, not the day's work: one click away. */}
+      <Collapse in={displayOpen}>
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', pb: 1, mb: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
+          {listView === 'spreadsheet' ? (
+            <ColumnPreferences preferences={columnPreferences} />
+          ) : (
+            <Typography variant="caption" color="text.secondary">Switch to the Spreadsheet view to choose and order columns.</Typography>
+          )}
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={density}
+            onChange={(_e, value: DensityChoice | null) => {
+              if (value) applyDensity(value);
+            }}
+            aria-label="Row density"
+          >
+            <ToggleButton value="comfortable" aria-label="Comfortable rows">Comfortable</ToggleButton>
+            <ToggleButton value="standard" aria-label="Standard rows">Standard</ToggleButton>
+            <ToggleButton value="compact" aria-label="Compact rows">Compact</ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
+      </Collapse>
 
       {/* Constraint 7: a control that cannot work is not silently missing. Said ONCE, in words,
           instead of a disabled button repeated down every row. */}
@@ -1599,7 +1926,7 @@ const LeadsPage: React.FC = () => {
       )}
 
       {/* Grid */}
-      <Paper sx={{ height: { xs: 'calc(100vh - 330px)', sm: 'calc(100vh - 200px)' }, minHeight: 420, boxShadow: 'none', width: '100%', minWidth: 0, borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ height: { xs: 'calc(100vh - 280px)', sm: 'calc(100vh - 150px)' }, minHeight: 420, boxShadow: 'none', width: '100%', minWidth: 0, borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         {isError ? (
           <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
             <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
@@ -1613,7 +1940,7 @@ const LeadsPage: React.FC = () => {
           <DataGrid
             rows={listView === 'simple' ? workFirstRows : rows}
             columns={gridColumns}
-            rowCount={totalCount}
+            rowCount={gridRowCount}
             loading={isLoading}
             slots={{ noRowsOverlay }}
             pageSizeOptions={[10, 25, 50]}

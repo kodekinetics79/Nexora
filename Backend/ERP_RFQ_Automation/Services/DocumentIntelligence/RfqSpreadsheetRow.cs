@@ -5,6 +5,14 @@ public sealed class RfqSpreadsheetRow
     public int RowNumber { get; set; }
     public string SourceDocumentName { get; set; } = "RFQ spreadsheet";
     public string WorksheetName { get; set; } = "CSV";
+
+    /// <summary>
+    /// The organisation asking for the quotation, as the document writes it ("Saudi Aramco"), and
+    /// the sentence it was read from. Read from the document's own text, never from a file name or
+    /// a list of known buyers; matched against the tenant's customers by the resolver.
+    /// </summary>
+    public string? BuyerOrganisation { get; set; }
+    public string? BuyerOrganisationEvidence { get; set; }
     public int HeaderRowNumber { get; set; } = 1;
     public Dictionary<int, string> HeadersByColumn { get; set; } = new();
     public Dictionary<string, int> FieldColumnNumbers { get; set; } = new(StringComparer.Ordinal);
@@ -92,6 +100,13 @@ public sealed class RfqSpreadsheetRow
     /// deterministic one.
     /// </summary>
     public Dictionary<string, RowFieldProvenance> FieldProvenance { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The order the whole DOCUMENT writes numeric dates in, when the reader could establish it
+    /// from text the row does not carry (an SAP Ariba print's banner, a date elsewhere on the page).
+    /// Shared by every row of the document; the normaliser applies it to every ambiguous date.
+    /// </summary>
+    public ERP_RFQ_Automation.Extraction.DateOrderEvidence? DocumentDateOrder { get; set; }
 
     public string SourceAddress(string fieldName, string legacyColumn)
     {

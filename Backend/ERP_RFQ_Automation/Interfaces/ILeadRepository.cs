@@ -7,7 +7,9 @@ namespace ERP_RFQ_Automation.Interfaces
 {
     public interface ILeadRepository
     {
-        Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null, AccountTeamScope? accessScope = null);
+        Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null, AccountTeamScope? accessScope = null, string? search = null, string? customerFilter = null, string? due = null, DateTime? today = null, ERP_RFQ_Automation.Repositories.LeadListColumnFilters? columns = null);
+        Task<(IReadOnlyList<(long StatusId, string Code, string Label, int Count)> Statuses, int NotOpened)> GetLeadListStatusesAsync(long businessUnitId, string? view = null, AccountTeamScope? accessScope = null);
+        Task<(IReadOnlyList<(long CustomerId, string Name, int Count)> Customers, int NoCustomer)> GetLeadListCustomersAsync(long businessUnitId, string? view = null, AccountTeamScope? accessScope = null, string? due = null, DateTime? today = null);
         Task<IEnumerable<EmailConfigurationDropdownDTO>> GetActiveEmailConfigurationsAsync(long businessUnitId);
 
         Task<IEnumerable<RejectionReasonDTO>> GetLeadRejectionReasonsAsync();
@@ -62,5 +64,12 @@ namespace ERP_RFQ_Automation.Interfaces
         /// </summary>
         Task<LeadResponseDTO?> LinkClientAsync(
             long id, long businessUnitId, LeadClientLinkRequestDTO request, string linkedBy = "system");
+
+        /// <summary>
+        /// A person answering the lead's day/month question about its closing date, or setting
+        /// the closing date outright. Returns null when the lead is not in this tenant.
+        /// </summary>
+        Task<LeadResponseDTO?> ConfirmClosingDateAsync(
+            long id, long businessUnitId, LeadClosingDateAnswerDTO answer, string answeredBy);
     }
 }

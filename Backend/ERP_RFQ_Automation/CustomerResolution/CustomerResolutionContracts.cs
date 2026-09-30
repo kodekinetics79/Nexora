@@ -959,6 +959,12 @@ public static partial class RfqNumberPattern
         var trimmed = rfqNumber?.Trim();
         if (string.IsNullOrEmpty(trimmed) || trimmed.Length is < 4 or > 64) return null;
 
+        // A bare run of digits has no shape: "6000000028" becomes ^\d{10}$, which Aramco, SABIC,
+        // Marafiq and MaSa numbers all match. One human link of an Aramco RFQ taught that shape
+        // to SEC, and every ten-digit RFQ after it was offered to SEC. Only a number with a
+        // letter or a separator in it identifies anybody.
+        if (trimmed.All(char.IsDigit)) return null;
+
         var builder = new System.Text.StringBuilder("^");
         var index = 0;
         var hasDigitRun = false;
@@ -995,9 +1001,18 @@ public static partial class RfqNumberPattern
         return pattern.Length <= 300 ? pattern : null;
     }
 
+    /// <summary>True for a stored shape of nothing but counted digits ("^\\d{10}$").</summary>
+    public static bool IsDigitsOnlyShape(string? pattern)
+        => pattern is not null && DigitsOnlyShape().IsMatch(pattern.Trim());
+
+    [GeneratedRegex(@"^\^\\d\{\d{1,2}\}\$$", RegexOptions.CultureInvariant)]
+    private static partial Regex DigitsOnlyShape();
+
     public static bool Matches(string? pattern, string? rfqNumber)
     {
         if (string.IsNullOrWhiteSpace(pattern) || string.IsNullOrWhiteSpace(rfqNumber)) return false;
+        // A digits-only shape learned before Derive refused it is not evidence about anybody.
+        if (IsDigitsOnlyShape(pattern)) return false;
         try
         {
             return Regex.IsMatch(rfqNumber.Trim(), pattern, MatchOptions);

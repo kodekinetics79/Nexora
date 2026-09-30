@@ -33,6 +33,9 @@
     <Content Include="Fixtures\empty-workbook.xls" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Fixtures\rfq-table.docx" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Fixtures\rfq-table-2.docx" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Real buyer prints behind the P0 AI-read defects (quantity 6 read as 1, glued SAP codes,
+         2 Assembley read as 1): two PDFs and page-1 text as the PDF reader now produces it. -->
+    <Content Include="Fixtures\ai-pdf\**" CopyToOutputDirectory="PreserveNewest" />
     <!-- The representative RFQ corpus: committed binaries + the manifest that defines every
          expected classification and extracted value in advance. See Corpus\README.md. -->
     <Content Include="Corpus\**" CopyToOutputDirectory="PreserveNewest" />

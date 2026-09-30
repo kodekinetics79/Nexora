@@ -38,7 +38,7 @@ import NextStepPanel from '../../../components/common/NextStepPanel';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
-import { formatDateSafe } from '../../../utils/dates';
+import { formatDateSafe, formatDeadline } from '../../../utils/dates';
 import { leadStatusWords } from '../../../utils/leadStatusWords';
 import {
   commercialActionPermissions,
@@ -46,6 +46,7 @@ import {
 } from '../../../utils/commercialActionPermissions';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import ResolveClientDialog from '../ResolveClientDialog';
+import ClosingDateQuestion from './ClosingDateQuestion';
 import FullNoBidCommitDialog from '../Workbench/FullNoBidCommitDialog';
 import RfqRevisionImpactResolutionDialog from '../Workbench/RfqRevisionImpactResolutionDialog';
 import LegacyDecisionRecordNotice from '../Workbench/LegacyDecisionRecordNotice';
@@ -62,6 +63,7 @@ import LinesTable from './LinesTable';
 import BuyerTermsPanel from './BuyerTermsPanel';
 import CheckDocumentDialog, { type ConfirmedLine } from './CheckDocumentDialog';
 import CreateRfqConfirmDialog, { type QualificationOutlook } from './CreateRfqConfirmDialog';
+import PartialReadNotice from './PartialReadNotice';
 import { decisionLabel } from '../decisionRead';
 import {
   applyUnitToUnitless,
@@ -252,11 +254,12 @@ const DecidePage: React.FC = () => {
     retry: false,
   });
 
-  // Who owns the request. The same record the lead page reads, so Take it / Give to… here and
-  // there are one control over one fact; the owner control refreshes it after every change.
+  // Who owns the request, and its RFQ number. Read on its own: the full lead record is 2.46 MB on
+  // a 1,500-line request and this page used five fields of it. The key sits under the lead
+  // record's, so the owner control's refresh of ['lead-detail', id] after every change reaches it.
   const leadQuery = useQuery({
-    queryKey: ['lead-detail', leadId],
-    queryFn: () => leadService.getById(leadId),
+    queryKey: ['lead-detail', leadId, 'owner'],
+    queryFn: () => leadDecisionService.getOwner(leadId),
     enabled: Number.isFinite(leadId) && leadId > 0,
     retry: false,
   });
@@ -493,10 +496,13 @@ const DecidePage: React.FC = () => {
         const request = buildFitRequest(current, concern, codes);
         const operation = retryOperation(fitOperation.current, 'lead-fit', leadId, request);
         fitOperation.current = operation;
-        await leadDecisionService.saveFitAssessment(leadId, request, operation.key);
+        const savedFit = await leadDecisionService.saveFitAssessment(leadId, request, operation.key);
         fitOperation.current = null;
         written.fitSaved = true;
-        current = await freshWorkbench();
+        // The save answers with the assessment it recorded; nothing the next write quotes (the
+        // revision, its decision version, the participation version, the lines) moves with it.
+        // Re-reading the whole request here rebuilt every line of it for nothing (PERF-03).
+        current = { ...current, fitAssessment: savedFit ?? current.fitAssessment };
       }
 
       // The server refuses to commit a Bid line on a lead that is not yet QUALIFIED, so the
@@ -521,11 +527,15 @@ const DecidePage: React.FC = () => {
         const scope = commit ? 'lead-participation-commit' : 'lead-participation-draft';
         const operation = retryOperation(participationOperation.current, scope, leadId, request);
         participationOperation.current = operation;
-        await leadDecisionService.saveParticipation(leadId, request, operation.key);
+        const savedChoices = await leadDecisionService.saveParticipation(leadId, request, operation.key);
         participationOperation.current = null;
         written.choicesSavedNow = true;
         guard.markSaved(formOf(workbench, decisions, concern));
-        current = await freshWorkbench();
+        // A save for a manager stays on this page, which re-reads the request once to show what
+        // was saved. Creating the RFQ needs only the version the save answered with.
+        current = commit && mode === 'rfq'
+          ? { ...current, participationVersion: savedChoices.participationVersion, participationStatus: savedChoices.participationStatus }
+          : await freshWorkbench();
       }
 
       if (mode === 'draft') {
@@ -557,12 +567,25 @@ const DecidePage: React.FC = () => {
         idempotencyKey: promotionKey.current,
       });
       guard.markSaved(formOf(workbench, decisions, concern));
+      // The lead has left the Leads queue. 'all' refetches the inactive list now, so going back
+      // to it does not paint the converted lead from cache first. Not awaited: nobody is looking.
+      void queryClient.invalidateQueries({ queryKey: ['leads'], refetchType: 'all' });
+      void queryClient.invalidateQueries({ queryKey: ['leads-total'], refetchType: 'all' });
       enqueueSnackbar(
         `RFQ ${receipt.rfqNumber || `#${receipt.rfqId}`} created with ${receipt.promotedLineCount} line${receipt.promotedLineCount === 1 ? '' : 's'}.`,
         { variant: 'success' },
       );
-      await refresh();
-      if (commercialAccess.canViewPromotedRfq) navigate(`/procurement/rfqs/view/${receipt.rfqId}`);
+      if (commercialAccess.canViewPromotedRfq) {
+        // Leaving for the RFQ: the request is marked out of date for the next visit, not rebuilt
+        // now for a page nobody will look at.
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['lead-decision-workbench', leadId], refetchType: 'none' }),
+          refresh({ workbench: false }),
+        ]);
+        navigate(`/procurement/rfqs/view/${receipt.rfqId}`);
+      } else {
+        await refresh();
+      }
     } catch (error: unknown) {
       const sentence = partialFailureSentence(
         mode,
@@ -855,7 +878,7 @@ const DecidePage: React.FC = () => {
         tone={dueTone}
         value={workbench.bidClosingDate ? (
           <>
-            {formatDateSafe(workbench.bidClosingDate)}
+            {formatDeadline(workbench.bidClosingDate)}
             <Box
               component="span"
               sx={{
@@ -926,17 +949,19 @@ const DecidePage: React.FC = () => {
             <Typography id="decide-customer" component="h1" variant="h5" sx={{ fontWeight: 800, fontSize: { xs: '1.3rem', md: '1.45rem', xl: '1.6rem' }, letterSpacing: '-0.015em', lineHeight: 1.2 }}>
               {workbench.customerName || 'Customer not matched yet'}
             </Typography>
-            {/* A resolved customer is immutable on the server (a database rule refuses any change),
-                so the picker is offered only while the request has none. */}
-            {!locked && commercialAccess.canLinkLeadClient && !workbench.customerId ? (
+            {/* The customer can be chosen, and changed, until an RFQ is made from the request; the
+                server records who changed it. After that the RFQ carries it. */}
+            {!locked && commercialAccess.canLinkLeadClient && (!workbench.customerId || !promotion) ? (
               <Link component="button" type="button" onClick={() => setCustomerDialogOpen(true)} sx={{ fontWeight: 700 }}>
-                Choose the customer
+                {workbench.customerId ? 'Change' : 'Choose the customer'}
               </Link>
             ) : null}
           </Stack>
         </Box>
         {factsRow}
       </Stack>
+
+      <ClosingDateQuestion leadId={leadId} canEdit={canEdit && !locked} />
 
       {/* Banners carry facts. The control for the next move is in the Next step panel, so each
           name appears once; the one exception is a manager reviewing a customer's change, whose
@@ -995,6 +1020,8 @@ const DecidePage: React.FC = () => {
           {new Date(workbenchQuery.dataUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.
         </Alert>
       ) : null}
+
+      <PartialReadNotice leadId={leadId} />
 
       {/* The next step, first. While the request can be decided, the same sentence repeats beside
           the one button in the sticky bar under the lines, and that copy is the one named "Next

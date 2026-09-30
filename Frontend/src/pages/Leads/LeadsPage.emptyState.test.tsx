@@ -32,6 +32,13 @@ vi.mock('../../api/services/decisionService', () => ({
   default: { getDecisionSummaries: vi.fn().mockResolvedValue({ summaries: {} }) },
 }));
 
+// Owner options are a network read the page makes for the assign picker; unmocked, it answered
+// with a non-array and crashed the page mid-test.
+vi.mock('../../api/services/commercialRoutingService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/services/commercialRoutingService')>();
+  return { ...actual, default: { getOwnerOptions: vi.fn().mockResolvedValue([]), changeLeadOwner: vi.fn(), getLeadAssignmentHistory: vi.fn().mockResolvedValue([]) } };
+});
+
 vi.mock('../../hooks/useColumnPreferences', () => ({
   default: () => ({
     columnVisibilityModel: {},
@@ -77,14 +84,26 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     hasPermission.mockReturnValue(true);
-    // The page asks twice: once for the page it shows, once (pageSize 1) for the unfiltered
-    // total that decides whether "nothing here" is a filter or a truly empty tenant. Both empty
-    // here; the "filtered" cases below answer the total with a real number.
-    getAll.mockImplementation((params: { pageSize?: number }) => Promise.resolve(
-      params.pageSize === 1
-        ? { items: [], totalCount: 3, pageNumber: 1, pageSize: 1 }
-        : { items: [], totalCount: 0, pageNumber: 1, pageSize: 10 },
-    ));
+    // The page asks twice: once for the page it shows, once (pageSize 1) for the live total that
+    // decides whether "nothing here" is a filter, work that has all moved on, or a truly empty
+    // tenant. Both empty by default; the cases below answer the total with a real number.
+    answerTotal(0);
+  });
+
+  const answerTotal = (liveTotal: number) => getAll.mockImplementation((params: { pageSize?: number }) => Promise.resolve(
+    params.pageSize === 1
+      ? { items: [], totalCount: liveTotal, pageNumber: 1, pageSize: 1 }
+      : { items: [], totalCount: 0, pageNumber: 1, pageSize: 10 },
+  ));
+
+  it('saysNothingToDecide_whenEveryLiveInquiryHasBecomeAnRfq', async () => {
+    answerTotal(3);
+    renderPage();
+
+    expect(await screen.findByText(/nothing to decide/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no inquiries yet/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /open rfqs/i }));
+    expect(navigate).toHaveBeenCalledWith('/procurement/rfqs/all');
   });
 
   it('saysNoInquiriesYet_andPointsAtInboundMailWhenNothingIsFiltered', async () => {
@@ -100,22 +119,27 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
   });
 
   it('saysTheFiltersMatchedNothing_andOffersToClearThem', async () => {
+    answerTotal(3);
     renderPage();
-    await screen.findByText(/no inquiries yet/i);
+    await screen.findByText(/nothing to decide/i);
 
-    const source = screen.getByLabelText(/where it came from/i);
-    fireEvent.mouseDown(source);
-    const listbox = await screen.findByRole('listbox');
-    fireEvent.click(within(listbox).getByRole('option', { name: /^email$/i }));
+    // Where it came from is in the Customer & bid header, beside the customer.
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by customer' }));
+    const cameFrom = await screen.findByRole('menu', { name: 'Came from' });
+    fireEvent.click(within(cameFrom).getByRole('menuitem', { name: /^email$/i }));
 
-    expect(await screen.findByText(/no inquiries match these filters/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
-    expect(await screen.findByText(/no inquiries yet/i)).toBeInTheDocument();
+    expect(await screen.findByText('No inquiries match')).toBeInTheDocument();
+    expect(screen.getByText('Came from Email')).toBeInTheDocument();
+    // The tabs line carries its own "Clear filters" while a filter is on; this is the empty
+    // state's own button, the last one on the page.
+    fireEvent.click(screen.getAllByRole('button', { name: /clear filters/i }).at(-1)!);
+    expect(await screen.findByText(/nothing to decide/i)).toBeInTheDocument();
   });
 
   it('countsAViewFromAnotherScreenAsAFilter', async () => {
     // A dashboard tile that links here with ?view= narrows the grid without the reader typing
     // anything, so "no inquiries yet" would be a plain lie.
+    answerTotal(3);
     renderPage('/procurement/leads/all?view=needs-review');
 
     expect(await screen.findByText(/no inquiries match these filters/i)).toBeInTheDocument();

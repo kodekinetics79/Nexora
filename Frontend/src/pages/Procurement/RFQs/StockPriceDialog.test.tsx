@@ -153,8 +153,11 @@ describe('Price from stock', () => {
     expect(within(dialog).getByLabelText('Quote price')).toHaveValue(150);
     expect(within(dialog).getByLabelText('Margin on cost percent')).toHaveValue(50);
     expect(within(dialog).getByText(/Profit SAR\s?50\.00 per EA · SAR\s?250\.00 on this line/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/^Below cost \(/)).not.toBeInTheDocument();
     fireEvent.change(within(dialog).getByLabelText('Quote price'), { target: { value: '90' } });
     expect(within(dialog).getByText(/Below cost: a loss of SAR\s?50\.00 on this line/)).toBeInTheDocument();
+    // UX-11: said in red right under the price the rep typed.
+    expect(within(dialog).getByText(/^Below cost \(SAR\s?100\.00 per EA\)$/)).toBeInTheDocument();
     // Informs, never blocks: the rep may still quote under cost.
     expect(within(dialog).getByRole('button', { name: 'Save quote price' })).toBeEnabled();
   });

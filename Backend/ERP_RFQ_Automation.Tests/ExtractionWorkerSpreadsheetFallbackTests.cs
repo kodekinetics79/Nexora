@@ -120,7 +120,9 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         var job = CreateJob(803, "plain-enquiry.txt");
         job.FileType = "txt";
         var queue = new RecordingQueue(job);
-        var llm = new StubLlm(AiProviderClass.Local); // no scripted responses -> every chunk fails
+        // no scripted responses -> every chunk fails; the shipped 8,192-token ceiling keeps the
+        // five lines in one call.
+        var llm = new StubLlm(AiProviderClass.Local) { MaxOutputTokens = 8192 };
         using var services = BuildServices(queue, document, llm, new RecordingPersister());
         var worker = CreateWorker(services);
 

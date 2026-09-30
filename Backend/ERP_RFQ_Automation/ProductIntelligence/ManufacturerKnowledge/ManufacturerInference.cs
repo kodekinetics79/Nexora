@@ -55,7 +55,17 @@ public static partial class ManufacturerInference
     /// <summary>Longest pattern the store keeps; anything longer is a description, not a number.</summary>
     public const int MaxPatternLength = 64;
 
-    private const int MinimumCandidateLength = 2;
+    /// <summary>
+    /// Shortest part-number pattern that is evidence of a maker. Four, not two: on Aramco's
+    /// 6000000031 the store had learned "CR", "PT", "CL", "CS" (and three-letter "GHG", "3RH") and
+    /// wrote GE ENERGY, ABB, COOPER CROUSE HINDS or SIEMENS onto lines whose buyer had approved
+    /// entirely different makers — 25 lines on one document. Two or three characters name a
+    /// product category ("CR" relay, "PT" transformer) far more often than a maker's family.
+    /// </summary>
+    public const int MinimumPatternLength = 4;
+
+    /// <summary>Shortest known maker name recognised inside a description ("ABB").</summary>
+    private const int MinimumNameLength = 2;
 
     /// <summary>Separators that delimit the FIRST segment of a part number.</summary>
     private static readonly char[] SegmentSeparators = ['-', '/', '.', ' ', '_'];
@@ -85,7 +95,7 @@ public static partial class ManufacturerInference
     /// The multi-digit run is where the family ends and the rating or series begins on every
     /// numbering scheme in the pilot corpus.</para>
     ///
-    /// <para><b>What is dropped.</b> Candidates shorter than two characters, and candidates that
+    /// <para><b>What is dropped.</b> Candidates shorter than <see cref="MinimumPatternLength"/>, and candidates that
     /// are purely numeric: a numeric prefix such as "60" identifies a quantity, a size, or nothing
     /// at all, and learning it would attribute every "60xxxx" line on every future document to
     /// whoever happened to be reviewed first. Anything longer than <see cref="MaxPatternLength"/>
@@ -117,7 +127,7 @@ public static partial class ManufacturerInference
         void Add(string? candidate)
         {
             if (candidate is null) return;
-            if (candidate.Length < MinimumCandidateLength || candidate.Length > MaxPatternLength) return;
+            if (candidate.Length < MinimumPatternLength || candidate.Length > MaxPatternLength) return;
             if (candidate.All(char.IsDigit)) return;
             if (candidates.Contains(candidate, StringComparer.Ordinal)) return;
             candidates.Add(candidate);
@@ -159,17 +169,25 @@ public static partial class ManufacturerInference
     /// already reviewed can be recognised in a description — a free-text scan for "any word that
     /// looks like a brand" is how "Standard" and "General" become manufacturers.
     /// </param>
+    /// <param name="buyerListsApprovedMakers">
+    /// True when the line carries the buyer's own list of approved makers. Such a line leaves the
+    /// manufacturer blank ON PURPOSE — the buyer accepts any maker on the list — so nothing is
+    /// inferred: a name from history is at best one arbitrary pick from the list and at worst a
+    /// maker the buyer did not approve, and a quote for another maker is rejected.
+    /// </param>
     public static ManufacturerInferenceResult? Infer(
         string? statedManufacturer,
         string? description,
         string? partNumber,
         IReadOnlyList<ManufacturerPartPattern> tenantPatterns,
-        IReadOnlySet<string> knownManufacturers)
+        IReadOnlySet<string> knownManufacturers,
+        bool buyerListsApprovedMakers = false)
     {
         ArgumentNullException.ThrowIfNull(tenantPatterns);
         ArgumentNullException.ThrowIfNull(knownManufacturers);
 
         if (!string.IsNullOrWhiteSpace(statedManufacturer)) return null;
+        if (buyerListsApprovedMakers) return null;
 
         return InferFromDescription(description, knownManufacturers)
                ?? InferFromPattern(partNumber, tenantPatterns);
@@ -197,7 +215,7 @@ public static partial class ManufacturerInference
         foreach (var name in knownManufacturers)
         {
             var folded = FoldText(name);
-            if (folded.Length < MinimumCandidateLength) continue;
+            if (folded.Length < MinimumNameLength) continue;
             if (!padded.Contains(" " + folded + " ", StringComparison.Ordinal)) continue;
             if (matches.Any(m => m.Folded == folded)) continue;
             matches.Add((name, folded));
@@ -228,7 +246,11 @@ public static partial class ManufacturerInference
 
         foreach (var candidate in PatternCandidates(partNumber))
         {
-            var rows = tenantPatterns.Where(p => string.Equals(p.Pattern, candidate, StringComparison.Ordinal)).ToList();
+            // A row whose maker still carries an export status flag ("$$ SIEMENS AG") was learned
+            // from a name the reader failed to clean; it is not a maker and never answers.
+            var rows = tenantPatterns.Where(p => string.Equals(p.Pattern, candidate, StringComparison.Ordinal)
+                                                 && !ERP_RFQ_Automation.Extraction.Templates.ManufacturingPartText.CarriesStatusFlag(p.Manufacturer))
+                .ToList();
             if (rows.Count == 0) continue;
 
             var makers = rows.Select(r => r.NormalizedManufacturer).Distinct(StringComparer.Ordinal).ToList();
