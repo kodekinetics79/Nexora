@@ -88,7 +88,7 @@ function LineChoiceControl({ quoteId, rfqId, line, currencyCode, onSaved }: {
   React.useEffect(() => {
     if (mode !== "ESTIMATE" || estimate !== "" || !record.data) return;
     const v = record.data;
-    const hint = v.trackRecord.lastQuoted?.unitPrice ?? v.trackRecord.lastWon?.unitPrice ?? v.supplierPrices?.[0]?.cost ?? v.price.unitPrice;
+    const hint = v.trackRecord?.lastQuoted?.unitPrice ?? v.trackRecord?.lastWon?.unitPrice ?? v.supplierPrices?.[0]?.cost ?? v.price.unitPrice;
     if (hint) setEstimate(String(hint));
   }, [mode, record.data, estimate]);
 

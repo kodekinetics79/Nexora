@@ -786,8 +786,10 @@ export function OtherMakerStockAction({ rfqId, itemId, canPrice }: { rfqId: numb
 
 /** "Last quoted SAR 130.00 · Never won", from the company's record on the part. */
 const recordHint = (view: StockLinePrice) => {
+  // A price answer without a track record (an older server, a part never priced) reads as
+  // "never quoted"; it must not take the RFQ page down with it.
   const track = view.trackRecord;
-  if (!track.lastQuoted && !track.lastWon) return "Never quoted before";
+  if (!track?.lastQuoted && !track?.lastWon) return "Never quoted before";
   return [
     track.lastQuoted ? `Last quoted ${formatMoney(track.lastQuoted.unitPrice, track.lastQuoted.currencyCode)}` : null,
     track.lastWon ? `Last won ${formatMoney(track.lastWon.unitPrice, track.lastWon.currencyCode)}` : "Never won",
