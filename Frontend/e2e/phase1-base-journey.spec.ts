@@ -109,7 +109,7 @@ async function skipLineThroughControls(page: Page, group: Locator) {
 async function uploadAndWaitForReconciliation(page: Page, file: string): Promise<string> {
   await page.goto('/procurement/leads/intelligence');
   await page.locator('input[type="file"]').setInputFiles(file);
-  await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+  await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
   await expect(page).toHaveURL(/\/procurement\/leads\/ingestion\/[0-9a-f-]+$/i);
   const batchId = page.url().split('/').at(-1);
   expect(batchId, 'reconciliation route must carry the durable batch id').toBeTruthy();

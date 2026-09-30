@@ -71,6 +71,12 @@ COPY ERP_RFQ_Automation/ ERP_RFQ_Automation/
 #     SQL inside individual migrations and would be silently lost by a regenerated baseline.
 #     That is why the baseline is hand-authored and reviewed, not scaffolded.
 #
+# AMENDED 2026-09-29. The first point no longer holds as written: from 2026-08-16 on, about twenty
+# migrations were authored with [DbContext] and [Migration] on the class itself and no Designer
+# file, and MigrationDiscoveryTests proves EF enumerates every one. The second point still holds,
+# but only for AlterColumn. So an ALREADY-APPLIED migration whose Up() has no AlterColumn can shed
+# its Designer file once its attributes move onto the class — see the budget note below.
+#
 # TO RE-MEASURE, don't guess:
 #     scripts/dev/measure-build-memory.sh --snapshot --mode docker --memory 7g --scenario baseline
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
@@ -92,6 +98,13 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
 # 2026-09-27: the estate reached 901,672 lines (32 files) and the guard stopped the deploy of
 # main. A local build at 872,515 peaked at 5,875 MB and passed. Raised to 1,100,000, still about
 # half the last measured pass above; the next squash is due before this is reached.
+# 2026-09-29: that was wrong for Render. Five consecutive deploys of main (98390fdd..1ea47c20,
+# including a manual retry) were OOM-killed at 901,672 lines — "Out of memory (used over 8Gi)" in
+# the deploy event, log silent from `dotnet publish` on. Fixed by removing 30 Designer files from
+# applied migrations (attributes moved onto the class; kept: the latest migration, and
+# EmailInquiryManifestContractVersionSentinel because its Up() uses AlterColumn). The full
+# `dotnet ef migrations script` output is byte-identical before and after. Estate: 57,117 lines,
+# 2 files. Budget lowered to 600,000 — Render last deployed cleanly near 640k.
 #
 # It counts the EVALUATED @(Compile) item list, not files on disk. That distinction is the whole
 # point: the squash leaves the 134 superseded migrations on disk for reversibility and removes
@@ -102,7 +115,7 @@ RUN designers=$(dotnet msbuild ERP_RFQ_Automation/ERP_RFQ_Automation.csproj -nol
     count=$(printf '%s\n' "${designers}" | sed '/^$/d' | wc -l); \
     lines=$(printf '%s\n' "${designers}" | tr '\n' '\0' \
               | xargs -0 --no-run-if-empty cat | wc -l); \
-    budget=1100000; \
+    budget=600000; \
     echo "migration Designer files: ${count} files, ${lines} lines (budget ${budget})"; \
     if [ "${count}" -eq 0 ]; then \
       echo "BUILD SAFETY FAILURE: no compiled EF migration Designer files."; \

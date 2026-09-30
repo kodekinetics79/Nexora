@@ -12,7 +12,7 @@ test('authorized bulk upload reaches governed reconciliation', async ({ page }) 
   });
   await page.goto('/procurement/leads/manual-upload');
   await page.locator('input[type=file]').setInputFiles(fixture.uploadFile!);
-  await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+  await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
   await expect(page).toHaveURL(new RegExp(`/procurement/leads/ingestion/${fixture.batchId}$`), { timeout: 30_000 });
   await expect(page.getByRole('heading', { name: 'Batch reconciliation' })).toBeVisible({ timeout: 60_000 });
   await expect(page.getByRole('button', { name: /\d+ New leads/ })).toBeVisible({ timeout: 60_000 });
@@ -56,7 +56,7 @@ test('scanner outage remains recoverable and retries the stored occurrence', asy
 
   await page.goto('/procurement/leads/manual-upload');
   await page.locator('input[type=file]').setInputFiles(fixture.uploadFile!);
-  await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+  await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
 
   await expect(page).toHaveURL(new RegExp(`/procurement/leads/ingestion/${batchId}$`));
   await expect(page.getByText('Awaiting Security Scan', { exact: true }).first()).toBeVisible();

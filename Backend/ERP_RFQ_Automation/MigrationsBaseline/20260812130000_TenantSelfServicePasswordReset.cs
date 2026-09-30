@@ -1,6 +1,8 @@
-using System;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+using System;
 
 #nullable disable
 
@@ -40,6 +42,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// caller gains from this INSERT is exactly "cause an email to be sent to somebody else's
     /// address", which is what the endpoint's rate limiter and durable per-IP counter are for.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260812130000_TenantSelfServicePasswordReset")]
     public partial class TenantSelfServicePasswordReset : Migration
     {
         /// <inheritdoc />

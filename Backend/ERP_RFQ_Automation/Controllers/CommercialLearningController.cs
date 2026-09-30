@@ -11,7 +11,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [Route("api/commercial-learning")]
 public sealed class CommercialLearningController(CommercialLearningService service,
     LearningGovernanceService governance,
-    IRoleGate roleGate) : ControllerBase
+    IAccountTeamScopeResolver accountScope) : ControllerBase
 {
     [HttpGet("products")]
     [RequireModulePermission("Products", PermissionAction.View)]
@@ -72,8 +72,13 @@ public sealed class CommercialLearningController(CommercialLearningService servi
     {
         var tenantId = TenantId();
         var actorUserId = ActorUserId();
-        if (await IsManagerAsync(tenantId))
+        // A manager reads the reps in their own team tree, not every rep in the business unit:
+        // the old manager-or-admin boolean handed a team lead their peers' coaching and losses.
+        var scope = await accountScope.ResolveAsync(actorUserId, RoleId(), tenantId, DateTime.UtcNow, cancellationToken);
+        if (scope.IsTenantWide)
             return Ok(await service.GetSalesRepsAsync(tenantId, limit, cancellationToken));
+        if (scope.Tier == AccountScopeTier.ManagedScope)
+            return Ok(await service.GetSalesRepsAsync(tenantId, limit, cancellationToken, scope.UserIds));
 
         IReadOnlyCollection<SalesRepCommercialMemory> ownMemory =
             [await service.GetSalesRepAsync(tenantId, actorUserId, cancellationToken)];
@@ -157,10 +162,12 @@ public sealed class CommercialLearningController(CommercialLearningService servi
         ? actor : throw new UnauthorizedAccessException("A valid authenticated actor claim is required.");
     private long RoleId() => long.TryParse(User.FindFirst("roleId")?.Value, out var role) && role > 0
         ? role : throw new UnauthorizedAccessException("A valid authenticated role claim is required.");
-    private Task<bool> IsManagerAsync(long tenantId) =>
-        roleGate.IsManagerOrAdminAsync(RoleId(), tenantId);
-    private async Task<bool> CanReadRepAsync(long tenantId, long requestedUserId) =>
-        requestedUserId == ActorUserId() || await IsManagerAsync(tenantId);
+    private async Task<bool> CanReadRepAsync(long tenantId, long requestedUserId)
+    {
+        if (requestedUserId == ActorUserId()) return true;
+        var scope = await accountScope.ResolveAsync(ActorUserId(), RoleId(), tenantId, DateTime.UtcNow);
+        return scope.IsTenantWide || scope.UserIds.Contains(requestedUserId);
+    }
     private string IdempotencyKey()
     {
         var value = Request.Headers["Idempotency-Key"].ToString().Trim();

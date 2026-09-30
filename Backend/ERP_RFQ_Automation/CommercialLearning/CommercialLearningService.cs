@@ -372,12 +372,20 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                     orderWins.ContainsKey(x.Id) ? "CUSTOMER_ORDER_WIN" : Outcome(x) + ":" + Reason(x))).ToArray());
     }
 
+    /// <param name="visibleUserIds">The reps the caller may read (a manager's team tree); null for
+    /// the whole business unit.</param>
     public async Task<IReadOnlyCollection<SalesRepCommercialMemory>> GetSalesRepsAsync(long businessUnitId,
-        int limit, CancellationToken cancellationToken = default)
+        int limit, CancellationToken cancellationToken = default, IReadOnlyCollection<long>? visibleUserIds = null)
     {
         EnsureTenant(businessUnitId);
-        var userIds = await context.Set<ERP_RFQ_Automation.CommercialRouting.LeadAssignment>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId)
+        var assignments = context.Set<ERP_RFQ_Automation.CommercialRouting.LeadAssignment>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId);
+        if (visibleUserIds is not null)
+        {
+            var visible = visibleUserIds.ToArray();
+            assignments = assignments.Where(x => visible.Contains(x.ToUserId));
+        }
+        var userIds = await assignments
             .GroupBy(x => x.ToUserId).OrderByDescending(x => x.Count()).Take(Math.Clamp(limit, 1, 200))
             .Select(x => x.Key).ToArrayAsync(cancellationToken);
         var results = new List<SalesRepCommercialMemory>(userIds.Length);

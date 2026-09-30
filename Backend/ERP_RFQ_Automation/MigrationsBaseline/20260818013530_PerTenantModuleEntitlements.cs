@@ -1,3 +1,5 @@
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -36,6 +38,8 @@ namespace ERP_RFQ_Automation.Migrations
     /// refuses to start instead of refusing every customer. <c>nexora_pipeline_app</c> needs
     /// nothing: it holds table-level SELECT on <c>platform."Tenants"</c>.</para>
     /// </summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260818013530_PerTenantModuleEntitlements")]
     public partial class PerTenantModuleEntitlements : Migration
     {
         /// <inheritdoc />

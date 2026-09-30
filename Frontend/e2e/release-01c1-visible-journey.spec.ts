@@ -83,7 +83,7 @@ test('authenticated four-inquiry bulk reconciliation is visible, governed, and t
     await page.locator('input[type="file"]').setInputFiles(files);
     await expect(page.getByText('01-new.csv')).toBeVisible();
     await expect(page.getByText('04-possible-match.csv')).toBeVisible();
-    await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
+    await page.getByRole('button', { name: /^Upload \d+ files?$/ }).click();
     await expect(page).toHaveURL(/\/procurement\/leads\/ingestion\/[0-9a-f-]+$/i);
     await expect(page.getByRole('heading', { name: 'Batch reconciliation' })).toBeVisible();
   });

@@ -1,6 +1,8 @@
-﻿using System;
+﻿using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+using System;
 
 #nullable disable
 
@@ -8,6 +10,8 @@ namespace ERP_RFQ_Automation.Migrations
 {
     /// <inheritdoc />
     /// <summary>How a company, and each of its sales people, word the request emailed to suppliers. Tenant-isolated.</summary>
+    [DbContext(typeof(ErpRfqAutomationContext))]
+    [Migration("20260916222210_SupplierEmailSettings")]
     public partial class SupplierEmailSettings : Migration
     {
         /// <inheritdoc />
