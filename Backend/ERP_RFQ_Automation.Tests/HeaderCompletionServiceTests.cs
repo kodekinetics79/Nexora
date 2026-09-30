@@ -49,7 +49,7 @@ public sealed class HeaderCompletionServiceTests
 
     private static readonly HeaderCompletionResult Nothing = new(null, null, null, null, null, null, null, null, null, null, 0.5);
 
-    private static DocumentExtractionInput Input(List<RfqSpreadsheetRow> rows, string? narrative = null) => new()
+    private static DocumentExtractionInput Input(List<RfqSpreadsheetRow> rows, string? narrative = null, string? opening = null) => new()
     {
         BusinessUnitId = 7,
         SourceId = "job:42",
@@ -61,6 +61,7 @@ public sealed class HeaderCompletionServiceTests
         HeaderText = string.Empty,
         LineItemRegions = rows.Select(r => r.ProductName ?? string.Empty).ToList(),
         DocumentNarrative = narrative,
+        DocumentOpeningText = opening,
     };
 
     private static List<RfqSpreadsheetRow> Rows(Dictionary<string, string>? labels = null, string? closing = null)
@@ -145,10 +146,10 @@ public sealed class HeaderCompletionServiceTests
     }
 
     [Fact]
-    public async Task A_document_that_states_its_closing_date_is_never_sent_to_the_model()
+    public async Task A_document_that_states_its_header_facts_and_its_buyer_is_never_sent_to_the_model()
     {
         var rows = Rows(new Dictionary<string, string> { ["Currency"] = "USD" }, closing: "2026-08-10");
-        rows.ForEach(r => { r.RfqNo = "RFQ-1"; r.DeliveryLocation = "Dammam"; r.AgreementReference = "FA-1"; r.RequiredDeliveryDate = "2026-09-01"; });
+        rows.ForEach(r => { r.RfqNo = "RFQ-1"; r.DeliveryLocation = "Dammam"; r.AgreementReference = "FA-1"; r.RequiredDeliveryDate = "2026-09-01"; r.BuyerOrganisation = "Marafiq"; });
         var llm = new ScriptedLlm(Nothing);
         var service = Service(llm);
 
@@ -214,6 +215,72 @@ public sealed class HeaderCompletionServiceTests
 
         Assert.All(rows, row => Assert.Null(row.BidClosingDate));
     }
+
+    [Fact]
+    public async Task The_buyer_organisation_is_read_from_the_first_table_rows_when_the_header_does_not_name_it()
+    {
+        // Every header fact is stated; only the buyer is unknown. Aramco's print names itself only
+        // inside its terms: "…that Saudi Aramco has requested".
+        var rows = Rows(new Dictionary<string, string> { ["Owner"] = "saadalmuteb" }, closing: "2026-10-08 15:00");
+        rows.ForEach(r => { r.RfqNo = "6000000028"; r.DeliveryLocation = "Dhahran"; r.AgreementReference = "FA-1"; r.RequiredDeliveryDate = "2027-01-02"; });
+        var opening = "Timing Rules | Due date | 10/8/2026 3:00 PM\n6.2 Part Number Revision | Is Vendor's quotation for all items matching with the product, part or model number that Saudi Aramco has requested?";
+        var llm = new ScriptedLlm(Nothing with
+        {
+            BuyerOrganisation = "Saudi Aramco",
+            BuyerOrganisationSpan = "part or model number that Saudi Aramco has requested",
+            // Anything else the call reports is not taken: only the organisation is read from it.
+            BidClosingDate = "2026-10-09", BidClosingDateSpan = "Due date | 10/8/2026 3:00 PM",
+        });
+        var service = Service(llm);
+
+        Assert.True(service.HasGap(Input(rows, opening: opening)));
+        var outcome = await service.CompleteAsync(Input(rows, opening: opening));
+
+        Assert.Equal(new[] { HeaderCompletionService.BuyerOrganisationField }, outcome.CompletedFields);
+        Assert.Equal(1, llm.Calls);
+        Assert.Equal("buyer:job:42:a2", llm.LastContext!.IdempotencyKey);
+        Assert.Contains("OTHER TEXT FROM THE DOCUMENT:", llm.LastText);
+        Assert.All(rows, row =>
+        {
+            Assert.Equal("Saudi Aramco", row.BuyerOrganisation);
+            Assert.Equal("part or model number that Saudi Aramco has requested", row.BuyerOrganisationEvidence);
+            Assert.Equal("2026-10-08 15:00", row.BidClosingDate);
+        });
+    }
+
+    [Fact]
+    public async Task A_date_quoted_from_the_table_rows_is_never_the_documents_date()
+    {
+        // The header lacks a closing date; the only date the call can quote sits in the table rows,
+        // which are sent for the buyer's name alone. It must not become the document's date.
+        var rows = Rows(new Dictionary<string, string> { ["Currency"] = "US Dollar" });
+        var opening = "Requested Delivery Date | Sat, 2 Jan, 2027\nStorage Location | Saudi Electricity Company 2241-RA01-Rabigh Power Plant";
+        var llm = new ScriptedLlm(Nothing with
+        {
+            BidClosingDate = "2027-01-02", BidClosingDateSpan = "Requested Delivery Date | Sat, 2 Jan, 2027",
+            BuyerOrganisation = "Saudi Electricity Company", BuyerOrganisationSpan = "Storage Location | Saudi Electricity Company 2241-RA01",
+        });
+
+        var outcome = await Service(llm).CompleteAsync(Input(rows, opening: opening));
+
+        Assert.Equal(2, llm.Calls);
+        Assert.Contains(RfqSpreadsheetFields.BidClosingDate, outcome.RejectedFields);
+        Assert.Equal(new[] { HeaderCompletionService.BuyerOrganisationField }, outcome.CompletedFields);
+        Assert.All(rows, row =>
+        {
+            Assert.Null(row.BidClosingDate);
+            Assert.Equal("Saudi Electricity Company", row.BuyerOrganisation);
+        });
+    }
+
+    [Theory]
+    [InlineData("Saudi Aramco", "that Aramco has requested")]            // the quote does not contain the name
+    [InlineData("Saudi Aramco", "that Saudi Aramco demands")]             // the quote is not in the text
+    [InlineData("buyer@aramco.com", "buyer@aramco.com has requested")]    // an address is not an organisation
+    [InlineData("1234567890", "1234567890 has requested")]                // nor is a number
+    public void A_buyer_name_the_document_does_not_state_as_quoted_is_dropped(string name, string span)
+        => Assert.Null(HeaderCompletionService.AnchorOrganisation(name, span,
+            "Is the part that Saudi Aramco has requested? that Aramco has requested; buyer@aramco.com has requested; 1234567890 has requested"));
 
     [Fact]
     public void The_buyer_name_is_never_completed()

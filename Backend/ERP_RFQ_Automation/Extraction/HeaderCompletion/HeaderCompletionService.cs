@@ -94,11 +94,37 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
         RfqSpreadsheetFields.AgreementReference,
     ];
 
+    /// <summary>The name <see cref="HeaderCompletionOutcome.CompletedFields"/> uses for the buyer's organisation.</summary>
+    public const string BuyerOrganisationField = "BuyerOrganisation";
+
+    /// <summary>Text the organisation read may add after the header: the first rows of the tables.</summary>
+    private const int MaxOpeningChars = 8_000;
+    private const string OpeningHeading = "OTHER TEXT FROM THE DOCUMENT:";
+
     public bool HasGap(DocumentExtractionInput input)
-        => input.IsStructured
-           && input.StructuredRows is { Count: > 0 } rows
-           && MissingFields(rows).Count > 0
-           && ComposeHeaderText(rows, input.DocumentNarrative).Length > 0;
+    {
+        if (!input.IsStructured || input.StructuredRows is not { Count: > 0 } rows) return false;
+        var header = ComposeHeaderText(rows, input.DocumentNarrative);
+        return (MissingFields(rows).Count > 0 && header.Length > 0)
+               || (NeedsOrganisation(rows) && ComposeOrganisationText(header, input.DocumentOpeningText).Length > 0);
+    }
+
+    /// <summary>No row names the organisation asking for the quotation.</summary>
+    internal static bool NeedsOrganisation(IReadOnlyList<RfqSpreadsheetRow> rows)
+        => rows.All(row => string.IsNullOrWhiteSpace(row.BuyerOrganisation));
+
+    /// <summary>
+    /// The header text, then the first rows of the tables under their own heading. Prints state the
+    /// buyer where no label says "buyer": "…that Saudi Aramco has requested", "Storage Location:
+    /// Saudi Electricity Company …". Only the organisation may be read from the added section.
+    /// </summary>
+    internal static string ComposeOrganisationText(string header, string? opening)
+    {
+        if (string.IsNullOrWhiteSpace(opening)) return header;
+        var extra = opening.Trim();
+        if (extra.Length > MaxOpeningChars) extra = extra[..MaxOpeningChars];
+        return header.Length == 0 ? $"{OpeningHeading}\n{extra}" : $"{header}\n\n{OpeningHeading}\n{extra}";
+    }
 
     public async Task<HeaderCompletionOutcome> CompleteAsync(DocumentExtractionInput input, CancellationToken ct = default)
     {
@@ -106,11 +132,14 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
             return HeaderCompletionOutcome.None("notStructured");
 
         var missing = MissingFields(rows);
-        if (missing.Count == 0)
+        var needOrganisation = NeedsOrganisation(rows);
+        if (missing.Count == 0 && !needOrganisation)
             return HeaderCompletionOutcome.None("nothingMissing");
 
         var text = ComposeHeaderText(rows, input.DocumentNarrative);
-        if (text.Length == 0)
+        var organisationText = needOrganisation ? ComposeOrganisationText(text, input.DocumentOpeningText) : string.Empty;
+        if (missing.Count > 0 && text.Length == 0) missing = [];
+        if (missing.Count == 0 && organisationText.Length == 0)
             return HeaderCompletionOutcome.None("noHeaderText");
 
         if (_llm.ProviderClass == AiProviderClass.External)
@@ -128,6 +157,11 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
                 return HeaderCompletionOutcome.None($"providerNotAuthorised:{decision.Reason}");
             }
         }
+
+        var completed = new List<string>();
+        var rejected = new List<string>();
+        if (missing.Count == 0)
+            return await ReadOrganisationAsync(input, rows, organisationText, completed, rejected, ct);
 
         HeaderCompletionResult? result;
         try
@@ -151,10 +185,10 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
         }
 
         if (result is null)
-            return HeaderCompletionOutcome.None("noResult");
+            return needOrganisation && organisationText != text
+                ? await ReadOrganisationAsync(input, rows, organisationText, completed, rejected, ct)
+                : HeaderCompletionOutcome.None("noResult");
 
-        var completed = new List<string>();
-        var rejected = new List<string>();
         foreach (var field in missing)
         {
             var (value, span) = Offered(result, field);
@@ -189,7 +223,81 @@ public sealed class HeaderCompletionService : IHeaderCompletionService
                 "Header completion filled {Fields} on {Document} from its own header text.",
                 string.Join(", ", completed), input.SourceDocumentName);
 
+        // The header alone may already name the buyer; only if it does not is the wider text read.
+        if (needOrganisation && ApplyOrganisation(result, text, rows, input.SourceDocumentName, completed, rejected))
+            needOrganisation = false;
+        if (needOrganisation && organisationText != text)
+            return await ReadOrganisationAsync(input, rows, organisationText, completed, rejected, ct);
+
         return new HeaderCompletionOutcome(completed, rejected, null);
+    }
+
+    /// <summary>
+    /// One call over the header and the first rows of the tables, from which ONLY the buyer's
+    /// organisation is taken. A refused or failed call leaves the client unresolved, as before.
+    /// </summary>
+    private async Task<HeaderCompletionOutcome> ReadOrganisationAsync(
+        DocumentExtractionInput input, IReadOnlyList<RfqSpreadsheetRow> rows, string organisationText,
+        List<string> completed, List<string> rejected, CancellationToken ct)
+    {
+        if (organisationText.Length == 0)
+            return new HeaderCompletionOutcome(completed, rejected, completed.Count == 0 ? "noHeaderText" : null);
+        HeaderCompletionResult? result;
+        try
+        {
+            result = await _llm.CompleteHeaderAsync(organisationText, new AiCallContext(
+                input.BusinessUnitId, AiPurposes.RfqExtraction,
+                $"buyer:{input.SourceId}:a{input.AttemptNumber}", AiPromptVersions.HeaderCompletion,
+                ExtractionJobId: input.ExtractionJobId,
+                SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _log.LogInformation(ex, "Buyer organisation read failed for {Document}; the client stays unresolved.", input.SourceDocumentName);
+            return new HeaderCompletionOutcome(completed, rejected, completed.Count == 0 ? "providerFailed" : null);
+        }
+        ApplyOrganisation(result, organisationText, rows, input.SourceDocumentName, completed, rejected);
+        return new HeaderCompletionOutcome(completed, rejected, null);
+    }
+
+    /// <summary>Puts an anchored organisation on every row. True when one was kept.</summary>
+    private bool ApplyOrganisation(
+        HeaderCompletionResult? result, string text, IReadOnlyList<RfqSpreadsheetRow> rows, string document,
+        List<string> completed, List<string> rejected)
+    {
+        if (result is null || string.IsNullOrWhiteSpace(result.BuyerOrganisation)) return false;
+        var name = AnchorOrganisation(result.BuyerOrganisation, result.BuyerOrganisationSpan, text);
+        if (name is null)
+        {
+            rejected.Add(BuyerOrganisationField);
+            _log.LogInformation(
+                "Buyer organisation \"{Value}\" offered for {Document} was not found verbatim in its quote or the text; dropped.",
+                result.BuyerOrganisation, document);
+            return false;
+        }
+        foreach (var row in rows)
+        {
+            row.BuyerOrganisation = name;
+            row.BuyerOrganisationEvidence = result.BuyerOrganisationSpan!.Trim();
+        }
+        completed.Add(BuyerOrganisationField);
+        _log.LogInformation("Buyer organisation \"{Name}\" read from {Document}.", name, document);
+        return true;
+    }
+
+    /// <summary>
+    /// The organisation name, or null when it cannot be trusted: its quote must occur verbatim in
+    /// the text and contain the name; a name with no letters, an e-mail address or a paragraph is
+    /// not an organisation.
+    /// </summary>
+    internal static string? AnchorOrganisation(string? value, string? span, string text)
+    {
+        if (string.IsNullOrWhiteSpace(value) || string.IsNullOrWhiteSpace(span)) return null;
+        var name = value.Trim();
+        if (name.Length < 2 || name.Length > 120 || !name.Any(char.IsLetter) || name.Contains('@')) return null;
+        if (span.Length > 240 || !Fold(text).Contains(Fold(span), StringComparison.Ordinal)) return null;
+        return Fold(span).Contains(Fold(name), StringComparison.Ordinal) ? name : null;
     }
 
     /// <summary>Fields no row states. A field any row states is the document's own business.</summary>

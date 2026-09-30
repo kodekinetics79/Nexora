@@ -31,6 +31,7 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IIamAuditWriter? _audit;
         private readonly ITenantAdminInvitationService? _invitations;
         private readonly ErpRfqAutomationContext? _context;
+        private readonly ERP_RFQ_Automation.Platform.Entitlements.ITenantAccessService? _tenantAccess;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50 };
 
         /// <summary>
@@ -45,7 +46,8 @@ namespace ERP_RFQ_Automation.Controllers
             IRolePermissionRepository? rolePermissions = null,
             IIamAuditWriter? audit = null,
             ITenantAdminInvitationService? invitations = null,
-            ErpRfqAutomationContext? context = null)
+            ErpRfqAutomationContext? context = null,
+            ERP_RFQ_Automation.Platform.Entitlements.ITenantAccessService? tenantAccess = null)
         {
             _repository = repository;
             _environment = environment;
@@ -55,6 +57,7 @@ namespace ERP_RFQ_Automation.Controllers
             _audit = audit;
             _invitations = invitations;
             _context = context;
+            _tenantAccess = tenantAccess;
         }
 
         // GET: api/User?pageNumber=1&pageSize=10&id=1&userName=john&email=john@example.com&roleId=1&region=US&isActive=true&businessUnitId=1
@@ -171,6 +174,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (_entitlements is not null)
                     response.Entitlements =
                         (await _entitlements.GetEnabledFeaturesAsync(actor.BusinessUnitId)).ToList();
+                // Cached with the access snapshot the request guard already resolved: no extra query.
+                if (_tenantAccess is not null)
+                    response.TimeZoneId = (await _tenantAccess.GetAccessAsync(actor.BusinessUnitId)).TimeZoneId;
 
                 if (actor.RoleId is not { } roleId)
                     return Ok(response);

@@ -616,6 +616,42 @@ public sealed class PlatformEntitlementEnforcementTests
             me.Entitlements);
     }
 
+    /// <summary>
+    /// The company's time zone, chosen when the company was created, rides the same session read,
+    /// so screens count a closing date's days left on the company's calendar, as the server does.
+    /// </summary>
+    [Fact]
+    public async Task MePermissions_CarriesTheCompanyTimeZone()
+    {
+        using var db = new TestDb();
+        using var seed = db.ContextFor(null);
+        SeedTenant(seed, 1, Bu, TenantStatus.Active).TimeZoneId = "Asia/Riyadh";
+        seed.SaveChanges();
+
+        using var ctx = db.ContextFor(null);
+        var controller = new UserController(
+            new StubUserRepository(), new StubWebHostEnvironment(), new StubRoleGate(),
+            tenantAccess: AccessService(ctx))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(new[]
+                    {
+                        new Claim("businessUnitId", Bu.ToString()),
+                        new Claim(ClaimTypes.NameIdentifier, "999")
+                    }, "test"))
+                }
+            }
+        };
+
+        var result = await controller.GetMyPermissions();
+
+        var me = Assert.IsType<MyPermissionsResponseDTO>(Assert.IsType<OkObjectResult>(result.Result).Value);
+        Assert.Equal("Asia/Riyadh", me.TimeZoneId);
+    }
+
     [Fact]
     public async Task UserReactivation_AtSeatCap_Returns403()
     {

@@ -2,6 +2,7 @@ using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Agent.Tools;
@@ -213,7 +214,12 @@ public sealed class SearchSuppliersTool : IAgentTool
 public sealed class SearchLeadsTool : IAgentTool
 {
     private readonly ErpRfqAutomationContext _db;
-    public SearchLeadsTool(ErpRfqAutomationContext db) => _db = db;
+    private readonly ICompanyClock _companyClock;
+    public SearchLeadsTool(ErpRfqAutomationContext db, ICompanyClock? companyClock = null)
+    {
+        _db = db;
+        _companyClock = companyClock ?? CompanyClock.Utc;
+    }
 
     public string Name => AgentToolNames.SearchLeads;
     public string Description =>
@@ -259,11 +265,15 @@ public sealed class SearchLeadsTool : IAgentTool
             query = query.Where(l => l.AssignTo != null && userIds.Contains(l.AssignTo.Value));
         }
 
+        // Closing dates are the buyer's wall-clock time: "overdue" is on the company's clock.
         if (overdueOnly)
+        {
+            var companyNow = await _companyClock.NowAsync(ctx.BusinessUnitId, ct);
             query = query.Where(l => l.BidClosingDate != null
                                      && l.BidClosingDate.Value.Year >= ToolSchemas.SentinelYearFloor
-                                     && l.BidClosingDate < now
+                                     && l.BidClosingDate < companyNow
                                      && l.LeadRejectedReasonId == null);
+        }
 
         if (staleOnly)
         {

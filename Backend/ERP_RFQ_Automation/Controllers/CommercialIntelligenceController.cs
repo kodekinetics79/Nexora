@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,7 +18,8 @@ public sealed class CommercialIntelligenceController(
     ISalesApplicationService sales,
     ICommercialRoutingApplicationService routing,
     IRoleGate roleGate,
-    IAccountTeamScopeResolver? accountScope = null) : ControllerBase
+    IAccountTeamScopeResolver? accountScope = null,
+    ICompanyClock? companyClock = null) : ControllerBase
 {
     [HttpGet("sales-today")]
     [RequireModulePermission("Leads", PermissionAction.View)]
@@ -791,6 +793,8 @@ public sealed class CommercialIntelligenceController(
         if (allowedUserIds is not null)
             usersQuery = usersQuery.Where(x => allowedUserIds.Contains(x.Id));
         var users = await usersQuery.OrderBy(x => x.FirstName).ThenBy(x => x.LastName).ToListAsync(ct);
+        // Closing dates are the buyer's wall-clock time: "past deadline" is on the company's clock.
+        var companyNow = await (companyClock ?? CompanyClock.Utc).NowAsync(tenant, ct);
         var assignmentsQuery = db.Set<LeadAssignment>().AsNoTracking()
             .Where(x => x.BusinessUnitId == tenant && x.EffectiveTo == null);
         var followUpsQuery = db.FollowUpTasks.AsNoTracking()
@@ -821,7 +825,7 @@ public sealed class CommercialIntelligenceController(
             var allOwnedRfqIds = allOwnedRfqs.Select(x => x.Id).ToHashSet();
             var ownedQuotes = quotes.Where(x => x.Rfqid.HasValue && allOwnedRfqIds.Contains(x.Rfqid.Value) && !TerminalQuote(x.Status?.SetupCode, x.Status?.SetupValue)).ToArray();
             return new RepSummary(user.Id, Name(user), user.Email, user.Role?.SetupValue,
-            activeLeads.Length, activeLeads.Count(x => x.BidClosingDate.HasValue && x.BidClosingDate < DateTime.UtcNow), openRfqs.Length,
+            activeLeads.Length, activeLeads.Count(x => x.BidClosingDate.HasValue && x.BidClosingDate < companyNow), openRfqs.Length,
             ownedQuotes.Count(x => Canonical(x.Status?.SetupCode, x.Status?.SetupValue) == "DRAFT"),
             followUps.Count(x => x.AssignedToUserId == user.Id && x.DueAtUtc <= DateTime.UtcNow.AddDays(1)),
             PipelineGroups(ownedQuotes)); }).ToList();

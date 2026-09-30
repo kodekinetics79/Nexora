@@ -370,7 +370,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 _log.LogInformation(
                     "{Name} is an HTML page named .{Ext}; read deterministically from its tables: {Rows} line(s), no model involved.",
                     name, ext, htmlRows.Count);
-                return Structured(job, name, htmlRows.ToList(), RetainedProse(reading.Paragraphs));
+                return Structured(job, name, htmlRows.ToList(), RetainedProse(reading.Paragraphs), OpeningText(reading.Grids));
             }
             _log.LogInformation(
                 "{Name} is an HTML page named .{Ext} with no readable line table; reading it as HTML text.", name, ext);
@@ -426,7 +426,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 _log.LogInformation(
                     "DOCX {Name} was read deterministically from its table: {Rows} line(s), no model involved.",
                     name, tableRows.Count);
-                return Structured(job, name, tableRows.ToList(), ProseOutsideTables(bytes, name));
+                return Structured(job, name, tableRows.ToList(), ProseOutsideTables(bytes, name), WordOpeningText(bytes, name));
             }
             // No mappable table — an ordinary prose document. Falls through to the text path
             // below, byte for byte as before: a prose RFQ is not a "layout not recognized"
@@ -551,11 +551,47 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         }
     }
 
+    /// <summary>Rows per table the buyer's organisation is looked for in.</summary>
+    private const int OpeningRowsPerTable = 40;
+
+    /// <summary>
+    /// The first rows of each table as plain text, "cell | cell" per row. Prints name the buyer in
+    /// their terms and storage-location rows, not under a "Buyer" label.
+    /// </summary>
+    internal static string? OpeningText(IReadOnlyList<IReadOnlyList<IReadOnlyList<string?>>> grids)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var grid in grids)
+            foreach (var row in grid.Take(OpeningRowsPerTable))
+            {
+                var cells = row.Where(cell => !string.IsNullOrWhiteSpace(cell)).Select(cell => cell!.Trim()).Distinct().ToList();
+                if (cells.Count > 0) sb.AppendLine(string.Join(" | ", cells));
+                if (sb.Length > 12_000) return sb.ToString();
+            }
+        return sb.Length == 0 ? null : sb.ToString();
+    }
+
+    private string? WordOpeningText(byte[] bytes, string name)
+    {
+        try
+        {
+            return OpeningText(DocxTableParser.ReadLeadingGrids(bytes, OpeningRowsPerTable));
+        }
+        catch (Exception ex)
+        {
+            // Only the buyer's name is read from it; the lines are already read.
+            _log.LogDebug(ex, "Opening table text of {Name} could not be read.", name);
+            return null;
+        }
+    }
+
     private static DocumentExtractionInput Structured(
-        ExtractionJob job, string name, List<RfqSpreadsheetRow> rows, string? documentNarrative = null)
+        ExtractionJob job, string name, List<RfqSpreadsheetRow> rows, string? documentNarrative = null,
+        string? documentOpeningText = null)
         => new()
         {
             DocumentNarrative = documentNarrative,
+            DocumentOpeningText = documentOpeningText,
             BusinessUnitId = job.BusinessUnitId,
             ReceivedOn = DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc),
             SourceId = $"job:{job.Id}",

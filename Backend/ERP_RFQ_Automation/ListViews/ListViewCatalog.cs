@@ -99,6 +99,40 @@ public static class ListViewCatalog
                 new("actions", "Actions", Locked: true)
             ]),
 
+            // Keys match the Spreadsheet view of Frontend/src/pages/Procurement/RFQs/AllRFQsPage.tsx
+            // (its RFQ_SHEET_COLUMNS). The Simple view is a fixed set and does not read this.
+            ["rfqs.list"] = new("rfqs.list", null,
+            [
+                new("nexoraSerial", "Nexora serial"),
+                new("rfqno", "RFQ #"),
+                new("customerRfqReference", "Customer RFQ reference", DefaultVisible: false),
+                new("customerName", "Customer"),
+                new("customerEmail", "Customer email", DefaultVisible: false),
+                new("buyersName", "Buyer"),
+                new("contactName", "Contact", DefaultVisible: false),
+                new("accountOwnerName", "Account owner", DefaultVisible: false),
+                new("ownerName", "Owner"),
+                new("itemCount", "Lines"),
+                new("recDate", "Received", DefaultVisible: false),
+                new("bidClosingDate", "Deadline"),
+                new("bidClosingDateHijri", "Deadline (Hijri)", DefaultVisible: false),
+                new("requiredDeliveryDate", "Required delivery"),
+                new("deliveryLocation", "Delivery location", DefaultVisible: false),
+                new("agreementReference", "Agreement reference", DefaultVisible: false),
+                new("opportunityNo", "Opportunity #", DefaultVisible: false),
+                new("rfqtype", "RFQ type", DefaultVisible: false),
+                new("inquiryType", "Inquiry type", DefaultVisible: false),
+                new("biddingDecision", "Bidding decision", DefaultVisible: false),
+                new("subDate", "Submitted", DefaultVisible: false),
+                new("status", "Status"),
+                new("readiness", "Readiness", DefaultVisible: false),
+                new("quote", "Quote"),
+                new("promotedBy", "Made from lead by", DefaultVisible: false),
+                new("createdDate", "Created", DefaultVisible: false),
+                new("modifiedDate", "Modified", DefaultVisible: false),
+                new("open", "Open", Locked: true)
+            ]),
+
             // Keys match the grid fields rendered by Frontend/src/pages/Customers/CustomersPage.tsx.
             // Every column the page renders is declared here: a rendered column the catalog does
             // not know is appended AFTER the locked Actions column and is missing from the picker,

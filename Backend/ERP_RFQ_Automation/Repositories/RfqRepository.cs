@@ -20,9 +20,13 @@ namespace ERP_RFQ_Automation.Repositories
     {
         private readonly ErpRfqAutomationContext _context;
 
-        public RfqRepository(ErpRfqAutomationContext context)
+        private readonly ERP_RFQ_Automation.MultiTenancy.ICompanyClock _companyClock;
+
+        public RfqRepository(ErpRfqAutomationContext context,
+            ERP_RFQ_Automation.MultiTenancy.ICompanyClock? companyClock = null)
         {
             _context = context;
+            _companyClock = companyClock ?? ERP_RFQ_Automation.MultiTenancy.CompanyClock.Utc;
         }
 
         private async Task<List<long>> FinishedRfqStatusIdsAsync(long businessUnitId)
@@ -40,7 +44,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .ToList();
         }
 
-        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null)
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false)
         {
             IQueryable<Rfq> query = _context.Rfqs
                 .AsNoTracking()
@@ -97,6 +101,13 @@ namespace ERP_RFQ_Automation.Repositories
                     (!string.IsNullOrWhiteSpace(createdBy) && r.CreatedBy == createdBy)
                 );
             }
+
+            // The list's Client and Unassigned filters. The owner is the lead's owner, the same
+            // person the Owner column shows.
+            if (customerId.HasValue)
+                query = query.Where(r => r.CustomerId == customerId.Value);
+            if (unassigned)
+                query = query.Where(r => r.Lead == null || r.Lead.AssignTo == null);
 
             if (!string.IsNullOrWhiteSpace(search))
             {
@@ -958,7 +969,8 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
             var rfqs = await query.ToListAsync();
 
-            var now = DateTime.UtcNow;
+            // Closing dates are the buyer's wall-clock time, so "soon" is counted on the company's clock.
+            var now = await _companyClock.NowAsync(businessUnitId);
             var sevenDaysLater = now.AddDays(7);
 
             return new RfqStatsDTO

@@ -68,6 +68,8 @@ export interface MePermissionsResponse {
    * omits it — and omission must read as "no optional surface", never as an error.
    */
   entitlements?: string[];
+  /** The company's time zone (IANA id), chosen when the company was created. Null when none is set. */
+  timeZoneId?: string | null;
 }
 
 export interface UserPaginatedResponse {

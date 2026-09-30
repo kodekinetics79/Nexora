@@ -1,0 +1,246 @@
+- generic [ref=e2]:
+  - status [ref=e3]: Dashboard, page loaded.
+  - generic [ref=e8]:
+    - link "Skip to main content" [ref=e9] [cursor=pointer]:
+      - /url: "#main-content"
+    - banner [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - button "Expand navigation menu" [ref=e13] [cursor=pointer]
+          - generic [ref=e17]:
+            - combobox "Search customers, suppliers, products, enquiries, quotes, orders and shipments" [ref=e21]
+            - generic [aria-hidden] [ref=e22]: ⌘ K
+          - status [ref=e23]
+        - generic [ref=e24]:
+          - button "Switch to dark theme" [ref=e25] [cursor=pointer]
+          - separator [ref=e28]
+          - button "Account menu — Golden Admin, Golden Admin" [ref=e29] [cursor=pointer]:
+            - generic [ref=e30]: GA
+            - generic [aria-hidden] [ref=e31]:
+              - heading [level=6] [ref=e32]: Golden Admin
+              - text: Golden Admin
+    - navigation "Main" [ref=e33]:
+      - generic [ref=e34]:
+        - img "Nexora" [ref=e37]
+        - generic [ref=e67]:
+          - list [ref=e68]:
+            - listitem [ref=e69]:
+              - button "Dashboard" [ref=e70] [cursor=pointer]
+            - listitem [ref=e75]:
+              - button "Inbox" [ref=e76] [cursor=pointer]
+            - listitem [ref=e80]:
+              - button "Leads" [ref=e81] [cursor=pointer]
+            - listitem [ref=e85]:
+              - button "RFQs" [ref=e86] [cursor=pointer]
+            - listitem [ref=e91]:
+              - button "Quotes" [ref=e92] [cursor=pointer]
+            - listitem [ref=e96]:
+              - button "Orders" [ref=e97] [cursor=pointer]
+            - listitem [ref=e101]:
+              - button "Fulfilment" [ref=e102] [cursor=pointer]
+            - listitem [ref=e106]:
+              - button "Receivables" [ref=e107] [cursor=pointer]
+          - separator [ref=e111]
+          - list [ref=e112]:
+            - listitem [ref=e113]:
+              - button "Daily role views" [ref=e114] [cursor=pointer]
+            - listitem [ref=e118]:
+              - button "Dashboards & analytics" [ref=e119] [cursor=pointer]
+            - listitem [ref=e123]:
+              - button "Intake channels & exceptions" [ref=e124] [cursor=pointer]
+            - listitem [ref=e128]:
+              - button "Suppliers & sourcing" [ref=e129] [cursor=pointer]
+            - listitem [ref=e133]:
+              - button "Customer PO & handoffs" [ref=e134] [cursor=pointer]
+            - listitem [ref=e138]:
+              - button "Customers & ownership" [ref=e139] [cursor=pointer]
+            - listitem [ref=e143]:
+              - button "Team & exceptions" [ref=e144] [cursor=pointer]
+            - listitem [ref=e148]:
+              - button "Assistants & tools" [ref=e149] [cursor=pointer]
+            - listitem [ref=e153]:
+              - button "Catalogue & stock" [ref=e154] [cursor=pointer]
+            - listitem [ref=e158]:
+              - button "Administration" [ref=e159] [cursor=pointer]
+          - separator [ref=e163]
+          - list [ref=e164]:
+            - listitem [ref=e165]:
+              - button "Screen directory" [ref=e166] [cursor=pointer]
+    - main [active] [ref=e170]:
+      - generic [ref=e172]:
+        - region "Whose numbers, and over what period" [ref=e173]:
+          - generic [ref=e174]:
+            - heading "Dashboard" [level=1] [ref=e175]
+            - group "Whose dashboard" [ref=e176]:
+              - button "My desk" [ref=e177] [cursor=pointer]
+              - button "Team" [pressed] [ref=e179] [cursor=pointer]
+            - paragraph [ref=e182]: Working out whose numbers these are…
+          - generic [ref=e183]:
+            - group "Period" [ref=e184]:
+              - button "Last 30 days" [pressed] [ref=e185] [cursor=pointer]
+              - button "Last 90 days" [ref=e187] [cursor=pointer]
+              - button "This year" [ref=e189] [cursor=pointer]
+              - button "Custom…" [ref=e191] [cursor=pointer]
+            - generic "Steps 4, 5 and 6 have their own fixed windows, set by the server." [ref=e193]: Dates govern · Did we win · What's out with customers · Why we lost
+        - navigation "Dashboard sections" [ref=e194]:
+          - button "Overview" [ref=e195] [cursor=pointer]
+          - button "Today" [ref=e196] [cursor=pointer]
+          - button "Reps" [ref=e197] [cursor=pointer]
+          - button "Customers" [ref=e198] [cursor=pointer]
+          - button "Suppliers" [ref=e199] [cursor=pointer]
+          - button "Brands asked for" [ref=e200] [cursor=pointer]
+          - button "Deadlines" [ref=e201] [cursor=pointer]
+          - button "Documents to check" [ref=e202] [cursor=pointer]
+        - region "Verified performance" [ref=e203]:
+          - heading "Verified performance" [level=2] [ref=e204]
+          - generic [ref=e205]:
+            - 'article "Leads requiring review: 5. Tenant- and role-visible leads received before the window end whose authoritative current record requires commercial review." [ref=e206]':
+              - generic "Tenant- and role-visible leads received before the window end whose authoritative current record requires commercial review." [ref=e207]:
+                - generic [ref=e208]: Leads requiring review
+                - paragraph [ref=e209]: "5"
+              - button "View 5 records behind Leads requiring review" [ref=e210] [cursor=pointer]: 5 records
+            - 'article "Qualification rate: 100%. First valid QUALIFIED decisions divided by first valid QUALIFIED plus DISQUALIFIED decisions in [from,to), per commercial case." [ref=e214]':
+              - generic "First valid QUALIFIED decisions divided by first valid QUALIFIED plus DISQUALIFIED decisions in [from,to), per commercial case." [ref=e215]:
+                - generic [ref=e216]: Qualification rate
+                - paragraph [ref=e217]: 100%
+              - button "View 8 records behind Qualification rate" [ref=e218] [cursor=pointer]: 8 records
+          - generic [ref=e222]:
+            - button "Edit layout" [ref=e224] [cursor=pointer]
+            - generic [ref=e225]: 16 further measures are defined but not yet reportable; the performance screen lists why.
+        - generic [ref=e226]:
+          - region "Did we win what we decided?" [ref=e229]:
+            - generic [ref=e230]:
+              - generic [ref=e231]:
+                - paragraph [aria-hidden] [ref=e232]: "1"
+                - heading "Did we win what we decided?" [level=2] [ref=e233]
+                - 'link "Did we win what we decided?: details" [ref=e234] [cursor=pointer]':
+                  - /url: /sales/quotes?state=outcomes
+                  - text: details →
+              - note "Scope not stated · 31 Aug – 29 Sep · freshness not stated. This band follows the period you choose above." [ref=e236]: Scope not stated · 31 Aug – 29 Sep · freshness not stated
+            - status [ref=e238]:
+              - paragraph [ref=e239]: Loading did we win what we decided?…
+          - region "What's out with customers, and where it stops" [ref=e242]:
+            - generic [ref=e243]:
+              - generic [ref=e244]:
+                - paragraph [aria-hidden] [ref=e245]: "2"
+                - heading "What's out with customers, and where it stops" [level=2] [ref=e246]
+                - 'link "What''s out with customers, and where it stops: details" [ref=e247] [cursor=pointer]':
+                  - /url: /sales/quotes
+                  - text: details →
+              - generic [ref=e248]:
+                - note "Scope not stated · All time · freshness not stated. This band has its own fixed window, set by the server. The period control does not change it." [ref=e249]: Scope not stated · All time · freshness not stated
+                - 'button "How to read this: The sent book: every quote that has left the building, in counts. Hatched: not decided yet — that money is still in the air. Where it stops: four bars on one axis, by count or by value. Click a stage or a segment to read it in words." [ref=e250]'
+            - status [ref=e254]:
+              - paragraph [ref=e255]: Loading what's out with customers, and where it stops…
+          - region "Why we lost" [ref=e258]:
+            - generic [ref=e259]:
+              - generic [ref=e260]:
+                - paragraph [aria-hidden] [ref=e261]: "3"
+                - heading "Why we lost" [level=2] [ref=e262]
+                - 'link "Why we lost: details" [ref=e263] [cursor=pointer]':
+                  - /url: /sales/quotes?state=outcomes
+                  - text: details →
+              - generic [ref=e264]:
+                - note "Scope not stated · All time · freshness not stated. This band has its own fixed window, set by the server. The period control does not change it." [ref=e265]: Scope not stated · All time · freshness not stated
+                - 'button "How to read this: Reasons the customer gave rise above the line. Losses we never found a reason for hang below it, on the same scale." [ref=e266]'
+            - status [ref=e270]:
+              - paragraph [ref=e271]: Loading why we lost…
+          - region "What's closing on us" [ref=e274]:
+            - generic [ref=e275]:
+              - generic [ref=e276]:
+                - paragraph [aria-hidden] [ref=e277]: "4"
+                - heading "What's closing on us" [level=2] [ref=e278]
+                - 'link "What''s closing on us: details" [ref=e279] [cursor=pointer]':
+                  - /url: /analytics/deadlines
+                  - text: details →
+              - generic [ref=e280]:
+                - note "Scope not stated · Every open enquiry · as of 11:33. This band has its own fixed window, set by the server. The period control does not change it." [ref=e281]: Scope not stated · Every open enquiry · as of 11:33
+                - 'button "How to read this: Open enquiries by how long is left to answer them. Press a column to list the ones it counted, or drag across several columns to list them together." [ref=e282]'
+            - generic [ref=e286]:
+              - generic [ref=e287]:
+                - generic [ref=e288]: Columns show
+                - 'button "Columns show: Enquiries. Change" [ref=e289] [cursor=pointer]': Enquiries
+              - group "Open enquiries by time left" [ref=e292]:
+                - 'button "Past deadline: 5 open enquiries, 14 lines. Lists the enquiries this counted." [ref=e293] [cursor=pointer]':
+                  - generic [ref=e294]: "5"
+                  - generic [ref=e298]: Past deadline
+                  - generic [ref=e299]: 14 lines
+                - 'button "Closing today: 5 open enquiries, 30 lines. Lists the enquiries this counted." [ref=e300] [cursor=pointer]':
+                  - generic [ref=e301]: "5"
+                  - generic [ref=e305]: Closing today
+                  - generic [ref=e306]: 30 lines
+                - 'button "1–3 days: 1 open enquiry, 1 line. Lists the enquiries this counted." [ref=e307] [cursor=pointer]':
+                  - generic [ref=e308]: "1"
+                  - generic [ref=e312]: 1–3 days
+                  - generic [ref=e313]: 1 line
+                - 'button "4–7 days: 3 open enquiries, 18 lines. Lists the enquiries this counted." [ref=e314] [cursor=pointer]':
+                  - generic [ref=e315]: "3"
+                  - generic [ref=e319]: 4–7 days
+                  - generic [ref=e320]: 18 lines
+                - 'button "8–30 days: 2 open enquiries, 1,505 lines. Lists the enquiries this counted." [ref=e321] [cursor=pointer]':
+                  - generic [ref=e322]: "2"
+                  - generic [ref=e326]: 8–30 days
+                  - generic [ref=e327]: 1,505 lines
+                - 'button "More than 30 days: 0 open enquiries, 0 lines. Lists the enquiries this counted." [ref=e328] [cursor=pointer]':
+                  - generic [ref=e329]: "0"
+                  - generic [ref=e333]: More than 30 days
+                  - generic [ref=e334]: 0 lines
+                - 'button "No closing date: 2 open enquiries, 1,386 lines. Lists the enquiries this counted." [ref=e335] [cursor=pointer]':
+                  - generic [ref=e336]: "2"
+                  - generic [ref=e340]: No closing date
+                  - generic [ref=e341]: 1,386 lines
+              - generic [ref=e342]:
+                - generic [ref=e343]: 18 open enquiries carrying 2,954 lines.
+                - generic [ref=e344]: 5 of them reached Nexora after their own deadline had already passed. They sit under “Past deadline” because they are, but nobody here answered late.
+          - region "What needs you today" [ref=e347]:
+            - generic [ref=e348]:
+              - generic [ref=e349]:
+                - paragraph [aria-hidden] [ref=e350]: "5"
+                - heading "What needs you today" [level=2] [ref=e351]
+                - 'link "What needs you today: details" [ref=e352] [cursor=pointer]':
+                  - /url: /sales/today
+                  - text: details →
+              - generic [ref=e353]:
+                - note "Scope not stated · Open right now · freshness not stated. This band has its own fixed window, set by the server. The period control does not change it." [ref=e354]: Scope not stated · Open right now · freshness not stated
+                - 'button "How to read this: Left of the line is late, right of it is still to come. Each end of the line is 14 days from now." [ref=e355]'
+            - status [ref=e359]:
+              - paragraph [ref=e360]: Loading what needs you today…
+          - region "The last six months" [ref=e363]:
+            - generic [ref=e364]:
+              - generic [ref=e365]:
+                - paragraph [aria-hidden] [ref=e366]: "6"
+                - heading "The last six months" [level=2] [ref=e367]
+                - 'link "The last six months: details" [ref=e368] [cursor=pointer]':
+                  - /url: /procurement/rfqs/all
+                  - text: details →
+              - generic [ref=e369]:
+                - note "Company-wide · Last 6 months · freshness not stated. This band has its own fixed window, set by the server. The period control does not change it." [ref=e370]: Company-wide · Last 6 months · freshness not stated
+                - 'button "How to read this: Background context. Everyone sees the same company-wide history here, whatever the other bands are scoped to." [ref=e371]'
+            - status [ref=e375]:
+              - paragraph [ref=e376]: Loading the last six months…
+          - region "What customers ask for" [ref=e379]:
+            - generic [ref=e380]:
+              - generic [ref=e381]:
+                - paragraph [aria-hidden] [ref=e382]: "7"
+                - heading "What customers ask for" [level=2] [ref=e383]
+                - 'link "What customers ask for: details" [ref=e384] [cursor=pointer]':
+                  - /url: /analytics/brand-demand
+                  - text: details →
+              - generic [ref=e385]:
+                - note "Company-wide · 31 Aug – 29 Sep · freshness not stated. This band follows the period you choose above." [ref=e386]: Company-wide · 31 Aug – 29 Sep · freshness not stated
+                - 'button "How to read this: Each slice is a maker, sized by how many request lines name it. Lines that name no maker are left out of the ring." [ref=e387]'
+            - status [ref=e391]:
+              - paragraph [ref=e392]: Loading what customers ask for…
+          - region "Who we quote" [ref=e395]:
+            - generic [ref=e396]:
+              - generic [ref=e397]:
+                - paragraph [aria-hidden] [ref=e398]: "8"
+                - heading "Who we quote" [level=2] [ref=e399]
+                - 'link "Who we quote: details" [ref=e400] [cursor=pointer]':
+                  - /url: /intelligence/commercial-memory
+                  - text: details →
+              - generic [ref=e401]:
+                - note "Company-wide · All time · freshness not stated. This band has its own fixed window, set by the server. The period control does not change it." [ref=e402]: Company-wide · All time · freshness not stated
+                - 'button "How to read this: Each slice is a customer. All time and company-wide: the period above does not change this band." [ref=e403]'
+            - status [ref=e407]:
+              - paragraph [ref=e408]: Loading who we quote…

@@ -855,6 +855,32 @@ public class ChunkedExtractionServiceTests
         Assert.True(samples[4] < 10_000, $"p95 local parse took {samples[4]:F2} ms");
     }
 
+    [Fact]
+    public async Task The_buyer_organisation_read_from_a_structured_document_reaches_the_lead_with_its_quote()
+    {
+        var rows = Enumerable.Range(2, 3).Select(row => SpreadsheetRow(row, "6000000028", $"Relay {row}", "1", "")).ToArray();
+        foreach (var row in rows)
+        {
+            row.BuyerOrganisation = "Saudi Aramco";
+            row.BuyerOrganisationEvidence = "part or model number that Saudi Aramco has requested";
+        }
+
+        var outcome = await NewService(new StubLlm()).ExtractStructuredAsync(rows, 7, "RFP - 6000000028.docx");
+
+        Assert.Equal("Saudi Aramco", outcome.Result!.CustomerCompanyName);
+        Assert.Equal("part or model number that Saudi Aramco has requested", outcome.Result.CustomerCompanyEvidence);
+    }
+
+    [Fact]
+    public async Task A_structured_document_that_names_no_buyer_leaves_the_client_unnamed()
+    {
+        var rows = Enumerable.Range(2, 3).Select(row => SpreadsheetRow(row, "RFQ-1", $"Relay {row}", "1", "")).ToArray();
+
+        var outcome = await NewService(new StubLlm()).ExtractStructuredAsync(rows, 7, "bid.xlsx");
+
+        Assert.Null(outcome.Result!.CustomerCompanyName);
+    }
+
     private static RfqSpreadsheetRow SpreadsheetRow(int row, string rfqNo, string product, string qty, string price)
         => new()
         {

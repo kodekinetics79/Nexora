@@ -1,5 +1,6 @@
 using System.Globalization;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Reporting;
 using Microsoft.EntityFrameworkCore;
 
@@ -57,11 +58,14 @@ public sealed class LeadDecisionService : ILeadDecisionService
 
     private readonly ErpRfqAutomationContext _db;
     private readonly IGrossMarginService _margin;
+    private readonly ICompanyClock _companyClock;
 
-    public LeadDecisionService(ErpRfqAutomationContext db, IGrossMarginService margin)
+    public LeadDecisionService(ErpRfqAutomationContext db, IGrossMarginService margin,
+        ICompanyClock? companyClock = null)
     {
         _db = db;
         _margin = margin ?? throw new ArgumentNullException(nameof(margin));
+        _companyClock = companyClock ?? CompanyClock.Utc;
     }
 
     // ================================================================ full brief
@@ -242,7 +246,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
             businessUnitId, now, ct);
 
         // ---- 5. deadline feasibility ---------------------------------------
-        var deadline = BuildDeadline(lead.BidClosingDate, totalItems, now);
+        // The closing date is the buyer's wall-clock time, so it is counted on the company's clock.
+        var deadline = BuildDeadline(lead.BidClosingDate, totalItems, await _companyClock.NowAsync(businessUnitId, ct));
 
         // ---- 6. recommendation ---------------------------------------------
         var brief = new LeadDecisionBrief
@@ -404,7 +409,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // out of the per-lead loop.
         var catalogAssessable = await CatalogHasIdentitiesAsync(businessUnitId, ct);
 
-        var now = DateTime.UtcNow;
+        var companyNow = await _companyClock.NowAsync(businessUnitId, ct);
         foreach (var lead in leads)
         {
             var total = lead.Items.Count;
@@ -436,7 +441,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 ? Round2(pricedItems.Sum(i => i.UnitPrice!.Value * i.Quantity!.Value))
                 : null;
 
-            var (daysLeft, urgency) = DeadlineBand(lead.BidClosingDate, now);
+            var (daysLeft, urgency) = DeadlineBand(lead.BidClosingDate, companyNow);
 
             // Summaries intentionally cannot emit actionable Bid because customer
             // identity and weighted margin evidence are not evaluated in this path.

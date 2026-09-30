@@ -94,6 +94,13 @@ public sealed class DocumentExtractionInput
     public string HeaderText { get; init; } = "";
 
     /// <summary>
+    /// The first rows of each table of a structured document, as plain text ("cell | cell"), so the
+    /// buyer's organisation can be read where prints state it (terms, storage location) rather than
+    /// only from the prose around the tables. Null when the reader has none.
+    /// </summary>
+    public string? DocumentOpeningText { get; init; }
+
+    /// <summary>
     /// One entry per parsed body region. For STRUCTURED sources (spreadsheet/CSV) a region
     /// is a real row, so the count is a real item count. For UNSTRUCTURED sources the
     /// reader produces one region per non-empty TEXT LINE — several lines routinely form
@@ -1151,7 +1158,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var primary = import.Documents.First();
         var items = InheritStatedCurrency(allItems.Select(MapCanonicalItem).ToList());
         var overall = ComputeOverallConfidence(items, header: primary);
-        var result = BuildStructuredResult(primary, items, overall);
+        var result = WithBuyerOrganisation(BuildStructuredResult(primary, items, overall), rows);
 
         var anyNeedsReview = import.Documents.Any(d => d.ValidationStatus != ValidationStatus.Valid)
                              || allItems.Any(i => i.ValidationStatus != ValidationStatus.Valid);
@@ -1171,7 +1178,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     .Select(d =>
                     {
                         var groupItems = InheritStatedCurrency(d.LineItems.Select(MapCanonicalItem).ToList());
-                        return BuildStructuredResult(d, groupItems, ComputeOverallConfidence(groupItems, d));
+                        return WithBuyerOrganisation(BuildStructuredResult(d, groupItems, ComputeOverallConfidence(groupItems, d)), rows);
                     })
                     .ToList();
                 diagnostics.Add($"Multi-inquiry document: split into {splitResults.Count} RFQ group(s).");
@@ -1466,6 +1473,22 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         VerifiedEvidence = null,
         EvidenceFromDocumentCheck = false
     };
+
+    /// <summary>
+    /// The buyer's organisation read from the document's own text (HeaderCompletionService), with the
+    /// sentence it was read from. The resolver matches it against the tenant's customers; a name no
+    /// customer carries is offered to the rep as a new client, never created on its own.
+    /// </summary>
+    private static LeadExtractionResult WithBuyerOrganisation(LeadExtractionResult result, IReadOnlyList<RfqSpreadsheetRow> rows)
+    {
+        var read = rows.FirstOrDefault(row => !string.IsNullOrWhiteSpace(row.BuyerOrganisation));
+        return read is null ? result : result with
+        {
+            CustomerCompanyName = read.BuyerOrganisation!.Trim(),
+            CustomerCompanyNameConfidence = (double)ERP_RFQ_Automation.Extraction.HeaderCompletion.HeaderCompletionService.CompletionConfidence,
+            CustomerCompanyEvidence = read.BuyerOrganisationEvidence,
+        };
+    }
 
     /// <summary>
     /// The deterministic spreadsheet/CSV path. It produces no document-level classification

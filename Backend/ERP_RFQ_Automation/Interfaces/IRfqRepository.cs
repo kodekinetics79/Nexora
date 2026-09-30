@@ -9,7 +9,7 @@ namespace ERP_RFQ_Automation.Interfaces
 {
     public interface IRfqRepository
     {
-        Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null);
+        Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null, long? customerId = null, bool unassigned = false);
         Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null);
         Task AddAsync(Rfq rfq);
         Task UpdateAsync(Rfq rfq);

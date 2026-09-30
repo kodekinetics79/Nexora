@@ -1,6 +1,12 @@
 import React from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Box, Button, ButtonBase, Chip, Stack, Tooltip, Typography } from '@mui/material';
-import type { ClientCandidateDTO } from '../../api/services/leadService';
+import { toast } from 'react-hot-toast';
+import leadService, { type ClientCandidateDTO } from '../../api/services/leadService';
+import customerService from '../../api/services/customerService';
+import { useAuth } from '../../context/AuthContext';
+import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 /**
  * CLIENT ORGANISATION IDENTITY — shared vocabulary + the list-grid cell.
@@ -44,6 +50,10 @@ export interface ClientIdentityLike {
    */
   customerMatchExplanation?: string | null;
   clientCandidates?: ClientCandidateDTO[] | null;
+  /** The lead, for the one-click add. */
+  id?: number;
+  /** The buyer's organisation as the document names it, read by the application. */
+  customerCompanyNameExtracted?: string | null;
 }
 
 /**
@@ -268,6 +278,51 @@ export interface ClientCellProps {
  * NEVER renders an empty cell — an unresolved client is a fact worth showing,
  * and a blank cell reads as "no data loaded".
  */
+/**
+ * One click: the organisation the document names becomes the lead's client. A client of that
+ * exact name already on file is linked instead of a second one being made (the same buyer on
+ * the next lead). Never happens on its own: the rep presses it.
+ */
+const AddNamedClient: React.FC<{ leadId: number; name: string }> = ({ leadId, name }) => {
+  const { hasPermission } = useAuth();
+  const queryClient = useQueryClient();
+  const add = useMutation({
+    mutationFn: async () => {
+      const onFile = await customerService.getAll({ name, pageSize: 10, isActive: true });
+      const same = onFile.items.find((customer) => customer.name.trim().toLowerCase() === name.toLowerCase());
+      const customerId = same?.id ?? await (async () => {
+        const form = new FormData();
+        form.append('Name', name);
+        return Number((await customerService.create(form)).id);
+      })();
+      if (!Number.isFinite(customerId) || customerId <= 0) throw new Error('The client was added but could not be linked. Use Set client.');
+      await leadService.linkClient(leadId, { customerId, contactId: null });
+      return same ? 'linked' : 'added';
+    },
+    onSuccess: (outcome) => {
+      toast.success(outcome === 'added' ? `“${name}” added as a client and linked.` : `Linked to “${name}”.`);
+      for (const key of ['leads', 'leads-outstanding', 'leads-assigned', 'customer-search', 'client-customer-search']) {
+        queryClient.invalidateQueries({ queryKey: [key] });
+      }
+      queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] });
+    },
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The client could not be added.')),
+  });
+  if (!hasPermission('Leads', 'edit') || !commercialActionPermissions(hasPermission).canCreateClientFromLead) return null;
+  return (
+    <Button
+      size="small"
+      variant="outlined"
+      disabled={add.isPending}
+      onClick={(event) => { event.stopPropagation(); add.mutate(); }}
+      aria-label={`Add ${name} as the client`}
+      sx={{ fontWeight: 800, fontSize: '0.7rem', py: 0, px: 0.75, minWidth: 0, minHeight: 22, textTransform: 'none' }}
+    >
+      {add.isPending ? 'Adding…' : 'Add'}
+    </Button>
+  );
+};
+
 const ClientCell: React.FC<ClientCellProps> = ({ lead, onResolve, canEdit = true }) => {
   const state = clientIdentityState(lead);
 
@@ -352,6 +407,39 @@ const ClientCell: React.FC<ClientCellProps> = ({ lead, onResolve, canEdit = true
       >
         {body}
       </ButtonBase>
+    );
+  }
+
+  // The document names the buyer, and no client on file matches: offer that name, one click.
+  const named = (lead.customerCompanyNameExtracted ?? '').trim();
+  const canAdd = canEdit && lead.id != null && named.length > 0;
+  if (named) {
+    return (
+      <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', flexWrap: 'wrap', py: 0.25, minWidth: 0 }}>
+        <Chip
+          size="small"
+          label="New client"
+          variant="outlined"
+          color="warning"
+          sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700 }}
+        />
+        <Tooltip title="Read from the document">
+          <Typography variant="body2" sx={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+            {named}
+          </Typography>
+        </Tooltip>
+        {canAdd ? <AddNamedClient leadId={lead.id!} name={named} /> : null}
+        {canEdit && (
+          <Button
+            size="small"
+            onClick={onResolve}
+            aria-label="Set the client company for this lead"
+            sx={{ fontWeight: 800, fontSize: '0.7rem', py: 0, px: 0.5, minWidth: 0, textTransform: 'none' }}
+          >
+            Set client
+          </Button>
+        )}
+      </Stack>
     );
   }
 

@@ -11,6 +11,7 @@ import axiosInstance from '../axiosInstance';
 /** Keys must match ListViewCatalog on the server. A typo yields a 404, not a silent default. */
 export type ListViewKey =
   | 'leads.list'
+  | 'rfqs.list'
   | 'customers.list'
   | 'suppliers.list'
   | 'lead.items'

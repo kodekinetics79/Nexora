@@ -5,6 +5,14 @@ public sealed class RfqSpreadsheetRow
     public int RowNumber { get; set; }
     public string SourceDocumentName { get; set; } = "RFQ spreadsheet";
     public string WorksheetName { get; set; } = "CSV";
+
+    /// <summary>
+    /// The organisation asking for the quotation, as the document writes it ("Saudi Aramco"), and
+    /// the sentence it was read from. Read from the document's own text, never from a file name or
+    /// a list of known buyers; matched against the tenant's customers by the resolver.
+    /// </summary>
+    public string? BuyerOrganisation { get; set; }
+    public string? BuyerOrganisationEvidence { get; set; }
     public int HeaderRowNumber { get; set; } = 1;
     public Dictionary<int, string> HeadersByColumn { get; set; } = new();
     public Dictionary<string, int> FieldColumnNumbers { get; set; } = new(StringComparer.Ordinal);

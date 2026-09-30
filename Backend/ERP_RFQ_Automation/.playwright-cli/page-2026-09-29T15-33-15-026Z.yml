@@ -1,0 +1,4 @@
+- generic [ref=e2]:
+  - status [ref=e3]
+  - status [ref=e4]:
+    - progressbar "Loading page" [ref=e5]

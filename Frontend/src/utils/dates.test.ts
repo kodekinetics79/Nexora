@@ -133,4 +133,14 @@ describe('formatDeadline — the buyer\'s clock, for every reader (pilot audit H
     expect(calendarDaysUntil('2026-09-06T17:00:00', now)).toBe(-22);
     expect(calendarDaysUntil(null, now)).toBeNull();
   });
+
+  it('counts on the company\'s calendar when the company has a time zone', () => {
+    // 22:00 UTC on 5 Sep is 01:00 on 6 Sep in Riyadh: SEC's 5 PM close on the 6th is due today there.
+    const now = new Date(Date.UTC(2026, 8, 5, 22, 0));
+    expect(calendarDaysUntil('2026-09-06T17:00:00', now, 'Asia/Riyadh')).toBe(0);
+    expect(calendarDaysUntil('2026-09-06T17:00:00', now, 'UTC')).toBe(1);
+    // A zone the browser does not know falls back to the reader's calendar rather than failing.
+    expect(calendarDaysUntil('2026-09-06T17:00:00', now, 'Mars/Olympus'))
+      .toBe(calendarDaysUntil('2026-09-06T17:00:00', now, null));
+  });
 });
