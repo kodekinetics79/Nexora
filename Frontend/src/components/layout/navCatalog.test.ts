@@ -100,7 +100,7 @@ const OLD_RAIL_DESTINATIONS: Record<string, string> = {
   'Won / Lost': '/sales/quotes?state=outcomes',
   'Service BOQs': '/services/boq',
   'Client PO Inbox': '/sales/client-pos',
-  'Customer Orders': '/sales/orders',
+  'Client Orders': '/sales/orders',
   'Procurement Handoffs': '/procurement/handoffs',
   'Accounts Receivable': '/sales/finance',
   Shipments: '/sales/shipments',
@@ -240,9 +240,9 @@ describe('the rail exposes the complete commercial spine', () => {
     expect(SETUP_ENTRIES).toHaveLength(22);
   });
 
-  it('ends the release journey at Orders while retaining deferred routes', () => {
+  it('ends the release journey at Client Orders while retaining deferred routes', () => {
     expect(RELEASE_PRIMARY_NAV.at(-1)).toMatchObject({
-      key: 'orders', label: 'Orders', path: '/sales/orders', moduleName: 'Orders',
+      key: 'orders', label: 'Client Orders', path: '/sales/orders', moduleName: 'Orders',
     });
     expect(RELEASE_PRIMARY_NAV.map((item) => item.key)).not.toContain('shipments');
     expect(RELEASE_PRIMARY_NAV.map((item) => item.key)).not.toContain('accounts-receivable');

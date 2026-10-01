@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
@@ -43,13 +43,14 @@ beforeEach(() => {
 });
 
 describe('the order screens without Customer Awards', () => {
-  it('the list hides the inbox buttons, shows no Access Denied panel, and names the access to ask for', async () => {
+  it('the list hides Client PO actions, shows no Access Denied panel, and names the access to ask for', async () => {
     renderPage(<OrderListPage />);
 
     expect(await screen.findByText(/no customer orders yet/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /client po inbox/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /upload client po/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /review client pos/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
-    expect(screen.getAllByText(/ask your administrator for customer awards access to confirm customer orders/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/ask your administrator for customer awards and client orders create access/i).length).toBeGreaterThan(0);
   });
 
   it('the create screen keeps Back to orders and drops the inbox button', () => {
@@ -60,10 +61,16 @@ describe('the order screens without Customer Awards', () => {
     expect(screen.getByText(/ask your administrator for customer awards access/i)).toBeInTheDocument();
   });
 
-  it('with the grant, both doors are back (the control)', async () => {
+  it('with the grant, upload starts on Client Orders and the review queue remains reachable', async () => {
     grants.customerAwards = true;
     renderPage(<OrderListPage />);
-    expect(await screen.findByRole('button', { name: /open client po inbox/i })).toBeInTheDocument();
+    const uploadButtons = await screen.findAllByRole('button', { name: /upload client po/i });
+    expect(uploadButtons).not.toHaveLength(0);
+    expect(screen.getByRole('button', { name: /review client pos/i })).toBeInTheDocument();
     expect(screen.queryByText(/ask your administrator/i)).not.toBeInTheDocument();
+
+    fireEvent.click(uploadButtons[0]);
+    expect(await screen.findByRole('heading', { name: /which quotation is this client po answering/i }))
+      .toBeInTheDocument();
   });
 });

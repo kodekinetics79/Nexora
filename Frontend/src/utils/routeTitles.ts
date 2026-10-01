@@ -62,7 +62,7 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/sales/quotes': 'Quotes',
   '/sales/quotes/create': 'Create Quote',
   '/sales/client-pos': 'Client PO Inbox',
-  '/sales/orders': 'Customer Orders',
+  '/sales/orders': 'Client Orders',
   '/sales/orders/create': 'Create Order',
   '/sales/finance': 'Accounts Receivable',
   '/sales/shipments': 'Shipments',

@@ -742,6 +742,8 @@ namespace ERP_RFQ_Automation.Services
                 CustomerName = order.Customer?.Name ?? "Unknown",
                 QuoteId = order.QuoteId,
                 QuoteNo = order.Quote?.QuoteNo,
+                CustomerPurchaseOrderId = order.CustomerAward?.CustomerPurchaseOrderId,
+                ClientPoNumber = order.CustomerAward?.PurchaseOrder?.ExternalPoNumber,
                 RfqId = order.Rfqid,
                 RfqNo = order.Rfq?.Rfqno,
                 LeadId = order.LeadId,

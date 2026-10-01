@@ -350,8 +350,8 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
   },
   {
     key: 'orders',
-    label: 'Orders',
-    description: 'Accepted customer commitments ready to fulfil, invoice and close.',
+    label: 'Client Orders',
+    description: 'Client POs matched to submitted quotes, ready to fulfil and invoice.',
     icon: <OrderIcon />,
     path: '/sales/orders',
     moduleName: 'Orders',

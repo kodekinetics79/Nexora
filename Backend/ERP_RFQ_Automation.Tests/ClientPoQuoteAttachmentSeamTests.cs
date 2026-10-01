@@ -1,5 +1,7 @@
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.OrderToCash;
+using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -111,6 +113,17 @@ public sealed class ClientPoQuoteAttachmentSeamTests
         Assert.Equal(quote.Id, order.QuoteId);
         Assert.Equal(award.Id, order.CustomerAwardId);
         Assert.Equal(OrderSourceTypes.CustomerAward, order.SourceType);
+
+        // The Client Orders read must expose the two documents too. The database already held
+        // both links, but the list query did not load either navigation, so the screen printed an
+        // empty submitted-quote column and could not name the buyer PO at all.
+        var clientOrder = Assert.Single(await new OrderService(
+            new OrderRepository(fixture.Context), fixture.Context)
+            .GetAllOrdersAsync(fixture.BusinessUnitId));
+        Assert.Equal(purchaseOrder.Id, clientOrder.CustomerPurchaseOrderId);
+        Assert.Equal(purchaseOrder.ExternalPoNumber, clientOrder.ClientPoNumber);
+        Assert.Equal(quote.Id, clientOrder.QuoteId);
+        Assert.Equal(quote.QuoteNo, clientOrder.QuoteNo);
 
         // And the same identity is what the inbox reports back, so the screen and the record agree.
         var row = Assert.Single(await fixture.Service.SearchPurchaseOrdersAsync(

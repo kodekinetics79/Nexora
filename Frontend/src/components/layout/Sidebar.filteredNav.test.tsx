@@ -58,7 +58,7 @@ describe('the rail presents the commercial spine and grouped workspaces', () => 
       'RFQs',
       'Suppliers',
       'Quotes',
-      'Orders',
+      'Client Orders',
       'Products',
       'Administration',
       'Customers & ownership',
@@ -72,7 +72,7 @@ describe('the rail presents the commercial spine and grouped workspaces', () => 
     auth.grants = new Set(['Orders']);
     renderRail('/sales/orders');
 
-    expect(row('Orders')).toHaveAttribute('aria-current', 'page');
+    expect(row('Client Orders')).toHaveAttribute('aria-current', 'page');
     expect(screen.queryByRole('button', { name: 'Fulfilment' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Receivables' })).not.toBeInTheDocument();
   });
@@ -124,7 +124,7 @@ describe('where the rail says you are', () => {
 
     expect(row('Leads')).not.toHaveAttribute('aria-current');
     expect(row('RFQs')).not.toHaveAttribute('aria-current');
-    expect(row('Orders')).not.toHaveAttribute('aria-current');
+    expect(row('Client Orders')).not.toHaveAttribute('aria-current');
   });
 
   it('lights the owning row on a DETAIL page, not just on the list', () => {
@@ -159,7 +159,7 @@ describe('where the rail says you are', () => {
   });
 
   it.each([
-    ['/sales/orders/42', 'Orders'],
+    ['/sales/orders/42', 'Client Orders'],
   ])('keeps the post-quote journey visible at %s', (url, destination) => {
     renderRail(url);
     expect(row(destination)).toHaveAttribute('aria-current', 'page');
@@ -206,7 +206,7 @@ describe('where the rail says you are', () => {
     renderRail('/inventory/ageing');
 
     expect(row('Products')).toHaveAttribute('aria-current', 'page');
-    for (const name of ['Inbox', 'Leads', 'RFQs', 'Quotes', 'Orders']) {
+    for (const name of ['Inbox', 'Leads', 'RFQs', 'Quotes', 'Client Orders']) {
       expect(row(name)).not.toHaveAttribute('aria-current');
     }
   });

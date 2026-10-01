@@ -43,6 +43,8 @@ const ORDER = {
   orderDate: '2026-08-01T00:00:00Z',
   customerId: 77,
   customerName: 'Synthetic Trading Co',
+  clientPoNumber: 'CLIENT-PO-SYNTH-77',
+  quoteNo: 'QT-SUBMITTED-77',
   status: 'CONFIRMED',
   paymentStatus: 'UNPAID',
   totalAmount: 1100,
@@ -85,6 +87,10 @@ describe('deferred modules on the order list', () => {
     );
 
     await screen.findByText('SO-SYNTH-900');
+    // The order row keeps the buyer commitment beside the submitted quotation it answered.
+    expect(screen.getByText('CLIENT-PO-SYNTH-77')).toBeInTheDocument();
+    expect(screen.getByText('QT-SUBMITTED-77')).toBeInTheDocument();
+
     expect(screen.queryByLabelText('Invoice order SO-SYNTH-900')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /shipment/i })).not.toBeInTheDocument();
     expect(post).not.toHaveBeenCalled();
