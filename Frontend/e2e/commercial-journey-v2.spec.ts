@@ -648,9 +648,9 @@ test('11 approved Supplier offer prices the actual Customer Quote with cost evid
     rationale: 'Target margin approved for Release 02 acceptance.',
   }, commandHeaders('commercial-v2-customer-pricing-atlas')));
   await page.goto(`/sales/quotes/view/${quoteId()}`);
-  await expect(page.getByText('SELECTED SUPPLIER QUOTE')).toBeVisible();
+  await expect(page.getByText('Supplier quote', { exact: true })).toBeVisible();
   await expect(page.getByText('Atlas Automation Partners', { exact: false })).toBeVisible();
-  await expect(page.getByText('Supplier validity does not support this Customer Quote')).toBeVisible();
+  await expect(page.getByText('Supplier price ends before this quote')).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
   await page.screenshot({ path: path.join(evidenceDir, 'supplier-offer-customer-pricing.png'), fullPage: true });
 });
@@ -779,14 +779,14 @@ test('15 Supplier selection is retained as the governed sourcing award', async (
 test('16 Customer Quote shows the selected Supplier cost source', async ({ page }) => {
   await loginAs(page, 'manager');
   await page.goto(`/sales/quotes/view/${quoteId()}`);
-  await expect(page.getByText('SELECTED SUPPLIER QUOTE')).toBeVisible();
+  await expect(page.getByText('Supplier quote', { exact: true })).toBeVisible();
   await expect(page.getByText('Atlas Automation Partners', { exact: false })).toBeVisible();
 });
 
 test('17 Customer Quote blocks silent use of insufficient Supplier validity', async ({ page }) => {
   await loginAs(page, 'manager');
   await page.goto(`/sales/quotes/view/${quoteId()}`);
-  await expect(page.getByText('Supplier validity does not support this Customer Quote')).toBeVisible();
+  await expect(page.getByText('Supplier price ends before this quote')).toBeVisible();
 });
 
 test('18 quote lifecycle preserves completed follow-up history', async ({ page }) => {
