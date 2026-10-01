@@ -11,17 +11,39 @@ async function setPermissions(
   customers = { create: true, edit: true, delete: true },
   suppliers = { create: false, edit: false, delete: false },
 ) {
+  const permissions = [
+    { moduleName: 'Customers', canView: true, canCreate: customers.create, canEdit: customers.edit, canDelete: customers.delete },
+    { moduleName: 'Quotations', canView: true, canCreate: false, canEdit: false, canDelete: false },
+    { moduleName: 'RFQ Management', canView: true, canCreate: false, canEdit: false, canDelete: false },
+    { moduleName: 'Orders', canView: true, canCreate: false, canEdit: false, canDelete: false },
+    { moduleName: 'Suppliers', canView: true, canCreate: suppliers.create, canEdit: suppliers.edit, canDelete: suppliers.delete },
+  ].map((item, index) => ({ ...item, id: 9200 + index, moduleId: 9200 + index, roleId: 1 }));
+
   await page.addInitScript(({ customerActions, supplierActions }) => {
     const current = JSON.parse(localStorage.getItem('userData') ?? '{}');
     const modules = [
-      { moduleName: 'Customers', canCreate: customerActions.create, canEdit: customerActions.edit, canDelete: customerActions.delete },
-      { moduleName: 'Quotations', canCreate: false, canEdit: false, canDelete: false },
-      { moduleName: 'RFQ Management', canCreate: false, canEdit: false, canDelete: false },
-      { moduleName: 'Orders', canCreate: false, canEdit: false, canDelete: false },
-      { moduleName: 'Suppliers', canCreate: supplierActions.create, canEdit: supplierActions.edit, canDelete: supplierActions.delete },
+      { moduleName: 'Customers', canView: true, canCreate: customerActions.create, canEdit: customerActions.edit, canDelete: customerActions.delete },
+      { moduleName: 'Quotations', canView: true, canCreate: false, canEdit: false, canDelete: false },
+      { moduleName: 'RFQ Management', canView: true, canCreate: false, canEdit: false, canDelete: false },
+      { moduleName: 'Orders', canView: true, canCreate: false, canEdit: false, canDelete: false },
+      { moduleName: 'Suppliers', canView: true, canCreate: supplierActions.create, canEdit: supplierActions.edit, canDelete: supplierActions.delete },
     ].map((item, index) => ({ ...item, id: 9200 + index, moduleId: 9200 + index, roleId: current.roleId ?? 1 }));
     localStorage.setItem('userData', JSON.stringify({ ...current, isSuperAdmin: false, businessUnitId: 1, permissions: modules }));
   }, { customerActions: customers, supplierActions: suppliers });
+
+  await page.route('**/api/User/me/permissions', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      userId: 1,
+      roleId: 1,
+      roleName: 'Release Manager Admin',
+      businessUnitId: 1,
+      isSuperAdmin: false,
+      isManager: true,
+      permissions,
+    }),
+  }));
 }
 
 const health = {
@@ -197,4 +219,46 @@ test('supplier-only users can manage supplier contacts without customer permissi
   const contactsTable = page.getByRole('table');
   await expect(contactsTable.getByRole('button', { name: 'Edit' })).toBeVisible();
   await expect(contactsTable.getByRole('button', { name: 'Remove' })).toBeVisible();
+});
+
+test('new suppliers must be assigned to a network before the profile is created', async ({ page }) => {
+  await setPermissions(
+    page,
+    { create: false, edit: false, delete: false },
+    { create: true, edit: true, delete: false },
+  );
+  await page.route('**/api/Supplier?*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 }),
+  }));
+  await page.route('**/api/Country?*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  await page.route('**/api/Currency?*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+
+  let createRequest = '';
+  await page.route('**/api/Supplier', route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    createRequest = route.request().postData() ?? '';
+    return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ id: 602 }) });
+  });
+
+  await page.goto('/suppliers');
+  await page.getByRole('button', { name: 'Add supplier profile' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByLabel('Network relationship')).toBeVisible();
+
+  await dialog.getByLabel(/Supplier Name/i).fill('Extended Pilot Supply');
+  await dialog.getByRole('button', { name: 'Save Supplier' }).click();
+  await expect(page.getByText('Choose whether this supplier is In Network, Extended Network, or Outside Network.')).toBeVisible();
+  expect(createRequest).toBe('');
+
+  await dialog.getByLabel('Network relationship').click();
+  await expect(page.getByRole('option', { name: 'In Network — partner' })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'Extended Network — approved supplier' })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'Outside Network — exception supplier' })).toBeVisible();
+  await page.getByRole('option', { name: 'Extended Network — approved supplier' }).click();
+  await dialog.getByRole('button', { name: 'Save Supplier' }).click();
+
+  await expect.poll(() => createRequest).toContain('TIER_2_EXTENDED');
+  await expect(dialog).toHaveCount(0);
 });

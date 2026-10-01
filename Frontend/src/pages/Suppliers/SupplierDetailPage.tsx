@@ -250,7 +250,7 @@ const SupplierDetailPage: React.FC = () => {
               {/* Tier sits here, with the commercial terms, and deliberately NOT beside the
                   governance verdicts below. It says who you choose to buy from first; it does not
                   say whether this supplier is approved, and it never blocks a dispatch. */}
-              <InfoRow label="Tier" value={supplierTierLabel(supplier.tier)} />
+              <InfoRow label="Network relationship" value={supplierTierLabel(supplier.tier)} />
               {/* Blank is not zero. An uncaptured credit term has to read as uncaptured, because
                   payment terms can carry weight in the supplier comparison and a supplier with no
                   number is not the same as one that demands payment on the day. */}

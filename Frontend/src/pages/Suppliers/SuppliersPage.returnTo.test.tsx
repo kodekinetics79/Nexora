@@ -35,6 +35,11 @@ vi.mock('../../api/services/supplierService', () => ({
     update: vi.fn(), delete: (id: number) => deleteSupplier(id),
     downloadTemplate: vi.fn(), uploadTemplate: vi.fn(), export: vi.fn(),
   },
+  SUPPLIER_TIERS: [
+    { value: 'TIER_1_PARTNER', label: 'In Network — partner' },
+    { value: 'TIER_2_EXTENDED', label: 'Extended Network — approved supplier' },
+    { value: 'TIER_3_OUT_OF_NETWORK', label: 'Outside Network — exception supplier' },
+  ],
   supplierTierLabel: () => 'Not classified',
 }));
 vi.mock('../../api/services/contactService', () => ({
@@ -118,9 +123,23 @@ describe('SuppliersPage — saving a supplier for a sourcing case', () => {
 
     expect(await screen.findByText(/saving takes you back to the case/i)).toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox', { name: /supplier_name/i }), { target: { value: 'Gulf Switchgear Trading Co.' } });
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: /network relationship/i }));
+    fireEvent.click(await screen.findByRole('option', { name: /extended network/i }));
     fireEvent.click(screen.getByRole('button', { name: /save_supplier/i }));
 
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const payload = create.mock.calls[0][0] as FormData;
+    expect(payload.get('tier')).toBe('TIER_2_EXTENDED');
     await waitFor(() => expect(navigate).toHaveBeenCalledWith('/procurement/sourcing-cases/3?refresh=1'));
+  });
+
+  it('requires a network relationship before a manually added supplier is saved', async () => {
+    renderAt('/suppliers?new=1');
+
+    fireEvent.change(await screen.findByRole('textbox', { name: /supplier_name/i }), { target: { value: 'Unclassified Supplier' } });
+    fireEvent.click(screen.getByRole('button', { name: /save_supplier/i }));
+
+    expect(create).not.toHaveBeenCalled();
+    expect(screen.getByRole('combobox', { name: /network relationship/i })).toBeInTheDocument();
   });
 });
