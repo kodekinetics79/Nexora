@@ -246,6 +246,29 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
           },
         ],
       },
+      MuiIconButton: {
+        styleOverrides: {
+          root: {
+            transition: 'transform 120ms ease-out, background-color 160ms ease-out, box-shadow 160ms ease-out',
+            '&:hover': {
+              transform: 'translateY(-1px)',
+              boxShadow: isDark
+                ? '0 6px 12px -8px rgba(0,0,0,0.8)'
+                : '0 6px 12px -8px rgba(15,18,24,0.45)',
+            },
+            '&:active': {
+              transform: 'translateY(1px)',
+              boxShadow: 'none',
+            },
+            '&.Mui-focusVisible': {
+              outline: '3px solid',
+              outlineColor: primaryBorderOnSurface,
+              outlineOffset: 2,
+            },
+            ...reducedMotion,
+          },
+        },
+      },
       MuiTab: {
         styleOverrides: {
           root: {
@@ -394,20 +417,28 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
               backgroundColor: mode === 'dark' ? '#4d5566' : '#a3a9b5',
             },
           },
-          // Motion, all of it small and all of it decorative: a page rises 8px into place as it
-          // mounts, summary tiles follow in sequence, and the brand mark catches a glint every
-          // few seconds. Every rule sits under [data-decorative-motion] or .nx-enter so the
-          // reduce-motion block below can switch the lot off with one selector.
+          // Motion is quiet operational feedback: the working paper settles into place on a real
+          // route change, records answer the pointer, and the brand mark catches a restrained
+          // glint. Query-string changes do not replay the route motion. Every rule is named so
+          // the reduce-motion block below can switch spatial effects off in one place.
           '@keyframes nx-rise': {
-            from: { opacity: 0, transform: 'translateY(8px)' },
+            // Never scale the whole route: even a fractional scale briefly turns a 44px touch
+            // target into a sub-44px target while the page is arriving.
+            from: { opacity: 0.9, transform: 'translateY(6px)' },
             to: { opacity: 1, transform: 'none' },
           },
           '@keyframes nx-glint': {
             '0%, 78%': { transform: 'skewX(-20deg) translateX(0)' },
             '100%': { transform: 'skewX(-20deg) translateX(560%)' },
           },
-          '.nx-enter, #main-content > :nth-child(2)': {
-            animation: 'nx-rise 280ms cubic-bezier(0.2, 0.7, 0.2, 1) both',
+          '.nx-enter, .nx-route-enter': {
+            animation: 'nx-rise 240ms cubic-bezier(0.16, 1, 0.3, 1) both',
+          },
+          '.MuiDataGrid-row, .MuiTableRow-root.MuiTableRow-hover': {
+            transition: 'background-color 140ms ease-out, box-shadow 160ms ease-out',
+          },
+          '.MuiDataGrid-row:hover, .MuiTableRow-root.MuiTableRow-hover:hover': {
+            boxShadow: `inset 3px 0 0 ${alpha(primaryPalette.main, 0.72)}`,
           },
           '.nx-glint': {
             animation: 'nx-glint 7s cubic-bezier(0.4, 0, 0.2, 1) infinite',
@@ -419,7 +450,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             'html:focus-within': {
               scrollBehavior: 'auto !important',
             },
-            '[data-decorative-motion="true"], [data-decorative-motion="true"] *, .nx-enter, #main-content > :nth-child(2), .nx-glint': {
+            '[data-decorative-motion="true"], [data-decorative-motion="true"] *, .nx-enter, .nx-route-enter, .nx-glint, .MuiDataGrid-row, .MuiTableRow-root.MuiTableRow-hover': {
               animation: 'none !important',
               transition: 'none !important',
             },

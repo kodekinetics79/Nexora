@@ -191,9 +191,6 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
       INBOX_ROOT,
       '/procurement/extraction/review',
       '/procurement/leads/inbound-mail',
-      '/procurement/leads/manual-upload',
-      '/procurement/leads/intelligence',
-      '/procurement/leads/ingestion',
     ],
     views: [
       { key: 'inbox-queue', label: 'Needs you', path: INBOX_ROOT },
@@ -209,13 +206,6 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
         label: 'Inbound mail',
         path: '/procurement/leads/inbound-mail',
         moduleName: 'Leads',
-      },
-      {
-        key: 'inbox-upload',
-        label: 'Upload documents',
-        path: '/procurement/leads/manual-upload',
-        moduleName: 'Leads',
-        activePrefixes: ['/procurement/leads/ingestion', '/procurement/leads/intelligence'],
       },
     ],
   },

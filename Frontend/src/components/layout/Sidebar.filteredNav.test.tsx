@@ -134,19 +134,28 @@ describe('where the rail says you are', () => {
     expect(row('Quotes')).toHaveAttribute('aria-current', 'page');
   });
 
-  it('lights Inbox on each of the intake screens it owns', () => {
-    // These were four separate rail rows under "Lead Management"; they are views of Inbox now, and
-    // the rail has to agree with the tab strip about that.
+  it('lights Inbox only on the review and inbound-mail views it owns', () => {
     for (const url of [
       '/procurement/extraction/review',
       '/procurement/leads/inbound-mail',
+    ]) {
+      const view = renderRail(url);
+      expect(screen.getByRole('button', { name: 'Inbox' })).toHaveAttribute('aria-current', 'page');
+      expect(screen.getByRole('button', { name: 'Leads' })).not.toHaveAttribute('aria-current');
+      expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
+      view.unmount();
+    }
+  });
+
+  it('lights Leads while documents are uploaded and processed', () => {
+    for (const url of [
       '/procurement/leads/manual-upload',
       '/procurement/leads/intelligence',
       '/procurement/leads/ingestion/123',
     ]) {
       const view = renderRail(url);
-      expect(screen.getByRole('button', { name: 'Inbox' })).toHaveAttribute('aria-current', 'page');
-      expect(screen.getByRole('button', { name: 'Leads' })).not.toHaveAttribute('aria-current');
+      expect(screen.getByRole('button', { name: 'Leads' })).toHaveAttribute('aria-current', 'page');
+      expect(screen.getByRole('button', { name: 'Inbox' })).not.toHaveAttribute('aria-current');
       expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
       view.unmount();
     }

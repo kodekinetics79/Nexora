@@ -232,12 +232,24 @@ describe('the rail exposes the complete commercial spine', () => {
     // Admin configuration and are no longer tenant destinations at all — see setupCatalog.tsx.
     // Supplier Email (2026-09-16) took it to 21: the wording of supplier RFQ emails.
     expect(railFor(false)).toHaveLength(8);
-    // Quotes gained an "All" tab (2026-09-28): the same list with no filter, not a new destination.
-    expect(PRIMARY_VIEWS).toHaveLength(16);
+    // Upload documents moved from an Inbox tab to the Leads header; it remains one destination,
+    // now opened from the screen whose records it creates.
+    expect(PRIMARY_VIEWS).toHaveLength(15);
     expect(ADVANCED_ENTRIES).toHaveLength(47);
     expect(ADVANCED_GROUPS).toHaveLength(10);
     // Quote statuses (2026-09-29): the client's own quote steps, endings and reasons, beside Quote Format.
     expect(SETUP_ENTRIES).toHaveLength(22);
+  });
+
+  it('keeps document upload out of Inbox and owned by Leads', () => {
+    const inbox = PRIMARY_NAV.find((item) => item.key === 'inbox');
+    const leads = PRIMARY_NAV.find((item) => item.key === 'leads');
+
+    expect(inbox?.views?.map((view) => view.label)).toEqual([
+      'Needs you', 'Documents to check', 'Inbound mail',
+    ]);
+    expect(inbox?.activePrefixes).not.toContain('/procurement/leads/manual-upload');
+    expect(leads?.activePrefixes).toContain('/procurement/leads/');
   });
 
   it('ends the release journey at Client Orders while retaining deferred routes', () => {

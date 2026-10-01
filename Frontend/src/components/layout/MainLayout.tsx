@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Drawer, Toolbar, CssBaseline, useMediaQuery, useTheme } from '@mui/material';
+import { useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import Branding from '../common/Branding';
@@ -28,6 +29,7 @@ interface MainLayoutProps {
 }
 
 const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
+  const location = useLocation();
   const [pinned, setPinned] = useState(readPinned);
   const [peek, setPeek] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -185,7 +187,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         }}
       >
         <Toolbar />
-        {children}
+        {/* The shell stays mounted while the working paper changes. Keying this small boundary by
+            pathname gives every real navigation one short, consistent arrival without replaying
+            motion for search, filters or pagination changes on the same screen. */}
+        <Box key={location.pathname} className="nx-route-enter" sx={{ minWidth: 0 }}>
+          {children}
+        </Box>
       </Box>
 
       {/* Fixed on every tenant page while a platform impersonation session is

@@ -106,6 +106,15 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
     expect(navigate).toHaveBeenCalledWith('/procurement/rfqs/all');
   });
 
+  it('puts document upload in the Leads header for every list state', async () => {
+    answerTotal(3);
+    renderPage();
+
+    await screen.findByText(/nothing to decide/i);
+    fireEvent.click(screen.getByRole('button', { name: 'Upload documents' }));
+    expect(navigate).toHaveBeenCalledWith('/procurement/leads/manual-upload');
+  });
+
   it('saysNoInquiriesYet_andPointsAtInboundMailWhenNothingIsFiltered', async () => {
     renderPage();
 
@@ -151,6 +160,7 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
 
     const button = await screen.findByRole('button', { name: /check for new leads/i });
     expect(button).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Upload documents' })).not.toBeInTheDocument();
     expect(button.parentElement).toHaveAttribute('tabindex', '0');
 
     fireEvent.mouseOver(button.parentElement as HTMLElement);

@@ -4,13 +4,12 @@ import ViewTabs from '../../components/layout/ViewTabs';
 import GlanceStrip from './GlanceStrip';
 
 /**
- * The one frame every Inbox tab sits in — Needs you, Documents to check, Inbound mail, Upload
- * documents.
+ * The one frame every Inbox tab sits in — Needs you, Documents to check and Inbound mail.
  *
- * Owner 2026-09-28: the four tabs each drew their own header at their own width, so the tab strip
+ * Owner 2026-09-28: the tabs each drew their own header at their own width, so the tab strip
  * jumped on every click, the title changed name and size, and the same verb was a different button
  * on each screen. Here the header ("Inbox" and today's figures), the width and the tab strip are
- * identical on all four; a tab changes only what is under the strip.
+ * identical on all three; a tab changes only what is under the strip.
  *
  * The toolbar row under the strip is the one place a tab puts its own things — what it holds on
  * the left (a count, a search, filters) and its actions on the right. It keeps its height when a
