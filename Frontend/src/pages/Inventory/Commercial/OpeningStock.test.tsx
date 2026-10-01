@@ -138,7 +138,7 @@ describe('Opening stock bootstrap', () => {
 
     await pick('Product', /VLV-100/);
     await pick('Warehouse', /Dammam/);
-    fireEvent.change(screen.getByLabelText(/quantity on hand/i), { target: { value: '40' } });
+    fireEvent.change(screen.getByLabelText(/quantity in stock/i), { target: { value: '40' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(recordStockCount).toHaveBeenCalledTimes(1));
@@ -161,7 +161,7 @@ describe('Opening stock bootstrap', () => {
     await pick('Warehouse', /Dammam/);
     expect(submit).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText(/quantity on hand/i), { target: { value: '40' } });
+    fireEvent.change(screen.getByLabelText(/quantity in stock/i), { target: { value: '40' } });
     await waitFor(() => expect(submit).toBeEnabled());
   });
 });

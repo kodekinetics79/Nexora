@@ -172,7 +172,7 @@ describe('Price from stock', () => {
     // Owner 2026-09-27: a missing price still shows a figure, SAR 0.00, with the way to set it.
     await within(dialog).findByText('Sale price per EA');
     expect(within(dialog).getAllByText(/^SAR\s?0\.00$/).length).toBeGreaterThan(0);
-    expect(within(dialog).getByRole('link', { name: 'pricing sheet' })).toHaveAttribute('href', '/inventory/pricing-sheet');
+    expect(within(dialog).getByRole('link', { name: 'Products list' })).toHaveAttribute('href', '/inventory/products');
     expect(within(dialog).getByLabelText('Quote price')).toHaveValue(120);
   });
 

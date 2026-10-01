@@ -36,7 +36,7 @@ describe('the Assistants & tools group', () => {
     renderRail();
     expect(screen.queryByRole('button', { name: /assistants & tools/i })).not.toBeInTheDocument();
     // The other workspaces are untouched by the entitlement.
-    expect(screen.getByRole('button', { name: /catalogue & stock/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /products/i })).toBeInTheDocument();
   });
 
   it('is present once the tenant holds capability.ai', () => {

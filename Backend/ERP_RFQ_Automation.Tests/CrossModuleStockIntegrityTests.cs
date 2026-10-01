@@ -80,8 +80,8 @@ public sealed class CrossModuleStockIntegrityTests
             .Where(x => x.InventoryId == InventoryRow).ToListAsync());
         Assert.Equal(InventoryMovementType.Issue, movement.Type);
         Assert.Equal(4m, movement.Quantity);
-        Assert.Equal(StockReservationStatus.Consumed,
-            Assert.Single(await verify.StockReservations.Where(x => x.OrderId == OrderId).ToListAsync()).Status);
+        // This release issues the shipment quantity directly and creates no reservation history.
+        Assert.Empty(await verify.StockReservations.Where(x => x.OrderId == OrderId).ToListAsync());
     }
 
     [Fact]
@@ -292,7 +292,7 @@ public sealed class CrossModuleStockIntegrityTests
     // ================================================================== order release
 
     [Fact]
-    public async Task Cancelling_an_order_releases_its_stock_holds()
+    public async Task Cancelling_an_order_does_not_change_stock_when_reservations_are_disabled()
     {
         using var database = NewDatabase();
         await using (var allocate = database.ContextFor(Tenant))
@@ -300,7 +300,7 @@ public sealed class CrossModuleStockIntegrityTests
             await InventoryServices.OrderStock(allocate)
                 .ReserveOrderAsync(Tenant, OrderId, "rep@acme");
         }
-        await AssertAvailableAsync(database, 6m);
+        await AssertAvailableAsync(database, 10m);
 
         await using (var context = database.ContextFor(Tenant))
         {
@@ -308,16 +308,15 @@ public sealed class CrossModuleStockIntegrityTests
                 .UpdateOrderAsync(OrderId, new UpdateOrderDto { StatusId = CancelledStatus }, Tenant);
         }
 
-        // Cancelling used to leave the holds Active forever: the units were never resellable and
-        // nothing in the product ever told anyone why.
+        // Confirmation does not hold inventory in this release, so cancellation has no stock
+        // reservation to mutate and the full balance remains available throughout.
         await AssertAvailableAsync(database, 10m);
         await using var verify = database.ContextFor(Tenant);
-        Assert.Equal(StockReservationStatus.Released,
-            Assert.Single(await verify.StockReservations.Where(x => x.OrderId == OrderId).ToListAsync()).Status);
+        Assert.Empty(await verify.StockReservations.Where(x => x.OrderId == OrderId).ToListAsync());
     }
 
     [Fact]
-    public async Task A_status_change_that_is_not_a_cancellation_keeps_the_holds()
+    public async Task A_status_change_does_not_create_holds_when_reservations_are_disabled()
     {
         using var database = NewDatabase();
         await using (var allocate = database.ContextFor(Tenant))
@@ -332,11 +331,13 @@ public sealed class CrossModuleStockIntegrityTests
                 .UpdateOrderAsync(OrderId, new UpdateOrderDto { StatusId = ShippedStatus }, Tenant);
         }
 
-        await AssertAvailableAsync(database, 6m);
+        await AssertAvailableAsync(database, 10m);
+        await using var verify = database.ContextFor(Tenant);
+        Assert.Empty(await verify.StockReservations.Where(x => x.OrderId == OrderId).ToListAsync());
     }
 
     [Fact]
-    public async Task Deleting_an_order_releases_its_holds_without_waiting_for_the_orphan_sweep()
+    public async Task Deleting_an_order_leaves_no_holds_when_reservations_are_disabled()
     {
         using var database = NewDatabase();
         await using (var allocate = database.ContextFor(Tenant))
@@ -350,13 +351,11 @@ public sealed class CrossModuleStockIntegrityTests
             await new OrderService(new OrderRepository(context), context).DeleteOrderAsync(OrderId, Tenant);
         }
 
-        // StockReservation has no FK to Orders, so the row survives the delete with a dangling
-        // OrderId and ReleaseForOrderAsync can never be called for it again. Releasing first is
-        // the fix; the orphan sweep is only the recovery path for holds already stranded.
+        // Confirmation creates no hold in this release, so deleting the order cannot strand a
+        // reservation and the legacy orphan sweep remains a no-op.
         await AssertAvailableAsync(database, 10m);
         await using var verify = database.ContextFor(Tenant);
-        Assert.Equal(StockReservationStatus.Released,
-            Assert.Single(await verify.StockReservations.ToListAsync()).Status);
+        Assert.Empty(await verify.StockReservations.ToListAsync());
         Assert.Equal(0, await InventoryServices.OrderStock(verify)
             .ReleaseOrphanedAsync(Tenant, "sweeper"));
     }
@@ -477,22 +476,16 @@ public sealed class CrossModuleStockIntegrityTests
             });
             await seed.SaveChangesAsync();
         }
-        await using (var hold = database.ContextFor(Tenant))
-        {
-            await new InventoryAvailabilityService(hold)
-                .ReserveAsync(Tenant, InventoryRow, 3m, "another-order", orderId: 94_999);
-        }
-
         await using var context = database.ContextFor(Tenant);
         var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, Tenant, default);
 
-        // 12 on hand - 3 reserved - 3 quarantined - 2 safety stock = 4 promisable. The brief used
-        // to print 999.
+        // 12 on hand - 3 quarantined - 2 safety stock = 7 promisable. Reservations are outside
+        // this release; the brief must still use the inventory ledger rather than legacy 999.
         var item = Assert.Single(brief.Coverage.Items);
         Assert.True(item.Matched);
-        Assert.Equal(4m, item.CatalogQtyOnHand);
+        Assert.Equal(7m, item.CatalogQtyOnHand);
         Assert.True(item.InStock);
-        Assert.Equal(4m, brief.Coverage.CatalogOnHandQuantity);
+        Assert.Equal(7m, brief.Coverage.CatalogOnHandQuantity);
         Assert.DoesNotContain(brief.Reasons, reason => reason.Contains("999", StringComparison.Ordinal));
     }
 
