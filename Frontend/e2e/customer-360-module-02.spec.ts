@@ -232,7 +232,15 @@ test('new suppliers must be assigned to a network before the profile is created'
     contentType: 'application/json',
     body: JSON.stringify({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 }),
   }));
-  await page.route('**/api/Country?*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  await page.route('**/api/Country?*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify([
+      { countryId: 11, countryCode: 'PK', countryName: 'Pakistan', buid: 1, isActive: true },
+      { countryId: 12, countryCode: 'SA', countryName: 'Saudi Arabia', buid: 1, isActive: true },
+      { countryId: 13, countryCode: 'AE', countryName: 'United Arab Emirates', buid: 1, isActive: true },
+    ]),
+  }));
   await page.route('**/api/Currency?*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
 
   let createRequest = '';
@@ -247,6 +255,12 @@ test('new suppliers must be assigned to a network before the profile is created'
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByLabel('Network relationship')).toBeVisible();
 
+  await dialog.getByLabel('Country').click();
+  await expect(page.getByRole('option', { name: 'Pakistan' })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'Saudi Arabia' })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'United Arab Emirates' })).toBeVisible();
+  await page.getByRole('option', { name: 'Saudi Arabia' }).click();
+
   await dialog.getByLabel(/Supplier Name/i).fill('Extended Pilot Supply');
   await dialog.getByRole('button', { name: 'Save Supplier' }).click();
   await expect(page.getByText('Choose whether this supplier is In Network, Extended Network, or Outside Network.')).toBeVisible();
@@ -260,5 +274,7 @@ test('new suppliers must be assigned to a network before the profile is created'
   await dialog.getByRole('button', { name: 'Save Supplier' }).click();
 
   await expect.poll(() => createRequest).toContain('TIER_2_EXTENDED');
+  expect(createRequest).toContain('name="countryId"');
+  expect(createRequest).toContain('12');
   await expect(dialog).toHaveCount(0);
 });

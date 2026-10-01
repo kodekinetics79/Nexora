@@ -155,12 +155,16 @@ public sealed class TenantBaselineSeederTests
         Assert.NotNull(unit.TenantUomId);
         Assert.Equal(TenantBaselineCatalog.UnitsOfMeasure.Count, summary.UnitsOfMeasureCreated);
 
-        // ---- the country the tenant trades from -------------------------------------------
-        // The code is the identity and is exact; the name is an editable label taken from ICU,
-        // which falls back to the code on a host running globalization-invariant.
-        var country = await context.SetCountries.IgnoreQueryFilters().SingleAsync(row => row.Buid == Bu);
+        // ---- the complete country catalogue -----------------------------------------------
+        // International suppliers must be addressable on the tenant's first day; the country of
+        // incorporation is one entry in the catalogue, not the only country the tenant may trade.
+        Assert.Equal(IsoCountryCatalogV1.Countries.Count, summary.CountriesCreated);
+        Assert.Equal(IsoCountryCatalogV1.Countries.Count,
+            await context.SetCountries.IgnoreQueryFilters().CountAsync(row => row.Buid == Bu));
+        var country = await context.SetCountries.IgnoreQueryFilters()
+            .SingleAsync(row => row.Buid == Bu && row.CountryCode == "SA");
         Assert.Equal("SA", country.CountryCode);
-        Assert.Contains(country.CountryName, new[] { "Saudi Arabia", "SA" });
+        Assert.Equal("Saudi Arabia", country.CountryName);
 
         // ---- and now actually raise the quote ---------------------------------------------
         var draftStatusId = await LifecycleStatusCatalog.ResolveIdAsync(context, Bu, "Quote", "DRAFT");
@@ -408,6 +412,10 @@ public sealed class TenantBaselineSeederTests
         // exists and the seeder must leave it alone.
         var configuration = await context.QuoteConfigurations.IgnoreQueryFilters().SingleAsync();
         configuration.TermsAndConditions = "Payment strictly 60 days from bill of lading.";
+        var pakistan = await context.SetCountries.IgnoreQueryFilters()
+            .SingleAsync(country => country.Buid == Bu && country.CountryCode == "PK");
+        pakistan.CountryName = "Pakistan — approved trade lane";
+        pakistan.IsActive = false;
         var representative = await context.SetupMasters.IgnoreQueryFilters()
             .SingleAsync(row => row.SetupCode == "SALES_REP");
         var revoked = await context.RolePermissions.IgnoreQueryFilters()
@@ -433,6 +441,9 @@ public sealed class TenantBaselineSeederTests
         await using var verify = db.ContextFor(Bu);
         Assert.Equal("Payment strictly 60 days from bill of lading.",
             (await verify.QuoteConfigurations.SingleAsync()).TermsAndConditions);
+        var preservedCountry = await verify.SetCountries.SingleAsync(country => country.CountryCode == "PK");
+        Assert.Equal("Pakistan — approved trade lane", preservedCountry.CountryName);
+        Assert.False(preservedCountry.IsActive);
         Assert.False(await new RolePermissionRepository(verify)
             .CheckPermissionAsync(representative.SetupId, "Customers", "canview", Bu));
 

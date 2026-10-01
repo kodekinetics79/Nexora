@@ -19,6 +19,7 @@ namespace ERP_RFQ_Automation.Repositories
             return await _context.SetCountries
                 .AsNoTracking()
                 .Where(c => c.Buid == buid)
+                .OrderBy(c => c.CountryName)
                 .Select(c => new CountryResponseDTO
                 {
                     CountryId = c.CountryId,
