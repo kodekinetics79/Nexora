@@ -187,7 +187,7 @@ public sealed class TenantBaselineSeeder(
         var quoteConfiguration = await EnsureQuoteConfigurationAsync(businessUnitId, profile, seededBy, now, ct);
         var currencies = await EnsureBaseCurrencyAsync(businessUnitId, currency, seededBy, now, ct);
         var units = await EnsureUnitsOfMeasureAsync(businessUnitId, seededBy, now, ct);
-        var countries = await EnsureCountryAsync(businessUnitId, profile.CountryCode, seededBy, now, ct);
+        var countries = await EnsureCountriesAsync(businessUnitId, seededBy, now, ct);
         var discountTypes = await EnsureDiscountTypesAsync(businessUnitId, seededBy, now, ct);
         var lifecycleStatuses = await EnsureLifecycleStatusesAsync(businessUnit, seededBy, now, ct);
         await LockReferenceListsAsync(businessUnitId, ct);
@@ -371,62 +371,42 @@ public sealed class TenantBaselineSeeder(
     }
 
     /// <summary>
-    /// The tenant's own country, and only that one.
+    /// The complete ISO-3166-1 country catalogue used by supplier and customer addresses.
     ///
-    /// <para>A full ISO country list is a per-business-unit table here, so seeding one would write
-    /// ~250 rows per tenant to make a dropdown longer. The one country a supplier or customer
-    /// record is overwhelmingly likely to need is the one the tenant trades from; the rest are an
-    /// administrator adding the countries they actually deal with. States and cities are not
-    /// seeded for the same reason — there is no defensible subset, and an incomplete one reads as
-    /// an authoritative list.</para>
+    /// <para>Supplier sourcing is international by definition. Requiring an administrator to open
+    /// Setup and hand-create another country before recording a supplier made the add-supplier form
+    /// look broken on every newly provisioned tenant. About 250 small reference rows per tenant is
+    /// the right trade-off for a complete, immediately usable address picker.</para>
     ///
-    /// <para>The NAME is resolved through <c>RegionInfo</c> and falls back to the code. Unlike a
-    /// currency name it is a label on a dropdown the tenant can rename, never something printed as
-    /// an identity, so ICU's spelling is good enough and a hand-maintained table of every country
-    /// would not earn its keep.</para>
+    /// <para>Only missing codes are inserted. An administrator's spelling, description, active
+    /// state, and related cities therefore remain authoritative when provisioning is retried.</para>
     /// </summary>
-    private async Task<int> EnsureCountryAsync(
-        long businessUnitId, string? countryCode, string actor, DateTime now, CancellationToken ct)
+    private async Task<int> EnsureCountriesAsync(
+        long businessUnitId, string actor, DateTime now, CancellationToken ct)
     {
-        var code = countryCode?.Trim().ToUpperInvariant();
-        if (string.IsNullOrEmpty(code) || code.Length != 2 || !code.All(char.IsAsciiLetter))
+        var existingCodes = (await context.SetCountries.IgnoreQueryFilters()
+                .Where(country => country.Buid == businessUnitId)
+                .Select(country => country.CountryCode)
+                .ToListAsync(ct))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var created = 0;
+        foreach (var country in IsoCountryCatalogV1.Countries.Where(country => !existingCodes.Contains(country.Code)))
         {
-            logger.LogInformation(
-                "No usable country code for business unit {BusinessUnitId}; the country list is left "
-                + "empty for the tenant to populate.", businessUnitId);
-            return 0;
+            context.SetCountries.Add(new SetCountry
+            {
+                Buid = businessUnitId,
+                CountryCode = country.Code,
+                CountryName = country.Name,
+                Description = "ISO 3166 country catalogue",
+                IsActive = true,
+                CreatedBy = actor,
+                CreatedDate = now
+            });
+            created++;
         }
 
-        if (await context.SetCountries.IgnoreQueryFilters()
-                .AnyAsync(country => country.Buid == businessUnitId && country.CountryCode == code, ct))
-            return 0;
-
-        context.SetCountries.Add(new SetCountry
-        {
-            Buid = businessUnitId,
-            CountryCode = code,
-            CountryName = CountryName(code),
-            Description = "Country of incorporation, recorded at provisioning",
-            IsActive = true,
-            CreatedBy = actor,
-            CreatedDate = now
-        });
-        return 1;
-    }
-
-    private static string CountryName(string alpha2)
-    {
-        try
-        {
-            var name = new System.Globalization.RegionInfo(alpha2).EnglishName;
-            return string.IsNullOrWhiteSpace(name) ? alpha2 : name;
-        }
-        catch (ArgumentException)
-        {
-            // A code ICU does not know (or a host running globalization-invariant). The code is
-            // the identity and is already correct; only the label is unavailable.
-            return alpha2;
-        }
+        return created;
     }
 
     /// <summary>

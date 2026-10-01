@@ -593,8 +593,10 @@ const SuppliersPage: React.FC = () => {
 
               <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>{t('country')}</InputLabel>
+                  <InputLabel id="supplier-country-label">{t('country')}</InputLabel>
                   <Select
+                    id="supplier-country"
+                    labelId="supplier-country-label"
                     value={formData.countryId}
                     label={t('country')}
                     onChange={(e) => setFormData(p => ({ ...p, countryId: e.target.value as number, cityId: '' as any }))}
@@ -608,8 +610,10 @@ const SuppliersPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>{t('city')}</InputLabel>
+                  <InputLabel id="supplier-city-label">{t('city')}</InputLabel>
                   <Select
+                    id="supplier-city"
+                    labelId="supplier-city-label"
                     value={formData.cityId}
                     label={t('city')}
                     onChange={(e) => setFormData(p => ({ ...p, cityId: e.target.value as number }))}
@@ -636,8 +640,10 @@ const SuppliersPage: React.FC = () => {
             <Grid container spacing={2}>
               <Grid size={{ xs: 12, sm: 4 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>{t('currency')}</InputLabel>
+                  <InputLabel id="supplier-currency-label">{t('currency')}</InputLabel>
                   <Select
+                    id="supplier-currency"
+                    labelId="supplier-currency-label"
                     value={formData.currencyId}
                     label={t('currency')}
                     onChange={(e) => setFormData(p => ({ ...p, currencyId: e.target.value as number }))}
