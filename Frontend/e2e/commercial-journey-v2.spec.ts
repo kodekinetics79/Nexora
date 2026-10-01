@@ -1326,12 +1326,6 @@ test('40 accepted shipment closes order to cash with replay safety', async ({ pa
   expect(order.items).toHaveLength(1);
   expect(order.nexoraSerial).toBe(required('E2E_V2_CLIENT_PO_EXACT_NEXORA_SERIAL'));
 
-  const allocation = await jsonOk<{ orderId: number; fullyAllocated: boolean }>(
-    await api(page, token, 'post', `/api/Order/${orderId}/allocate`),
-  );
-  expect(allocation.orderId).toBe(orderId);
-  expect(allocation.fullyAllocated).toBe(true);
-
   const shipments = await jsonOk<Shipment[]>(await api(page, token, 'get', '/api/Shipment'));
   let shipment = shipments.find((item) => item.orderId === orderId);
   const availabilityBeforeShipment = shipment ? null : await jsonOk<InventoryAvailability[]>(
@@ -1356,11 +1350,13 @@ test('40 accepted shipment closes order to cash with replay safety', async ({ pa
   expect(shipment.items).toHaveLength(order.items.length);
   expect(shipment.deliveryStatus).toBe('DISPATCHED');
 
+  // Reservations are outside this release. The shipment is the stock issue and must not create
+  // or consume a hidden hold on the customer's order.
   const consumedReservations = await jsonOk<StockReservation[]>(
     await api(page, token, 'get', '/api/inventory-intelligence/reservations?status=Consumed'),
   );
   expect(consumedReservations.some((item) => item.demandReference === `Order ${orderId}`
-    && item.quantity === order.items[0].quantity)).toBe(true);
+    && item.quantity === order.items[0].quantity)).toBe(false);
   const reconciliation = await jsonOk<{ balanced: boolean; driftCount: number }>(
     await api(page, token, 'get', '/api/inventory-intelligence/stock/reconciliation?driftOnly=true'),
   );
@@ -1375,7 +1371,7 @@ test('40 accepted shipment closes order to cash with replay safety', async ({ pa
       const after = availabilityAfterShipment.find((row) => row.inventoryId === before?.inventoryId);
       expect(before, `Order line ${item.id} must resolve to authoritative stock.`).toBeTruthy();
       expect(after?.onHand).toBe(before!.onHand - item.quantity);
-      expect(after?.reserved).toBe(before!.reserved - item.quantity);
+      expect(after?.reserved).toBe(before!.reserved);
     }
   }
 
@@ -1683,11 +1679,6 @@ test('41 sourced demand crosses supplier PO, inbound receipt, inventory, deliver
   expect(sourcedOrder.nexoraSerial).toBe(required('E2E_CORE_NEXORA_SERIAL'));
   expect(sourcedOrder.items.find((item) => item.id === sourcedOrderLineId)?.productId)
     .toBe(supplierPo!.lines[0].productId);
-  const allocation = await jsonOk<{ fullyAllocated: boolean }>(await api(
-    page, token, 'post', `/api/Order/${sourcedOrder.id}/allocate`,
-  ));
-  expect(allocation.fullyAllocated).toBe(true);
-
   let outbound = (await jsonOk<Shipment[]>(await api(page, token, 'get', '/api/Shipment')))
     .find((item) => item.orderId === sourcedOrder.id);
   const outboundAlreadyExisted = Boolean(outbound);
@@ -1722,7 +1713,7 @@ test('41 sourced demand crosses supplier PO, inbound receipt, inventory, deliver
     page, token, 'get', '/api/inventory-intelligence/reservations?status=Consumed',
   ));
   expect(consumed.some((item) => item.demandReference === `Order ${sourcedOrder.id}`
-    && item.quantity === sourcedOrder.items[0].quantity)).toBe(true);
+    && item.quantity === sourcedOrder.items[0].quantity)).toBe(false);
   expect(await jsonOk(await api(
     page, token, 'get', '/api/inventory-intelligence/stock/reconciliation?driftOnly=true',
   ))).toEqual(expect.objectContaining({ balanced: true, driftCount: 0 }));
