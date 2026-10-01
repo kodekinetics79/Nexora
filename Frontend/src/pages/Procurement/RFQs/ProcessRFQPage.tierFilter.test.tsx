@@ -70,7 +70,7 @@ describe('supplier RFQ dispatch — filtering candidates by tier', () => {
   it('shows every candidate’s tier, including the ones nobody has classified', async () => {
     await openSupplierPicker();
     const partnerRow = screen.getByText('Gulf Instrument Partners').closest('li');
-    expect(partnerRow).toHaveTextContent('Tier 1 — Partner');
+    expect(partnerRow).toHaveTextContent('In Network — partner');
     // Absence of a tier is a real answer and says so on the row; it is not shown as Tier 3.
     const untieredRow = screen.getByText('Older Supplier Co').closest('li');
     expect(untieredRow).toHaveTextContent('Not classified');

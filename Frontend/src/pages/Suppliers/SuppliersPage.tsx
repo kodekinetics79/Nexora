@@ -8,7 +8,7 @@ import {
   DialogContentText,
   Grid, FormControlLabel, Switch, TextField, CircularProgress,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Tooltip, Divider, MenuItem, Select, FormControl, InputLabel, Alert,
+  Tooltip, Divider, MenuItem, Select, FormControl, FormHelperText, InputLabel, Alert,
 } from '@mui/material';
 import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import {
@@ -18,7 +18,7 @@ import {
   Visibility as ViewIcon,
 } from '@mui/icons-material';
 import { Stack } from '@mui/material';
-import supplierService, { supplierTierLabel, type SupplierDTO } from '../../api/services/supplierService';
+import supplierService, { SUPPLIER_TIERS, supplierTierLabel, type SupplierDTO } from '../../api/services/supplierService';
 import contactService, { type ContactDTO } from '../../api/services/contactService';
 import currencyService from '../../api/services/currencyService';
 import countryService from '../../api/services/countryService';
@@ -375,6 +375,10 @@ const SuppliersPage: React.FC = () => {
       enqueueSnackbar('Enter a valid Supplier contact email.', { variant: 'warning' });
       return;
     }
+    if (!selectedRecord && !formData.tier) {
+      enqueueSnackbar('Choose whether this supplier is In Network, Extended Network, or Outside Network.', { variant: 'warning' });
+      return;
+    }
     const fd = new FormData();
     Object.entries(formData).forEach(([k, v]) => {
       if (k !== 'isActive' && v !== '') fd.append(k, String(v));
@@ -450,9 +454,9 @@ const SuppliersPage: React.FC = () => {
     { field: 'countryName', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
     { field: 'currencyName', headerName: t('currency'), width: 100, renderCell: (p) => p.value ?? '—' },
     { field: 'paymentTerms', headerName: t('payment_terms'), width: 140, renderCell: (p) => p.value ?? '—' },
-    // Tier is a commercial classification, not a status: rendered as plain text next to the status
+    // Network relationship is a commercial classification, not a status: rendered as plain text next to the status
     // chips rather than as a chip of its own, so it cannot be read as an approval verdict.
-    { field: 'tier', headerName: 'Tier', width: 175, renderCell: (p) => supplierTierLabel(p.value) },
+    { field: 'tier', headerName: 'Network', width: 245, renderCell: (p) => supplierTierLabel(p.value) },
     { field: 'governanceStatus', headerName: 'Approval', width: 145, renderCell: (p) => <Chip label={statusLabel(p.value, 'Unverified')} size="small" variant="outlined" /> },
     { field: 'readinessStatus', headerName: 'RFQ readiness', width: 145, renderCell: (p) => <Chip label={statusLabel(p.value, 'Review required')} size="small" variant="outlined" /> },
     { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
@@ -535,6 +539,28 @@ const SuppliersPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <TextField fullWidth label={t('tags')} value={formData.tags} onChange={f('tags')} placeholder="electronics, preferred" />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <FormControl fullWidth required={!selectedRecord}>
+                  <InputLabel id="supplier-network-label">Network relationship</InputLabel>
+                  <Select
+                    labelId="supplier-network-label"
+                    label="Network relationship"
+                    value={formData.tier}
+                    onChange={(e) => setFormData((current) => ({ ...current, tier: e.target.value }))}
+                  >
+                    <MenuItem value="" disabled={!selectedRecord}>
+                      <em>{selectedRecord ? 'Not classified' : 'Choose a network'}</em>
+                    </MenuItem>
+                    {SUPPLIER_TIERS.map((option) => (
+                      <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                    ))}
+                  </Select>
+                  <FormHelperText>
+                    In Network suppliers are established partners; Extended Network suppliers are approved alternatives;
+                    Outside Network suppliers are used by exception.
+                  </FormHelperText>
+                </FormControl>
               </Grid>
               <Grid size={{ xs: 12 }}>
                 <Chip size="small" label={selectedRecord?.isActive === false ? 'Inactive' : 'Active'}

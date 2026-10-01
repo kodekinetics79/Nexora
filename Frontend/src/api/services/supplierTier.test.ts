@@ -18,9 +18,9 @@ describe('supplier tier', () => {
   });
 
   it('never renders a raw enum value at a buyer', () => {
-    expect(supplierTierLabel('TIER_1_PARTNER')).toBe('Tier 1 — Partner');
-    expect(supplierTierLabel('TIER_2_EXTENDED')).toBe('Tier 2 — Extended network');
-    expect(supplierTierLabel('TIER_3_OUT_OF_NETWORK')).toBe('Tier 3 — Out of network');
+    expect(supplierTierLabel('TIER_1_PARTNER')).toBe('In Network — partner');
+    expect(supplierTierLabel('TIER_2_EXTENDED')).toBe('Extended Network — approved supplier');
+    expect(supplierTierLabel('TIER_3_OUT_OF_NETWORK')).toBe('Outside Network — exception supplier');
   });
 
   it('does not invent a label for a value the server has not agreed to', () => {

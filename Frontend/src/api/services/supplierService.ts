@@ -10,9 +10,9 @@ import axiosInstance from '../axiosInstance';
  * auto-promotion, no sync with governance.
  */
 export const SUPPLIER_TIERS = [
-  { value: 'TIER_1_PARTNER', label: 'Tier 1 — Partner' },
-  { value: 'TIER_2_EXTENDED', label: 'Tier 2 — Extended network' },
-  { value: 'TIER_3_OUT_OF_NETWORK', label: 'Tier 3 — Out of network' },
+  { value: 'TIER_1_PARTNER', label: 'In Network — partner' },
+  { value: 'TIER_2_EXTENDED', label: 'Extended Network — approved supplier' },
+  { value: 'TIER_3_OUT_OF_NETWORK', label: 'Outside Network — exception supplier' },
 ] as const;
 
 /** Null/blank tier is a real state — "not classified" — and is never displayed as a tier. */

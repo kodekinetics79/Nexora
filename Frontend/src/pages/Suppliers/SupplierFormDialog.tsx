@@ -164,10 +164,10 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
           <Grid size={{ xs: 12, sm: 6 }}>
             <TextField
               select fullWidth
-              label="Tier"
+              label="Network relationship"
               value={form.tier}
               onChange={f('tier')}
-              helperText="Who you buy from first. Tier orders and pre-selects suppliers for an RFQ; it never blocks one, and it never affects the weighted comparison score."
+              helperText="In Network suppliers are established partners; Extended Network suppliers are approved alternatives; Outside Network suppliers are used by exception. This classification orders suggestions but never replaces governance approval."
             >
               <MenuItem value="">Not classified</MenuItem>
               {SUPPLIER_TIERS.map((option) => (
