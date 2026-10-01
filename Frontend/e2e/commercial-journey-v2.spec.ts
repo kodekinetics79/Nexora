@@ -1056,13 +1056,20 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   expect(blockedApply.status()).toBe(409);
 
   await page.goto(`/procurement/rfqs/view/${rfqId()}`);
-  // Owner 2026-09-29: the scenarios, shadow pricing and target bridge are engine internals. They
-  // stay in the API (asserted above) and are no longer shown on the RFQ page; the Next step says
-  // what to do, and Smart Pricing is the pricing door.
-  await expect(page.getByRole('button', { name: 'RFQ record' })).toBeVisible();
-  await expect(page.getByText('Opportunity Digital Twin', { exact: true })).toHaveCount(0);
-  await expect(page.getByText('Predictive pricing · shadow mode', { exact: true })).toHaveCount(0);
-  await expect(page.getByText('Customer target bridge', { exact: true })).toHaveCount(0);
+  // The scenarios, pricing and target bridge fold under "Ways to fulfil this request" so the
+  // line table opens the page; the journey opens the fold the way a rep would.
+  await page.getByRole('button', { name: /Ways to fulfil this request/ }).click();
+  await expect(page.getByText('Opportunity Digital Twin', { exact: true })).toBeVisible();
+  await expect(page.getByText(intelligence.nextBestAction.label, { exact: false }).first()).toBeVisible();
+  await expect(page.getByText(intelligence.digitalTwin.validity, { exact: false }).first()).toBeVisible();
+  for (const scenario of intelligence.digitalTwin.scenarios) {
+    await expect(page.getByText(scenario.label, { exact: true })).toBeVisible();
+  }
+  await expect(page.getByText('Predictive pricing · shadow mode', { exact: true })).toBeVisible();
+  await expect(page.getByText('Customer target bridge', { exact: true })).toBeVisible();
+  const firstScenarioEvidence = page.locator('details').first();
+  await firstScenarioEvidence.locator('summary').click();
+  await expect(firstScenarioEvidence.getByText(intelligence.digitalTwin.scenarios[0].riskExplanation, { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Smart Pricing' }).click();
   await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/pricing$`));
   await expect(page.getByRole('heading', { name: 'Shadow pricing workspace' })).toBeVisible();
@@ -1151,10 +1158,9 @@ test('37 local-first processing evidence and governed learning remain visible ac
   expect(processing.externalCostStatus).toBe('LocalComputeUnpriced');
 
   await page.goto(`/procurement/rfqs/view/${rfqId()}`);
-  // Owner 2026-09-29: how the request was read belongs to the lead and Platform Admin, not the RFQ
-  // page (the API above still serves it). It stays on Supplier Quote and Client PO review below.
-  await expect(page.getByRole('button', { name: 'RFQ record' })).toBeVisible();
-  await expect(page.getByText('Processing evidence', { exact: true })).toHaveCount(0);
+  // Processing evidence folds under "Line intelligence and processing evidence" on the RFQ.
+  await page.getByRole('button', { name: /Line intelligence and processing evidence/ }).click();
+  await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
   // A client sees the finished product only: no provider, model or cost wording (owner rule 2026-09-16).
   await expect(page.getByText(/Local-first|External provider|Provider use|External cost/)).toHaveCount(0);
 

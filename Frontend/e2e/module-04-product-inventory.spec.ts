@@ -188,8 +188,6 @@ test('RFQ line wording is based on persisted resolution and history has no fabri
   await page.goto('/procurement/rfqs/view/402');
   await expect(page.getByText('Persisted resolution')).toBeVisible();
   await expect(page.getByText('Request data verified')).toHaveCount(0);
-  // The workflow history is in the closed "RFQ record" fold at the foot of the page.
-  await page.getByRole('button', { name: 'RFQ record' }).click();
   await expect(page.getByText('RFQ Created')).toBeVisible();
   await expect(page.getByText('Approved & Sent')).toHaveCount(0);
 });

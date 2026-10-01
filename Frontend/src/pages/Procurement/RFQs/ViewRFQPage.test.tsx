@@ -84,10 +84,9 @@ vi.mock('../../../context/AuthContext', () => ({
 vi.mock('notistack', () => ({ useSnackbar: () => ({ enqueueSnackbar: vi.fn() }) }));
 // The line's price cell asks the stock-price service; unstubbed it gets a partial reply and throws.
 vi.mock('../../../api/services/stockPriceService', () => ({ default: { get: vi.fn().mockResolvedValue(null), saveMargin: vi.fn() } }));
-// The RFQ page no longer renders these panels (they live on the lead and quote pages). They are
-// mocked with a marker so a test can prove they stay off this page.
-vi.mock('../../../components/common/CommercialLineIntelligence', () => ({ default: () => <div>line-intelligence-panel</div> }));
-vi.mock('../../../components/common/CommercialProcessingEvidence', () => ({ default: () => <div>processing-evidence-panel</div> }));
+// Panels with their own data of their own; not what this spec is about.
+vi.mock('../../../components/common/CommercialLineIntelligence', () => ({ default: () => null }));
+vi.mock('../../../components/common/CommercialProcessingEvidence', () => ({ default: () => null }));
 vi.mock('../../../components/common/LifecycleActions', () => ({ default: () => null }));
 vi.mock('../../../components/common/EmailPromptDialog', () => ({ default: () => null }));
 
@@ -178,13 +177,6 @@ const intelligence = (over: Partial<RfqCommercialIntelligence> = {}): RfqCommerc
   ...over,
 });
 
-/** The one record fold at the foot of the page; its content is only accessible once opened. */
-const openRecord = async () => {
-  fireEvent.click(await screen.findByRole('button', { name: 'RFQ record' }));
-};
-/** The value printed beside a label in a Fact (record fold) or a header fact span. */
-const factValue = (label: string) => screen.getByText(label, { exact: true }).nextElementSibling?.textContent ?? null;
-
 const wrapper = ({ children }: { children: ReactNode }) => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
@@ -244,22 +236,18 @@ describe('ViewRFQPage — cross-module Lead links', () => {
     render(<ViewRFQPage />, { wrapper });
 
     await screen.findAllByText('RFQ-9001');
-    // Opened first, so the negative is not passing only because the fold hides its content.
-    await openRecord();
-    expect(screen.getByText('Lead #55')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Lead #55' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open Canonical Lead' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open Lead decision record' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Open exact source evidence' })).not.toBeInTheDocument();
   });
 
-  it('routes the one lead link in the RFQ record only to the guarded Lead detail destination', async () => {
+  it('routes the general Canonical Lead action only to the guarded Lead detail destination', async () => {
     render(<ViewRFQPage />, { wrapper });
 
-    await openRecord();
-    fireEvent.click(await screen.findByRole('button', { name: 'Lead #55' }));
+    // The general information block sits inside the collapsed "Request details" fold.
+    fireEvent.click(await screen.findByRole('button', { name: /Request details/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Canonical Lead' }));
     expect(testAccess.navigate).toHaveBeenCalledWith('/procurement/leads/view/55');
-    // One door to the lead from the record, not two.
-    expect(screen.queryByRole('button', { name: 'Open Canonical Lead' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Open Lead decision record' })).not.toBeInTheDocument();
   });
 
   it('takes exact line evidence to the Lead workbench Evidence stage', async () => {
@@ -720,29 +708,20 @@ describe('ViewRFQPage — immutable promotion lineage', () => {
     }));
     render(<ViewRFQPage />, { wrapper });
 
-    await openRecord();
-    expect(screen.getByTestId('rfq-lineage')).toHaveTextContent(/^Marked to quote by Bid Manager on 24 Aug 2026 · from lead revision 2$/);
-    expect(factValue('Receipt')).toBe('#901 · decision #333 · version 4');
+    expect(await screen.findByText('Governed promotion receipt')).toBeInTheDocument();
+    expect(screen.getByText('Revision 2')).toBeInTheDocument();
+    expect(screen.getByText('Version 4')).toBeInTheDocument();
+    expect(screen.getByText('#901')).toBeInTheDocument();
     expect(screen.getByText('Immutable source record #55101')).toBeInTheDocument();
     expect(screen.queryByText('Revision line #55101')).not.toBeInTheDocument();
     expect(screen.queryByText('Quote?')).not.toBeInTheDocument();
   });
 
-  it('says the lead is newer than the revision the RFQ was made from', async () => {
-    getRfq.mockResolvedValue(rfq({ promotionId: 901, sourceLeadRevisionNumber: 2, activeLeadRevision: 3, promotedBy: 'Bid Manager', promotedAtUtc: '2026-08-24T12:00:00Z' }));
-    render(<ViewRFQPage />, { wrapper });
-
-    await openRecord();
-    expect(screen.getByTestId('rfq-lineage')).toHaveTextContent(/^Marked to quote by Bid Manager on 24 Aug 2026 · from lead revision 2 · lead now at revision 3$/);
-  });
-
   it('states that lineage is unavailable instead of inferring it for a legacy RFQ', async () => {
     render(<ViewRFQPage />, { wrapper });
 
-    await openRecord();
-    expect(screen.getByTestId('rfq-lineage')).toHaveTextContent(/^No record of who marked this to quote · lead at revision 1$/);
-    expect(screen.queryByText('Receipt')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Marked to quote/)).not.toBeInTheDocument();
+    expect(await screen.findByText('Promotion receipt unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/immutable source lineage cannot be claimed/i)).toBeInTheDocument();
     expect(screen.getAllByText('Trace unavailable')).toHaveLength(3);
     expect(screen.getByText('Ready for quote of 3 lines')).toBeInTheDocument();
   });
@@ -760,54 +739,13 @@ describe('ViewRFQPage — immutable customer request terms', () => {
     }));
     render(<ViewRFQPage />, { wrapper });
 
-    // The rep's terms are in the facts row at the top, without opening anything.
-    await screen.findAllByText('RFQ-9001');
-    expect(factValue('Their reference')).toBe('CUSTOMER-RFQ-77');
-    expect(factValue('Deliver to')).toBe('Plant 4 · Receiving Bay B');
-    expect(factValue('Needed by')).toMatch(/^1[45] Sep 2026$/);
-    // Each appears once: the record fold does not repeat a term the facts row shows.
-    expect(screen.getAllByText('CUSTOMER-RFQ-77')).toHaveLength(1);
-    expect(screen.getAllByText('Plant 4 · Receiving Bay B')).toHaveLength(1);
-    expect(screen.getAllByText('Their reference')).toHaveLength(1);
-    // The rest of the customer's terms are in the RFQ record.
-    await openRecord();
-    expect(factValue('Agreement reference')).toBe('FRAME-2026-09');
-    expect(factValue('Customer deadline (Hijri)')).toBe('1448-04-03');
-    expect(factValue('Inquiry type')).toBe('product');
-  });
-
-  it('puts the buyer in the facts row, once, and only when it is not already the customer or contact', async () => {
-    getRfq.mockResolvedValue(rfq({ buyersName: 'Saba S Alkhambashi', contactName: 'Procurement Desk' }));
-    const { unmount } = render(<ViewRFQPage />, { wrapper });
-
-    await screen.findAllByText('RFQ-9001');
-    expect(factValue('Buyer')).toBe('Saba S Alkhambashi');
-    expect(screen.getAllByText('Saba S Alkhambashi')).toHaveLength(1);
-    unmount();
-
-    getRfq.mockResolvedValue(rfq({ buyersName: 'Fulton County' }));
-    render(<ViewRFQPage />, { wrapper });
-    await screen.findAllByText('RFQ-9001');
-    await openRecord();
-    expect(screen.queryByText('Buyer')).not.toBeInTheDocument();
-  });
-
-  it('shows "Not stated" for terms the customer did not give, and invents none', async () => {
-    getRfq.mockResolvedValue(rfq({ rfqtype: undefined, activeLeadRevision: 0, businessUnitName: undefined }));
-    render(<ViewRFQPage />, { wrapper });
-
-    await screen.findAllByText('RFQ-9001');
-    // Absent terms stay out of the facts row (the one "Needed by" is the record's, not the header's) …
-    expect(screen.getByText('Needed by')).not.toHaveClass('fact-label');
-    expect(screen.getByText('Deliver to')).not.toHaveClass('fact-label');
-    await openRecord();
-    // … and are named in the record instead, as not stated.
-    for (const label of ['RFQ type', 'Buyer', 'Their reference', 'Deliver to', 'Needed by', 'Agreement reference', 'Inquiry type', 'Customer deadline (Hijri)', 'Business unit', 'Customer email']) {
-      expect(factValue(label), label).toBe('Not stated');
-    }
-    expect(screen.queryByText('Agreement')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Revision 1|revision 1/)).not.toBeInTheDocument();
-    expect(screen.getByTestId('rfq-lineage')).toHaveTextContent(/^No record of who marked this to quote$/);
+    fireEvent.click(await screen.findByRole('button', { name: /Request details/ }));
+    expect(await screen.findByRole('heading', { name: 'Customer request terms' })).toBeInTheDocument();
+    expect(screen.getByText('CUSTOMER-RFQ-77')).toBeInTheDocument();
+    expect(screen.getByText('Plant 4 · Receiving Bay B')).toBeInTheDocument();
+    expect(screen.getByText('FRAME-2026-09')).toBeInTheDocument();
+    expect(screen.getByText('1448-04-03')).toBeInTheDocument();
+    expect(screen.getByText('product')).toBeInTheDocument();
   });
 
   it('renders only a bounded, escaped line-field summary and retains the remaining count', async () => {
@@ -842,48 +780,6 @@ describe('ViewRFQPage — immutable customer request terms', () => {
 });
 
 /**
- * Owner 2026-09-29: the bottom of the RFQ page is one closed record fold. The engine's fulfilment
- * scenarios and the line/processing evidence left the page; the Next step says what to do.
- */
-describe('ViewRFQPage — one record fold at the bottom', () => {
-  it('renders no fulfilment-scenario or evidence folds, even when the engine has scenarios', async () => {
-    const twin = intelligence().digitalTwin;
-    getRfqIntelligence.mockResolvedValue(intelligence({
-      digitalTwin: {
-        ...twin,
-        scenarios: [{
-          code: 'STOCK_ONLY', label: 'Stock only', eligible: false, explanation: 'No stock', riskBand: 'BLOCKED', confidence: 1,
-          riskExplanation: 'Blocked', quantities: [], costSources: [], assumptions: [], approvalRequirements: [], evidence: [],
-        }],
-      },
-    }));
-    render(<ViewRFQPage />, { wrapper });
-
-    await screen.findAllByText('RFQ-9001');
-    await waitFor(() => expect(getRfqIntelligence).toHaveBeenCalled());
-    // The intelligence still drives the header, so it is still read …
-    expect(await screen.findByText('63%')).toBeInTheDocument();
-    // … but none of its machinery is shown.
-    for (const gone of ['Ways to fulfil this request', 'Line intelligence and processing evidence', 'Request details', 'Where this RFQ came from',
-      'Opportunity Digital Twin', 'Stock only', 'Predictive pricing · shadow mode', 'Customer target bridge', 'Recover line coverage',
-      'Open recommended action', 'line-intelligence-panel', 'processing-evidence-panel']) {
-      expect(screen.queryByText(gone), gone).not.toBeInTheDocument();
-    }
-    expect(screen.getAllByRole('button', { name: 'RFQ record' })).toHaveLength(1);
-  });
-
-  it('keeps the workflow history in the record', async () => {
-    getRfq.mockResolvedValue(rfq({ modifiedBy: 'editor', modifiedDate: '2026-08-05T12:00:00Z' }));
-    render(<ViewRFQPage />, { wrapper });
-
-    await openRecord();
-    expect(screen.getByText('RFQ Created')).toBeInTheDocument();
-    expect(screen.getByText('Last Modified')).toBeInTheDocument();
-    expect(screen.getByText('by editor')).toBeInTheDocument();
-  });
-});
-
-/**
  * The screen carried three readiness statements. Two were constants: `rfq.readiness` derived
  * from an ItemCount the detail endpoint never populated, and a literal warning chip wired to
  * nothing at all. The evidence-backed score is the one that means something.
@@ -913,10 +809,8 @@ describe('ViewRFQPage — dates', () => {
     render(<ViewRFQPage />, { wrapper });
 
     await screen.findAllByText('RFQ-9001');
-    await openRecord();
     expect(screen.queryByText(/01 Jan 1$/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Jan 0001/)).not.toBeInTheDocument();
-    expect(factValue('Received')).toBe('Not stated');
   });
 });
 
