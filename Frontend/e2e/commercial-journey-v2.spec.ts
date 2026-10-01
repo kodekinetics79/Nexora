@@ -1004,15 +1004,10 @@ test('34 role Today surfaces expose persisted operational work', async ({ page }
   await page.getByRole('button', { name: 'Open sourcing queue' }).click();
   await expect(page).toHaveURL(/\/procurement\/rfqs\/all\?state=requires-sourcing$/);
 
-  const inventory = await jsonOk<{ metrics: Array<{ label: string; value: number }>; exceptions: Array<{ partNumber: string }> }>(
-    await api(page, token, 'get', '/api/inventory-intelligence/overview'),
-  );
+  // Inventory Today is consolidated into the Products workspace for this release.
   await page.goto('/inventory/today');
-  await expect(page.getByRole('heading', { name: 'Inventory today' })).toBeVisible();
-  if (inventory.metrics.length) await expect(page.getByText(inventory.metrics[0].label, { exact: true })).toBeVisible();
-  if (inventory.exceptions.length) await expect(page.getByText(inventory.exceptions[0].partNumber, { exact: true }).first()).toBeVisible();
-  await page.getByRole('button', { name: 'View demand intelligence' }).click();
-  await expect(page).toHaveURL(/\/inventory\/demand$/);
+  await expect(page).toHaveURL(/\/inventory\/products$/);
+  await expect(page.getByRole('heading', { name: 'Products' })).toBeVisible();
 
   await page.goto('/executive/today');
   // /executive/today and /dashboard are the same screen, and it is no longer the "Executive view":
