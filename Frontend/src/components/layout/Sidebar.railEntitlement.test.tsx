@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -50,7 +50,7 @@ describe('the rail keeps operational workspaces discoverable', () => {
     renderRail();
 
     expect(screen.getByRole('button', { name: 'Inbox' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Catalogue & stock' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Products' })).toBeInTheDocument();
     expect(screen.getByText('More workspaces')).toBeInTheDocument();
   });
 
@@ -60,7 +60,7 @@ describe('the rail keeps operational workspaces discoverable', () => {
     renderRail();
 
     expect(screen.getByText('More workspaces')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Catalogue & stock' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Products' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Inbox' })).toBeInTheDocument();
   });
 
@@ -70,7 +70,7 @@ describe('the rail keeps operational workspaces discoverable', () => {
     renderRail();
 
     expect(screen.getByRole('button', { name: 'Inbox' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Catalogue & stock' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Products' })).toBeInTheDocument();
   });
 
   it('keeps the searchable directory as a fallback', () => {
@@ -78,30 +78,20 @@ describe('the rail keeps operational workspaces discoverable', () => {
     expect(screen.getByRole('button', { name: 'Screen directory' })).toBeInTheDocument();
   });
 
-  it('opens the requested workspace when its collapsed icon is activated', () => {
+  it('keeps Products directly available when the rail is collapsed', () => {
     render(
       <MemoryRouter initialEntries={['/inbox']}>
         <CollapsedRailHarness />
       </MemoryRouter>,
     );
 
-    const catalogue = screen.getByRole('button', { name: 'Catalogue & stock' });
+    const inventory = screen.getByRole('button', { name: 'Products' });
     expect(screen.getByRole('status', { name: 'Rail state' })).toHaveTextContent('collapsed');
-    expect(screen.queryByRole('button', { name: 'Products' })).not.toBeInTheDocument();
-
-    fireEvent.click(catalogue);
-
-    expect(screen.getByRole('status', { name: 'Rail state' })).toHaveTextContent('expanded');
-    expect(screen.getByRole('button', { name: 'Catalogue & stock' })).toHaveAttribute(
-      'aria-expanded',
-      'true',
-    );
-    expect(screen.getByRole('button', { name: 'Products' })).toBeInTheDocument();
+    expect(inventory).toBeInTheDocument();
   });
 
   it('renders only list items as direct children of every list', () => {
     const { container } = renderRail();
-    fireEvent.click(screen.getByRole('button', { name: 'Catalogue & stock' }));
 
     for (const list of container.querySelectorAll('ul')) {
       expect(Array.from(list.children).every((child) => child.tagName === 'LI')).toBe(true);

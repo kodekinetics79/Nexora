@@ -78,6 +78,7 @@ export default function StockActionsDialog({ row, open, onClose }: {
 
   const settle = () => {
     void client.invalidateQueries({ queryKey: ['inventory-intelligence'] });
+    void client.invalidateQueries({ queryKey: ['products'] });
   };
 
   const mutation = useMutation({
@@ -141,7 +142,7 @@ export default function StockActionsDialog({ row, open, onClose }: {
       <DialogTitle sx={{ pb: 0 }}>
         {row.partNumber} — {row.productName}
         <Typography variant="body2" color="text.secondary">
-          {row.warehouseName} · {row.onHand} on hand · {row.available} available to promise
+          {row.warehouseName} · {row.onHand} in stock · {row.available} available
         </Typography>
       </DialogTitle>
       <Tabs
@@ -183,7 +184,7 @@ export default function StockActionsDialog({ row, open, onClose }: {
 
           {mode === 'reclassify' && <>
             <Typography variant="body2" color="text.secondary">
-              Moves units into or out of a non-sellable bucket. On-hand does not change — the units
+              Moves units into or out of a non-sellable bucket. In stock does not change — the units
               are still in the building — but available-to-promise does. A negative quantity releases.
             </Typography>
             <TextField select label="Bucket" size="small" value={bucket}

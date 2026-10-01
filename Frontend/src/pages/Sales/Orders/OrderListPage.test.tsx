@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import OrderListPage from './OrderListPage';
@@ -75,8 +75,8 @@ beforeEach(() => {
   });
 });
 
-describe('the invoice action on the order list', () => {
-  it('opens the line-level screen instead of posting the whole ordered quantity', async () => {
+describe('deferred modules on the order list', () => {
+  it('keeps Fulfilment and Receivables actions out of this release', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -84,18 +84,13 @@ describe('the invoice action on the order list', () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByLabelText('Invoice order SO-SYNTH-900'));
-
-    // The screen appears, pre-filled with what the customer accepted...
-    const field = await screen.findByLabelText('Invoice quantity for Gate valve') as HTMLInputElement;
-    expect(field.value).toBe('7');
-    // ...and nothing has been billed by the click itself.
-    await waitFor(() => expect(get).toHaveBeenCalledWith(
-      '/api/delivery/orders/900/delivered-quantities', undefined));
+    await screen.findByText('SO-SYNTH-900');
+    expect(screen.queryByLabelText('Invoice order SO-SYNTH-900')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /shipment/i })).not.toBeInTheDocument();
     expect(post).not.toHaveBeenCalled();
   });
 
-  it('keeps the next-shipment action available on a non-terminal partial order', async () => {
+  it('keeps the order itself available for work', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -103,9 +98,6 @@ describe('the invoice action on the order list', () => {
       </QueryClientProvider>,
     );
 
-    // `hasShipments` is true in this fixture. It means at least one despatch exists, not that every
-    // active line has shipped in full. Only the terminal order status closes this door.
-    expect(await screen.findByRole('button', { name: 'Create next shipment for SO-SYNTH-900' }))
-      .toBeVisible();
+    expect(await screen.findByRole('button', { name: 'View Order' })).toBeVisible();
   });
 });

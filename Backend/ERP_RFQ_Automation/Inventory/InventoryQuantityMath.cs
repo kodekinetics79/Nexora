@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Inventory.Commercial;
+using System.Linq.Expressions;
 
 namespace ERP_RFQ_Automation.Inventory;
 
@@ -14,9 +15,19 @@ namespace ERP_RFQ_Automation.Inventory;
 /// </summary>
 public static class InventoryQuantityMath
 {
+    // The expression is also inlined into database read queries. One arithmetic definition
+    // serves both SQL filtering/sorting and the existing materialized-domain callers.
+    public static readonly Expression<Func<decimal, decimal, decimal, decimal, decimal, decimal, decimal, decimal>>
+        AvailableToPromiseExpression = (onHand, reserved, allocated, quarantine, damaged, expired, safetyStock) =>
+            Math.Max(0m, onHand - (InventoryReleaseScope.ReservationsEnabled ? reserved : 0m)
+                - allocated - quarantine - damaged - expired - safetyStock);
+
+    private static readonly Func<decimal, decimal, decimal, decimal, decimal, decimal, decimal, decimal>
+        AvailableToPromiseCompiled = AvailableToPromiseExpression.Compile();
     /// <summary>
     /// Available-to-promise: physical on-hand minus every bucket that is either already
-    /// committed (reserved/allocated) or not sellable (quarantine/damaged/expired) minus the
+    /// committed (allocated, and reserved only when enabled) or not sellable
+    /// (quarantine/damaged/expired) minus the
     /// protected safety stock. Clamped at zero — a negative ATP is never a promise a
     /// salesperson can make, and the clamp keeps every downstream sum monotonic.
     ///
@@ -32,7 +43,8 @@ public static class InventoryQuantityMath
         decimal damaged,
         decimal expired,
         decimal safetyStock)
-        => Math.Max(0m, onHand - reserved - allocated - quarantine - damaged - expired - safetyStock);
+        // Historical holds are retained for audit, but do not withhold stock in this release.
+        => AvailableToPromiseCompiled(onHand, reserved, allocated, quarantine, damaged, expired, safetyStock);
 
     /// <summary>
     /// The signed effect a movement has on <see cref="Models.Inventory.QtyOnHand"/>.

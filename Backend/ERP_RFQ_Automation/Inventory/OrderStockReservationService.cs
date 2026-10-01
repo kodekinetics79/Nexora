@@ -192,6 +192,10 @@ public sealed class OrderStockReservationService(
         if (!orderExists)
             throw new KeyNotFoundException($"Order {orderId} was not found in this tenant.");
 
+        // Confirmation does not hold inventory in this release. Physical stock is issued only
+        // when a shipment declares its quantities; no historical reservation is changed here.
+        if (!InventoryReleaseScope.ReservationsEnabled) return new OrderAllocationResult(orderId, []);
+
         var lines = await (from item in _db.Set<OrderItem>().AsNoTracking()
                            join order in _db.Set<Order>().AsNoTracking() on item.OrderId equals order.Id
                            where order.Id == orderId && order.BusinessUnitId == businessUnitId && item.IsActive
@@ -236,6 +240,7 @@ public sealed class OrderStockReservationService(
     public async Task<int> ReleaseOrphanedAsync(long businessUnitId, string? actor = null,
         CancellationToken ct = default)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled) return 0;
         var orphanOrderIds = await _db.Set<StockReservation>().AsNoTracking()
             .Where(r => r.BusinessUnitId == businessUnitId && r.Status == StockReservationStatus.Active
                         && r.OrderId != null
@@ -402,6 +407,9 @@ public sealed class OrderStockReservationService(
 
     public async Task<int> ConsumeOrderAsync(long businessUnitId, long orderId, string? actor = null, CancellationToken ct = default)
     {
+        // This legacy endpoint infers quantities from holds. Shipments declare actual quantities
+        // and use ConsumeOrderLinesAsync, which works without creating or consuming reservations.
+        InventoryReleaseScope.RequireReservations();
         // LOT DECLARATION: this used to read reservation IDs and call _availability.ConsumeAsync in
         // a loop, never touching the lot declarer. On-hand fell and the hold flipped to Consumed,
         // but MaterialLot.QuantityConsumed never moved — and GetReservableLotsAsync computes a lot's
@@ -455,6 +463,10 @@ public sealed class OrderStockReservationService(
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(quantityByOrderItemId);
+        if (!InventoryReleaseScope.ReservationsEnabled && shipmentId is not > 0)
+            throw new InvalidOperationException("A shipment is required to issue stock while reservations are disabled.");
+        if (quantityByOrderItemId.Values.Any(quantity => quantity <= 0m))
+            throw new ArgumentOutOfRangeException(nameof(quantityByOrderItemId), "Issue quantities must be positive.");
 
         // TENANT ISOLATION: identical to ReserveOrderAsync. OrderItem carries no BusinessUnitId,
         // so every line is reached only through an Order proven to belong to the caller.
@@ -465,6 +477,10 @@ public sealed class OrderStockReservationService(
 
         var declaredIds = quantityByOrderItemId.Keys.ToArray();
         if (declaredIds.Length == 0) return new OrderIssueResult(orderId, []);
+        if (!InventoryReleaseScope.ReservationsEnabled && !await _db.Shipments.AsNoTracking()
+                .AnyAsync(x => x.Id == shipmentId && x.OrderId == orderId
+                    && x.BusinessUnitId == businessUnitId && x.IsActive, ct))
+            throw new InvalidOperationException("The shipment does not belong to this order and tenant.");
 
         // A declared line that belongs to some OTHER order (possibly another tenant's) must not
         // reach the ledger: OrderItem ids are global, and a caller naming a foreign line would
@@ -497,7 +513,10 @@ public sealed class OrderStockReservationService(
             await _lotDeclarer.DeclareIssueAsync(businessUnitId, lotLines, actor ?? "system",
                 IssueCorrelation(orderId, shipmentId), complianceOverrideReason, ct);
 
-            return new OrderIssueResult(orderId, lines);
+            var result = new OrderIssueResult(orderId, lines);
+            if (!InventoryReleaseScope.ReservationsEnabled && result.IsShort)
+                throw new IncompleteGoodsIssueException(orderId, result.ShortLines);
+            return result;
         }
 
         // ATOMICITY: a goods issue for a multi-line order is one physical event (same reasoning
@@ -519,6 +538,9 @@ public sealed class OrderStockReservationService(
     private async Task<OrderLineIssue> IssueLineAsync(long businessUnitId, long orderId, long orderItemId,
         decimal declared, string? actor, long? shipmentId, List<LotIssueLine> lotLines, CancellationToken ct)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled)
+            return await IssueUnreservedLineAsync(businessUnitId, orderId, orderItemId, declared,
+                actor, shipmentId, lotLines, ct);
         var issued = 0m;
         var fromLots = 0m;
         if (declared > 0m)
@@ -597,6 +619,114 @@ public sealed class OrderStockReservationService(
             .SumAsync(r => (decimal?)r.Quantity, ct) ?? 0m;
 
         return new OrderLineIssue(orderItemId, declared, issued, stillReserved, fromLots, issued - fromLots);
+    }
+
+    /// <summary>Issue actual shipment quantities without creating or changing reservation history.</summary>
+    private async Task<OrderLineIssue> IssueUnreservedLineAsync(long businessUnitId, long orderId,
+        long orderItemId, decimal declared, string? actor, long? shipmentId,
+        List<LotIssueLine> lotLines, CancellationToken ct)
+    {
+        // Serialize the order before checking prior issues, and use the same inventory locks as
+        // counts, transfers and receipts. Retries of one shipment must never decrement twice.
+        await LockIssueAsync($"goods-issue-order:{businessUnitId}:{orderId}", ct);
+        var line = await _db.Set<OrderItem>().AsNoTracking()
+            .SingleAsync(x => x.Id == orderItemId && x.OrderId == orderId, ct);
+        if (!line.IsActive)
+            throw new InvalidOperationException("An inactive order line cannot be issued.");
+        var lineSource = $"order:{orderId}:line:{orderItemId}:shipment:";
+        var source = $"{lineSource}{shipmentId}";
+        var priorMovements = await _db.InventoryMovements.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.SourceType == "Shipment"
+                && x.SourceId.StartsWith(lineSource) && x.Type == Commercial.InventoryMovementType.Issue)
+            .ToListAsync(ct);
+        var replay = priorMovements.Where(x => x.SourceId == source).Sum(x => x.Quantity);
+        if (replay > 0m)
+        {
+            if (replay != declared)
+                throw new InvalidOperationException("This shipment has already issued a different quantity for this line.");
+            var priorLots = await _db.Set<Traceability.MaterialLotConsumption>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.OrderId == orderId
+                    && x.OrderItemId == orderItemId && x.ShipmentId == shipmentId).ToListAsync(ct);
+            lotLines.AddRange(priorLots.Select(x => new LotIssueLine(x.MaterialLotId, orderId,
+                orderItemId, shipmentId, x.Quantity)));
+            var lotQuantity = priorLots.Sum(x => x.Quantity);
+            return new OrderLineIssue(orderItemId, declared, replay, 0m, lotQuantity, replay - lotQuantity);
+        }
+
+        var historicallyIssued = await _db.Set<StockReservation>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.OrderId == orderId
+                && x.OrderItemId == orderItemId && x.Status == StockReservationStatus.Consumed)
+            .SumAsync(x => (decimal?)x.Quantity, ct) ?? 0m;
+        if (declared > line.Quantity - historicallyIssued - priorMovements.Sum(x => x.Quantity))
+            throw new InvalidOperationException("The issue quantity exceeds the order line's unshipped quantity.");
+
+        var inventoryIds = await _db.Set<Models.Inventory>().AsNoTracking()
+            .Where(x => x.Buid == businessUnitId && x.ProductId == line.ProductId
+                && x.WarehouseId != null && (line.WarehouseId == null || x.WarehouseId == line.WarehouseId))
+            .OrderBy(x => x.Id).Select(x => x.Id).ToListAsync(ct);
+        var remaining = declared;
+        var fromLots = 0m;
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        foreach (var inventoryId in inventoryIds)
+        {
+            if (remaining <= 0m) break;
+            await LockIssueAsync(InventoryAvailabilityService.InventoryLock(businessUnitId, inventoryId), ct);
+            var inventory = await _db.Set<Models.Inventory>()
+                .SingleAsync(x => x.Buid == businessUnitId && x.Id == inventoryId, ct);
+            await _db.Entry(inventory).ReloadAsync(ct);
+            var available = InventoryQuantityMath.AvailableToPromise(inventory.QtyOnHand, 0m,
+                inventory.AllocatedQuantity, inventory.QuarantineQuantity, inventory.DamagedQuantity,
+                inventory.ExpiredQuantity, inventory.SafetyStockQuantity);
+            var budget = Math.Min(remaining, available);
+            if (budget <= 0m) continue;
+
+            var allLots = await _db.Set<Traceability.MaterialLot>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.InventoryId == inventoryId)
+                .ToListAsync(ct);
+            decimal Pending(long lotId) => lotLines.Where(x => x.MaterialLotId == lotId).Sum(x => x.Quantity);
+            decimal LotRemaining(Traceability.MaterialLot lot) =>
+                Math.Max(0m, lot.QuantityReceived - lot.QuantityConsumed - Pending(lot.Id));
+            // Non-sellable lots cannot become anonymous stock merely because they were filtered
+            // out of picking. Only the physical balance outside ALL lots is eligible as un-lotted.
+            var unLotted = Math.Max(0m, inventory.QtyOnHand - allLots.Sum(LotRemaining));
+            var moved = 0m;
+            foreach (var lot in allLots.Where(x => x.Status == Traceability.MaterialLotStatuses.Available
+                    && (x.ExpiryDate == null || x.ExpiryDate >= today))
+                .OrderBy(x => x.ExpiryDate ?? DateOnly.MaxValue).ThenBy(x => x.ReceivedOn).ThenBy(x => x.Id))
+            {
+                var take = Math.Min(budget - moved, LotRemaining(lot));
+                if (take <= 0m) continue;
+                lotLines.Add(new LotIssueLine(lot.Id, orderId, orderItemId, shipmentId, take));
+                moved += take;
+                fromLots += take;
+                if (moved == budget) break;
+            }
+            moved += Math.Min(budget - moved, unLotted);
+            if (moved <= 0m) continue;
+            var now = DateTime.UtcNow;
+            inventory.QtyOnHand -= moved;
+            inventory.ModifiedBy = actor ?? "system";
+            inventory.ModifiedOn = now;
+            _db.InventoryMovements.Add(new Commercial.InventoryMovement
+            {
+                BusinessUnitId = businessUnitId, ProductId = line.ProductId, InventoryId = inventoryId,
+                WarehouseId = inventory.WarehouseId!.Value, Type = Commercial.InventoryMovementType.Issue,
+                Quantity = moved, OccurredOn = now, IdempotencyKey = $"{source}:inventory:{inventoryId}",
+                SourceType = "Shipment", SourceId = source, Reason = "Authorised shipment stock issue",
+                CreatedBy = actor ?? "system", CreatedOn = now,
+            });
+            await _db.SaveChangesAsync(ct);
+            remaining -= moved;
+        }
+        return new OrderLineIssue(orderItemId, declared, declared - remaining, 0m,
+            fromLots, declared - remaining - fromLots);
+    }
+
+    private async Task LockIssueAsync(string identity, CancellationToken ct)
+    {
+        if (_db.Database.IsNpgsql())
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({identity}, 0))", ct);
     }
 
     /// <summary>

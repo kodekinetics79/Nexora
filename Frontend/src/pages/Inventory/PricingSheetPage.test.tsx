@@ -59,9 +59,41 @@ describe('Pricing sheet', () => {
     renderSheet();
     fireEvent.change(await screen.findByLabelText('Landed cost for GOLD-QUOTE-0004'), { target: { value: '100' } });
     fireEvent.change(screen.getByLabelText('Margin on cost for GOLD-QUOTE-0004'), { target: { value: '20' } });
+    fireEvent.mouseDown(screen.getByLabelText('Currency for GOLD-QUOTE-0004'));
+    fireEvent.click(await screen.findByRole('option', { name: 'SAR' }));
     expect(screen.getByLabelText('Sale price for GOLD-QUOTE-0004')).toHaveValue(120);
     fireEvent.click(screen.getByRole('button', { name: 'Save 1 change' }));
     await waitFor(() => expect(mocks.save).toHaveBeenCalledWith([{ productId: 3, landedCost: 100, salePrice: 120, currencyId: 1 }]));
+  });
+
+  it('does not pretend a missing currency is the tenant base currency', async () => {
+    mocks.get.mockResolvedValue(sheet([{ ...unpriced, landedCost: 100, salePrice: 120 }]));
+    mocks.save.mockResolvedValue({ saved: 1 });
+    renderSheet();
+
+    await screen.findByText('GOLD-QUOTE-0004');
+    expect(screen.getByLabelText('Currency for GOLD-QUOTE-0004')).toHaveTextContent('Not set');
+    expect(screen.queryByText('SAR')).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByLabelText('Currency for GOLD-QUOTE-0004'));
+    fireEvent.click(await screen.findByRole('option', { name: 'SAR' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save 1 change' }));
+
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith([
+      { productId: 3, landedCost: 100, salePrice: 120, currencyId: 1 },
+    ]));
+  });
+
+  it('does not relabel the purchase currency when catalogue currency changes', async () => {
+    mocks.get.mockResolvedValue(sheet([{ ...unpriced, currencyId: 1, currencyCode: 'SAR', landedCost: 100, salePrice: 120, lastPurchasePrice: 25.5, lastPurchaseCurrencyCode: 'EUR' }]));
+    renderSheet();
+    await screen.findByText('GOLD-QUOTE-0004');
+    expect(screen.getByText('25.50')).toBeInTheDocument();
+    expect(screen.getByText('EUR')).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByLabelText('Currency for GOLD-QUOTE-0004'));
+    fireEvent.click(await screen.findByRole('option', { name: 'USD' }));
+    expect(screen.getByText('EUR')).toBeInTheDocument();
+    expect(screen.getByText('25.50')).toBeInTheDocument();
   });
 
   it('typing a sale price works the margin out, and a price under cost is called out', async () => {
@@ -80,6 +112,7 @@ describe('Pricing sheet', () => {
     expect(await screen.findByText(/Prices are changed by a manager/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Landed cost for GOLD-QUOTE-0004')).not.toBeInTheDocument();
     await screen.findByText('GOLD-QUOTE-0004');
-    expect(screen.getByText(/SAR\s?120\.00/)).toBeInTheDocument();
+    expect(screen.getByText('120.00')).toBeInTheDocument();
+    expect(screen.getByText('SAR')).toBeInTheDocument();
   });
 });

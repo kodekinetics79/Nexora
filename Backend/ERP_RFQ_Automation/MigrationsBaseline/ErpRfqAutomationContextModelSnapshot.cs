@@ -20750,6 +20750,14 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceipt", b =>
                 {
+                    b.Property<string>("SupplierInvoiceNumber")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("BillOfLadingNumber")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<long>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("bigint");

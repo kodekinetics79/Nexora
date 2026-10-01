@@ -23,160 +23,119 @@ namespace ERP_RFQ_Automation.Tests;
 /// </summary>
 public sealed class Gate6LotReservationTests
 {
-    // ===================================================== FR-INV-01: the hold names what it holds
-
+    // Current release: orders do not reserve, but actual goods issues remain lot-traceable.
     [Fact]
-    public async Task An_allocated_hold_names_the_material_lot_it_is_holding()
+    public async Task Confirming_an_order_does_not_create_a_lot_hold()
     {
         using var scenario = new LotScenario();
         await scenario.ReceiveLotAsync("BATCH-A", 5m);
-
         var result = await scenario.AllocateAsync(quantity: 4m);
-
-        Assert.True(result.FullyAllocated);
-        var line = Assert.Single(result.Lines);
-        Assert.Equal(4m, line.ReservedFromLots);
-        Assert.Equal(0m, line.ReservedWithoutLot);
-
+        Assert.Empty(result.Lines);
         await using var verify = scenario.Context();
-        var holds = await verify.Set<StockReservation>()
-            .Where(x => x.Status == StockReservationStatus.Active).ToListAsync();
-        Assert.All(holds, hold => Assert.NotNull(hold.MaterialLotId));
-        Assert.Equal(4m, holds.Sum(x => x.Quantity));
+        Assert.Empty(await verify.StockReservations.ToListAsync());
+        Assert.Equal(7m, (await verify.Set<InventoryRow>().SingleAsync()).QtyOnHand);
     }
 
     [Fact]
-    public async Task Allocation_takes_the_earliest_expiring_lot_first()
+    public async Task Actual_issue_takes_the_earliest_expiring_lot_first()
     {
         using var scenario = new LotScenario();
-        // Received in the WRONG order on purpose: the older receipt has the later expiry, so plain
-        // first-in-first-out would pick it and quietly age out the batch that expires first.
         var longDated = await scenario.ReceiveLotAsync("BATCH-LONG", 3m,
-            expiry: new DateOnly(2030, 1, 1));
+            expiry: DateOnly.FromDateTime(DateTime.UtcNow).AddYears(3));
         var shortDated = await scenario.ReceiveLotAsync("BATCH-SHORT", 3m,
-            expiry: new DateOnly(2027, 1, 1));
-
-        await scenario.AllocateAsync(quantity: 3m);
-
+            expiry: DateOnly.FromDateTime(DateTime.UtcNow).AddYears(1));
+        await scenario.IssueAsync(3m, await scenario.RecordShipmentAsync(3m));
         await using var verify = scenario.Context();
-        var holds = await verify.Set<StockReservation>()
-            .Where(x => x.Status == StockReservationStatus.Active).ToListAsync();
-        Assert.Equal(3m, holds.Where(x => x.MaterialLotId == shortDated).Sum(x => x.Quantity));
-        Assert.Equal(0m, holds.Where(x => x.MaterialLotId == longDated).Sum(x => x.Quantity));
+        var issues = await verify.MaterialLotConsumptions.ToListAsync();
+        Assert.Equal(3m, issues.Where(x => x.MaterialLotId == shortDated).Sum(x => x.Quantity));
+        Assert.DoesNotContain(issues, x => x.MaterialLotId == longDated);
+        Assert.Empty(await verify.StockReservations.ToListAsync());
     }
 
     [Fact]
-    public async Task Two_orders_cannot_both_name_the_same_units_of_one_lot()
+    public async Task Two_orders_cannot_issue_the_same_units_of_one_lot()
     {
         using var scenario = new LotScenario();
-        var lotId = await scenario.ReceiveLotAsync("BATCH-A", 5m);
-
-        await scenario.AllocateAsync(quantity: 4m);
-        await scenario.AllocateAsync(quantity: 4m, orderId: LotScenario.SecondOrderId,
-            orderItemId: LotScenario.SecondOrderItemId);
-
+        var lot = await scenario.ReceiveLotAsync("BATCH-A", 5m);
+        await scenario.IssueAsync(4m, await scenario.RecordShipmentAsync(4m));
+        var second = await scenario.RecordShipmentAsync(4m, LotScenario.SecondOrderId, LotScenario.SecondOrderItemId);
+        await Assert.ThrowsAsync<IncompleteGoodsIssueException>(() => scenario.IssueAsync(4m, second,
+            orderId: LotScenario.SecondOrderId, orderItemId: LotScenario.SecondOrderItemId));
         await using var verify = scenario.Context();
-        var onLot = await verify.Set<StockReservation>()
-            .Where(x => x.MaterialLotId == lotId && x.Status == StockReservationStatus.Active)
-            .SumAsync(x => x.Quantity);
-
-        // The lot holds five; the two orders wanted eight between them. Without the lot-level
-        // check the inventory-level total would have allowed both to name the same physical units,
-        // because the row also carries un-lotted opening stock that covers the difference.
-        Assert.Equal(5m, onLot);
+        Assert.Equal(4m, (await verify.MaterialLots.SingleAsync(x => x.Id == lot)).QuantityConsumed);
+        Assert.Single(await verify.MaterialLotConsumptions.ToListAsync());
+        Assert.Equal(3m, (await verify.Set<InventoryRow>().SingleAsync()).QtyOnHand);
     }
 
     [Fact]
-    public async Task Stock_with_no_lot_behind_it_is_reported_as_a_gap_rather_than_as_coverage()
+    public async Task Opening_stock_issue_reports_its_unlotted_quantity_honestly()
     {
         using var scenario = new LotScenario();
-        // No receipt at all: the inventory row carries only its opening balance, which entered by
-        // count and therefore has no lot. Reserving it must work — it is real stock — and must say
-        // so, because a hold nobody can trace is what a recall discovers too late.
-        var result = await scenario.AllocateAsync(quantity: 2m);
-
+        var result = await scenario.IssueAsync(2m, await scenario.RecordShipmentAsync(2m));
         var line = Assert.Single(result.Lines);
-        Assert.Equal(2m, line.Reserved);
-        Assert.Equal(0m, line.ReservedFromLots);
-        Assert.Equal(2m, line.ReservedWithoutLot);
+        Assert.Equal(2m, line.Issued);
+        Assert.Equal(0m, line.IssuedFromLots);
+        Assert.Equal(2m, line.IssuedWithoutLot);
+        Assert.Equal(0m, line.StillReserved);
     }
 
-    // ================================================ FR-INV-01 / FR-MTR-05: the physical control
-
     [Fact]
-    public async Task Quarantining_one_lot_releases_only_the_orders_that_were_holding_that_lot()
+    public async Task Quarantine_preserves_historical_holds_but_blocks_recalled_lot_from_issue()
     {
         using var scenario = new LotScenario();
         var lotA = await scenario.ReceiveLotAsync("BATCH-A", 4m);
         var lotB = await scenario.ReceiveLotAsync("BATCH-B", 4m);
-
-        // Order 1 takes lot A (received first, so FEFO reaches it first). Order 2 takes lot B.
-        await scenario.AllocateAsync(quantity: 4m);
-        await scenario.AllocateAsync(quantity: 4m, orderId: LotScenario.SecondOrderId,
-            orderItemId: LotScenario.SecondOrderItemId);
-
+        await using (var seed = scenario.Context())
+        {
+            await HistoricalReservations.SeedAsync(seed, scenario.BusinessUnitId, ProcurementTestData.Inventory,
+                4m, "old-A", LotScenario.OrderId, LotScenario.OrderItemId, lotA);
+            await HistoricalReservations.SeedAsync(seed, scenario.BusinessUnitId, ProcurementTestData.Inventory,
+                4m, "old-B", LotScenario.SecondOrderId, LotScenario.SecondOrderItemId, lotB);
+        }
         var quarantine = await scenario.QuarantineAsync(lotA);
-
-        // THE POINT OF THIS GATE. Gate 5 could only free stock by quantity, newest hold first, so
-        // recalling lot A displaced the order holding lot B and left the order holding the
-        // recalled material untouched. Now the displaced order is the one that was actually
-        // holding the recalled lot, and the other customer's promise survives the recall.
-        var displaced = Assert.Single(quarantine.DisplacedReservations);
-        Assert.Equal(LotScenario.OrderId, displaced.OrderId);
-
+        Assert.Empty(quarantine.DisplacedReservations);
+        await scenario.IssueAsync(4m, await scenario.RecordShipmentAsync(4m));
         await using var verify = scenario.Context();
-        var stillHeld = await verify.Set<StockReservation>()
-            .Where(x => x.Status == StockReservationStatus.Active).ToListAsync();
-        Assert.All(stillHeld, hold => Assert.Equal(lotB, hold.MaterialLotId));
-        Assert.Equal(LotScenario.SecondOrderId, Assert.Single(stillHeld.Select(x => x.OrderId).Distinct()));
+        Assert.All(await verify.StockReservations.ToListAsync(), hold => Assert.Equal(StockReservationStatus.Active, hold.Status));
+        Assert.Equal(lotB, Assert.Single(await verify.MaterialLotConsumptions.ToListAsync()).MaterialLotId);
+        Assert.Equal(0m, (await verify.MaterialLots.SingleAsync(x => x.Id == lotA)).QuantityConsumed);
     }
 
     [Fact]
-    public async Task A_hold_that_names_a_quarantined_lot_cannot_be_issued()
+    public async Task Historical_hold_on_quarantined_lot_cannot_be_consumed()
     {
         using var scenario = new LotScenario();
-        var lotId = await scenario.ReceiveLotAsync("BATCH-A", 5m);
-        await scenario.AllocateAsync(quantity: 4m);
-
-        // The lot is put on hold WITHOUT going through the release path, which is the race the
-        // physical control exists for: a quality hold raised while a picker is already at the
-        // rack, or any future writer of the lot status that forgets to release the holds. The
-        // guard must not depend on the release having run.
-        await scenario.ForceQuarantineStatusAsync(lotId);
-
-        var reservationId = await scenario.FirstActiveHoldIdAsync();
+        var lot = await scenario.ReceiveLotAsync("BATCH-A", 5m);
+        long reservationId;
+        await using (var seed = scenario.Context())
+            reservationId = (await HistoricalReservations.SeedAsync(seed, scenario.BusinessUnitId,
+                ProcurementTestData.Inventory, 4m, "old-held", LotScenario.OrderId, LotScenario.OrderItemId, lot)).Id;
+        await scenario.ForceQuarantineStatusAsync(lot);
         await using var context = scenario.Context();
-        var failure = await Assert.ThrowsAsync<QuarantinedLotIssueException>(
-            () => InventoryServices.Availability(context)
-                .ConsumeAsync(scenario.BusinessUnitId, reservationId, "qa"));
-
-        Assert.Equal(lotId, failure.MaterialLotId);
-
-        // Nothing moved. A refusal that had already decremented on-hand would be worse than none.
-        await using var verify = scenario.Context();
-        Assert.Equal(7m, await verify.Set<InventoryRow>()
-            .Where(x => x.Id == ProcurementTestData.Inventory).Select(x => x.QtyOnHand).SingleAsync());
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            InventoryServices.Availability(context).ConsumeAsync(scenario.BusinessUnitId, reservationId, "qa"));
+        Assert.Contains("disabled", failure.Message);
+        Assert.Equal(7m, (await context.Set<InventoryRow>().SingleAsync()).QtyOnHand);
+        Assert.Empty(await context.MaterialLotConsumptions.ToListAsync());
     }
 
     [Fact]
-    public async Task A_recall_names_the_orders_holding_the_lot_not_everyone_holding_the_product()
+    public async Task Historical_recall_evidence_remains_specific_to_the_held_lot()
     {
         using var scenario = new LotScenario();
         var lotA = await scenario.ReceiveLotAsync("BATCH-A", 4m);
-        await scenario.ReceiveLotAsync("BATCH-B", 4m);
-
-        await scenario.AllocateAsync(quantity: 4m);
-        await scenario.AllocateAsync(quantity: 4m, orderId: LotScenario.SecondOrderId,
-            orderItemId: LotScenario.SecondOrderItemId);
-
+        var lotB = await scenario.ReceiveLotAsync("BATCH-B", 4m);
         await using var context = scenario.Context();
-        var commitments = await InventoryServices.Availability(context)
-            .GetLotCommitmentsAsync(scenario.BusinessUnitId, lotA);
-
-        // Both orders hold the same PRODUCT. Only one holds the recalled lot.
-        Assert.Equal([LotScenario.OrderId], commitments.AffectedOrderIds);
-        Assert.Equal(4m, commitments.HeldQuantity);
-        Assert.Equal(0m, commitments.ConsumedQuantity);
+        await HistoricalReservations.SeedAsync(context, scenario.BusinessUnitId, ProcurementTestData.Inventory,
+            4m, "old-A", LotScenario.OrderId, LotScenario.OrderItemId, lotA);
+        await HistoricalReservations.SeedAsync(context, scenario.BusinessUnitId, ProcurementTestData.Inventory,
+            4m, "old-B", LotScenario.SecondOrderId, LotScenario.SecondOrderItemId, lotB);
+        var evidence = await InventoryServices.Availability(context).GetLotCommitmentsAsync(scenario.BusinessUnitId, lotA);
+        Assert.Equal([LotScenario.OrderId], evidence.AffectedOrderIds);
+        Assert.Equal(4m, evidence.HeldQuantity);
+        // Historical evidence is readable, but does not withhold any current lot availability.
+        var lots = await InventoryServices.Availability(context).GetReservableLotsAsync(scenario.BusinessUnitId, ProcurementTestData.Inventory);
+        Assert.Equal(4m, lots.Single(x => x.MaterialLotId == lotA).Reservable);
     }
 
     // ============================================ FR-INV-03: the issue declares what it moved
@@ -217,17 +176,13 @@ public sealed class Gate6LotReservationTests
     /// the lot is offered as reservable in full.</para>
     /// </summary>
     [Fact]
-    public async Task Issuing_a_whole_order_declares_its_lots_so_the_units_cannot_be_reserved_twice()
+    public async Task Issuing_a_shipment_declares_lots_so_the_units_cannot_be_issued_twice()
     {
         using var scenario = new LotScenario();
         var lotId = await scenario.ReceiveLotAsync("BATCH-A", 5m);
         await scenario.AllocateAsync(quantity: 4m);
 
-        await using (var issue = scenario.Context())
-        {
-            Assert.Equal(1, await InventoryServices.OrderStock(issue)
-                .ConsumeOrderAsync(scenario.BusinessUnitId, LotScenario.OrderId, "qa"));
-        }
+        await scenario.IssueAsync(4m, await scenario.RecordShipmentAsync(4m));
 
         await using var verify = scenario.Context();
         var declaration = Assert.Single(await verify.MaterialLotConsumptions.ToListAsync());
@@ -249,21 +204,18 @@ public sealed class Gate6LotReservationTests
     public async Task An_order_hold_that_names_no_line_is_refused_rather_than_issued_undeclared()
     {
         using var scenario = new LotScenario();
-        await scenario.ReceiveLotAsync("BATCH-A", 5m);
-        await scenario.AllocateAsync(quantity: 4m);
+        var lot = await scenario.ReceiveLotAsync("BATCH-A", 5m);
         await using (var detach = scenario.Context())
         {
-            var hold = await detach.Set<StockReservation>()
-                .SingleAsync(x => x.OrderId == LotScenario.OrderId && x.Status == StockReservationStatus.Active);
-            hold.OrderItemId = null;
-            await detach.SaveChangesAsync();
+            await HistoricalReservations.SeedAsync(detach, scenario.BusinessUnitId,
+                ProcurementTestData.Inventory, 4m, "unattributed-old-hold", LotScenario.OrderId, lotId: lot);
         }
 
         await using var context = scenario.Context();
         var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             InventoryServices.OrderStock(context).ConsumeOrderAsync(scenario.BusinessUnitId, LotScenario.OrderId, "qa"));
 
-        Assert.Contains("name no order line", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("disabled", refusal.Message, StringComparison.Ordinal);
         await using var verify = scenario.Context();
         Assert.Empty(await verify.MaterialLotConsumptions.ToListAsync());
         Assert.Equal(StockReservationStatus.Active, (await verify.Set<StockReservation>()
@@ -324,7 +276,7 @@ public sealed class Gate6LotReservationTests
         // An override that is always present stops meaning anything, so the despatch that supplies
         // one it does not need is refused rather than quietly accepted.
         var failure = await Assert.ThrowsAsync<MaterialTraceabilityValidationException>(
-            () => scenario.IssueAsync(quantity: 4m, shipmentId: 96_703,
+            async () => await scenario.IssueAsync(quantity: 4m, shipmentId: await scenario.RecordShipmentAsync(4m),
                 overrideReason: "Signing for it just in case."));
         Assert.Contains("in date", failure.Message);
     }
@@ -343,13 +295,11 @@ public sealed class Gate6LotReservationTests
         // away, producing a delivery note for goods that never moved.
         await scenario.QuarantineAsync(lotId);
 
-        var issue = await scenario.IssueAsync(quantity: 4m, shipmentId: 96_704);
-
-        Assert.True(issue.IsShort);
-        Assert.Equal(0m, issue.TotalIssued);
-        var shortLine = Assert.Single(issue.ShortLines);
-        Assert.Equal(4m, shortLine.Declared);
-        Assert.Equal(0m, shortLine.Issued);
+        var shipment = await scenario.RecordShipmentAsync(4m);
+        await Assert.ThrowsAsync<IncompleteGoodsIssueException>(() => scenario.IssueAsync(4m, shipment));
+        await using var verify = scenario.Context();
+        Assert.Empty(await verify.MaterialLotConsumptions.ToListAsync());
+        Assert.Equal(7m, (await verify.Set<InventoryRow>().SingleAsync()).QtyOnHand);
     }
 
     // ============================================================ FR-INV-05 and FR-INV-06 reports

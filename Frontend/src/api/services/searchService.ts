@@ -1,4 +1,5 @@
 import axiosInstance from '../axiosInstance';
+import { RELEASE_SCOPE } from '../../config/releaseScope';
 
 /**
  * FR-DSH-04 — the top bar's cross-entity quick search.
@@ -103,10 +104,23 @@ const searchService = {
     params: GlobalSearchParams,
     signal?: AbortSignal,
   ): Promise<GlobalSearchResponse> => {
+    const releaseEntities = params.entities?.filter(
+      (entity) => entity !== 'shipment' || RELEASE_SCOPE.fulfilment,
+    );
+    if (params.entities && releaseEntities?.length === 0) {
+      return {
+        query: params.q,
+        hits: [],
+        searchedEntities: [],
+        deniedEntities: [],
+        truncated: [],
+        notes: ['The selected record type is not offered in this release.'],
+      };
+    }
     const response = await axiosInstance.get('/api/search', {
       params: {
         q: params.q,
-        entities: params.entities?.length ? params.entities.join(',') : undefined,
+        entities: releaseEntities?.length ? releaseEntities.join(',') : undefined,
         from: params.from,
         to: params.to,
         status: params.status,
@@ -126,7 +140,15 @@ const searchService = {
       || !Array.isArray(data.notes)) {
       throw new Error('Search returned an unreadable response.');
     }
-    return data as GlobalSearchResponse;
+    const result = data as GlobalSearchResponse;
+    if (RELEASE_SCOPE.fulfilment) return result;
+    return {
+      ...result,
+      hits: result.hits.filter((hit) => hit.entity !== 'shipment'),
+      searchedEntities: result.searchedEntities.filter((entity) => entity !== 'shipment'),
+      deniedEntities: result.deniedEntities.filter((entity) => entity !== 'shipment'),
+      truncated: result.truncated.filter((entity) => entity !== 'shipment'),
+    };
   },
 };
 

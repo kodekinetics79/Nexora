@@ -26,15 +26,37 @@ export interface ProductDTO {
   uomName?: string;
   unitCost?: number;
   sellingPrice?: number;
-  /** The currency the pricing sheet's landed cost and sale price are in; absent until priced there. */
+  priceCurrencyId?: number | null;
+  /** Currency for both landed cost and sale price; absent while the product is deliberately unpriced. */
   priceCurrencyCode?: string | null;
+  reservedQuantity?: number;
+  availableQuantity?: number;
+  incomingQuantity?: number;
+  nextIncomingOn?: string | null;
+  incomingCommitmentCount?: number;
+  incomingWarehouseCount?: number;
+  reorderGap?: number;
+  reorderThreshold?: number;
+  reorderStatus?: 'OUT_OF_STOCK' | 'BELOW_MINIMUM' | 'REORDER_POINT' | 'OVERSTOCK' | null;
+  reorderWarehouseSummary?: string | null;
+  warehouseCount?: number;
+  stockLocationSummary?: string | null;
+  materialLotCount?: number;
+  quarantinedLotCount?: number;
+  expiredCertificateCount?: number;
+  materialLotRemainingQuantity?: number;
   finalLandedCost?: number;
   finalSalesPrice?: number;
+  /** Latest committed supplier PO unit cost, in its own transaction currency. */
+  lastPurchaseCost?: number | null;
+  lastPurchaseCurrencyCode?: string | null;
+  lastPurchaseOn?: string | null;
   warehouseId?: number;
   warehouseName?: string;
   preferredSupplierId?: number;
   preferredSupplierName?: string;
   preferredSupplierEmail?: string;
+  preferredSupplierTier?: string;
   batchTracking?: boolean;
   serialTracking?: boolean;
   expirationDate?: string;
@@ -101,11 +123,26 @@ export interface ProductFilters {
   pageSize?: number;
   search?: string;
   isActive?: boolean;
+  stock?: 'all' | 'in-stock' | 'out-of-stock' | 'low-stock';
+  warehouseId?: number;
+  sortBy?: 'name' | 'partNo' | 'unit' | 'onHand' | 'available' | 'lastPurchaseCost' | 'landedCost' | 'salePrice' | 'currency';
+  sortDirection?: 'asc' | 'desc';
 }
 
 export interface ProductLookup {
   id: number;
   name: string;
+}
+
+export interface ProductCurrencyLookup {
+  id: number;
+  code: string;
+  isBase: boolean;
+}
+
+export interface ProductWarehouseLookup {
+  id: number;
+  warehouseName: string;
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
@@ -157,8 +194,8 @@ const productService = {
     return r.data;
   },
 
-  getWarehouses: async (): Promise<any[]> => {
-    const r = await axiosInstance.get('/api/Product/lookups/warehouses');
+  getWarehouses: async (): Promise<ProductWarehouseLookup[]> => {
+    const r = await axiosInstance.get<ProductWarehouseLookup[]>('/api/Product/lookups/warehouses');
     return r.data;
   },
 
@@ -169,6 +206,11 @@ const productService = {
 
   getSuppliers: async (): Promise<any[]> => {
     const r = await axiosInstance.get('/api/Product/lookups/suppliers');
+    return r.data;
+  },
+
+  getCurrencies: async (): Promise<ProductCurrencyLookup[]> => {
+    const r = await axiosInstance.get('/api/Product/lookups/currencies');
     return r.data;
   },
 

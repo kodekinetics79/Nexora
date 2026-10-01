@@ -119,8 +119,8 @@
       "name": "Commercial Navigation Spine",
       "kind": "nav",
       "refersTo": "navigation-active",
-      "description": "The seven daily commercial stages in stable journey order.",
-      "html": "<nav class=\"ds-nav\" aria-label=\"Commercial stages\"><a class=\"ds-nav-item ds-nav-active\" href=\"#\" aria-current=\"page\">Inbox</a><a class=\"ds-nav-item\" href=\"#\">Leads</a><a class=\"ds-nav-item\" href=\"#\">RFQs</a><a class=\"ds-nav-item\" href=\"#\">Quotes</a><a class=\"ds-nav-item\" href=\"#\">Orders</a><a class=\"ds-nav-item\" href=\"#\">Fulfilment</a><a class=\"ds-nav-item\" href=\"#\">Receivables</a></nav>",
+      "description": "The six release-visible commercial stages in stable journey order.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Commercial stages\"><a class=\"ds-nav-item ds-nav-active\" href=\"#\" aria-current=\"page\">Inbox</a><a class=\"ds-nav-item\" href=\"#\">Leads</a><a class=\"ds-nav-item\" href=\"#\">RFQs</a><a class=\"ds-nav-item\" href=\"#\">Products</a><a class=\"ds-nav-item\" href=\"#\">Quotes</a><a class=\"ds-nav-item\" href=\"#\">Orders</a></nav>",
       "css": ".ds-nav { display: grid; gap: 4px; width: 240px; font-family: \"Source Sans 3\", system-ui, sans-serif; } .ds-nav-item { display: flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: 10px; color: #0f172a; font-size: 14px; font-weight: 600; text-decoration: none; transition: background-color 160ms ease-out, color 160ms ease-out, box-shadow 160ms ease-out; } .ds-nav-item:hover { background: rgba(100, 116, 139, .1); } .ds-nav-item:focus-visible { outline: 3px solid #075dcc; outline-offset: 2px; } .ds-nav-active { background: #075dcc; color: #fff; font-weight: 700; box-shadow: 0 10px 15px -3px rgba(7, 93, 204, .3); } .ds-nav-active:hover, .ds-nav-active:active { background: #064da9; }"
     },
     {
@@ -159,7 +159,7 @@
       "Do show evidence, owner, status, and the next governed action in the same decision context.",
       "Do use Cambay for orientation and Source Sans 3 for operational reading.",
       "Do preserve solid actions, persistent field borders, visible focus, and 44px minimum targets.",
-      "Do keep the seven commercial navigation stages in their journey order across roles and breakpoints."
+      "Do keep the six release-visible commercial navigation stages in their journey order across roles and breakpoints."
     ],
     "donts": [
       "Don't use gradients, glass effects, animated scanner motifs, or generic AI spectacle.",

@@ -126,10 +126,10 @@ public sealed class InventoryIntelligenceController(
 
     [HttpGet("availability")]
     [RequireModulePermission("Products", PermissionAction.View)]
-    public async Task<ActionResult> Availability([FromQuery] string? search, [FromQuery] long? warehouseId, CancellationToken ct)
+    public async Task<ActionResult> Availability([FromQuery] string? search, [FromQuery] long? warehouseId, CancellationToken ct, [FromQuery] long? productId = null)
         // Bounded: this used to materialise every inventory row in the tenant and render all of
-        // them. Narrow with search/warehouseId rather than scrolling.
-        => Ok((await AvailabilityRows(search, warehouseId, ct)).Take(MaxRows).Select(x => new { x.InventoryId, x.ProductId, x.PartNumber, x.ProductName,
+        // them. An exact product filter is applied before the cap for the Products stock dialog.
+        => Ok((await AvailabilityRows(search, warehouseId, ct, productId)).Take(MaxRows).Select(x => new { x.InventoryId, x.ProductId, x.PartNumber, x.ProductName,
             x.WarehouseId, x.WarehouseName, x.OnHand, x.Reserved, x.Available, x.Incoming,
             reorderPoint = (decimal?)x.ReorderPoint,
             // FR-INV-04. Nullable all the way to the client: null is "not configured", and the
@@ -336,6 +336,8 @@ public sealed class InventoryIntelligenceController(
     [RequireModulePermission("Products", PermissionAction.Edit)]
     public async Task<ActionResult> SweepReservations([FromQuery] int olderThanHours = 72, CancellationToken ct = default)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled)
+            return Conflict(new { error = InventoryReleaseScope.ReservationsDisabledMessage });
         if (olderThanHours < 1) return BadRequest(new { error = "olderThanHours must be at least 1." });
         var tenant = TenantId();
         var orphaned = await orderStock.ReleaseOrphanedAsync(tenant, Actor(), ct);
@@ -542,6 +544,8 @@ public sealed class InventoryIntelligenceController(
     [RequireModulePermission("Products", PermissionAction.Edit)]
     public async Task<ActionResult> Release(long id, VersionRequest request, CancellationToken ct)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled)
+            return Conflict(new { error = InventoryReleaseScope.ReservationsDisabledMessage });
         try
         {
             await inventoryAvailability.ReleaseAsync(TenantId(), id, request.ExpectedVersion,
@@ -571,14 +575,62 @@ public sealed class InventoryIntelligenceController(
         var query = from incoming in db.IncomingInventory.AsNoTracking()
             join product in db.Products.AsNoTracking() on incoming.ProductId equals product.Id
             join warehouse in db.Set<Warehouse>().AsNoTracking() on incoming.WarehouseId equals warehouse.Id
+            join line in db.SupplierPurchaseOrderLines.AsNoTracking().Where(x => x.BusinessUnitId == tenant)
+                on (long?)incoming.Id equals line.IncomingInventoryId into lines
+            from line in lines.DefaultIfEmpty()
+            join purchaseOrder in db.SupplierPurchaseOrders.AsNoTracking().Where(x => x.BusinessUnitId == tenant)
+                on line.SupplierPurchaseOrderId equals purchaseOrder.Id into purchaseOrders
+            from purchaseOrder in purchaseOrders.DefaultIfEmpty()
+            join supplier in db.Suppliers.AsNoTracking().Where(x => x.Buid == tenant)
+                on purchaseOrder.SupplierId equals supplier.Id into suppliers
+            from supplier in suppliers.DefaultIfEmpty()
             where incoming.BusinessUnitId == tenant && product.Buid == tenant && warehouse.BusinessUnitId == tenant
                 && (requestedStatus == null || incoming.Status == requestedStatus)
-            orderby incoming.ExpectedOn
-            select new { incoming.Id, purchaseOrderId = (long?)null, purchaseOrderNumber = incoming.SourceId,
-                supplierName = "Not linked", partNumber = product.PartNo, productName = product.ProductName,
+            orderby incoming.ExpectedOn, incoming.Id
+            select new { incoming.Id, purchaseOrderId = purchaseOrder == null ? (long?)null : purchaseOrder.Id,
+                purchaseOrderLineId = line == null ? (long?)null : line.Id,
+                purchaseOrderNumber = purchaseOrder == null ? null : purchaseOrder.PurchaseOrderNumber,
+                sourceReference = incoming.SourceId,
+                supplierName = supplier == null ? null : supplier.Name,
+                supplierCity = supplier == null || supplier.City == null || supplier.City.Buid != tenant ? null : supplier.City.CityName,
+                supplierCountry = supplier == null || supplier.Country == null || supplier.Country.Buid != tenant ? null : supplier.Country.CountryName,
+                partNumber = product.PartNo, productName = product.ProductName,
                 warehouseName = warehouse.WarehouseName, incoming.OrderedQuantity, incoming.ReceivedQuantity,
                 expectedAt = (DateOnly?)incoming.ExpectedOn, status = incoming.Status.ToString() };
-        return Ok(await query.Take(250).ToListAsync(ct));
+        var rows = await query.Take(250).ToListAsync(ct);
+        var lineIds = rows.Where(x => x.purchaseOrderLineId.HasValue)
+            .Select(x => x.purchaseOrderLineId!.Value).Distinct().ToArray();
+        // A shipment tracking reference may be a BL, air waybill or container reference.
+        // Preserve its generic meaning and all recorded references on split shipments.
+        var tracking = await (from shipmentLine in db.Set<ERP_RFQ_Automation.InboundLogistics.SupplierShipmentLine>().AsNoTracking()
+            join shipment in db.Set<ERP_RFQ_Automation.InboundLogistics.SupplierShipment>().AsNoTracking()
+                on shipmentLine.SupplierShipmentId equals shipment.Id
+            where shipmentLine.BusinessUnitId == tenant && shipment.BusinessUnitId == tenant
+                && lineIds.Contains(shipmentLine.SupplierPurchaseOrderLineId)
+                && shipment.Milestone != ERP_RFQ_Automation.InboundLogistics.InboundShipmentMilestones.Cancelled
+                && shipment.TrackingReference != null
+            orderby shipment.Id
+            select new { shipmentLine.SupplierPurchaseOrderLineId, shipment.TrackingReference }).ToListAsync(ct);
+        var receipts = await (from receiptLine in db.GoodsReceiptLines.AsNoTracking()
+            join receipt in db.GoodsReceipts.AsNoTracking() on receiptLine.GoodsReceiptId equals receipt.Id
+            where receiptLine.BusinessUnitId == tenant && receipt.BusinessUnitId == tenant
+                && lineIds.Contains(receiptLine.SupplierPurchaseOrderLineId)
+            orderby receipt.ReceivedOn, receipt.Id
+            select new { receiptLine.SupplierPurchaseOrderLineId, receipt.SupplierInvoiceNumber, receipt.BillOfLadingNumber }).ToListAsync(ct);
+        var trackingByLine = tracking.ToLookup(x => x.SupplierPurchaseOrderLineId);
+        var receiptsByLine = receipts.ToLookup(x => x.SupplierPurchaseOrderLineId);
+        return Ok(rows.Select(row => new
+        {
+            row.Id, row.purchaseOrderId, row.purchaseOrderNumber, row.sourceReference,
+            row.supplierName, row.supplierCity, row.supplierCountry, row.partNumber, row.productName,
+            row.warehouseName, row.OrderedQuantity, row.ReceivedQuantity, row.expectedAt, row.status,
+            trackingReferences = trackingByLine[row.purchaseOrderLineId ?? 0]
+                .Select(x => x.TrackingReference).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray(),
+            supplierInvoiceNumbers = receiptsByLine[row.purchaseOrderLineId ?? 0]
+                .Select(x => x.SupplierInvoiceNumber).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray(),
+            billOfLadingNumbers = receiptsByLine[row.purchaseOrderLineId ?? 0]
+                .Select(x => x.BillOfLadingNumber).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray(),
+        }));
     }
 
     [HttpGet("movements")]
@@ -626,13 +678,14 @@ public sealed class InventoryIntelligenceController(
         });
     }
 
-    private async Task<List<AvailabilityRow>> AvailabilityRows(string? search, long? warehouseId, CancellationToken ct)
+    private async Task<List<AvailabilityRow>> AvailabilityRows(string? search, long? warehouseId, CancellationToken ct, long? productId = null)
     {
         var tenant = TenantId();
         var inventory = await (from stock in db.Set<Models.Inventory>().AsNoTracking()
             join product in db.Products.AsNoTracking() on stock.ProductId equals product.Id
             join warehouse in db.Set<Warehouse>().AsNoTracking() on stock.WarehouseId equals warehouse.Id
             where stock.Buid == tenant && product.Buid == tenant && warehouse.BusinessUnitId == tenant &&
+                (!productId.HasValue || product.Id == productId) &&
                 (!warehouseId.HasValue || warehouse.Id == warehouseId) &&
                 (string.IsNullOrWhiteSpace(search) || EF.Functions.ILike(product.PartNo, $"%{search}%") || EF.Functions.ILike(product.ProductName ?? "", $"%{search}%"))
             // Project the twelve scalars this method actually reads. Selecting the whole
@@ -647,7 +700,7 @@ public sealed class InventoryIntelligenceController(
                 WarehouseId = warehouse.Id, warehouse.WarehouseName
             }).ToListAsync(ct);
         var ids = inventory.Select(x => x.InventoryId).ToArray();
-        var reserved = await db.Set<StockReservation>().AsNoTracking().Where(x => x.BusinessUnitId == tenant && ids.Contains(x.InventoryId) && x.Status == StockReservationStatus.Active)
+        var reserved = await db.Set<StockReservation>().AsNoTracking().Where(x => InventoryReleaseScope.ReservationsEnabled && x.BusinessUnitId == tenant && ids.Contains(x.InventoryId) && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId).Select(x => new { Id = x.Key, Quantity = x.Sum(r => r.Quantity) }).ToDictionaryAsync(x => x.Id, x => x.Quantity, ct);
         var productIds = inventory.Select(x => x.ProductId).Distinct().ToArray();
         // "Incoming" means OPEN COMMITTED supply only. Planned supply used to be counted here but

@@ -15,6 +15,8 @@ vi.setConfig({ testTimeout: 30_000 });
  */
 
 const create = vi.fn();
+const deleteSupplier = vi.fn();
+const getAll = vi.fn();
 const navigate = vi.fn();
 
 vi.mock('react-router-dom', async (importOriginal) => {
@@ -28,9 +30,9 @@ vi.mock('../../context/AuthContext', () => ({
 }));
 vi.mock('../../api/services/supplierService', () => ({
   default: {
-    getAll: vi.fn().mockResolvedValue({ items: [], totalCount: 0 }),
+    getAll: (...args: unknown[]) => getAll(...args),
     create: (fd: FormData) => create(fd),
-    update: vi.fn(), delete: vi.fn(),
+    update: vi.fn(), delete: (id: number) => deleteSupplier(id),
     downloadTemplate: vi.fn(), uploadTemplate: vi.fn(), export: vi.fn(),
   },
   supplierTierLabel: () => 'Not classified',
@@ -61,7 +63,53 @@ const renderAt = (url: string) => render(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getAll.mockResolvedValue({ items: [], totalCount: 0 });
   create.mockResolvedValue({ id: 9, name: 'Gulf Switchgear Trading Co.' });
+  deleteSupplier.mockResolvedValue(undefined);
+});
+
+describe('SuppliersPage — supplier profile deletion', () => {
+  const supplier = {
+    id: 17,
+    name: 'Unused Test Supplier',
+    contactEmail: 'unused@example.com',
+    isActive: true,
+    governanceStatus: 'UNVERIFIED',
+    verificationStatus: 'UNKNOWN',
+    complianceStatus: 'UNKNOWN',
+    riskStatus: 'UNKNOWN',
+    readinessStatus: 'REVIEW_REQUIRED',
+  };
+
+  it('requires an explicit destructive confirmation before deleting an unused profile', async () => {
+    getAll.mockResolvedValue({ items: [supplier], totalCount: 1 });
+    renderAt('/suppliers');
+
+    fireEvent.click(await screen.findByRole('button', { name: `Delete ${supplier.name}` }));
+    expect(screen.getByRole('dialog', { name: /delete unused supplier profile/i })).toBeInTheDocument();
+    expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument();
+    expect(deleteSupplier).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete profile' }));
+
+    await waitFor(() => expect(deleteSupplier).toHaveBeenCalledWith(17));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /delete unused supplier profile/i })).not.toBeInTheDocument());
+  });
+
+  it('keeps the dialog open and explains deactivation when commercial history protects the supplier', async () => {
+    getAll.mockResolvedValue({ items: [supplier], totalCount: 1 });
+    deleteSupplier.mockRejectedValue({
+      response: { data: { detail: 'Supplier records with commercial lineage cannot be deleted.' } },
+    });
+    renderAt('/suppliers');
+
+    fireEvent.click(await screen.findByRole('button', { name: `Delete ${supplier.name}` }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete profile' }));
+
+    expect(await screen.findByText(/use Supplier Governance to mark it inactive instead/i)).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: /delete unused supplier profile/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open profile' })).toBeInTheDocument();
+  });
 });
 
 describe('SuppliersPage — saving a supplier for a sourcing case', () => {

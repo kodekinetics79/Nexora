@@ -101,6 +101,15 @@ public sealed class MaterialTraceabilityService(
                 PurchaseOrderNumber = _db.SupplierPurchaseOrders
                     .Where(p => p.BusinessUnitId == businessUnitId && p.Id == x.SupplierPurchaseOrderId)
                     .Select(p => p.PurchaseOrderNumber).FirstOrDefault(),
+                ReceiptNumber = _db.GoodsReceipts
+                    .Where(r => r.BusinessUnitId == businessUnitId && r.Id == x.GoodsReceiptId)
+                    .Select(r => r.ReceiptNumber).FirstOrDefault(),
+                SupplierInvoiceNumber = _db.GoodsReceipts
+                    .Where(r => r.BusinessUnitId == businessUnitId && r.Id == x.GoodsReceiptId)
+                    .Select(r => r.SupplierInvoiceNumber).FirstOrDefault(),
+                BillOfLadingNumber = _db.GoodsReceipts
+                    .Where(r => r.BusinessUnitId == businessUnitId && r.Id == x.GoodsReceiptId)
+                    .Select(r => r.BillOfLadingNumber).FirstOrDefault(),
             })
             .ToListAsync(ct);
 
@@ -125,7 +134,8 @@ public sealed class MaterialTraceabilityService(
                 lotCertificates.Length,
                 lotCertificates.Where(c => c.ExpiresOn.HasValue)
                     .Select(c => (DateOnly?)c.ExpiresOn!.Value).Min(),
-                x.CommercialCaseId, x.NexoraSerial, x.Version);
+                x.CommercialCaseId, x.NexoraSerial, x.Version, x.ReceiptNumber,
+                x.SupplierInvoiceNumber, x.BillOfLadingNumber);
         }).ToList();
     }
 
@@ -148,9 +158,9 @@ public sealed class MaterialTraceabilityService(
             .Where(l => l.BusinessUnitId == businessUnitId && l.Id == lot.SupplierPurchaseOrderLineId)
             .Select(l => new { l.HsCode, l.CountryOfOrigin })
             .SingleOrDefaultAsync(ct);
-        var receiptNumber = await _db.GoodsReceipts.AsNoTracking()
+        var receipt = await _db.GoodsReceipts.AsNoTracking()
             .Where(r => r.BusinessUnitId == businessUnitId && r.Id == lot.GoodsReceiptId)
-            .Select(r => r.ReceiptNumber).FirstOrDefaultAsync(ct);
+            .Select(r => new { r.ReceiptNumber, r.SupplierInvoiceNumber, r.BillOfLadingNumber }).FirstOrDefaultAsync(ct);
         var supplierName = await _db.Suppliers.AsNoTracking()
             .Where(s => s.Buid == businessUnitId && s.Id == lot.SupplierId)
             .Select(s => s.Name).FirstOrDefaultAsync(ct);
@@ -207,14 +217,15 @@ public sealed class MaterialTraceabilityService(
         return new LotWhereFromView(
             lot.Id, lot.LotNumber, lot.TrackingMode, lot.Status, lot.ProductId, product?.PartNo,
             product?.ProductName, lot.WarehouseId, warehouseName, lot.QuantityReceived, lot.QuantityConsumed,
-            lot.QuantityRemaining, lot.ReceivedOn, lot.GoodsReceiptId, receiptNumber,
+            lot.QuantityRemaining, lot.ReceivedOn, lot.GoodsReceiptId, receipt?.ReceiptNumber,
             lot.SupplierPurchaseOrderId, origin?.PurchaseOrderNumber, origin?.DemandSource,
             lot.SupplierPurchaseOrderLineId, lot.SupplierId, supplierName, origin?.RfqId, rfqNumber,
             lot.CommercialCaseId, lot.NexoraSerial, lot.CountryOfOrigin, lot.OrderedCountryOfOrigin,
             lot.ManufacturerName, lot.ManufacturerPartNumber, lot.SupplierBatchReference,
             lot.ManufactureDate, lot.ExpiryDate, poLine?.HsCode, lot.QuarantineReasonCode,
             lot.QuarantineReason, lot.QuarantinedOn, lot.QuarantinedBy, lot.ReleasedOn, lot.ReleasedBy,
-            lot.ReleaseReason, certificateState, certificates, fulfilments, gaps, lot.Version);
+            lot.ReleaseReason, certificateState, certificates, fulfilments, gaps, lot.Version,
+            receipt?.SupplierInvoiceNumber, receipt?.BillOfLadingNumber);
     }
 
     /// <summary>

@@ -67,7 +67,7 @@ public sealed class Gate6CanonicalAvailabilityTests
         Assert.Equal(
             InventoryQuantityMath.AvailableToPromise(1000m, 17m, 31m, 53m, 71m, 97m, 113m),
             snapshot.AvailableToPromise);
-        Assert.Equal(618m, snapshot.AvailableToPromise);
+        Assert.Equal(635m, snapshot.AvailableToPromise); // historical reservations do not withhold stock
     }
 
     [Fact]
@@ -75,7 +75,7 @@ public sealed class Gate6CanonicalAvailabilityTests
     {
         // The clamp is what keeps every downstream sum monotonic: a row 40 units oversold must
         // contribute zero to a multi-warehouse total, not subtract from its siblings.
-        Assert.Equal(0m, InventoryQuantityMath.AvailableToPromise(10m, 50m, 0m, 0m, 0m, 0m, 0m));
+        Assert.Equal(0m, InventoryQuantityMath.AvailableToPromise(10m, 0m, 0m, 50m, 0m, 0m, 0m));
     }
 
     private static string SourcePath(string relativePath)

@@ -22,6 +22,7 @@ import dayjs from 'dayjs';
 import PermissionGuard from '../../../components/common/PermissionGuard';
 import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
 import { formatMoney } from '../../../utils/currency';
+import { RELEASE_SCOPE } from '../../../config/releaseScope';
 
 const day = (value?: string | null) => (value ? dayjs(value).format('DD MMM YYYY') : '');
 
@@ -35,16 +36,11 @@ const ORDER_EXPORT_COLUMNS: ExportColumn<OrderDTO>[] = [
   { header: 'RFQ #', value: (o) => o.rfqNo },
   { header: 'Lead #', value: (o) => o.leadNo },
   { header: 'Status', value: (o) => o.status },
-  { header: 'Payment', value: (o) => o.paymentStatus || 'UNPAID' },
-  { header: 'Payment reference', value: (o) => o.paymentReference },
   { header: 'Currency', value: (o) => o.currencyCode },
   { header: 'Subtotal', value: (o) => o.subTotal },
   { header: 'Discount', value: (o) => o.discountAmount },
   { header: 'Tax', value: (o) => o.taxAmount },
   { header: 'Total', value: (o) => o.totalAmount },
-  { header: 'Paid', value: (o) => o.paidAmount },
-  { header: 'Balance', value: (o) => o.balanceAmount },
-  { header: 'Shipped', value: (o) => (o.hasShipments ? 'Yes' : 'No') },
   { header: 'Notes', value: (o) => o.notes },
   { header: 'Terms and conditions', value: (o) => o.termsAndConditions },
 ];
@@ -79,15 +75,6 @@ const OrderListPage: React.FC = () => {
       case 'CONFIRMED': return 'primary';
       case 'COMPLETED': return 'success';
       case 'CANCELLED': return 'error';
-      default: return 'default';
-    }
-  };
-
-  const getPaymentStatusColor = (status: string) => {
-    switch (status?.toUpperCase()) {
-      case 'UNPAID': return 'error';
-      case 'PARTIAL': return 'warning';
-      case 'PAID': return 'success';
       default: return 'default';
     }
   };
@@ -157,7 +144,6 @@ const OrderListPage: React.FC = () => {
               <TableCell sx={{ fontWeight: 700 }}>Quote #</TableCell>
               <TableCell sx={{ fontWeight: 700 }} align="right">Amount</TableCell>
               <TableCell sx={{ fontWeight: 700 }} align="center">Status</TableCell>
-              <TableCell sx={{ fontWeight: 700 }} align="center">Payment</TableCell>
               <TableCell sx={{ fontWeight: 700 }} align="center">Actions</TableCell>
             </TableRow>
           </TableHead>
@@ -167,7 +153,7 @@ const OrderListPage: React.FC = () => {
               // business has never taken an order or a search matched nothing, and with no way
               // forward from either.
               <TableRow>
-                <TableCell colSpan={8} align="center" sx={{ py: 5 }}>
+                <TableCell colSpan={7} align="center" sx={{ py: 5 }}>
                   <Typography sx={{ fontWeight: 800 }}>
                     {searchTerm ? 'No order matches this search' : 'No customer orders yet'}
                   </Typography>
@@ -195,14 +181,11 @@ const OrderListPage: React.FC = () => {
                     <Chip label={order.status} size="small" color={getStatusColor(order.status) as any} variant="filled" sx={{ fontWeight: 600, minWidth: 80 }} />
                   </TableCell>
                   <TableCell align="center">
-                    <Chip label={order.paymentStatus || 'UNPAID'} size="small" color={getPaymentStatusColor(order.paymentStatus || 'UNPAID') as any} variant="outlined" sx={{ fontWeight: 600, minWidth: 80 }} />
-                  </TableCell>
-                  <TableCell align="center">
                     <Stack direction="row" spacing={1} sx={{ justifyContent: 'center' }}>
                       <Tooltip title="View Order">
                         <IconButton size="small" color="primary" onClick={() => navigate(`/sales/orders/${order.id}`)}><ViewIcon fontSize="small" /></IconButton>
                       </Tooltip>
-                      <PermissionGuard moduleName="Accounts Receivable" action="create">
+                      {RELEASE_SCOPE.receivables && <PermissionGuard moduleName="Accounts Receivable" action="create">
                         <Tooltip title="Invoice what the customer accepted">
                           <IconButton
                             size="small"
@@ -216,8 +199,8 @@ const OrderListPage: React.FC = () => {
                             <InvoiceIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
-                      </PermissionGuard>
-                      <PermissionGuard moduleName="Shipments" action="create">
+                      </PermissionGuard>}
+                      {RELEASE_SCOPE.fulfilment && <PermissionGuard moduleName="Shipments" action="create">
                         {!['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(
                           order.status.replaceAll('_', '').toUpperCase(),
                         ) && (
@@ -232,7 +215,7 @@ const OrderListPage: React.FC = () => {
                             </IconButton>
                           </Tooltip>
                         )}
-                      </PermissionGuard>
+                      </PermissionGuard>}
                     </Stack>
                   </TableCell>
                 </TableRow>
@@ -242,7 +225,7 @@ const OrderListPage: React.FC = () => {
         </Table>
       </Paper>
 
-      {invoicing && (
+      {RELEASE_SCOPE.receivables && invoicing && (
         <InvoiceFromOrderDialog
           orderId={invoicing.id}
           orderNo={invoicing.orderNo}

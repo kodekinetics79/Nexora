@@ -560,6 +560,33 @@ describe('ViewRFQPage — a line without a product says so, and is not offered a
     expect(testAccess.navigate).not.toHaveBeenCalledWith('/procurement/sourcing-cases/44');
   });
 
+  it('keeps both known networks inside Your suppliers and leaves internet as new discovery', async () => {
+    unknownLine();
+    getProducts.mockResolvedValue({
+      items: [{ id: 501, partNo: 'mpn 1', productName: 'Valve', qtyOnHand: 0, reorderPoint: 0, isActive: true, createdBy: 'qa', createdOn: '2026-08-01T00:00:00Z', images: [], attachments: [] }],
+      totalItems: 1, pageNumber: 1, pageSize: 20, totalPages: 1,
+    });
+    createOrOpenSourcingCase.mockResolvedValue({
+      id: 44,
+      version: 3,
+      candidates: [
+        { supplierId: 81, supplierName: 'Direct Controls', contactEmail: 'direct@example.test', evidenceType: 'PREFERRED_SUPPLIER', recommendationReason: 'Your preferred supplier for this part', eligibleForSupplierRfq: true, blockingReasons: [], supplierTier: 'TIER_1_PARTNER' },
+        { supplierId: 82, supplierName: 'IRG', contactEmail: 'irg@example.test', evidenceType: 'SUPPLIER_METADATA', recommendationReason: 'Carries TELEDYNE', eligibleForSupplierRfq: true, blockingReasons: [], supplierTier: 'TIER_2_EXTENDED' },
+      ],
+    });
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Find supplier' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByRole('tab', { name: /Your suppliers \(2\)/ })).toBeInTheDocument();
+    expect(within(dialog).getByRole('tab', { name: /Source from internet/ })).toBeInTheDocument();
+    expect(within(dialog).getByText('In Network')).toBeInTheDocument();
+    expect(within(dialog).getByText('Extended Network')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('Direct Controls').length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText('IRG').length).toBeGreaterThan(0);
+  });
+
   it('Find supplier adds the part when the catalogue has no such part number, links it, and the window shows the real email and sends', async () => {
     unknownLine();
     getProducts.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 20, totalPages: 0 });

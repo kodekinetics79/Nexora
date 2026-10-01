@@ -1,110 +1,96 @@
-import React, { useState, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import React, { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
-  Dialog, DialogTitle, DialogContent, DialogActions,
-  Button, TextField, MenuItem, Grid, FormControlLabel,
-  Switch, Divider, Typography, CircularProgress,
-  Alert, Box,
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Alert,
+  Box,
+  Button,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  Grid,
+  InputAdornment,
+  MenuItem,
+  Stack,
+  Switch,
+  TextField,
+  Typography,
 } from '@mui/material';
+import { ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
+import { useSnackbar } from 'notistack';
 import productService from '../../api/services/productService';
 import { useAuth } from '../../context/AuthContext';
-import { useSnackbar } from 'notistack';
 
-/**
- * The server's own sentence, verbatim.
- *
- * Every refusal this dialog can now provoke arrives already written for an operator — "PartNo
- * VLV-8830 already exists in this Business Unit.", "Category ID 44 does not exist in this Business
- * Unit.", "The field ProductName must be a string with a maximum length of 100." — and that
- * sentence is the only thing that tells the user what to change. Replacing it with "Failed to save
- * product." throws the answer away and leaves them clicking Save again.
- *
- * The 409 branch this replaces was WRONG on the only day it could ever have fired. It rendered
- * "This product changed since you opened it. Reload and review the latest values." — a stale-record
- * message — but the sole Conflict() in ProductController was inside Delete, which this dialog never
- * calls, so the branch was unreachable and nobody noticed. Create and Update now return 409 for a
- * duplicate part number, which would have shown a reload prompt for a problem no reload can fix.
- *
- * Reads all three shapes ASP.NET actually sends: the RFC 7807 body the controller builds
- * (`detail`/`title`), the `{ error }` body the delete path uses, and the ModelState dictionary an
- * automatic 400 produces. Mirrors the local helpers in CustomersPage and DeliveryConfirmationPanel
- * rather than importing the Inventory/Commercial one, which does not unwrap the ModelState bag.
- */
-const serverMessage = (error: unknown, fallback: string): string => {
-  const data = (error as { response?: { data?: unknown } })?.response?.data;
-  if (typeof data === 'string' && data.trim()) return data;
-
-  const body = data as { detail?: string; error?: string; title?: string; errors?: Record<string, string[]> } | undefined;
-  if (body?.detail?.trim()) return body.detail;
-  if (body?.error?.trim()) return body.error;
-
-  if (body?.errors) {
-    const first = Object.values(body.errors).flat().find(message => typeof message === 'string' && message.trim());
-    if (first) return first;
-  }
-
-  return body?.title?.trim() ? body.title : fallback;
-};
-
-/**
- * The server's caps, stated at the keyboard instead of at the Save button.
- *
- * ProductCreateRequestDTO and ProductUpdateRequestDTO cap ProductName at 100 and Description at
- * 500, mirroring `Products."ProductName"` varchar(100) and `Products."Description"` varchar(500).
- * Those attributes were tightened so an over-long value is refused by validation with a readable
- * sentence rather than dying inside the INSERT as Postgres 22001 — but a refusal that only arrives
- * after Save still costs the user everything they typed. Repeating the cap here means the 101st
- * character is never typed in the first place.
- *
- * The counter is not decoration. `maxLength` swallows keystrokes silently, which reads as a broken
- * keyboard unless something on screen says why — so the field states where it is, and says so
- * plainly at the boundary. Same pairing the rest of the app already uses (AccountsReceivablePage,
- * ExtendValidityDialog): `htmlInput.maxLength` plus an `n/max` helper.
- *
- * Defence in depth, not a replacement: `serverMessage` above still renders the server's own
- * sentence, and the server remains the authority on what fits.
- */
 const PRODUCT_NAME_MAX = 100;
 const DESCRIPTION_MAX = 500;
 
-/** `12/100` — and, at the boundary, why the keyboard appears to have stopped. */
+const serverMessage = (error: unknown, fallback: string): string => {
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data;
+  const body = data as { detail?: string; error?: string; title?: string; errors?: Record<string, string[]> } | undefined;
+  if (body?.detail?.trim()) return body.detail;
+  if (body?.error?.trim()) return body.error;
+  const validation = body?.errors && Object.values(body.errors).flat().find(Boolean);
+  return validation || body?.title || fallback;
+};
+
 const counter = (value: string, max: number) =>
   value.length >= max ? `${value.length}/${max} · limit reached` : `${value.length}/${max}`;
+
+const supplierTierLabel = (tier?: string) => tier === 'TIER_1_PARTNER'
+  ? 'In Network'
+  : tier === 'TIER_2_EXTENDED'
+    ? 'Extended Network'
+    : tier === 'TIER_3_OUT_OF_NETWORK'
+      ? 'New supplier'
+      : '';
+
+const emptyForm = {
+  productName: '', partNo: '', modelNo: '', description: '',
+  categoryId: '', subCategoryId: '', reorderPoint: '0', uomId: '',
+  priceCurrencyId: '', unitCost: '', sellingPrice: '',
+  warehouseId: '', preferredSupplierId: '', leadTime: '', countryOfOrigin: '',
+  hscode: '', barcode: '', qrcode: '', height: '', width: '', depth: '', weight: '', dimensions: '',
+  batchTracking: false, serialTracking: false, expirationDate: '', isActive: true, isCatalogItem: false,
+};
+
+type ProductForm = typeof emptyForm;
+type FieldErrors = Partial<Record<'partNo' | 'priceCurrencyId' | 'unitCost' | 'sellingPrice', string>>;
 
 interface Props {
   open: boolean;
   onClose: () => void;
-  productId?: number; // if provided, loads for edit
+  productId?: number;
 }
+
+const useProductLookup = <T,>(key: string, queryFn: () => Promise<T>, enabled: boolean) => useQuery({
+  queryKey: [key], queryFn, enabled,
+});
 
 const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
   const { t } = useTranslation();
   const { userData, hasPermission } = useAuth();
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
-  const isEdit = !!productId;
+  const isEdit = productId != null;
+  const [form, setForm] = useState<ProductForm>(emptyForm);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [formError, setFormError] = useState('');
+  const [pricingChanged, setPricingChanged] = useState(false);
 
-  const emptyForm = {
-    productName: '', partNo: '', modelNo: '', description: '',
-    categoryId: '', subCategoryId: '', reorderPoint: 0,
-    uomId: '', unitCost: '', sellingPrice: '', finalLandedCost: '', finalSalesPrice: '',
-    warehouseId: '', preferredSupplierId: '',
-    batchTracking: false, serialTracking: false, expirationDate: '',
-    height: '', width: '', depth: '', weight: '', dimensions: '', barcode: '', qrcode: '',
-    leadTime: '', hscode: '', countryOfOrigin: '', isActive: true, isCatalogItem: false,
-  };
+  const { data: categories } = useProductLookup('product-categories', productService.getCategories, open);
+  const { data: subCategories } = useProductLookup('product-subcategories', productService.getSubCategories, open);
+  const { data: warehouses } = useProductLookup('product-warehouses', productService.getWarehouses, open);
+  const { data: uoms } = useProductLookup('product-uoms', productService.getUoms, open);
+  const { data: suppliers } = useProductLookup('product-suppliers', productService.getSuppliers, open);
+  const { data: currencies } = useProductLookup('product-price-currencies', productService.getCurrencies, open);
 
-  const [form, setForm] = useState(emptyForm);
-
-  // Lookups
-  const { data: categories } = useQuery({ queryKey: ['product-categories'], queryFn: productService.getCategories, enabled: open });
-  const { data: subCategories } = useQuery({ queryKey: ['product-subcategories'], queryFn: productService.getSubCategories, enabled: open });
-  const { data: warehouses } = useQuery({ queryKey: ['product-warehouses'], queryFn: productService.getWarehouses, enabled: open });
-  const { data: uoms } = useQuery({ queryKey: ['product-uoms'], queryFn: productService.getUoms, enabled: open });
-  const { data: suppliers } = useQuery({ queryKey: ['product-suppliers'], queryFn: productService.getSuppliers, enabled: open });
-
-  // Load for edit
   const { data: editData, isLoading: isEditLoading, isError: isEditError, refetch: refetchEdit } = useQuery({
     queryKey: ['product-detail', productId],
     queryFn: () => productService.getById(productId!),
@@ -112,222 +98,201 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
   });
 
   useEffect(() => {
-    if (editData && open && isEdit) {
-      setForm({
-        productName: editData.productName ?? '',
-        partNo: editData.partNo ?? '',
-        modelNo: editData.modelNo ?? '',
-        description: editData.description ?? '',
-        categoryId: editData.categoryId != null ? String(editData.categoryId) : '',
-        subCategoryId: editData.subCategoryId != null ? String(editData.subCategoryId) : '',
-        reorderPoint: editData.reorderPoint ?? 0,
-        uomId: editData.uomId != null ? String(editData.uomId) : '',
-        unitCost: editData.unitCost != null ? String(editData.unitCost) : '',
-        sellingPrice: editData.sellingPrice != null ? String(editData.sellingPrice) : '',
-        finalLandedCost: editData.finalLandedCost != null ? String(editData.finalLandedCost) : '',
-        finalSalesPrice: editData.finalSalesPrice != null ? String(editData.finalSalesPrice) : '',
-        warehouseId: editData.warehouseId != null ? String(editData.warehouseId) : '',
-        preferredSupplierId: editData.preferredSupplierId != null ? String(editData.preferredSupplierId) : '',
-        batchTracking: editData.batchTracking ?? false,
-        serialTracking: editData.serialTracking ?? false,
-        expirationDate: editData.expirationDate ?? '',
-        height: editData.height != null ? String(editData.height) : '',
-        width: editData.width != null ? String(editData.width) : '',
-        depth: editData.depth != null ? String(editData.depth) : '',
-        weight: editData.weight != null ? String(editData.weight) : '',
-        dimensions: editData.dimensions ?? '',
-        barcode: editData.barcode ?? '',
-        qrcode: editData.qrcode ?? '',
-        leadTime: editData.leadTime != null ? String(editData.leadTime) : '',
-        hscode: editData.hscode ?? '',
-        countryOfOrigin: editData.countryOfOrigin ?? '',
-        isActive: editData.isActive ?? true,
-        isCatalogItem: editData.isCatalogItem ?? false,
-      });
-    }
-  }, [editData, open, isEdit]);
+    if (!open || !isEdit || !editData) return;
+    setForm({
+      productName: editData.productName ?? '',
+      partNo: editData.partNo ?? '',
+      modelNo: editData.modelNo ?? '',
+      description: editData.description ?? '',
+      categoryId: editData.categoryId == null ? '' : String(editData.categoryId),
+      subCategoryId: editData.subCategoryId == null ? '' : String(editData.subCategoryId),
+      reorderPoint: String(editData.reorderPoint ?? 0),
+      uomId: editData.uomId == null ? '' : String(editData.uomId),
+      priceCurrencyId: editData.priceCurrencyId == null ? '' : String(editData.priceCurrencyId),
+      unitCost: editData.unitCost == null ? '' : String(editData.unitCost),
+      sellingPrice: editData.sellingPrice == null ? '' : String(editData.sellingPrice),
+      warehouseId: editData.warehouseId == null ? '' : String(editData.warehouseId),
+      preferredSupplierId: editData.preferredSupplierId == null ? '' : String(editData.preferredSupplierId),
+      leadTime: editData.leadTime == null ? '' : String(editData.leadTime),
+      countryOfOrigin: editData.countryOfOrigin ?? '',
+      hscode: editData.hscode ?? '',
+      barcode: editData.barcode ?? '',
+      qrcode: editData.qrcode ?? '',
+      height: editData.height == null ? '' : String(editData.height),
+      width: editData.width == null ? '' : String(editData.width),
+      depth: editData.depth == null ? '' : String(editData.depth),
+      weight: editData.weight == null ? '' : String(editData.weight),
+      dimensions: editData.dimensions ?? '',
+      batchTracking: editData.batchTracking ?? false,
+      serialTracking: editData.serialTracking ?? false,
+      expirationDate: editData.expirationDate ?? '',
+      isActive: editData.isActive ?? true,
+      isCatalogItem: editData.isCatalogItem ?? false,
+    });
+    setPricingChanged(false);
+  }, [editData, isEdit, open]);
 
-  const saveMutation = useMutation({
-    mutationFn: (fd: FormData) => isEdit ? productService.update(productId!, fd) : productService.create(fd),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['products'] });
-      queryClient.invalidateQueries({ queryKey: ['product-detail', productId] });
-      enqueueSnackbar(isEdit ? 'Product updated!' : 'Product created!', { variant: 'success' });
-      handleClose();
-    },
-    onError: (error) => enqueueSnackbar(serverMessage(error, 'Failed to save product.'), { variant: 'error' }),
-  });
-
-  const handleClose = () => {
+  const close = () => {
     setForm(emptyForm);
+    setFieldErrors({});
+    setFormError('');
+    setPricingChanged(false);
     onClose();
   };
 
-  const handleSave = () => {
-    if (!hasPermission('Products', isEdit ? 'edit' : 'create')) {
-      enqueueSnackbar('You do not have permission to save this product.', { variant: 'error' });
-      return;
-    }
-    const fd = new FormData();
-    Object.entries(form).forEach(([k, v]) => {
-      if (v !== '' && v !== null && v !== undefined) fd.append(k, String(v));
-    });
-    if (!isEdit) fd.append('createdBy', userData.userName || 'System');
-    else fd.append('modifiedBy', userData.userName || 'System');
-    fd.append('buid', String(userData.businessUnitId || 1));
-    saveMutation.mutate(fd);
+  const saveMutation = useMutation({
+    mutationFn: (data: FormData) => isEdit ? productService.update(productId!, data) : productService.create(data),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['product-detail', productId] });
+      void queryClient.invalidateQueries({ queryKey: ['pricing-sheet'] });
+      void queryClient.invalidateQueries({ queryKey: ['stock-price'] });
+      enqueueSnackbar(isEdit ? 'Product updated' : 'Product created', { variant: 'success' });
+      close();
+    },
+    onError: (error) => setFormError(serverMessage(error, 'The product could not be saved.')),
+  });
+
+  const setField = (field: keyof ProductForm) => (event: React.ChangeEvent<HTMLInputElement>) => {
+    setForm((current) => ({ ...current, [field]: event.target.value }));
+    if (field === 'unitCost' || field === 'sellingPrice' || field === 'priceCurrencyId') setPricingChanged(true);
+    setFieldErrors((current) => ({ ...current, [field]: undefined }));
+    setFormError('');
   };
 
-  const f = (field: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setForm(prev => ({ ...prev, [field]: e.target.value }));
+  const validate = (): boolean => {
+    const errors: FieldErrors = {};
+    const cost = form.unitCost === '' ? null : Number(form.unitCost);
+    const sale = form.sellingPrice === '' ? null : Number(form.sellingPrice);
+    const currencyEntered = form.priceCurrencyId !== '';
+    const anyPricingEntered = cost != null || sale != null || currencyEntered;
+    const completePricing = cost != null && sale != null && currencyEntered;
+    if (!form.partNo.trim()) errors.partNo = 'Part number is required.';
+    if (!isEdit || pricingChanged) {
+      if (anyPricingEntered && cost == null) errors.unitCost = 'Enter landed cost or clear all pricing fields.';
+      else if (cost != null && (!Number.isFinite(cost) || cost <= 0)) errors.unitCost = 'Enter an amount above 0.';
+      if (anyPricingEntered && sale == null) errors.sellingPrice = 'Enter selling price or clear all pricing fields.';
+      else if (sale != null && (!Number.isFinite(sale) || sale <= 0)) errors.sellingPrice = 'Enter an amount above 0.';
+      if (anyPricingEntered && !currencyEntered) errors.priceCurrencyId = 'Choose a currency or clear both prices.';
+      if (anyPricingEntered && !completePricing && !errors.priceCurrencyId && !currencyEntered) errors.priceCurrencyId = 'Complete all pricing fields or clear them.';
+    }
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
 
-  const SectionTitle = ({ label }: { label: string }) => (
-    <Grid size={{ xs: 12 }}>
-      <Divider sx={{ mt: 1 }} />
-      <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1, mt: 1.5, display: 'block' }}>
-        {label}
-      </Typography>
-    </Grid>
-  );
+  const save = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!hasPermission('Products', isEdit ? 'edit' : 'create')) {
+      setFormError('You do not have permission to save this product.');
+      return;
+    }
+    if (!validate()) return;
+
+    const data = new FormData();
+    Object.entries(form).forEach(([key, value]) => {
+      if (value !== '') data.append(key, String(value));
+    });
+    if (isEdit) {
+      data.append('applyPricing', String(pricingChanged));
+      data.append('modifiedBy', userData.userName || 'System');
+    } else data.append('createdBy', userData.userName || 'System');
+    data.append('buid', String(userData.businessUnitId || 1));
+    saveMutation.mutate(data);
+  };
+
+  const landedCost = Number(form.unitCost);
+  const sellingPrice = Number(form.sellingPrice);
+  const pricesEntered = form.unitCost !== '' && form.sellingPrice !== '' && landedCost > 0 && sellingPrice > 0;
+  const margin = pricesEntered ? ((sellingPrice - landedCost) / landedCost) * 100 : null;
+  const belowCost = pricesEntered && sellingPrice < landedCost;
+  const selectedCurrency = currencies?.find((currency) => String(currency.id) === form.priceCurrencyId)?.code || '—';
 
   return (
-    <Dialog open={open} onClose={handleClose} fullWidth maxWidth="md">
-      <DialogTitle sx={{ fontWeight: 800 }}>{isEdit ? 'Edit Product' : 'Add New Product'}</DialogTitle>
-      <DialogContent dividers sx={{ p: 3 }}>
-        <Grid container spacing={2}>
+    <Dialog open={open} onClose={close} fullWidth maxWidth="md">
+      <DialogTitle sx={{ fontWeight: 800 }}>{isEdit ? 'Edit product' : 'Add product'}</DialogTitle>
+      <DialogContent dividers sx={{ p: { xs: 2, sm: 3 } }}>
+        <Box component="form" id="product-form" noValidate onSubmit={save}>
+          <Grid container spacing={2}>
+            {formError && <Grid size={{ xs: 12 }}><Alert severity="error">{formError}</Alert></Grid>}
+            {isEditLoading && <Grid size={{ xs: 12 }}><Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><CircularProgress size={20} /><Typography>Loading product…</Typography></Stack></Grid>}
+            {isEditError && <Grid size={{ xs: 12 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetchEdit()}>Retry</Button>}>The product could not be loaded for editing.</Alert></Grid>}
 
-          {/* Basic Info */}
-          <SectionTitle label="Basic Information" />
-          <Grid size={{ xs: 12, sm: 6 }}>
-            <TextField
-              fullWidth
-              label="Product Name"
-              value={form.productName}
-              onChange={f('productName')}
-              helperText={counter(form.productName, PRODUCT_NAME_MAX)}
-              slotProps={{ htmlInput: { maxLength: PRODUCT_NAME_MAX } }}
-            />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 6 }}>
-            <TextField fullWidth label="Part No" value={form.partNo} onChange={f('partNo')} required />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 6 }}>
-            <TextField fullWidth label="Model No" value={form.modelNo} onChange={f('modelNo')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField select fullWidth label={t('categories') || 'Category'} value={form.categoryId} onChange={f('categoryId')}>
-              <MenuItem value="">None</MenuItem>
-              {categories?.map((c: any) => <MenuItem key={c.id ?? c.categoryId} value={c.id ?? c.categoryId}>{c.name ?? c.categoryName}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField select fullWidth label={t('sub_categories') || 'Sub-Category'} value={form.subCategoryId} onChange={f('subCategoryId')}>
-              <MenuItem value="">None</MenuItem>
-              {subCategories?.map((c: any) => <MenuItem key={c.id ?? c.subCategoryId} value={c.id ?? c.subCategoryId}>{c.name ?? c.subCategoryName}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid size={{ xs: 12 }}>
-            <TextField
-              fullWidth
-              multiline
-              rows={2}
-              label="Description"
-              value={form.description}
-              onChange={f('description')}
-              helperText={counter(form.description, DESCRIPTION_MAX)}
-              slotProps={{ htmlInput: { maxLength: DESCRIPTION_MAX } }}
-            />
-          </Grid>
+            <Grid size={{ xs: 12, sm: 6 }}>
+              <TextField required fullWidth label="Part number" value={form.partNo} onChange={setField('partNo')} error={!!fieldErrors.partNo} helperText={fieldErrors.partNo} />
+            </Grid>
+            <Grid size={{ xs: 12, sm: 6 }}>
+              <TextField fullWidth label="Product name" value={form.productName} onChange={setField('productName')} helperText={counter(form.productName, PRODUCT_NAME_MAX)} slotProps={{ htmlInput: { maxLength: PRODUCT_NAME_MAX } }} />
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <TextField select fullWidth label={t('uom') || 'UOM'} value={form.uomId} onChange={setField('uomId')}>
+                <MenuItem value="">Not set</MenuItem>
+                {uoms?.map((u: any) => <MenuItem key={u.id} value={String(u.id)}>{u.value ?? u.name ?? u.uomName}</MenuItem>)}
+              </TextField>
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <TextField fullWidth type="number" label="Reorder point" value={form.reorderPoint} onChange={setField('reorderPoint')} slotProps={{ htmlInput: { min: 0 } }} />
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <TextField select fullWidth label="Price currency" value={form.priceCurrencyId} onChange={setField('priceCurrencyId')} error={!!fieldErrors.priceCurrencyId} helperText={fieldErrors.priceCurrencyId}>
+                <MenuItem value="">Unpriced</MenuItem>
+                {currencies?.map((currency) => <MenuItem key={currency.id} value={String(currency.id)}>{currency.code}{currency.isBase ? ' · base' : ''}</MenuItem>)}
+              </TextField>
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <TextField fullWidth type="number" label="Landed cost" value={form.unitCost} onChange={setField('unitCost')} error={!!fieldErrors.unitCost} helperText={fieldErrors.unitCost || 'Cost delivered into stock'} slotProps={{ input: { startAdornment: <InputAdornment position="start">{selectedCurrency}</InputAdornment> }, htmlInput: { min: 0, step: '0.01' } }} />
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <TextField fullWidth type="number" label="Selling price" value={form.sellingPrice} onChange={setField('sellingPrice')} error={!!fieldErrors.sellingPrice} helperText={fieldErrors.sellingPrice || 'Current catalogue sale price'} slotProps={{ input: { startAdornment: <InputAdornment position="start">{selectedCurrency}</InputAdornment> }, htmlInput: { min: 0, step: '0.01' } }} />
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }} sx={{ display: 'flex', alignItems: 'center' }}>
+              <Box><Typography variant="caption" color="text.secondary">Margin on cost</Typography><Typography sx={{ fontWeight: 800 }}>{margin == null ? '—' : `${margin.toFixed(1)}%`}</Typography></Box>
+            </Grid>
+            {belowCost && <Grid size={{ xs: 12 }}><Alert severity="warning">Selling price is below landed cost. You can save it, but this product has a negative margin.</Alert></Grid>}
 
-          {isEditLoading && <Grid size={{ xs: 12 }}><CircularProgress size={22} aria-label="Loading product" /></Grid>}
-          {isEditError && <Grid size={{ xs: 12 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetchEdit()}>Retry</Button>}>The product could not be loaded for editing.</Alert></Grid>}
+            <Grid size={{ xs: 12, sm: 6 }}>
+              <TextField select fullWidth label="Preferred supplier" value={form.preferredSupplierId} onChange={setField('preferredSupplierId')}>
+                <MenuItem value="">Not set</MenuItem>
+                {suppliers?.map((supplier: any) => <MenuItem key={supplier.id} value={String(supplier.id)}>{supplier.name}{supplierTierLabel(supplier.tier) ? ` · ${supplierTierLabel(supplier.tier)}` : ''}</MenuItem>)}
+              </TextField>
+            </Grid>
+            <Grid size={{ xs: 12, sm: 6 }}>
+              <TextField select fullWidth label="Default warehouse" value={form.warehouseId} onChange={setField('warehouseId')}>
+                <MenuItem value="">Not set</MenuItem>
+                {warehouses?.map((warehouse: any) => <MenuItem key={warehouse.id ?? warehouse.warehouseId} value={String(warehouse.id ?? warehouse.warehouseId)}>{warehouse.name ?? warehouse.warehouseName}</MenuItem>)}
+              </TextField>
+            </Grid>
 
-          {/* Pricing & Stock */}
-          <SectionTitle label="Pricing & Stock" />
-          <Grid size={{ xs: 6, sm: 3 }}>
-            <TextField fullWidth type="number" label="Reorder Point" value={form.reorderPoint} onChange={f('reorderPoint')} />
+            <Grid size={{ xs: 12 }}>
+              <Accordion disableGutters elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: '10px !important', '&::before': { display: 'none' } }}>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Box><Typography sx={{ fontWeight: 700 }}>More product details</Typography><Typography variant="body2" color="text.secondary">Description, classification, identifiers, dimensions and tracking</Typography></Box>
+                </AccordionSummary>
+                <AccordionDetails>
+                  <Grid container spacing={2}>
+                    <Grid size={{ xs: 12, sm: 6 }}><TextField fullWidth label="Model number" value={form.modelNo} onChange={setField('modelNo')} /></Grid>
+                    <Grid size={{ xs: 12, sm: 3 }}><TextField select fullWidth label="Category" value={form.categoryId} onChange={setField('categoryId')}><MenuItem value="">None</MenuItem>{categories?.map((c: any) => <MenuItem key={c.id ?? c.categoryId} value={String(c.id ?? c.categoryId)}>{c.name ?? c.categoryName}</MenuItem>)}</TextField></Grid>
+                    <Grid size={{ xs: 12, sm: 3 }}><TextField select fullWidth label="Sub-category" value={form.subCategoryId} onChange={setField('subCategoryId')}><MenuItem value="">None</MenuItem>{subCategories?.map((c: any) => <MenuItem key={c.id ?? c.subCategoryId} value={String(c.id ?? c.subCategoryId)}>{c.name ?? c.subCategoryName}</MenuItem>)}</TextField></Grid>
+                    <Grid size={{ xs: 12 }}><TextField fullWidth multiline rows={2} label="Description" value={form.description} onChange={setField('description')} helperText={counter(form.description, DESCRIPTION_MAX)} slotProps={{ htmlInput: { maxLength: DESCRIPTION_MAX } }} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth type="number" label="Lead time (days)" value={form.leadTime} onChange={setField('leadTime')} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth label="Country of origin" value={form.countryOfOrigin} onChange={setField('countryOfOrigin')} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth label="HS code" value={form.hscode} onChange={setField('hscode')} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth label="Barcode" value={form.barcode} onChange={setField('barcode')} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth label="QR code" value={form.qrcode} onChange={setField('qrcode')} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth label="Dimensions" value={form.dimensions} onChange={setField('dimensions')} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth type="number" label="Weight (kg)" value={form.weight} onChange={setField('weight')} /></Grid>
+                    <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth type="date" label="Expiration date" value={form.expirationDate} onChange={setField('expirationDate')} slotProps={{ inputLabel: { shrink: true } }} /></Grid>
+                    <Grid size={{ xs: 12 }}><Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}><FormControlLabel control={<Switch checked={form.batchTracking} onChange={(e) => setForm((current) => ({ ...current, batchTracking: e.target.checked }))} />} label="Batch tracking" /><FormControlLabel control={<Switch checked={form.serialTracking} onChange={(e) => setForm((current) => ({ ...current, serialTracking: e.target.checked }))} />} label="Serial tracking" /><FormControlLabel control={<Switch checked={form.isCatalogItem} onChange={(e) => setForm((current) => ({ ...current, isCatalogItem: e.target.checked }))} />} label="Catalogue item" /><FormControlLabel control={<Switch checked={form.isActive} onChange={(e) => setForm((current) => ({ ...current, isActive: e.target.checked }))} />} label="Active" /></Stack></Grid>
+                  </Grid>
+                </AccordionDetails>
+              </Accordion>
+            </Grid>
           </Grid>
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField select fullWidth label={t('uom') || 'UOM'} value={form.uomId} onChange={f('uomId')}>
-              <MenuItem value="">None</MenuItem>
-              {uoms?.map((u: any) => <MenuItem key={u.id} value={String(u.id)}>{u.value ?? u.name ?? u.uomName}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid size={{ xs: 12, sm: 6 }}>
-            {/* Prices live on the Pricing sheet, with the currency they are in. This form used to take
-                four unlabelled-currency figures marked "$" while every quote went out in SAR. */}
-            <Alert severity="info" sx={{ py: 0.25 }}>
-              Landed cost and sale price are kept on the{' '}
-              <Box component="a" href="/inventory/pricing-sheet" target="_blank" rel="noopener" sx={{ fontWeight: 700, color: 'primary.main' }}>pricing sheet</Box>.
-            </Alert>
-          </Grid>
-
-          {/* Logistics */}
-          <SectionTitle label="Logistics" />
-          <Grid size={{ xs: 12, sm: 4 }}>
-            <TextField select fullWidth label={t('warehouse') || 'Warehouse'} value={form.warehouseId} onChange={f('warehouseId')}>
-              <MenuItem value="">None</MenuItem>
-              {warehouses?.map((w: any) => <MenuItem key={w.id ?? w.warehouseId} value={w.id ?? w.warehouseId}>{w.name ?? w.warehouseName}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid size={{ xs: 12, sm: 4 }}>
-            <TextField select fullWidth label={t('supplier') || 'Preferred Supplier'} value={form.preferredSupplierId} onChange={f('preferredSupplierId')}>
-              <MenuItem value="">None</MenuItem>
-              {suppliers?.map((s: any) => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid size={{ xs: 12, sm: 2 }}>
-            <TextField fullWidth type="number" label="Lead Time (days)" value={form.leadTime} onChange={f('leadTime')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 2 }}>
-            <TextField fullWidth label={t('country') || 'Country of Origin'} value={form.countryOfOrigin} onChange={f('countryOfOrigin')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 4 }}>
-            <TextField fullWidth label="HS Code" value={form.hscode} onChange={f('hscode')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 4 }}>
-            <TextField fullWidth label="Barcode" value={form.barcode} onChange={f('barcode')} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 4 }}>
-            <TextField fullWidth label="QR Code" value={form.qrcode} onChange={f('qrcode')} />
-          </Grid>
-
-          {/* Physical */}
-          <SectionTitle label="Physical Dimensions" />
-          <Grid size={{ xs: 6, sm: 3 }}>
-            <TextField fullWidth type="number" label="Height" value={form.height} onChange={f('height')} />
-          </Grid>
-          <Grid size={{ xs: 6, sm: 3 }}>
-            <TextField fullWidth type="number" label="Width" value={form.width} onChange={f('width')} />
-          </Grid>
-          <Grid size={{ xs: 6, sm: 3 }}>
-            <TextField fullWidth type="number" label="Depth" value={form.depth} onChange={f('depth')} />
-          </Grid>
-          <Grid size={{ xs: 6, sm: 3 }}>
-            <TextField fullWidth type="number" label="Weight (kg)" value={form.weight} onChange={f('weight')} />
-          </Grid>
-          <Grid size={{ xs: 12 }}>
-            <TextField fullWidth label="Dimensions (text)" value={form.dimensions} onChange={f('dimensions')} placeholder="e.g. 10x5x3 cm" />
-          </Grid>
-
-          {/* Tracking & Flags */}
-          <SectionTitle label="Tracking & Status" />
-          <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField fullWidth type="date" label="Expiration Date" value={form.expirationDate} onChange={f('expirationDate')} slotProps={{ inputLabel: { shrink: true } }} />
-          </Grid>
-          <Grid size={{ xs: 12, sm: 9 }} sx={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <FormControlLabel control={<Switch checked={form.batchTracking} onChange={(e) => setForm(p => ({ ...p, batchTracking: e.target.checked }))} />} label="Batch Tracking" />
-            <FormControlLabel control={<Switch checked={form.serialTracking} onChange={(e) => setForm(p => ({ ...p, serialTracking: e.target.checked }))} />} label="Serial Tracking" />
-            <FormControlLabel control={<Switch checked={form.isCatalogItem} onChange={(e) => setForm(p => ({ ...p, isCatalogItem: e.target.checked }))} />} label="Catalog Item" />
-            <FormControlLabel control={<Switch checked={form.isActive} onChange={(e) => setForm(p => ({ ...p, isActive: e.target.checked }))} color="primary" />} label="Active" />
-          </Grid>
-
-        </Grid>
+        </Box>
       </DialogContent>
       <DialogActions sx={{ p: 2 }}>
-        <Button onClick={handleClose} color="inherit">{t('cancel') || 'Cancel'}</Button>
-        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending || isEditLoading || isEditError || !hasPermission('Products', isEdit ? 'edit' : 'create')} sx={{ px: 4 }}>
-          {saveMutation.isPending ? <CircularProgress size={22} /> : (isEdit ? 'Update Product' : 'Create Product')}
+        <Button onClick={close} color="inherit">{t('cancel') || 'Cancel'}</Button>
+        <Button form="product-form" type="submit" variant="contained" disabled={saveMutation.isPending || isEditLoading || isEditError || !hasPermission('Products', isEdit ? 'edit' : 'create')} sx={{ minWidth: 140 }}>
+          {saveMutation.isPending ? <CircularProgress size={22} /> : (isEdit ? 'Save product' : 'Create product')}
         </Button>
       </DialogActions>
     </Dialog>

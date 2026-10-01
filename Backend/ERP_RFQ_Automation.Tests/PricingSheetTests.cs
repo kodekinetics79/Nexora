@@ -59,7 +59,7 @@ public sealed class PricingSheetTests
             var belowZero = await controller.Save(new PricingSheetController.SaveCommand(
                 [new PricingSheetController.PriceChange(ProcurementTestData.Product, -1m, 120m, ProcurementTestData.Currency)]), CancellationToken.None);
 
-            Assert.Contains("choose the currency", Detail(noCurrency));
+            Assert.Contains("landed cost, sale price and currency must be set together", Detail(noCurrency));
             Assert.Contains("not one of your company's parts", Detail(otherTenant));
             Assert.Contains("landed cost must be above 0", Detail(belowZero));
         }
@@ -67,6 +67,36 @@ public sealed class PricingSheetTests
         await using var check = fixture.Context(fixture.OtherBusinessUnitId);
         var others = await check.Products.IgnoreQueryFilters().SingleAsync(p => p.Id == fixture.OtherProductId);
         Assert.Null(others.PriceCurrencyId);
+    }
+
+    [Fact]
+    public async Task A_partial_price_tuple_is_refused_but_all_three_fields_can_be_cleared()
+    {
+        using var fixture = new ProcurementScenario();
+        await using (var db = fixture.Context())
+        {
+            var controller = Controller(db, fixture.BusinessUnitId);
+            var missingSale = await controller.Save(new PricingSheetController.SaveCommand(
+                [new PricingSheetController.PriceChange(ProcurementTestData.Product, 90m, null, ProcurementTestData.Currency)]),
+                CancellationToken.None);
+            var orphanCurrency = await controller.Save(new PricingSheetController.SaveCommand(
+                [new PricingSheetController.PriceChange(ProcurementTestData.Product, null, null, ProcurementTestData.Currency)]),
+                CancellationToken.None);
+
+            Assert.Contains("must be set together", Detail(missingSale));
+            Assert.Contains("must be set together", Detail(orphanCurrency));
+
+            var cleared = await controller.Save(new PricingSheetController.SaveCommand(
+                [new PricingSheetController.PriceChange(ProcurementTestData.Product, null, null, null)]),
+                CancellationToken.None);
+            Assert.IsType<OkObjectResult>(cleared);
+        }
+
+        await using var check = fixture.Context();
+        var product = await check.Products.SingleAsync(p => p.Id == ProcurementTestData.Product);
+        Assert.Null(product.UnitCost);
+        Assert.Null(product.SellingPrice);
+        Assert.Null(product.PriceCurrencyId);
     }
 
     [Fact]

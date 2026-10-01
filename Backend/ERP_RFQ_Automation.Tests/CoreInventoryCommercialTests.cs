@@ -10,13 +10,13 @@ public sealed class CoreInventoryCommercialTests
         var snapshot = Snapshot(1, onHand: 100, reserved: 10, allocated: 5,
             quarantine: 7, damaged: 3, expired: 4, safety: 11);
 
-        Assert.Equal(60m, snapshot.AvailableToPromise);
+        Assert.Equal(70m, snapshot.AvailableToPromise);
     }
 
     [Fact]
     public void Atp_never_reports_negative_stock()
     {
-        Assert.Equal(0m, Snapshot(1, onHand: 5, reserved: 10).AvailableToPromise);
+        Assert.Equal(0m, Snapshot(1, onHand: 5, quarantine: 10).AvailableToPromise);
     }
 
     [Fact]

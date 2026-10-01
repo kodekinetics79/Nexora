@@ -12,6 +12,8 @@ export interface PricingRow {
   salePrice?: number | null;
   /** The last supplier purchase price on record, for reference only. */
   lastPurchasePrice?: number | null;
+  lastPurchaseCurrencyCode?: string | null;
+  lastPurchaseOn?: string | null;
   onHand: number;
   changedOn?: string | null;
   changedBy?: string | null;

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import OrderViewPage from './OrderViewPage';
@@ -83,8 +83,8 @@ beforeEach(() => {
   get.mockReset();
 });
 
-describe('order fulfilment actions', () => {
-  it('offers the next shipment when an earlier shipment only covered part of the order', async () => {
+describe('deferred order modules', () => {
+  it('does not offer Fulfilment or Receivables actions in this release', async () => {
     get.mockImplementation((url: string) => {
       if (url === '/api/Order/900') return Promise.resolve({ data: ORDER });
       if (url === '/api/Shipment/order/900') return Promise.resolve({ data: [shipment(4)] });
@@ -93,7 +93,11 @@ describe('order fulfilment actions', () => {
 
     renderPage();
 
-    expect(await screen.findByRole('button', { name: 'Create next shipment' })).toBeVisible();
+    await screen.findByText('Order #SO-SYNTH-900');
+    expect(screen.queryByRole('button', { name: /shipment/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /invoice accepted delivery/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /accounts receivable/i })).not.toBeInTheDocument();
+    expect(get).not.toHaveBeenCalledWith('/api/Shipment/order/900', expect.anything());
   });
 
   it('does not offer another shipment after every ordered unit has despatched', async () => {
@@ -109,18 +113,4 @@ describe('order fulfilment actions', () => {
     expect(screen.queryByRole('button', { name: /Create.*shipment/i })).not.toBeInTheDocument();
   });
 
-  it('opens accepted-quantity invoicing and deep-links to the created document', async () => {
-    get.mockImplementation((url: string) => {
-      if (url === '/api/Order/900') return Promise.resolve({ data: ORDER });
-      if (url === '/api/Shipment/order/900') return Promise.resolve({ data: [shipment(4)] });
-      throw new Error(`unexpected GET ${url}`);
-    });
-
-    renderPage();
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Invoice accepted delivery' }));
-    expect(screen.getByRole('dialog', { name: 'Invoice accepted delivery' })).toBeVisible();
-    fireEvent.click(screen.getByRole('button', { name: 'Create synthetic invoice' }));
-    expect(screen.getByLabelText('location')).toHaveTextContent('/sales/finance?documentId=4242');
-  });
 });

@@ -1,9 +1,10 @@
-import React, { useRef, useState } from 'react';
-import { Button, Box, CircularProgress, Tooltip } from '@mui/material';
+import React, { useId, useRef, useState } from 'react';
+import { Button, Box, CircularProgress, Menu, MenuItem, Tooltip } from '@mui/material';
 import {
   FileDownload as ExportIcon,
   Upload as UploadIcon,
   FileDownload as TemplateIcon,
+  KeyboardArrowDown as ExpandIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -15,6 +16,9 @@ interface Props {
   templateFileName?: string;
   exportFileName?: string;
   canUpload?: boolean;
+  onUploadSuccess?: () => void;
+  variant?: 'buttons' | 'menu';
+  menuActions?: { label: string; onClick: () => void; disabled?: boolean }[];
 }
 
 const downloadBlob = (data: any, filename: string) => {
@@ -33,10 +37,20 @@ const UploadExportToolbar: React.FC<Props> = ({
   templateFileName = 'Template.xlsx',
   exportFileName = 'Export.xlsx',
   canUpload = true,
+  onUploadSuccess,
+  variant = 'buttons',
+  menuActions = [],
 }) => {
   const { enqueueSnackbar } = useSnackbar();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState<'template' | 'upload' | 'export' | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
+  const menuId = useId();
+  const triggerId = useId();
+  const runMenuAction = (action: () => void) => {
+    setMenuAnchor(null);
+    action();
+  };
 
   const handleTemplate = async () => {
     try {
@@ -78,6 +92,7 @@ const UploadExportToolbar: React.FC<Props> = ({
     try {
       setLoading('upload');
       const res = await onUpload(file);
+      onUploadSuccess?.();
       enqueueSnackbar(res.data?.message || 'Upload successful!', { variant: 'success' });
     } catch (error: unknown) {
       enqueueSnackbar(
@@ -94,6 +109,45 @@ const UploadExportToolbar: React.FC<Props> = ({
     <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
       <input ref={fileInputRef} type="file" accept=".xlsx,.xls" hidden onChange={handleFileChange} />
 
+      {variant === 'menu' ? <>
+        <Button
+          id={triggerId}
+          size="small"
+          variant="outlined"
+          aria-haspopup="menu"
+          aria-controls={menuAnchor ? menuId : undefined}
+          aria-expanded={Boolean(menuAnchor)}
+          onClick={(event) => setMenuAnchor(event.currentTarget)}
+          disabled={!!loading}
+          startIcon={loading ? <CircularProgress size={14} /> : undefined}
+          endIcon={<ExpandIcon />}
+          sx={{ textTransform: 'none', fontWeight: 600 }}
+        >
+          More
+        </Button>
+        <Menu
+          id={menuId}
+          anchorEl={menuAnchor}
+          open={Boolean(menuAnchor)}
+          onClose={() => setMenuAnchor(null)}
+          slotProps={{ list: { 'aria-labelledby': triggerId } }}
+        >
+          {menuActions.map((action) => <MenuItem
+            key={action.label}
+            disabled={!!loading || action.disabled}
+            onClick={() => runMenuAction(action.onClick)}
+          >{action.label}</MenuItem>)}
+          <MenuItem disabled={!!loading} onClick={() => runMenuAction(handleTemplate)}>
+            Download template
+          </MenuItem>
+          {canUpload && <MenuItem disabled={!!loading} onClick={() => runMenuAction(() => fileInputRef.current?.click())}>
+            Import products
+          </MenuItem>}
+          <MenuItem disabled={!!loading} onClick={() => runMenuAction(handleExport)}>
+            Export products
+          </MenuItem>
+        </Menu>
+      </> : <>
       <Tooltip title="Download Excel Template">
         <Button
           size="small"
@@ -134,6 +188,7 @@ const UploadExportToolbar: React.FC<Props> = ({
           Export
         </Button>
       </Tooltip>
+      </>}
     </Box>
   );
 };

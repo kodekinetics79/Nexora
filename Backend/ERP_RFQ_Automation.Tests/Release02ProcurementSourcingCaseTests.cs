@@ -153,6 +153,26 @@ public sealed class Release02ProcurementSourcingCaseTests
     }
 
     [Fact]
+    public async Task Candidate_view_carries_the_customer_set_network_tier_without_using_it_as_a_gate()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        await using (var setup = fixture.Context())
+        {
+            var supplier = await setup.Suppliers.SingleAsync(x => x.Id == ProcurementTestData.Supplier);
+            supplier.Tier = SupplierTiers.Tier1Partner;
+            await setup.SaveChangesAsync();
+        }
+
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            CreateCase(fixture, "candidate-network-tier")));
+
+        var candidate = Assert.Single(created.Candidates);
+        Assert.Equal(SupplierTiers.Tier1Partner, candidate.SupplierTier);
+        Assert.True(candidate.EligibleForSupplierRfq);
+    }
+
+    [Fact]
     public async Task Candidate_search_honours_10_20_50_without_fabricating_results()
     {
         using var fixture = new ProcurementScenario();

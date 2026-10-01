@@ -56,15 +56,14 @@ describe('the rail presents the commercial spine and grouped workspaces', () => 
       'Inbox',
       'Leads',
       'RFQs',
+      'Suppliers',
       'Quotes',
       'Orders',
-      'Fulfilment',
-      'Receivables',
+      'Products',
       'Administration',
       'Customers & ownership',
       'Suppliers & sourcing',
       'Customer PO & handoffs',
-      'Catalogue & stock',
       'Screen directory',
     ]));
   });
@@ -84,11 +83,21 @@ describe('the rail presents the commercial spine and grouped workspaces', () => 
     expect(screen.getAllByRole('button', { expanded: false }).length).toBeGreaterThan(0);
   });
 
-  it('automatically opens the workspace containing the current screen', () => {
+  it('keeps every inventory detail screen inside the single Products destination', () => {
     renderRail('/inventory/ageing');
 
-    expect(row('Catalogue & stock')).toHaveAttribute('aria-expanded', 'true');
-    expect(row('Stock ageing')).toHaveAttribute('aria-current', 'page');
+    expect(row('Products')).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('button', { name: 'Catalogue & stock' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the supplier register beside Leads and RFQs, including supplier details', () => {
+    renderRail('/suppliers/42');
+
+    expect(row('Suppliers')).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('button', { name: 'Suppliers & sourcing' })).not.toHaveAttribute(
+      'aria-current',
+      'page',
+    );
   });
 });
 
@@ -116,8 +125,6 @@ describe('where the rail says you are', () => {
     expect(row('Leads')).not.toHaveAttribute('aria-current');
     expect(row('RFQs')).not.toHaveAttribute('aria-current');
     expect(row('Orders')).not.toHaveAttribute('aria-current');
-    expect(row('Fulfilment')).not.toHaveAttribute('aria-current');
-    expect(row('Receivables')).not.toHaveAttribute('aria-current');
   });
 
   it('lights the owning row on a DETAIL page, not just on the list', () => {
@@ -153,8 +160,6 @@ describe('where the rail says you are', () => {
 
   it.each([
     ['/sales/orders/42', 'Orders'],
-    ['/sales/shipments/21', 'Fulfilment'],
-    ['/sales/finance', 'Receivables'],
   ])('keeps the post-quote journey visible at %s', (url, destination) => {
     renderRail(url);
     expect(row(destination)).toHaveAttribute('aria-current', 'page');
@@ -197,10 +202,11 @@ describe('where the rail says you are', () => {
     expect(row('Setup')).toHaveAttribute('aria-current', 'page');
   });
 
-  it('lights nothing when the address belongs to no primary destination', () => {
+  it('lights Products on specialist inventory addresses', () => {
     renderRail('/inventory/ageing');
 
-    for (const name of ['Inbox', 'Leads', 'RFQs', 'Quotes', 'Orders', 'Fulfilment', 'Receivables']) {
+    expect(row('Products')).toHaveAttribute('aria-current', 'page');
+    for (const name of ['Inbox', 'Leads', 'RFQs', 'Quotes', 'Orders']) {
       expect(row(name)).not.toHaveAttribute('aria-current');
     }
   });

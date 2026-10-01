@@ -421,8 +421,8 @@ export default function StockPriceDialog({ open, rfqId, itemId, productId, onAsk
                     ) : sellingPrice == null ? (
                       <Typography variant="caption" color="text.secondary">
                         Set by a manager on the{" "}
-                        <Box component="a" href="/inventory/pricing-sheet" target="_blank" rel="noopener" sx={{ color: "primary.main", fontWeight: 700 }}>
-                          pricing sheet
+                        <Box component="a" href="/inventory/products" target="_blank" rel="noopener" sx={{ color: "primary.main", fontWeight: 700 }}>
+                          Products list
                         </Box>.
                       </Typography>
                     ) : (

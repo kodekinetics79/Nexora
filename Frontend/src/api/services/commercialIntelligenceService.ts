@@ -647,8 +647,14 @@ export interface LotCommitmentsDTO {
 export interface IncomingStockDTO {
   id: number;
   purchaseOrderId?: number | null;
-  purchaseOrderNumber: string;
-  supplierName: string;
+  purchaseOrderNumber?: string | null;
+  sourceReference?: string | null;
+  trackingReferences?: string[];
+  supplierInvoiceNumbers?: string[];
+  billOfLadingNumbers?: string[];
+  supplierName?: string | null;
+  supplierCity?: string | null;
+  supplierCountry?: string | null;
   partNumber: string;
   productName: string;
   warehouseName: string;
@@ -721,6 +727,7 @@ export interface CommercialLineResolutionDTO {
 
 export interface ListParams {
   search?: string;
+  productId?: number;
   status?: string;
   customerId?: number;
   sourceId?: number;

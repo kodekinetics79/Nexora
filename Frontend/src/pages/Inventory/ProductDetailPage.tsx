@@ -173,7 +173,7 @@ const ProductDetailPage: React.FC = () => {
 
         {/* Stats Strip */}
         <Box sx={{ display: 'flex', mt: 0 }}>
-          <StatBox label={t('quantity') || 'Qty on Hand'} value={product.qtyOnHand} />
+          <StatBox label="In stock" value={product.qtyOnHand} />
           <StatBox label="Reorder Point" value={product.reorderPoint} />
           <StatBox label={t('uom') || 'UOM'} value={product.uomName} />
           <StatBox label="Sale price" value={product.sellingPrice != null ? priceText(product.sellingPrice) : null} />
@@ -205,7 +205,7 @@ const ProductDetailPage: React.FC = () => {
               <InfoRow label="Margin on cost" value={product.unitCost && product.sellingPrice ? `${(Math.round((product.sellingPrice / product.unitCost - 1) * 10000) / 100).toLocaleString()}%` : null} />
               <InfoRow label="Last purchase" value={product.finalLandedCost != null ? priceText(product.finalLandedCost) : null} />
               <Box sx={{ pt: 1 }}>
-                <Button size="small" href="/inventory/pricing-sheet">Change prices on the pricing sheet</Button>
+                <Button size="small" href={`/inventory/products?search=${encodeURIComponent(product.partNo)}`}>Edit prices in Products</Button>
               </Box>
             </Section>
 

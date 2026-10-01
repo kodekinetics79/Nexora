@@ -269,7 +269,7 @@ public sealed class Release02SupplierGovernanceTests
     }
 
     [Fact]
-    public async Task Supplier_repository_rejects_cross_tenant_currency_and_physical_deletion()
+    public async Task Supplier_repository_rejects_cross_tenant_currency_and_deletes_an_unused_profile_with_its_contacts()
     {
         using var database = new TestDb();
         await using var context = database.ContextFor(null);
@@ -293,7 +293,54 @@ public sealed class Release02SupplierGovernanceTests
         await Assert.ThrowsAsync<ArgumentException>(() => repository.AddAsync(supplier));
         supplier.CurrencyId = null;
         await repository.AddAsync(supplier);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => repository.DeleteAsync(supplier.Id, 41));
+        context.Contacts.Add(new Contact
+        {
+            BusinessUnitId = 41,
+            SupplierId = supplier.Id,
+            FirstName = "Unused",
+            LastName = "Contact",
+            IsActive = true,
+            CreatedBy = "test-user",
+            CreatedOn = DateTime.UtcNow,
+            ConcurrencyToken = Guid.NewGuid()
+        });
+        await context.SaveChangesAsync();
+
+        await repository.DeleteAsync(supplier.Id, 41);
+
+        Assert.False(await context.Suppliers.AnyAsync(x => x.Id == supplier.Id));
+        Assert.False(await context.Contacts.AnyAsync(x => x.SupplierId == supplier.Id));
+    }
+
+    [Fact]
+    public async Task Supplier_repository_preserves_a_profile_that_has_commercial_lineage()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(context, 41);
+        await context.SaveChangesAsync();
+        var repository = new SupplierRepository(context, new DeterministicSupplierNumberGenerator());
+        var supplier = Supplier("Preferred Parts", 41);
+        await repository.AddAsync(supplier);
+        context.Products.Add(new Product
+        {
+            PartNo = "PREFERRED-001",
+            ProductName = "Preferred component",
+            PreferredSupplierId = supplier.Id,
+            Buid = 41,
+            QtyOnHand = 0,
+            ReorderPoint = 0,
+            IsActive = true,
+            IsCatalogItem = true,
+            CreatedBy = "test-user",
+            CreatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => repository.DeleteAsync(supplier.Id, 41));
+
+        Assert.Contains("commercial lineage", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.True(await context.Suppliers.AnyAsync(x => x.Id == supplier.Id));
     }
 

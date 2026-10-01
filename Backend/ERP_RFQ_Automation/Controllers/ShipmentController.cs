@@ -365,7 +365,8 @@ namespace ERP_RFQ_Automation.Controllers
                 .ToDictionary(g => g.Key, g => g.Sum(i => i.Quantity));
             if (declared.Count == 0) return; // a shipment that declares no goods issues none
 
-            await _stock.ReserveOrderAsync(businessUnitId, orderId, actor);
+            if (ERP_RFQ_Automation.Inventory.InventoryReleaseScope.ReservationsEnabled)
+                await _stock.ReserveOrderAsync(businessUnitId, orderId, actor);
             var issue = await _stock.ConsumeOrderLinesAsync(businessUnitId, orderId, declared, actor,
                 shipmentId, complianceOverrideReason);
 

@@ -397,6 +397,8 @@ public partial class ErpRfqAutomationContext
             entity.ToTable("goods_receipts"); entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             entity.Property(x => x.ReceiptNumber).HasMaxLength(80).IsRequired();
+            entity.Property(x => x.SupplierInvoiceNumber).HasMaxLength(100);
+            entity.Property(x => x.BillOfLadingNumber).HasMaxLength(100);
             entity.Property(x => x.Status).HasMaxLength(24).IsRequired();
             entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
             entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();

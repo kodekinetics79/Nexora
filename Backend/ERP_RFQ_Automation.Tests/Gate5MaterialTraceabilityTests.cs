@@ -187,10 +187,10 @@ public sealed class Gate5MaterialTraceabilityTests
         var availabilityService = new InventoryAvailabilityService(context);
 
         // Reserving more than the un-quarantined balance is refused AT THE POINT OF ALLOCATION.
-        var refusal = await Assert.ThrowsAsync<InsufficientStockException>(() =>
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             availabilityService.ReserveAsync(scenario.BusinessUnitId, ProcurementTestData.Inventory,
                 3m, "reserve-after-recall"));
-        Assert.Equal(2m, refusal.Available);
+        Assert.Equal(InventoryReleaseScope.ReservationsDisabledMessage, refusal.Message);
 
         // Quarantine is on-hand neutral: the units are still in the building, they have just
         // stopped being sellable. A quarantine that decremented on-hand would double-count against
@@ -208,7 +208,7 @@ public sealed class Gate5MaterialTraceabilityTests
     /// would still ship. Delete the <c>ReleaseForQuarantineAsync</c> call and this test fails.
     /// </summary>
     [Fact]
-    public async Task Quarantine_gives_back_holds_that_were_taken_before_the_recall()
+    public async Task Quarantine_preserves_historical_holds_while_removing_stock_from_availability()
     {
         using var scenario = new TraceabilityScenario();
         await scenario.ReceiveAsync(quantity: 8m);
@@ -217,7 +217,7 @@ public sealed class Gate5MaterialTraceabilityTests
         long reservationId;
         await using (var reserve = scenario.Context())
         {
-            var hold = await new InventoryAvailabilityService(reserve).ReserveAsync(
+            var hold = await HistoricalReservations.SeedAsync(reserve,
                 scenario.BusinessUnitId, ProcurementTestData.Inventory, 10m, "hold-before-recall",
                 orderId: TraceabilityScenario.OrderId, orderItemId: TraceabilityScenario.OrderItemId);
             reservationId = hold.Id;
@@ -225,16 +225,15 @@ public sealed class Gate5MaterialTraceabilityTests
 
         var result = await scenario.QuarantineAsync(lotId, version: 1);
 
-        var displaced = Assert.Single(result.DisplacedReservations);
-        Assert.Equal(reservationId, displaced.ReservationId);
-        Assert.Equal(TraceabilityScenario.OrderId, displaced.OrderId);
+        Assert.Empty(result.DisplacedReservations);
+        Assert.Equal(2m, result.AvailableToPromiseAfter);
 
         await using var verify = scenario.Context();
-        Assert.Equal(StockReservationStatus.Released, await verify.StockReservations
+        Assert.Equal(StockReservationStatus.Active, await verify.StockReservations
             .Where(x => x.Id == reservationId).Select(x => x.Status).SingleAsync());
         // Released BECAUSE of the recall, not because an order was cancelled. The two facts must be
         // distinguishable in the ledger.
-        Assert.True(await verify.ProcurementEvents.AnyAsync(x =>
+        Assert.False(await verify.ProcurementEvents.AnyAsync(x =>
             x.AggregateType == "StockReservation"
             && x.EventType == "STOCK_RESERVATION_RELEASED_ON_QUARANTINE"));
     }

@@ -101,16 +101,17 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
 
   // Inventory
   '/inventory/overview': 'Inventory Overview',
-  '/inventory/availability': 'Stock Availability',
+  '/inventory/availability': 'Products',
   '/inventory/warehouses': 'Inventory Warehouses',
   '/inventory/reservations': 'Stock Reservations',
-  '/inventory/incoming': 'Incoming Stock',
-  '/inventory/movements': 'Stock Movements',
+  '/inventory/incoming': 'Incoming & receipts',
+  '/inventory/movements': 'Stock Activity',
   '/inventory/demand': 'Inventory Demand',
   '/inventory/resources': 'Related Resources',
-  '/inventory/lots': 'Material Lots and Traceability',
+  '/inventory/lots': 'Traceability',
   '/inventory/order-trace': 'Where-Used Trace',
   '/inventory/products': 'Products',
+  '/inventory/pricing-sheet': 'Products',
   '/inventory/categories': 'Product Categories',
   '/inventory/sub-categories': 'Product Sub-Categories',
 

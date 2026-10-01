@@ -3,8 +3,11 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.ProductDTOs;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.Inventory;
+using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Traceability;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -68,7 +71,11 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] int pageNumber = 1,
             [FromQuery] int pageSize = 10,
             [FromQuery] string? search = null,
-            [FromQuery] bool? isActive = null)
+            [FromQuery] bool? isActive = null,
+            [FromQuery] string stock = "all",
+            [FromQuery] long? warehouseId = null,
+            [FromQuery] string sortBy = "partNo",
+            [FromQuery] string sortDirection = "asc")
         {
             try
             {
@@ -78,14 +85,164 @@ namespace ERP_RFQ_Automation.Controllers
                 // Relaxed validation: Allow any page size up to 1000
                 if (pageSize < 1 || pageSize > 1000) return BadRequest("Page size must be between 1 and 1000.");
 
-                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive);
+                var listQuery = new ProductListQuery(stock, warehouseId, sortBy, sortDirection);
+                if (listQuery.ValidationError is { } queryError)
+                    return BadRequest(TracedProblem(400, "Invalid product query", queryError));
+                if (warehouseId.HasValue && !await _context.Warehouses.AsNoTracking()
+                    .AnyAsync(w => w.Id == warehouseId && w.BusinessUnitId == targetBUId))
+                    return BadRequest(TracedProblem(400, "Invalid product query", "Warehouse is not available."));
+
+                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive, listQuery);
                 var materialized = items.ToList();
                 var ids = materialized.Select(x => x.Id).ToArray();
-                var stock = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == targetBUId &&
-                        x.ProductId.HasValue && ids.Contains(x.ProductId.Value))
-                    .GroupBy(x => x.ProductId!.Value).Select(x => new { x.Key, Quantity = x.Sum(y => y.QtyOnHand) })
-                    .ToDictionaryAsync(x => x.Key, x => x.Quantity);
-                materialized.ForEach(x => x.QtyOnHand = stock.GetValueOrDefault(x.Id));
+                var stockRows = await _context.Set<Models.Inventory>().AsNoTracking()
+                    .Where(x => x.Buid == targetBUId && x.ProductId.HasValue && ids.Contains(x.ProductId.Value)
+                        && (!warehouseId.HasValue || x.WarehouseId == warehouseId))
+                    .Select(x => new
+                    {
+                        x.Id,
+                        ProductId = x.ProductId!.Value,
+                        x.WarehouseId,
+                        WarehouseName = x.Warehouse == null ? null : x.Warehouse.WarehouseName,
+                        x.QtyOnHand,
+                        x.AllocatedQuantity,
+                        x.QuarantineQuantity,
+                        x.DamagedQuantity,
+                        x.ExpiredQuantity,
+                        x.SafetyStockQuantity,
+                        x.ReorderPoint,
+                        x.MinimumLevel,
+                        x.MaximumLevel,
+                    })
+                    .ToListAsync();
+                var stockIds = stockRows.Select(x => x.Id).ToArray();
+                var reservations = !InventoryReleaseScope.ReservationsEnabled || stockIds.Length == 0
+                    ? new Dictionary<long, decimal>()
+                    : await _context.StockReservations.AsNoTracking()
+                        .Where(x => x.BusinessUnitId == targetBUId && stockIds.Contains(x.InventoryId)
+                            && x.Status == StockReservationStatus.Active)
+                        .GroupBy(x => x.InventoryId)
+                        .Select(x => new { InventoryId = x.Key, Quantity = x.Sum(y => y.Quantity) })
+                        .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity);
+                List<IncomingInventory> incomingRows = ids.Length == 0
+                    ? new List<IncomingInventory>()
+                    : await _context.IncomingInventory.AsNoTracking()
+                        .Where(x => x.BusinessUnitId == targetBUId && ids.Contains(x.ProductId)
+                            && (!warehouseId.HasValue || x.WarehouseId == warehouseId)
+                            && (x.Status == IncomingInventoryStatus.Ordered
+                                || x.Status == IncomingInventoryStatus.Confirmed
+                                || x.Status == IncomingInventoryStatus.InTransit
+                                || x.Status == IncomingInventoryStatus.PartiallyReceived))
+                        .ToListAsync();
+                var lotSummaries = ids.Length == 0
+                    ? new Dictionary<long, (int LotCount, int QuarantinedLotCount, decimal RemainingQuantity)>()
+                    : (await _context.MaterialLots.AsNoTracking()
+                        .Where(x => x.BusinessUnitId == targetBUId && ids.Contains(x.ProductId))
+                        .GroupBy(x => x.ProductId)
+                        .Select(group => new
+                        {
+                            ProductId = group.Key,
+                            LotCount = group.Count(),
+                            QuarantinedLotCount = group.Count(x => x.Status == MaterialLotStatuses.Quarantined),
+                            RemainingQuantity = group.Sum(x => x.QuantityReceived - x.QuantityConsumed),
+                        })
+                        .ToListAsync())
+                        .ToDictionary(x => x.ProductId, x => (x.LotCount, x.QuarantinedLotCount, x.RemainingQuantity));
+                var today = DateOnly.FromDateTime(DateTime.UtcNow);
+                var expiredCertificates = ids.Length == 0
+                    ? new Dictionary<long, int>()
+                    : await (from certificate in _context.MaterialLotCertificates.AsNoTracking()
+                             join lot in _context.MaterialLots.AsNoTracking()
+                                 on certificate.MaterialLotId equals lot.Id
+                             where certificate.BusinessUnitId == targetBUId
+                                 && lot.BusinessUnitId == targetBUId
+                                 && ids.Contains(lot.ProductId)
+                                 && certificate.ExpiresOn.HasValue
+                                 && certificate.ExpiresOn.Value < today
+                             group certificate by lot.ProductId into certificateGroup
+                             select new { ProductId = certificateGroup.Key, Count = certificateGroup.Count() })
+                        .ToDictionaryAsync(x => x.ProductId, x => x.Count);
+
+                foreach (var item in materialized)
+                {
+                    var itemStock = stockRows.Where(x => x.ProductId == item.Id).ToList();
+                    item.QtyOnHand = itemStock.Sum(x => x.QtyOnHand);
+                    item.ReservedQuantity = itemStock.Sum(x => reservations.GetValueOrDefault(x.Id));
+                    item.AvailableQuantity = itemStock.Sum(x => InventoryQuantityMath.AvailableToPromise(
+                        x.QtyOnHand,
+                        reservations.GetValueOrDefault(x.Id),
+                        x.AllocatedQuantity,
+                        x.QuarantineQuantity,
+                        x.DamagedQuantity,
+                        x.ExpiredQuantity,
+                        x.SafetyStockQuantity));
+                    item.WarehouseCount = itemStock.Where(x => x.WarehouseId.HasValue)
+                        .Select(x => x.WarehouseId!.Value).Distinct().Count();
+                    item.StockLocationSummary = string.Join(", ", itemStock
+                        .Select(x => x.WarehouseName)
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Distinct()
+                        .OrderBy(name => name));
+                    if (itemStock.Count > 0 && string.IsNullOrWhiteSpace(item.StockLocationSummary))
+                        item.StockLocationSummary = "Warehouse not assigned";
+                    var reorderConditions = itemStock.Select(stockRow =>
+                    {
+                        var available = InventoryQuantityMath.AvailableToPromise(
+                            stockRow.QtyOnHand,
+                            reservations.GetValueOrDefault(stockRow.Id),
+                            stockRow.AllocatedQuantity,
+                            stockRow.QuarantineQuantity,
+                            stockRow.DamagedQuantity,
+                            stockRow.ExpiredQuantity,
+                            stockRow.SafetyStockQuantity);
+                        var inbound = incomingRows.Where(incoming => incoming.ProductId == item.Id
+                                && incoming.WarehouseId == stockRow.WarehouseId)
+                            .Sum(incoming => incoming.OpenQuantity);
+                        var condition = ReorderAlertService.Classify(
+                            available + inbound,
+                            stockRow.QtyOnHand,
+                            stockRow.MinimumLevel,
+                            stockRow.MaximumLevel,
+                            stockRow.ReorderPoint);
+                        return new
+                        {
+                            condition.Kind,
+                            condition.Threshold,
+                            condition.Shortfall,
+                            stockRow.WarehouseName,
+                        };
+                    }).ToList();
+                    item.ReorderStatus = new[]
+                    {
+                        ReorderAlertKinds.OutOfStock,
+                        ReorderAlertKinds.BelowMinimum,
+                        ReorderAlertKinds.ReorderPoint,
+                        ReorderAlertKinds.Overstock,
+                    }.FirstOrDefault(kind => reorderConditions.Any(condition => condition.Kind == kind));
+                    var governingConditions = reorderConditions
+                        .Where(condition => condition.Kind == item.ReorderStatus)
+                        .ToList();
+                    item.ReorderGap = governingConditions.Sum(condition => condition.Shortfall);
+                    item.ReorderThreshold = governingConditions.Sum(condition => condition.Threshold);
+                    item.ReorderWarehouseSummary = string.Join(", ", governingConditions
+                        .Select(condition => condition.WarehouseName)
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Distinct()
+                        .OrderBy(name => name));
+
+                    var itemIncoming = incomingRows.Where(x => x.ProductId == item.Id && x.OpenQuantity > 0m).ToList();
+                    item.IncomingQuantity = itemIncoming.Sum(x => x.OpenQuantity);
+                    item.NextIncomingOn = itemIncoming.Count == 0 ? null : itemIncoming.Min(x => x.ExpectedOn);
+                    item.IncomingCommitmentCount = itemIncoming.Count;
+                    item.IncomingWarehouseCount = itemIncoming.Select(x => x.WarehouseId).Distinct().Count();
+                    if (lotSummaries.TryGetValue(item.Id, out var lotSummary))
+                    {
+                        item.MaterialLotCount = lotSummary.LotCount;
+                        item.QuarantinedLotCount = lotSummary.QuarantinedLotCount;
+                        item.MaterialLotRemainingQuantity = lotSummary.RemainingQuantity;
+                    }
+                    item.ExpiredCertificateCount = expiredCertificates.GetValueOrDefault(item.Id);
+                }
 
                 return Ok(new PaginatedProductResponseDTO
                 {
@@ -152,6 +309,7 @@ namespace ERP_RFQ_Automation.Controllers
                     UomName = product.Uom?.UomName,
                     UnitCost = product.UnitCost,
                     SellingPrice = product.SellingPrice,
+                    PriceCurrencyId = product.PriceCurrencyId,
                     PriceCurrencyCode = product.PriceCurrency?.Code,
                     FinalLandedCost = product.FinalLandedCost,
                     FinalSalesPrice = product.FinalSalesPrice,
@@ -160,6 +318,7 @@ namespace ERP_RFQ_Automation.Controllers
                     PreferredSupplierId = product.PreferredSupplierId,
                     PreferredSupplierName = product.PreferredSupplier?.Name,
                     PreferredSupplierEmail = product.PreferredSupplier?.ContactEmail,
+                    PreferredSupplierTier = product.PreferredSupplier?.Tier,
                     BatchTracking = product.BatchTracking,
                     SerialTracking = product.SerialTracking,
                     ExpirationDate = product.ExpirationDate,
@@ -235,6 +394,7 @@ namespace ERP_RFQ_Automation.Controllers
                 UomId = request.UomId,
                 UnitCost = request.UnitCost,
                 SellingPrice = request.SellingPrice,
+                PriceCurrencyId = request.PriceCurrencyId,
                 FinalLandedCost = request.FinalLandedCost,
                 FinalSalesPrice = request.FinalSalesPrice,
 
@@ -344,6 +504,8 @@ namespace ERP_RFQ_Automation.Controllers
                 UomName = savedProduct.Uom?.UomName,
                 UnitCost = savedProduct.UnitCost,
                 SellingPrice = savedProduct.SellingPrice,
+                PriceCurrencyId = savedProduct.PriceCurrencyId,
+                PriceCurrencyCode = savedProduct.PriceCurrency?.Code,
                 FinalLandedCost = savedProduct.FinalLandedCost,
                 FinalSalesPrice = savedProduct.FinalSalesPrice,
 
@@ -352,6 +514,7 @@ namespace ERP_RFQ_Automation.Controllers
                 PreferredSupplierId = savedProduct.PreferredSupplierId,
                 PreferredSupplierName = savedProduct.PreferredSupplier?.Name,
                 PreferredSupplierEmail = savedProduct.PreferredSupplier?.ContactEmail,
+                PreferredSupplierTier = savedProduct.PreferredSupplier?.Tier,
                 BatchTracking = savedProduct.BatchTracking,
                 SerialTracking = savedProduct.SerialTracking,
                 ExpirationDate = savedProduct.ExpirationDate,
@@ -419,9 +582,12 @@ namespace ERP_RFQ_Automation.Controllers
             product.CategoryId = request.CategoryId;
             product.ReorderPoint = request.ReorderPoint;
             product.UomId = request.UomId;
-            // Prices are kept on the Pricing sheet (PricingSheetController), in a currency the keeper
-            // chose. This edit no longer writes them: the product form stopped showing them, so
-            // writing the form's empty values here would wipe a price a manager had just set.
+            if (request.ApplyPricing)
+            {
+                product.UnitCost = request.UnitCost;
+                product.SellingPrice = request.SellingPrice;
+                product.PriceCurrencyId = request.PriceCurrencyId;
+            }
 
             product.WarehouseId = request.WarehouseId;
             product.PreferredSupplierId = request.PreferredSupplierId;
@@ -446,7 +612,28 @@ namespace ERP_RFQ_Automation.Controllers
 
             try
             {
-                await _repository.UpdateAsync(product, request.Buid, request.Attachments);
+                var strategy = _context.Database.CreateExecutionStrategy();
+                await strategy.ExecuteAsync(async () =>
+                {
+                    await using var transaction = await _context.Database.BeginTransactionAsync();
+                    await _repository.UpdateAsync(product, request.Buid, request.Attachments, request.ApplyPricing);
+
+                    // The product default and every warehouse row are one logical edit. Committing
+                    // these separately used to let a failed stock sync return an error after the
+                    // product and its price had already changed.
+                    var stockRows = await _context.Set<Models.Inventory>()
+                        .Where(x => x.Buid == request.Buid && x.ProductId == id
+                                    && x.ReorderPoint != product.ReorderPoint)
+                        .ToListAsync();
+                    foreach (var row in stockRows)
+                    {
+                        row.ReorderPoint = product.ReorderPoint;
+                        row.ModifiedBy = Actor();
+                        row.ModifiedOn = DateTime.UtcNow;
+                    }
+                    if (stockRows.Count > 0) await _context.SaveChangesAsync();
+                    await transaction.CommitAsync();
+                });
             }
             catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
             {
@@ -492,36 +679,6 @@ namespace ERP_RFQ_Automation.Controllers
                     : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not saved", ex.Message));
             }
 
-            // FR-INV-04. Push the reorder point down to the stock rows that actually drive the
-            // alert.
-            //
-            // Inventory.ReorderPoint is copied from the product ONCE, when the stock row is first
-            // created (StockLedgerService.ResolveInventoryAsync), and was never re-synced. Every
-            // exception surface — the overview's BelowReorderPoint list, the warehouse exception
-            // counts, the demand/buying list — reads Inventory.ReorderPoint, while this screen
-            // writes Product.ReorderPoint. So raising a reorder point on a product that already
-            // held stock changed nothing anybody could see: the setting existed, the field saved,
-            // the alert kept using the old number, and the only symptom was an alert that never
-            // fired.
-            //
-            // Per warehouse rather than per product, because that is the grain the alert is
-            // evaluated at; the item master supplies the default for every location that has not
-            // been given its own.
-            var stockRows = await _context.Set<Models.Inventory>()
-                .Where(x => x.Buid == request.Buid && x.ProductId == id
-                            && x.ReorderPoint != product.ReorderPoint)
-                .ToListAsync();
-            if (stockRows.Count > 0)
-            {
-                foreach (var row in stockRows)
-                {
-                    row.ReorderPoint = product.ReorderPoint;
-                    row.ModifiedBy = Actor();
-                    row.ModifiedOn = DateTime.UtcNow;
-                }
-                await _context.SaveChangesAsync();
-            }
-
             // Reload the product to include attachments
             var savedProduct = await _repository.GetByIdAsync(id, request.Buid);
 
@@ -558,6 +715,8 @@ namespace ERP_RFQ_Automation.Controllers
                 UomName = savedProduct.Uom?.UomName,
                 UnitCost = savedProduct.UnitCost,
                 SellingPrice = savedProduct.SellingPrice,
+                PriceCurrencyId = savedProduct.PriceCurrencyId,
+                PriceCurrencyCode = savedProduct.PriceCurrency?.Code,
                 FinalLandedCost = savedProduct.FinalLandedCost,
                 FinalSalesPrice = savedProduct.FinalSalesPrice,
 
@@ -566,6 +725,7 @@ namespace ERP_RFQ_Automation.Controllers
                 PreferredSupplierId = savedProduct.PreferredSupplierId,
                 PreferredSupplierName = savedProduct.PreferredSupplier?.Name,
                 PreferredSupplierEmail = savedProduct.PreferredSupplier?.ContactEmail,
+                PreferredSupplierTier = savedProduct.PreferredSupplier?.Tier,
                 BatchTracking = savedProduct.BatchTracking,
                 SerialTracking = savedProduct.SerialTracking,
                 ExpirationDate = savedProduct.ExpirationDate,
@@ -687,6 +847,20 @@ namespace ERP_RFQ_Automation.Controllers
             _ = businessUnitId;
             if (!TryGetTenantId(out var targetBUId)) return Forbid();
             return Ok(await _repository.GetUomsAsync(targetBUId));
+        }
+
+        [HttpGet("lookups/currencies")]
+        [RequireModulePermission("Products", PermissionAction.View)]
+        public async Task<ActionResult> GetCurrencies()
+        {
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
+            var currencies = await _context.Currencies.AsNoTracking()
+                .Where(x => x.BusinessUnitId == targetBUId && x.IsActive == true)
+                .OrderByDescending(x => x.IsBaseCurrency == true)
+                .ThenBy(x => x.Code)
+                .Select(x => new { x.Id, x.Code, IsBase = x.IsBaseCurrency == true })
+                .ToListAsync();
+            return Ok(currencies);
         }
 
         // Product Matching Endpoints

@@ -125,22 +125,23 @@ public class StockLedgerIntegrityTests
     }
 
     [Fact]
-    public async Task Adjustment_cannot_write_off_stock_that_is_already_reserved()
+    public async Task Adjustment_ignores_historical_holds_without_changing_them()
     {
         using var db = new TestDb();
         var (productId, warehouseA, _) = SeedCatalog(db);
         var stock = await Ledger(db).RecordCountAsync(Bu, productId, warehouseA, 100m, "opening:4", "ops@acme");
-        await new InventoryAvailabilityService(db.ContextFor(Bu))
-            .ReserveAsync(Bu, stock.InventoryId, 80m, "hold:1", orderId: 5);
-
-        // Only 20 units are uncommitted; writing off 50 would leave the reservation unbacked.
-        await Assert.ThrowsAsync<StockLedgerException>(() =>
-            Ledger(db).AdjustAsync(Bu, productId, warehouseA, -50m, "adjust:overcommit", "ops@acme"));
+        using var history = db.ContextFor(Bu);
+        var historical = await HistoricalReservations.SeedAsync(history, Bu, stock.InventoryId, 80m, "hold:1", orderId: 5);
+        await Ledger(db).AdjustAsync(Bu, productId, warehouseA, -50m, "adjust:history", "ops@acme");
+        await history.Entry(historical).ReloadAsync();
+        Assert.Equal(80m, historical.Quantity);
+        Assert.Equal(StockReservationStatus.Active, historical.Status);
+        await AssertLedgerBalancedAsync(db);
 
         var availability = await new InventoryAvailabilityService(db.ContextFor(Bu))
             .GetAvailabilityAsync(Bu, stock.InventoryId);
-        Assert.Equal(100m, availability.OnHand);
-        Assert.Equal(20m, availability.Available);
+        Assert.Equal(50m, availability.OnHand);
+        Assert.Equal(50m, availability.Available);
     }
 
     [Fact]
@@ -303,18 +304,21 @@ public class StockLedgerIntegrityTests
     [Fact]
     public async Task Goods_issue_keeps_the_ledger_balanced()
     {
-        using var db = new TestDb();
-        var (productId, warehouseA, _) = SeedCatalog(db);
-        var stock = await Ledger(db).RecordCountAsync(Bu, productId, warehouseA, 100m, "opening:13", "ops@acme");
-
-        var availability = new InventoryAvailabilityService(db.ContextFor(Bu));
-        var reservation = await availability.ReserveAsync(Bu, stock.InventoryId, 30m, "issue:hold", orderId: 9);
-        await new InventoryAvailabilityService(db.ContextFor(Bu)).ConsumeAsync(Bu, reservation.Id);
-
-        using var verify = db.ContextFor(Bu);
-        Assert.Equal(70m, verify.Set<ERP_RFQ_Automation.Models.Inventory>().Single().QtyOnHand);
-        // Receipt(+100) and Issue(-30) must reconcile to the persisted 70.
-        await AssertLedgerBalancedAsync(db);
+        using var scenario = new LotScenario();
+        await using (var context = scenario.Context())
+        {
+            var inventory = await context.Set<Models.Inventory>().SingleAsync();
+            inventory.QtyOnHand = 0m;
+            await context.SaveChangesAsync();
+            await new StockLedgerService(context).RecordCountAsync(scenario.BusinessUnitId,
+                inventory.ProductId!.Value, inventory.WarehouseId!.Value, 100m, "opening", "test");
+        }
+        var shipment = await scenario.RecordShipmentAsync(3m);
+        await scenario.IssueAsync(3m, shipment);
+        await using var verify = scenario.Context();
+        Assert.Equal(97m, (await verify.Set<Models.Inventory>().SingleAsync()).QtyOnHand);
+        Assert.Empty(await new InventoryAvailabilityService(verify)
+            .ReconcileLedgerAsync(scenario.BusinessUnitId, driftOnly: true));
     }
 
     [Theory]

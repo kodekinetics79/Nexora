@@ -63,11 +63,15 @@ import opportunityPriorityService, {
 } from '../../api/services/opportunityPriorityService';
 import { useAuth } from '../../context/AuthContext';
 import { statusLabel } from '../../utils/statusLabels';
+import { RELEASE_SCOPE } from '../../config/releaseScope';
 
 const DOC_ORDER: CommercialCaseDocument['documentType'][] = [
   'Lead', 'RFQ', 'SourcingCase', 'SupplierRFQ', 'SupplierQuote',
   'Quote', 'ClientPO', 'Order', 'SupplierPO', 'ProcurementHandoff', 'Shipment',
 ];
+const RELEASE_DOC_ORDER = DOC_ORDER.filter(
+  (type) => type !== 'Shipment' || RELEASE_SCOPE.fulfilment,
+);
 
 const GAP_HEADLINE: Record<CommercialCaseTraceabilityGap['gapKind'], string> = {
   UnlinkedDocument: 'States no commercial case',
@@ -139,6 +143,7 @@ const typeIcon = (type: CommercialCaseDocument['documentType']) => {
 };
 
 const openDocument = (navigate: ReturnType<typeof useNavigate>, doc: CommercialCaseDocument) => {
+  if (doc.documentType === 'Shipment' && !RELEASE_SCOPE.fulfilment) return;
   const routes: Record<string, string> = {
     Lead: `/procurement/leads/view/${doc.documentId}`,
     RFQ: `/procurement/rfqs/view/${doc.documentId}`,
@@ -305,8 +310,9 @@ const CommercialCaseWorkspacePage: React.FC = () => {
 
   const documentsByType = React.useMemo(() => {
     const entries = new Map<CommercialCaseDocument['documentType'], CommercialCaseDocument[]>();
-    for (const type of DOC_ORDER) entries.set(type, []);
+    for (const type of RELEASE_DOC_ORDER) entries.set(type, []);
     for (const doc of detail?.documents ?? []) {
+      if (!RELEASE_DOC_ORDER.includes(doc.documentType)) continue;
       const current = entries.get(doc.documentType) ?? [];
       current.push(doc);
       entries.set(doc.documentType, current);
@@ -353,7 +359,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
             <Chip icon={<RfqIcon />} label={`RFQs ${counts.rfqs}`} size="small" />
             <Chip icon={<QuoteIcon />} label={`Quotes ${counts.quotes}`} size="small" />
             <Chip icon={<OrderIcon />} label={`Orders ${counts.orders}`} size="small" />
-            <Chip icon={<ShipmentIcon />} label={`Shipments ${counts.shipments}`} size="small" />
+            {RELEASE_SCOPE.fulfilment && <Chip icon={<ShipmentIcon />} label={`Shipments ${counts.shipments}`} size="small" />}
           </Stack>
         </Stack>
 
@@ -522,7 +528,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
 
       {tab === 1 && (
         <Stack spacing={2}>
-          {DOC_ORDER.map(type => {
+          {RELEASE_DOC_ORDER.map(type => {
             const docs = documentsByType.get(type) ?? [];
             if (docs.length === 0) return null;
             return (
@@ -801,7 +807,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
                       <Chip label={`RFQs ${item.rfqCount}`} size="small" variant="outlined" />
                       <Chip label={`Quotes ${item.quoteCount}`} size="small" variant="outlined" />
                       <Chip label={`Orders ${item.orderCount}`} size="small" variant="outlined" />
-                      <Chip label={`Shipments ${item.shipmentCount}`} size="small" variant="outlined" />
+                      {RELEASE_SCOPE.fulfilment && <Chip label={`Shipments ${item.shipmentCount}`} size="small" variant="outlined" />}
                     </Stack>
                   </Stack>
                 </ListItemButton>

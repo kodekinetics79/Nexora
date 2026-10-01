@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { RELEASE_SCOPE } from '../../config/releaseScope';
 import {
   Inbox as InboxIcon,
   TrendingUp as LeadIcon,
@@ -36,17 +37,11 @@ import {
   Inventory2 as InventoryIcon,
   Category as CategoryIcon,
   Warehouse as WarehouseIcon,
-  EventAvailable as AvailabilityIcon,
   Bookmark as ReservationIcon,
-  FlightLand as IncomingIcon,
-  CompareArrows as MovementIcon,
   ShowChart as DemandIcon,
-  Straighten as LevelsIcon,
-  NotificationsActive as ReorderIcon,
   Rule as VarianceIcon,
   HourglassBottom as AgeingIcon,
   Link as ResourcesIcon,
-  QrCode2 as LotIcon,
   Troubleshoot as TraceIcon,
   MarkEmailRead as MailIcon,
   FolderSpecial as WatchedFolderIcon,
@@ -56,7 +51,6 @@ import {
   UploadFile as UploadIcon,
   RateReview as ReviewIcon,
   Business as AdminOpsIcon,
-  PriceChange as PriceSheetIcon,
 } from '@mui/icons-material';
 
 /**
@@ -67,15 +61,15 @@ import {
  * them. Two lists disagreeing about one rail is the same defect as two rails: a screen can be
  * routed, permitted, and still unfindable, and nobody can tell which list is wrong.
  *
- * The primary rail therefore reads from here and nothing else. It carries the seven successive
- * commercial nouns an operator needs to follow work all the way to cash:
+ * The primary rail therefore reads from here and nothing else. This release carries the six
+ * commercial nouns an operator needs through the accepted order:
  *
- *     Inbox -> Leads -> RFQs -> Quotes -> Orders -> Fulfilment -> Receivables
+ *     Inbox -> Leads -> RFQs -> Products -> Quotes -> Orders
  *
  * Everything else is RELOCATED, never removed: it keeps its route, its permission gate, its page
  * title, its deep links and its tests, and it is listed — with a sentence saying what it decides —
  * on the "All screens" directory at `/advanced`. Setup is an administrative workspace beneath the
- * commercial spine rather than an eighth daily destination. `navCatalog.test.ts` fails the build if a
+ * commercial spine rather than another daily destination. `navCatalog.test.ts` fails the build if a
  * destination that used to be on the rail stops being reachable from either place.
  *
  * Modelled deliberately on `pages/Setup/setupCatalog.tsx`, which already solved this problem for
@@ -99,6 +93,14 @@ export interface NavEntry {
   keywords?: string[];
   /** Hidden from non-managers, matching the rail's old `isManager` branches. */
   managerOnly?: boolean;
+  /**
+   * Keep specialist destinations in the searchable screen directory and route catalogue without
+   * giving every tool equal weight in the day-to-day rail. The owning workspace remains selected
+   * when one of these routes is open, so hiding a child never hides where the user is.
+   */
+  hideFromSidebar?: boolean;
+  /** Historical or deferred destinations omitted from release navigation and search. */
+  releaseVisible?: boolean;
   /** A neighbour that shows the same nouns for a different purpose. */
   seeAlso?: { label: string; path: string; note: string };
 }
@@ -116,6 +118,8 @@ export interface NavGroup {
    * sales role of every tenant, whether or not the tenant has the capability.
    */
   entitlement?: string;
+  /** Kept in the route catalogue for later activation, but not offered in the current release. */
+  releaseVisible?: boolean;
 }
 
 /** One of the tabs a primary destination offers. Exactly one level, never nested. */
@@ -143,19 +147,19 @@ export interface PrimaryNavItem {
   activePrefixes?: string[];
   /** The one level of tabs this destination offers. Absent means the screen has no tabs. */
   views?: NavView[];
+  /** Kept in the route catalogue for later activation, but not offered in the current release. */
+  releaseVisible?: boolean;
 }
 
 export const INBOX_ROOT = '/inbox';
 export const ADVANCED_ROOT = '/advanced';
 
 /**
- * The Dashboard, then the seven commercial rows.
+ * The Dashboard, then the commercial rows known to the application.
  *
- * The seven are ordered by the journey, not by module name: work arrives (Inbox), becomes an
- * enquiry (Leads), becomes a request we can price (RFQs), becomes an offer (Quotes), an Order, a
- * fulfilled delivery, and finally a receivable. Permission filtering means each role sees only the
- * stages it can open, while the order stays stable across roles — including the Dashboard above
- * them, which every role that holds the module now sees in the same place.
+ * The release-visible rows are ordered by the journey, not by module name. Deferred modules remain
+ * here so their routes and permissions do not have to be dismantled to keep them off the release
+ * rail.
  */
 export const PRIMARY_NAV: PrimaryNavItem[] = [
   {
@@ -292,6 +296,25 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     ],
   },
   {
+    key: 'suppliers',
+    label: 'Suppliers',
+    labelKey: 'suppliers',
+    description: 'The supplier register — contacts, terms, tier and trading history.',
+    icon: <SupplierIcon />,
+    path: '/suppliers',
+    moduleName: 'Suppliers',
+    activePrefixes: ['/suppliers/'],
+  },
+  {
+    key: 'inventory',
+    label: 'Products',
+    description: 'Product master, inventory, pricing, stock activity and traceability.',
+    icon: <InventoryIcon />,
+    path: '/inventory/products',
+    moduleName: 'Products',
+    activePrefixes: ['/inventory/'],
+  },
+  {
     key: 'quotes',
     label: 'Quotes',
     description: 'The offers you have made — drafts to finish, sent quotes to chase, and outcomes.',
@@ -339,6 +362,7 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     path: '/sales/shipments',
     moduleName: 'Shipments',
     activePrefixes: ['/sales/shipments'],
+    releaseVisible: RELEASE_SCOPE.fulfilment,
   },
   {
     key: 'accounts-receivable',
@@ -348,6 +372,7 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     path: '/sales/finance',
     moduleName: 'Accounts Receivable',
     activePrefixes: ['/sales/finance'],
+    releaseVisible: RELEASE_SCOPE.receivables,
   },
 ];
 
@@ -567,16 +592,6 @@ export const ADVANCED_GROUPS: NavGroup[] = [
     title: 'Suppliers & sourcing',
     caption: 'Who you buy from, what they quoted, and what you ordered.',
     entries: [
-      {
-        key: 'suppliers',
-        label: 'Suppliers',
-        labelKey: 'suppliers',
-        description: 'The supplier record — contacts, terms, tier and trading history.',
-        path: '/suppliers',
-        icon: <SupplierIcon />,
-        moduleName: 'Suppliers',
-        keywords: ['vendor', 'supplier', 'partner', 'contact'],
-      },
       {
         key: 'sourcing-cases',
         label: 'RFQs needing sourcing',
@@ -804,25 +819,6 @@ export const ADVANCED_GROUPS: NavGroup[] = [
     caption: 'What you sell, what you hold, and where it is.',
     entries: [
       {
-        key: 'products',
-        label: 'Products',
-        labelKey: 'products',
-        description: 'The catalogue you quote against — part numbers, descriptions and default pricing.',
-        path: '/inventory/products',
-        icon: <InventoryIcon />,
-        moduleName: 'Products',
-        keywords: ['catalogue', 'product', 'part', 'item', 'sku'],
-      },
-      {
-        key: 'pricing-sheet',
-        label: 'Pricing sheet',
-        description: 'Landed cost and sale price for every part, in the currency you choose. Quotes start from these.',
-        path: '/inventory/pricing-sheet',
-        icon: <PriceSheetIcon />,
-        moduleName: 'Products',
-        keywords: ['price', 'pricing', 'price list', 'cost', 'landed cost', 'sale price', 'margin'],
-      },
-      {
         key: 'categories',
         label: 'Product categories',
         labelKey: 'categories',
@@ -831,6 +827,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <CategoryIcon />,
         moduleName: 'Product Categories',
         keywords: ['category', 'group', 'family'],
+        hideFromSidebar: true,
       },
       {
         key: 'sub-categories',
@@ -841,24 +838,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <CategoryIcon />,
         moduleName: 'Product Categories',
         keywords: ['sub category', 'subcategory', 'group'],
-      },
-      {
-        key: 'inventory-overview',
-        label: 'Stock overview',
-        description: 'On hand, committed and incoming across every warehouse, in one figure each.',
-        path: '/inventory/overview',
-        icon: <InventoryIcon />,
-        moduleName: 'Products',
-        keywords: ['stock', 'overview', 'on hand', 'summary'],
-      },
-      {
-        key: 'inventory-availability',
-        label: 'Availability',
-        description: 'What can actually be promised on a date, after reservations are taken off.',
-        path: '/inventory/availability',
-        icon: <AvailabilityIcon />,
-        moduleName: 'Products',
-        keywords: ['atp', 'available', 'promise', 'free stock'],
+        hideFromSidebar: true,
       },
       {
         key: 'inventory-warehouses',
@@ -868,6 +848,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <WarehouseIcon />,
         moduleName: 'Products',
         keywords: ['warehouse', 'store', 'location', 'depot'],
+        hideFromSidebar: true,
         seeAlso: {
           label: 'Setup → Warehouses',
           path: '/setup/warehouse',
@@ -876,30 +857,14 @@ export const ADVANCED_GROUPS: NavGroup[] = [
       },
       {
         key: 'inventory-reservations',
+        releaseVisible: RELEASE_SCOPE.reservations,
         label: 'Reservations',
         description: 'Stock held against a specific quote or order and not available to anyone else.',
         path: '/inventory/reservations',
         icon: <ReservationIcon />,
         moduleName: 'Products',
         keywords: ['reserve', 'allocation', 'committed', 'hold'],
-      },
-      {
-        key: 'inventory-incoming',
-        label: 'Incoming stock',
-        description: 'Ordered from suppliers and not yet received, with expected dates.',
-        path: '/inventory/incoming',
-        icon: <IncomingIcon />,
-        moduleName: 'Products',
-        keywords: ['incoming', 'on order', 'inbound', 'eta'],
-      },
-      {
-        key: 'inventory-movements',
-        label: 'Stock movements',
-        description: 'Every receipt, issue and transfer, with who did it and when.',
-        path: '/inventory/movements',
-        icon: <MovementIcon />,
-        moduleName: 'Products',
-        keywords: ['movement', 'transaction', 'receipt', 'issue', 'transfer', 'ledger'],
+        hideFromSidebar: true,
       },
       {
         key: 'inventory-demand',
@@ -909,24 +874,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <DemandIcon />,
         moduleName: 'Products',
         keywords: ['demand', 'consumption', 'usage', 'forecast'],
-      },
-      {
-        key: 'inventory-levels',
-        label: 'Stock levels',
-        description: 'The minimum and maximum each product should be held at.',
-        path: '/inventory/levels',
-        icon: <LevelsIcon />,
-        moduleName: 'Products',
-        keywords: ['min', 'max', 'reorder level', 'safety stock'],
-      },
-      {
-        key: 'inventory-reorder-alerts',
-        label: 'Reorder alerts',
-        description: 'Products that have fallen below their minimum and what was done about it.',
-        path: '/inventory/reorder-alerts',
-        icon: <ReorderIcon />,
-        moduleName: 'Products',
-        keywords: ['reorder', 'alert', 'low stock', 'replenish'],
+        hideFromSidebar: true,
       },
       {
         key: 'inventory-count-variance',
@@ -936,6 +884,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <VarianceIcon />,
         moduleName: 'Products',
         keywords: ['count', 'variance', 'stocktake', 'discrepancy', 'audit'],
+        hideFromSidebar: true,
       },
       {
         key: 'inventory-ageing',
@@ -945,6 +894,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <AgeingIcon />,
         moduleName: 'Products',
         keywords: ['ageing', 'aging', 'slow moving', 'obsolete', 'old stock'],
+        hideFromSidebar: true,
       },
       {
         key: 'inventory-resources',
@@ -954,15 +904,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <ResourcesIcon />,
         moduleName: 'Products',
         keywords: ['datasheet', 'attachment', 'document', 'drawing', 'certificate'],
-      },
-      {
-        key: 'inventory-lots',
-        label: 'Lots & traceability',
-        description: 'Batch and lot records, and what each one was consumed by.',
-        path: '/inventory/lots',
-        icon: <LotIcon />,
-        moduleName: 'Products',
-        keywords: ['lot', 'batch', 'serial', 'traceability', 'recall'],
+        hideFromSidebar: true,
       },
       {
         key: 'inventory-order-trace',
@@ -972,6 +914,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         icon: <TraceIcon />,
         moduleName: 'Products',
         keywords: ['trace', 'where used', 'genealogy', 'order trace'],
+        hideFromSidebar: true,
       },
     ],
   },
@@ -995,6 +938,14 @@ export const ADVANCED_GROUPS: NavGroup[] = [
 
 /** Every relocated destination, flattened — the directory page, search and the tests read this. */
 export const ADVANCED_ENTRIES: NavEntry[] = ADVANCED_GROUPS.flatMap((group) => group.entries);
+
+/** Groups and stages actually offered by this release. Deferred routes remain directly bookmarkable. */
+export const RELEASE_ADVANCED_GROUPS: NavGroup[] = ADVANCED_GROUPS.filter(
+  (group) => group.releaseVisible !== false,
+).map((group) => ({ ...group, entries: group.entries.filter((entry) => entry.releaseVisible !== false) }));
+export const RELEASE_PRIMARY_NAV: PrimaryNavItem[] = PRIMARY_NAV.filter(
+  (item) => item.releaseVisible !== false,
+);
 
 /** Every tab offered by a primary destination, flattened. */
 export const PRIMARY_VIEWS: NavView[] = PRIMARY_NAV.flatMap((item) => item.views ?? []);

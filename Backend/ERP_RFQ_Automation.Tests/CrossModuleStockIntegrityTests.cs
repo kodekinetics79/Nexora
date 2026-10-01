@@ -193,11 +193,10 @@ public sealed class CrossModuleStockIntegrityTests
         Assert.Equal(1m, movement.Quantity);
 
         var reservations = await verify.StockReservations.Where(x => x.OrderId == OrderId).ToListAsync();
-        Assert.Equal(1m, reservations.Where(x => x.Status == StockReservationStatus.Consumed).Sum(x => x.Quantity));
-        Assert.Equal(3m, reservations.Where(x => x.Status == StockReservationStatus.Active).Sum(x => x.Quantity));
+        Assert.Empty(reservations);
 
-        // 9 on hand - 3 still held for this order = 6 promisable elsewhere.
-        await AssertAvailableAsync(database, 6m);
+        // Only actual shipment reduces stock; the unshipped order balance creates no hold.
+        await AssertAvailableAsync(database, 9m);
 
         // And the order is NOT closed: 3 of 4 units have not shipped.
         Assert.Equal(OpenStatus, await verify.Orders.Where(x => x.Id == OrderId).Select(x => x.StatusId).SingleAsync());

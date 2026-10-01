@@ -86,10 +86,11 @@ public sealed class Gate6ReorderAlertTests
         using var scenario = new ReorderScenario();
         await scenario.SetOnHandAsync(100m);
         await scenario.SetLevelsAsync(minimum: 10m, maximum: null);
-        // Every one of the hundred units is spoken for. On-hand says the shelf is full; the
-        // warehouse can supply nobody, and the next enquiry would be quoted against stock that is
-        // not there.
-        await scenario.ReserveAsync(100m);
+        // Physical stock under quarantine cannot satisfy the next enquiry.
+        await using (var context = scenario.Context())
+            await new StockLedgerService(context).ReclassifyAsync(ProcurementTestData.Tenant,
+                ProcurementTestData.Product, ProcurementTestData.Warehouse, StockBucket.Quarantine,
+                100m, "quarantine-all", "test");
 
         var row = Assert.Single(await scenario.EvaluateAsync(), x => x.InventoryId == StockRowId);
 
@@ -411,9 +412,9 @@ internal sealed class ReorderScenario : IDisposable
     public async Task ReserveAsync(decimal quantity)
     {
         await using var context = Context();
-        await new InventoryAvailabilityService(context).ReserveAsync(
+        await HistoricalReservations.SeedAsync(context,
             ProcurementTestData.Tenant, ProcurementTestData.Inventory, quantity,
-            $"hold-{++_sequence}", actor: "qa");
+            $"hold-{++_sequence}");
     }
 
     public async Task AddIncomingAsync(decimal quantity)

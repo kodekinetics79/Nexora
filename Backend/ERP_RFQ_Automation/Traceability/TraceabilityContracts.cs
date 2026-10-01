@@ -271,7 +271,9 @@ public sealed record LotWhereFromView(
     IReadOnlyList<LotCertificateView> Certificates,
     IReadOnlyList<LotFulfilmentView> FulfilledInto,
     IReadOnlyList<MaterialTraceGap> Gaps,
-    long Version);
+    long Version,
+    string? SupplierInvoiceNumber = null,
+    string? BillOfLadingNumber = null);
 
 /// <summary>One declared onward use of a lot.</summary>
 public sealed record LotFulfilmentView(
@@ -357,7 +359,10 @@ public sealed record LotSummaryView(
     DateOnly? EarliestCertificateExpiry,
     long? CommercialCaseId,
     string? NexoraSerial,
-    long Version);
+    long Version,
+    string? ReceiptNumber = null,
+    string? SupplierInvoiceNumber = null,
+    string? BillOfLadingNumber = null);
 
 public sealed record LotSearchQuery(
     string? Search = null,

@@ -19,16 +19,39 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         public string? UomName { get; set; }
         public decimal? UnitCost { get; set; }
         public decimal? SellingPrice { get; set; }
+        public long? PriceCurrencyId { get; set; }
         public decimal? FinalLandedCost { get; set; }
         public decimal? FinalSalesPrice { get; set; }
         /// <summary>The currency the Pricing sheet's landed cost and sale price are in; null until priced there.</summary>
         public string? PriceCurrencyCode { get; set; }
+        /// <summary>Latest dispatched supplier PO's unit purchase cost, before landed additions; never a master-price fallback.</summary>
+        public decimal? LastPurchaseCost { get; set; }
+        public string? LastPurchaseCurrencyCode { get; set; }
+        /// <summary>Supplier PO dispatch date, or creation date for legacy orders without dispatch timestamps.</summary>
+        public DateTime? LastPurchaseOn { get; set; }
+        public decimal ReservedQuantity { get; set; }
+        public decimal AvailableQuantity { get; set; }
+        public decimal IncomingQuantity { get; set; }
+        public DateOnly? NextIncomingOn { get; set; }
+        public int IncomingCommitmentCount { get; set; }
+        public int IncomingWarehouseCount { get; set; }
+        public decimal ReorderGap { get; set; }
+        public decimal ReorderThreshold { get; set; }
+        public string? ReorderStatus { get; set; }
+        public string? ReorderWarehouseSummary { get; set; }
+        public int WarehouseCount { get; set; }
+        public string? StockLocationSummary { get; set; }
+        public int MaterialLotCount { get; set; }
+        public int QuarantinedLotCount { get; set; }
+        public int ExpiredCertificateCount { get; set; }
+        public decimal MaterialLotRemainingQuantity { get; set; }
 
         public long? WarehouseId { get; set; }
         public string? WarehouseName { get; set; }
         public long? PreferredSupplierId { get; set; }
         public string? PreferredSupplierName { get; set; }
         public string? PreferredSupplierEmail { get; set; }
+        public string? PreferredSupplierTier { get; set; }
         public bool? BatchTracking { get; set; }
         public bool? SerialTracking { get; set; }
         public DateOnly? ExpirationDate { get; set; }
@@ -109,6 +132,8 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
 
         [Range(0, double.MaxValue)]
         public decimal? SellingPrice { get; set; }
+
+        public long? PriceCurrencyId { get; set; }
 
         [Range(0, double.MaxValue)]
         public decimal? FinalLandedCost { get; set; }
@@ -217,6 +242,15 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
 
         [Range(0, double.MaxValue)]
         public decimal? SellingPrice { get; set; }
+
+        public long? PriceCurrencyId { get; set; }
+
+        /// <summary>
+        /// Older multipart clients do not send pricing fields. Keeping this false preserves the
+        /// existing tuple; the Inventory form sends true when it intentionally applies or clears
+        /// landed cost, sale price and currency together.
+        /// </summary>
+        public bool ApplyPricing { get; set; }
 
         [Range(0, double.MaxValue)]
         public decimal? FinalLandedCost { get; set; }

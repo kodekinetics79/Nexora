@@ -89,8 +89,21 @@ foreach (var moduleName in permissionModules)
 {
     var module = await EnsureModuleAsync(moduleName);
     foreach (var role in new[] { managerRole, editorRole })
-        await EnsurePermissionAsync(tenantId, role.SetupId, module.Id, create: true, edit: true);
+        await EnsurePermissionAsync(
+            tenantId,
+            role.SetupId,
+            module.Id,
+            create: true,
+            edit: true,
+            delete: moduleName == "Suppliers" && role.SetupId == managerRole.SetupId);
 }
+// Supplier-response capture needs the currency catalogue for prices, but it must
+// remain reference data. Mirror the real desk presets with view-only access so
+// the acceptance users can complete the sourcing journey without gaining setup rights.
+var currenciesModule = await EnsureModuleAsync("Currencies");
+foreach (var role in new[] { managerRole, editorRole })
+    await EnsurePermissionAsync(tenantId, role.SetupId, currenciesModule.Id,
+        create: false, edit: false, view: true);
 var accountsReceivableModule = await EnsureModuleAsync("Accounts Receivable");
 var customerPaymentsModule = await EnsureModuleAsync("Customer Payments");
 var bankAccountsModule = await EnsureModuleAsync("Bank Accounts");
@@ -137,6 +150,8 @@ foreach (var moduleName in permissionModules)
     var module = await EnsureModuleAsync(moduleName);
     await EnsurePermissionAsync(tenantId, salesRole.SetupId, module.Id, create: true, edit: true);
 }
+await EnsurePermissionAsync(tenantId, salesRole.SetupId, currenciesModule.Id,
+    create: false, edit: false, view: true);
 await db.SaveChangesAsync();
 
 var team = await EnsureTeamAsync("Core Commercial Intelligence", manager.Id);
@@ -536,18 +551,20 @@ async Task<Module> EnsureModuleAsync(string name)
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
-async Task EnsurePermissionAsync(long bu, long role, long module, bool create, bool edit, bool view = true)
+async Task EnsurePermissionAsync(
+    long bu, long role, long module, bool create, bool edit, bool view = true, bool delete = false)
 {
     var existing = await db.RolePermissions.SingleOrDefaultAsync(x => x.BusinessUnitId == bu && x.RoleId == role && x.ModuleId == module);
     if (existing is null)
     {
         db.Add(new RolePermission { BusinessUnitId = bu, RoleId = role, ModuleId = module, CanView = view, CanCreate = create,
-            CanEdit = edit, CanDelete = false, CreatedBy = fixtureActor, CreatedOn = now });
+            CanEdit = edit, CanDelete = delete, CreatedBy = fixtureActor, CreatedOn = now });
         return;
     }
     existing.CanView = view;
     existing.CanCreate = existing.CanCreate == true || create;
     existing.CanEdit = existing.CanEdit == true || edit;
+    existing.CanDelete = existing.CanDelete == true || delete;
 }
 
 async Task<Customer> EnsureCustomerAsync(string name, string email)

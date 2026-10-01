@@ -18,6 +18,7 @@ import shipmentService from '../../../api/services/shipmentService';
 import dayjs from 'dayjs';
 import { formatMoney } from '../../../utils/currency';
 import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
+import { RELEASE_SCOPE } from '../../../config/releaseScope';
 
 // The same physical states counted by the server's shipment ceiling. SCHEDULED and CANCELLED
 // notes did not move stock and must not consume an order line's remaining quantity on screen.
@@ -33,7 +34,7 @@ const OrderViewPage: React.FC = () => {
   const [invoiceOpen, setInvoiceOpen] = useState(false);
   const canCreateShipment = hasPermission('Shipments', 'create');
   const canViewShipments = hasPermission('Shipments', 'view');
-  const canCreateInvoice = hasPermission('Accounts Receivable', 'create');
+  const canCreateInvoice = RELEASE_SCOPE.receivables && hasPermission('Accounts Receivable', 'create');
 
   const { data: order, isLoading, isError, refetch } = useQuery({
     queryKey: ['order-details', id, businessUnitId],
@@ -44,7 +45,7 @@ const OrderViewPage: React.FC = () => {
   const shipmentsQuery = useQuery({
     queryKey: ['shipments-for-order', order?.id, businessUnitId],
     queryFn: () => shipmentService.getByOrderId(Number(order!.id), businessUnitId),
-    enabled: Boolean(order?.id) && canCreateShipment && canViewShipments,
+    enabled: RELEASE_SCOPE.fulfilment && Boolean(order?.id) && canCreateShipment && canViewShipments,
   });
 
   const hasRemainingShipmentQuantity = useMemo(() => {
@@ -60,7 +61,7 @@ const OrderViewPage: React.FC = () => {
 
   const orderIsTerminal = ['SHIPPED', 'DELIVERED', 'CANCELLED']
     .includes(order?.status?.replaceAll('_', '').toUpperCase() ?? '');
-  const canCreateNextShipment = canCreateShipment && canViewShipments
+  const canCreateNextShipment = RELEASE_SCOPE.fulfilment && canCreateShipment && canViewShipments
     && shipmentsQuery.isSuccess && hasRemainingShipmentQuantity && !orderIsTerminal;
 
   const getStatusColor = (status: string) => {
@@ -99,7 +100,7 @@ const OrderViewPage: React.FC = () => {
           {/* There is deliberately no "Print Invoice" action here. A tax invoice is the numbered,
               persisted document the finance subsystem issues — not a rendering of the order.
               This links to the governed AR register instead; it is not order-filtered yet. */}
-          {hasPermission('Accounts Receivable', 'view') && (
+          {RELEASE_SCOPE.receivables && hasPermission('Accounts Receivable', 'view') && (
             <Button variant="outlined" startIcon={<ReceivableIcon />} size="small" onClick={() => navigate('/sales/finance')}>Accounts Receivable</Button>
           )}
           {canCreateInvoice && (
@@ -209,7 +210,7 @@ const OrderViewPage: React.FC = () => {
             </CardContent>
           </Card>
 
-          <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+          {RELEASE_SCOPE.receivables && <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
             <CardContent>
               <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 2 }}>PAYMENT STATUS</Typography>
               <Stack spacing={2}>
@@ -229,11 +230,11 @@ const OrderViewPage: React.FC = () => {
                 />
               </Stack>
             </CardContent>
-          </Card>
+          </Card>}
         </Grid>
       </Grid>
 
-      {invoiceOpen && (
+      {RELEASE_SCOPE.receivables && invoiceOpen && (
         <InvoiceFromOrderDialog
           orderId={order.id}
           orderNo={order.orderNo || order.orderNumber || String(order.id)}
