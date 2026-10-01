@@ -36,11 +36,43 @@ vi.mock('../../api/services/productService', async (importOriginal) => {
       getWarehouses: () => Promise.resolve([]),
       getUoms: () => Promise.resolve([]),
       getSuppliers: () => Promise.resolve([]),
+      getCurrencies: () => Promise.resolve([{ id: 1, code: 'SAR', name: 'Saudi Riyal', isBase: true }]),
       getById: (id: number) => getById(id),
       create: (data: FormData) => create(data),
       update: (id: number, data: FormData) => update(id, data),
     },
   };
+});
+
+describe('Product pricing is one governed tuple', () => {
+  it('does not create a partly priced product', async () => {
+    renderDialog();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Part number' }), { target: { value: 'VLV-200' } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Landed cost' }), { target: { value: '25.50' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create product' }));
+
+    expect(await screen.findByText('Enter selling price or clear all pricing fields.')).toBeInTheDocument();
+    expect(screen.getByText('Choose a currency or clear both prices.')).toBeInTheDocument();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('creates a complete cost, sale price and currency tuple', async () => {
+    renderDialog();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Part number' }), { target: { value: 'VLV-300' } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Landed cost' }), { target: { value: '25.50' } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Selling price' }), { target: { value: '40.13' } });
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Price currency' }));
+    fireEvent.click(await screen.findByRole('option', { name: /SAR/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create product' }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const submitted = create.mock.calls[0][0] as FormData;
+    expect(submitted.get('unitCost')).toBe('25.50');
+    expect(submitted.get('sellingPrice')).toBe('40.13');
+    expect(submitted.get('priceCurrencyId')).toBe('1');
+  });
 });
 
 const hasPermission = vi.fn();
@@ -72,8 +104,9 @@ function renderDialog() {
   );
 }
 
-const nameField = () => screen.getByRole('textbox', { name: 'Product Name' });
+const nameField = () => screen.getByRole('textbox', { name: 'Product name' });
 const descriptionField = () => screen.getByRole('textbox', { name: 'Description' });
+const openMoreDetails = () => fireEvent.click(screen.getByRole('button', { name: /More product details/ }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -90,12 +123,14 @@ describe('Product name and description carry the server caps at the input', () =
 
   it('caps Description at the width of its column too', () => {
     renderDialog();
+    openMoreDetails();
 
     expect(descriptionField()).toHaveAttribute('maxlength', String(DESCRIPTION_MAX));
   });
 
   it('shows where the user is, so a field that stops accepting keystrokes has said why', () => {
     renderDialog();
+    openMoreDetails();
 
     expect(screen.getByText(`0/${NAME_MAX}`)).toBeInTheDocument();
     expect(screen.getByText(`0/${DESCRIPTION_MAX}`)).toBeInTheDocument();
@@ -120,8 +155,8 @@ describe('Product name and description carry the server caps at the input', () =
     });
     renderDialog();
 
-    fireEvent.change(screen.getByRole('textbox', { name: 'Part No' }), { target: { value: 'VLV-100' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create Product' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Part number' }), { target: { value: 'VLV-100' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create product' }));
 
     await waitFor(() => expect(
       screen.getByText('The field ProductName must be a string with a maximum length of 100.'),

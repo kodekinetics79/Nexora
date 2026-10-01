@@ -59,7 +59,7 @@ export default function AvailabilityPage() {
   return (
     <PageShell
       title="Availability"
-      subtitle="On-hand, reserved, available and incoming quantities by warehouse, against the levels set for each row."
+      subtitle="In stock, available and incoming quantities by warehouse, against the levels set for each row."
       actions={
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
           <TextField size="small" label="Search part or product" value={search} onChange={event => setSearch(event.target.value)} />
@@ -78,8 +78,7 @@ export default function AvailabilityPage() {
                 <TableCell>Part</TableCell>
                 <TableCell>Product</TableCell>
                 <TableCell>Warehouse</TableCell>
-                <TableCell align="right">On hand</TableCell>
-                <TableCell align="right">Reserved</TableCell>
+                <TableCell align="right">In stock</TableCell>
                 <TableCell align="right">Available</TableCell>
                 <TableCell align="right">Incoming</TableCell>
                 <TableCell align="right">Minimum</TableCell>
@@ -95,7 +94,6 @@ export default function AvailabilityPage() {
                   <TableCell>{row.productName}</TableCell>
                   <TableCell>{row.warehouseName}</TableCell>
                   <TableCell align="right">{row.onHand}</TableCell>
-                  <TableCell align="right">{row.reserved}</TableCell>
                   <TableCell align="right">{row.available}</TableCell>
                   <TableCell align="right">{row.incoming}</TableCell>
                   <TableCell align="right"><Level value={row.minimumLevel} /></TableCell>

@@ -69,9 +69,7 @@ function QuarantineDialog({ lot, onClose, onSaved }: { lot: LotWhereFromDTO; onC
       <DialogContent>
         <Stack spacing={2} sx={{ pt: 1 }}>
           <Alert severity="warning">
-            {lot.quantityRemaining} unit(s) stop being available to promise immediately. Stock already
-            held for a customer order is released back and listed afterwards, so those orders can be
-            re-sourced.
+            {lot.quantityRemaining} unit(s) stop being available to promise immediately.
           </Alert>
           {mutation.isError && <ApiErrorNotice error={mutation.error} fallbackMessage="The lot could not be quarantined." />}
           <FormControl size="small" fullWidth>
@@ -270,7 +268,7 @@ export default function LotDetailPage() {
               <Alert severity="error" sx={{ mb: 2.5 }}>
                 <AlertTitle>Quarantined — not allocatable</AlertTitle>
                 {lot.quarantineReasonCode}: {lot.quarantineReason} · held by {lot.quarantinedBy} on{' '}
-                {formatDateTime(lot.quarantinedOn)}. This lot cannot be reserved or declared against a
+                {formatDateTime(lot.quarantinedOn)}. This lot cannot be issued or declared against a
                 customer fulfilment until it is released.
               </Alert>
             )}
@@ -285,6 +283,8 @@ export default function LotDetailPage() {
                 <Field label="Warehouse" value={lot.warehouseName ?? lot.warehouseId} />
                 <Field label="Received" value={formatDateTime(lot.receivedOn)} />
                 <Field label="Goods receipt" value={lot.receiptNumber ?? lot.goodsReceiptId} />
+                <Field label="Supplier invoice #" value={lot.supplierInvoiceNumber || 'Not recorded'} />
+                <Field label="Bill of lading #" value={lot.billOfLadingNumber || 'Not recorded'} />
                 <Field label="Supplier PO" value={lot.purchaseOrderNumber ?? lot.supplierPurchaseOrderId} />
                 <Field label="Supplier" value={lot.supplierName ?? lot.supplierId} />
                 <Field label="Demand source" value={lot.purchaseOrderDemandSource} />

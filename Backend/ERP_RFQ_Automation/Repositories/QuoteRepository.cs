@@ -31,8 +31,9 @@ namespace ERP_RFQ_Automation.Repositories
                 .Where(q => q.BusinessUnitId == businessUnitId && q.RemovedOn == null)
                 .Include(q => q.Customer)
                 .Include(q => q.Rfq).ThenInclude(r => r.Lead)
+                // ORDERED quotes stay in the list (owner decision OD5): a quote that reached a
+                // purchase order completed the journey, and the dashboard's Won count includes it.
                 .Include(q => q.Status)
-                .Where(q => q.Status.SetupCode != "ORDERED")
                 .Include(q => q.Currency)
                 .Include(q => q.BusinessUnit)
                 .Include(q => q.DiscountType);
@@ -55,13 +56,16 @@ namespace ERP_RFQ_Automation.Repositories
                     && !_context.Quotes.Any(n => n.RevisionOfQuoteId == q.Id && n.SentOn != null));
             }
             else if (normalizedState == "outcomes")
-                query = query.Where(q => q.Status.SetupCode == "ACCEPTED" || q.Status.SetupCode == "REJECTED" || q.Status.SetupCode == "EXPIRED");
+                query = query.Where(q => q.Status.SetupCode == "ACCEPTED" || q.Status.SetupCode == "REJECTED"
+                                         || q.Status.SetupCode == "EXPIRED" || q.Status.SetupCode == "ORDERED");
 
             if (!string.IsNullOrWhiteSpace(search))
             {
                 search = search.Trim().ToLower();
                 query = query.Where(q => q.QuoteNo.ToLower().Contains(search) ||
+                                         (q.ExternalQuoteReference != null && q.ExternalQuoteReference.ToLower().Contains(search)) ||
                                          (q.NexoraSerial != null && q.NexoraSerial.ToLower().Contains(search)) ||
+                                         (q.Rfq != null && q.Rfq.Rfqno.ToLower().Contains(search)) ||
                                          (q.Customer != null && q.Customer.Name.ToLower().Contains(search)));
             }
 
@@ -89,17 +93,34 @@ namespace ERP_RFQ_Automation.Repositories
 
             var dtos = quotes.Select(q => MapToDTO(q, itemCounts.TryGetValue(q.Id, out var count) ? count : 0, reasonNames, staleDays)).ToList();
             var pageIds = dtos.Select(d => d.Id).ToList();
-            var sentSuccessors = await _context.Quotes.AsNoTracking()
-                .Where(n => n.RevisionOfQuoteId != null && pageIds.Contains(n.RevisionOfQuoteId.Value) && n.SentOn != null)
-                .Select(n => new { Of = n.RevisionOfQuoteId!.Value, n.QuoteNo })
+            // A SENT revision replaces the quote: the customer now holds that one. A revision still
+            // in draft replaces nothing - the customer still holds this quote - but the step and
+            // outcome commands already refuse this quote, so the list names the waiting revision
+            // (PendingRevision*) and offers to finish it instead. A withdrawn revision is neither.
+            var successors = await _context.Quotes.AsNoTracking()
+                .Where(n => n.RevisionOfQuoteId != null && pageIds.Contains(n.RevisionOfQuoteId.Value) && n.RemovedOn == null)
+                .Select(n => new { Of = n.RevisionOfQuoteId!.Value, n.Id, n.QuoteNo, n.SentOn })
                 .ToListAsync();
             foreach (var dto in dtos)
             {
-                var successor = sentSuccessors.FirstOrDefault(n => n.Of == dto.Id);
+                var successor = successors.FirstOrDefault(n => n.Of == dto.Id);
                 if (successor is null) continue;
-                dto.SupersededByQuoteNo = successor.QuoteNo;
-                dto.IsStale = false;
+                if (successor.SentOn != null)
+                {
+                    dto.SupersededByQuoteNo = successor.QuoteNo;
+                    dto.IsStale = false;
+                }
+                else
+                {
+                    dto.PendingRevisionId = successor.Id;
+                    dto.PendingRevisionQuoteNo = successor.QuoteNo;
+                }
             }
+
+            // The client's step / ending and the owner's name: two batched reads for the page.
+            await ERP_RFQ_Automation.Sla.QuoteClientStatusReadModel.ApplyAsync(_context, businessUnitId,
+                quotes.Zip(dtos, (q, dto) => new ERP_RFQ_Automation.Sla.QuoteClientStatusReadModel.Row(
+                    dto, q.SubStatusId, q.SubStatusOn, q.OwnerUserId)).ToList());
 
             return (dtos, totalItems);
         }
@@ -158,6 +179,9 @@ namespace ERP_RFQ_Automation.Repositories
             dto.RevisionImpactDetail = await ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpactQueries
                 .DescribeOpenQuoteImpactAsync(_context, businessUnitId, id);
             dto.RevisionImpact = dto.RevisionImpactDetail?.ImpactType;
+            await ERP_RFQ_Automation.Sla.QuoteClientStatusReadModel.ApplyAsync(_context, businessUnitId,
+                new[] { new ERP_RFQ_Automation.Sla.QuoteClientStatusReadModel.Row(
+                    dto, quote.SubStatusId, quote.SubStatusOn, quote.OwnerUserId) });
             return dto;
         }
 
@@ -182,6 +206,8 @@ namespace ERP_RFQ_Automation.Repositories
                 // that never happened, and the UI says so.
                 CommercialCaseId = q.CommercialCaseId,
                 NexoraSerial = q.NexoraSerial,
+                ExternalQuoteReference = q.ExternalQuoteReference,
+                UploadedFileName = q.UploadedFileName,
                 ContactId = q.ContactId,
                 LifecycleVersion = q.LifecycleVersion,
                 Version = q.RevisionNo,

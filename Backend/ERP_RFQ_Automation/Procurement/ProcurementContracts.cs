@@ -183,7 +183,10 @@ public sealed record SourcingCandidateView(
     string RiskStatus,
     string ReadinessStatus,
     bool EligibleForSupplierRfq,
-    IReadOnlyCollection<string> BlockingReasons);
+    IReadOnlyCollection<string> BlockingReasons,
+    // Commercial relationship only: Tier 1 is the direct network, Tier 2 the extended network.
+    // It annotates the buyer's known-supplier list and never changes dispatch eligibility.
+    string? SupplierTier = null);
 
 public sealed record SourcingCandidateSearchResult(
     long SourcingCaseId,
@@ -409,7 +412,9 @@ public sealed record PostGoodsReceiptCommand(
     IReadOnlyCollection<PostGoodsReceiptLine> Lines,
     string IdempotencyKey,
     string Actor,
-    string CorrelationId);
+    string CorrelationId,
+    string? SupplierInvoiceNumber = null,
+    string? BillOfLadingNumber = null);
 
 /// <summary>
 /// FR-MTR-01. <paramref name="Lot"/> is what the operator says about the material on this line —

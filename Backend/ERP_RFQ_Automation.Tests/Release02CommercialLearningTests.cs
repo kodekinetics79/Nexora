@@ -130,8 +130,9 @@ public sealed class Release02CommercialLearningTests
         var result = await new CommercialLearningService(context)
             .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
         var line = Assert.Single(result.Lines);
-        Assert.Equal(.5m, line.StockQuantity);
-        Assert.Equal(9.5m, line.UnfulfilledQuantity);
+        // The historical reservation remains auditable but does not withhold ATP in this release.
+        Assert.Equal(1m, line.StockQuantity);
+        Assert.Equal(9m, line.UnfulfilledQuantity);
         Assert.Equal("PARTIAL_REQUIRES_SOURCE", line.FulfilmentRoute);
         Assert.Contains("No evidence-complete Supplier offer covers the remaining demand", line.Blockers);
 

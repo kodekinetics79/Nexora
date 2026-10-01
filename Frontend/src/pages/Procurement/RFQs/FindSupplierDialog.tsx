@@ -100,12 +100,26 @@ type Row = {
   supplierId?: number;
   hitId?: string;
   blocked?: string;
+  knownNetwork?: "In Network" | "Extended Network" | "Other known suppliers";
+};
+
+const knownNetworkFor = (tier?: string | null): NonNullable<Row["knownNetwork"]> => {
+  if (tier === "TIER_1_PARTNER") return "In Network";
+  if (tier === "TIER_2_EXTENDED") return "Extended Network";
+  return "Other known suppliers";
+};
+
+const KNOWN_NETWORK_ORDER: Record<NonNullable<Row["knownNetwork"]>, number> = {
+  "In Network": 0,
+  "Extended Network": 1,
+  "Other known suppliers": 2,
 };
 
 /**
  * One small window per RFQ line: who to ask, how many, what to say, Send. The rep's own suppliers
- * come first, then companies found on the internet (makers, distributors, resellers). Every
- * default is a suggestion: ticks, quantity and message can all be changed.
+ * come first, grouped by the customer's In Network and Extended Network tiers, then companies
+ * found on the internet (makers, distributors, resellers). Every default is a suggestion: ticks,
+ * quantity and message can all be changed.
  */
 export default function FindSupplierDialog({
   open, line, openCase, presetSupplierIds, presetMessage, earlierRequests, catalogueChoice, onClose, onSent,
@@ -166,14 +180,17 @@ export default function FindSupplierDialog({
     meta: { silenceGlobalError: true },
   });
 
-  const ownRows: Row[] = (sourcingCase?.candidates ?? []).map((candidate) => ({
-    key: `s-${candidate.supplierId}`,
-    name: candidate.supplierName,
-    email: candidate.contactEmail ?? null,
-    detail: earlierRequests?.get(candidate.supplierId) ?? plainReason(candidate.recommendationReason),
-    supplierId: candidate.supplierId,
-    blocked: candidate.eligibleForSupplierRfq ? undefined : candidate.blockingReasons?.[0] ?? "Cannot be asked",
-  }));
+  const ownRows: Row[] = (sourcingCase?.candidates ?? [])
+    .map((candidate) => ({
+      key: `s-${candidate.supplierId}`,
+      name: candidate.supplierName,
+      email: candidate.contactEmail ?? null,
+      detail: earlierRequests?.get(candidate.supplierId) ?? plainReason(candidate.recommendationReason),
+      supplierId: candidate.supplierId,
+      blocked: candidate.eligibleForSupplierRfq ? undefined : candidate.blockingReasons?.[0] ?? "Cannot be asked",
+      knownNetwork: knownNetworkFor(candidate.supplierTier),
+    }))
+    .sort((left, right) => KNOWN_NETWORK_ORDER[left.knownNetwork!] - KNOWN_NETWORK_ORDER[right.knownNetwork!]);
   const ownIds = new Set(ownRows.map((row) => row.supplierId));
   const hits: SupplierDiscoveryHit[] = (internet.data?.pages ?? []).flatMap((page) => page.hits);
   const internetRows: Row[] = hits
@@ -386,7 +403,7 @@ export default function FindSupplierDialog({
   const partBlock = hasPartBlock ? body.slice(partStart, partEnd).trim() : "";
   const bodyAfter = hasPartBlock ? body.slice(partEnd).trim() : "";
 
-  // Nothing of your own for this part: open on the internet list rather than an empty tab.
+  // No known route for this part: open new-supplier discovery rather than an empty tab.
   const tabTouched = React.useRef(false);
   React.useEffect(() => {
     if (!open) { tabTouched.current = false; return; }
@@ -398,7 +415,7 @@ export default function FindSupplierDialog({
   const rows = tab === "own" ? ownRows : internetRows;
 
   const supplierTable = (
-    <Table size="small" stickyHeader aria-label={tab === "own" ? "Your suppliers" : "Suppliers found on the internet"}>
+    <Table size="small" stickyHeader aria-label={tab === "own" ? "Your known suppliers" : "Suppliers found on the internet"}>
       <TableHead>
         <TableRow>
           <TableCell padding="checkbox" />
@@ -407,37 +424,50 @@ export default function FindSupplierDialog({
         </TableRow>
       </TableHead>
       <TableBody>
-        {rows.map((row) => {
+        {rows.map((row, index) => {
           const isTicked = ticked.has(row.key) && !row.blocked;
+          const startsKnownNetwork = tab === "own"
+            && row.knownNetwork !== rows[index - 1]?.knownNetwork;
           return (
-            <TableRow key={row.key} hover selected={isTicked} sx={{ opacity: row.blocked ? 0.6 : 1 }}>
-              <TableCell padding="checkbox">
-                <Checkbox
-                  size="small"
-                  checked={isTicked}
-                  disabled={Boolean(row.blocked)}
-                  onChange={() => toggle(row.key)}
-                  slotProps={{ input: { "aria-label": `Ask ${row.name}` } }}
-                />
-              </TableCell>
-              <TableCell sx={{ maxWidth: 220 }}>
-                <Stack direction="row" spacing={0.5} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
-                  <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.3 }} noWrap title={row.name}>{row.name}</Typography>
-                  {row.role && <Chip size="small" variant="outlined" label={row.role} sx={{ height: 18, fontSize: 11 }} />}
-                  {row.country && <Typography variant="caption" color="text.secondary">{row.country}</Typography>}
-                </Stack>
-                {row.detail && (
-                  <Tooltip title={row.detail} placement="bottom-start">
-                    <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block" }}>{row.detail}</Typography>
-                  </Tooltip>
-                )}
-              </TableCell>
-              <TableCell sx={{ maxWidth: 210 }}>
-                {row.blocked
-                  ? <Typography variant="caption" color="warning.main">{row.blocked}</Typography>
-                  : <Typography variant="body2" noWrap title={row.email ?? ""} sx={{ fontSize: 13 }}>{row.email}</Typography>}
-              </TableCell>
-            </TableRow>
+            <React.Fragment key={row.key}>
+              {startsKnownNetwork && (
+                <TableRow>
+                  <TableCell colSpan={3} sx={{ py: 0.75, bgcolor: "action.hover", borderBottomColor: "divider" }}>
+                    <Typography variant="caption" sx={{ fontWeight: 800, color: "text.primary" }}>
+                      {row.knownNetwork}
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+              <TableRow hover selected={isTicked} sx={{ opacity: row.blocked ? 0.6 : 1 }}>
+                <TableCell padding="checkbox">
+                  <Checkbox
+                    size="small"
+                    checked={isTicked}
+                    disabled={Boolean(row.blocked)}
+                    onChange={() => toggle(row.key)}
+                    slotProps={{ input: { "aria-label": `Ask ${row.name}` } }}
+                  />
+                </TableCell>
+                <TableCell sx={{ maxWidth: 220 }}>
+                  <Stack direction="row" spacing={0.5} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.3 }} noWrap title={row.name}>{row.name}</Typography>
+                    {row.role && <Chip size="small" variant="outlined" label={row.role} sx={{ height: 18, fontSize: 11 }} />}
+                    {row.country && <Typography variant="caption" color="text.secondary">{row.country}</Typography>}
+                  </Stack>
+                  {row.detail && (
+                    <Tooltip title={row.detail} placement="bottom-start">
+                      <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block" }}>{row.detail}</Typography>
+                    </Tooltip>
+                  )}
+                </TableCell>
+                <TableCell sx={{ maxWidth: 210 }}>
+                  {row.blocked
+                    ? <Typography variant="caption" color="warning.main">{row.blocked}</Typography>
+                    : <Typography variant="body2" noWrap title={row.email ?? ""} sx={{ fontSize: 13 }}>{row.email}</Typography>}
+                </TableCell>
+              </TableRow>
+            </React.Fragment>
           );
         })}
       </TableBody>
@@ -522,14 +552,14 @@ export default function FindSupplierDialog({
                 <Tab value="internet" sx={{ minHeight: 42 }} label={
                   <Badge color="primary" badgeContent={internetTicked} invisible={internetTicked === 0}>
                     <Box sx={{ pr: internetTicked ? 1.5 : 0 }}>
-                      From the internet {internet.isLoading ? "…" : internet.isError ? "" : `(${internetRows.length}${moreInternet ? "+" : ""})`}
+                      Source from internet {internet.isLoading ? "…" : internet.isError ? "" : `(${internetRows.length}${moreInternet ? "+" : ""})`}
                     </Box>
                   </Badge>} />
               </Tabs>
               <Box sx={{ flex: 1, overflowY: "auto", minHeight: { xs: 240, md: 0 } }}>
                 {tab === "own" && ownRows.length === 0 && (
                   <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-                    None of your suppliers is linked to this part yet. Look at the internet tab, or type an address in To.
+                    No In Network or Extended Network supplier is linked to this part yet. Source from internet, or type an address in To.
                   </Typography>
                 )}
                 {tab === "internet" && internet.isLoading && (
@@ -544,7 +574,7 @@ export default function FindSupplierDialog({
                 {tab === "internet" && internet.isError && (
                   <Stack spacing={1} sx={{ p: 2, alignItems: "flex-start" }}>
                     <Typography variant="body2" color="text.secondary">
-                      The internet search did not answer this time. Your own suppliers and typed emails still work.
+                      The internet search did not answer this time. Your In Network and Extended Network suppliers, and typed emails, still work.
                     </Typography>
                     <Button size="small" variant="outlined" onClick={() => internet.refetch()}>Try again</Button>
                   </Stack>

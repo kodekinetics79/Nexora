@@ -382,7 +382,7 @@ public sealed class StockLinePricingService : IStockLinePricingService
             .ToDictionaryAsync(x => x.Id, x => x.WarehouseName, ct);
         var ids = rows.Select(x => x.Id).ToArray();
         var reserved = await _db.Set<StockReservation>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && ids.Contains(x.InventoryId) && x.Status == StockReservationStatus.Active)
+            .Where(x => InventoryReleaseScope.ReservationsEnabled && x.BusinessUnitId == businessUnitId && ids.Contains(x.InventoryId) && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId)
             .Select(x => new { InventoryId = x.Key, Quantity = x.Sum(y => y.Quantity) })
             .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity, ct);

@@ -269,7 +269,7 @@ public sealed class ProcurementController(
             var result = await service.PostGoodsReceiptAsync(new PostGoodsReceiptCommand(
                 TenantId(), request.PurchaseOrderId, request.WarehouseId, request.ReceiptNumber,
                 request.ReceivedOn, request.ExpectedPurchaseOrderVersion, request.Lines, IdempotencyKey(),
-                Actor(), CorrelationId()), RequestAborted);
+                Actor(), CorrelationId(), request.SupplierInvoiceNumber, request.BillOfLadingNumber), RequestAborted);
             return Created($"/api/procurement/goods-receipts/{result.Id}", result);
         });
 
@@ -502,4 +502,6 @@ public sealed record PostGoodsReceiptRequest(
     string ReceiptNumber,
     DateTime ReceivedOn,
     long ExpectedPurchaseOrderVersion,
-    IReadOnlyCollection<PostGoodsReceiptLine> Lines);
+    IReadOnlyCollection<PostGoodsReceiptLine> Lines,
+    string? SupplierInvoiceNumber = null,
+    string? BillOfLadingNumber = null);

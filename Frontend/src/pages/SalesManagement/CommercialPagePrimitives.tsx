@@ -96,13 +96,14 @@ export function ResponsiveTable({ label, children }: { label: string; children: 
 }
 
 export function StatusChip({ value }: { value: string }) {
-  const normalized = value.toLowerCase();
-  const color = normalized.includes('overdue') || normalized.includes('short') || normalized.includes('blocked')
+  const normalized = value.trim().toLowerCase();
+  const color = normalized === 'unavailable' || normalized === 'out of stock'
+      || normalized.includes('overdue') || normalized.includes('short') || normalized.includes('blocked')
       || normalized.includes('unhealthy') || normalized.includes('failed') || normalized.includes('dead')
     ? 'error'
     : normalized.includes('pending') || normalized.includes('due') || normalized.includes('review')
       ? 'warning'
-      : normalized.includes('active') || normalized.includes('available') || normalized.includes('complete')
+      : normalized === 'active' || normalized === 'available' || normalized.includes('complete')
         ? 'success'
         : 'default';
   return <Chip size="small" label={value} color={color} variant="outlined" sx={{ fontWeight: 700 }} />;

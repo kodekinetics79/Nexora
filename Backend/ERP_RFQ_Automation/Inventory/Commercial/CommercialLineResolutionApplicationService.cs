@@ -252,7 +252,7 @@ public sealed class CommercialLineResolutionApplicationService(
             select new { stock, warehouse }).ToListAsync(ct);
         var ids = stocks.Select(x => x.stock.Id).ToArray();
         var reserved = await db.Set<StockReservation>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && ids.Contains(x.InventoryId)
+            .Where(x => InventoryReleaseScope.ReservationsEnabled && x.BusinessUnitId == businessUnitId && ids.Contains(x.InventoryId)
                 && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId).Select(x => new { Id = x.Key, Qty = x.Sum(y => y.Quantity) })
             .ToDictionaryAsync(x => x.Id, x => x.Qty, ct);

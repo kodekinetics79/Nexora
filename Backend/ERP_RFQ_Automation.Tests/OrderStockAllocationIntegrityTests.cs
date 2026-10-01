@@ -6,11 +6,7 @@ using Microsoft.EntityFrameworkCore;
 namespace ERP_RFQ_Automation.Tests;
 
 /// <summary>
-/// Certifies the order-to-stock allocation contract: it is tenant-isolated (order lines carry no
-/// BusinessUnitId of their own), it spills across warehouses so an order does not report a false
-/// shortage when the quote engine already promised the stock, it ranks warehouses by what is
-/// actually available rather than by raw on-hand, it will not steal another product's stock on a
-/// part-number collision, and abandoned holds can be recovered.
+/// Confirms tenant isolation and unchanged stock/history while order reservations are disabled.
 /// </summary>
 public class OrderStockAllocationIntegrityTests
 {
@@ -90,7 +86,7 @@ public class OrderStockAllocationIntegrityTests
     }
 
     [Fact]
-    public async Task Allocation_spills_across_warehouses_instead_of_reporting_a_false_shortage()
+    public async Task Confirmation_does_not_hold_stock_in_any_warehouse()
     {
         using var db = new TestDb();
         SeedTenant(db, Bu);
@@ -103,22 +99,16 @@ public class OrderStockAllocationIntegrityTests
 
         var result = await Service(db).ReserveOrderAsync(Bu, 40, "rep@acme");
 
-        // Previously this reserved only the 60 in the single "best" warehouse and reported a
-        // 40-unit shortage, while the quote engine had already promised all 110.
-        var line = Assert.Single(result.Lines);
-        Assert.Equal(100m, line.Reserved);
-        Assert.Equal(0m, line.Shortage);
-        Assert.Equal("Reserved", line.Outcome);
-        Assert.True(result.FullyAllocated);
+        Assert.Empty(result.Lines);
 
         using var verify = db.ContextFor(Bu);
         var holds = verify.StockReservations.Where(x => x.OrderId == 40).ToList();
-        Assert.Equal(2, holds.Count);
-        Assert.Equal(100m, holds.Sum(x => x.Quantity));
+        Assert.Empty(holds);
+        Assert.Equal(110m, verify.Set<Models.Inventory>().Sum(x => x.QtyOnHand));
     }
 
     [Fact]
-    public async Task Allocation_ranks_warehouses_by_available_not_by_raw_on_hand()
+    public async Task Confirmation_does_not_change_another_orders_historical_hold()
     {
         using var db = new TestDb();
         SeedTenant(db, Bu);
@@ -129,15 +119,17 @@ public class OrderStockAllocationIntegrityTests
         SeedStock(db, Bu, 33, productId, small, 50m);
 
         // Everything in the big warehouse is already committed to another order.
-        await new InventoryAvailabilityService(db.ContextFor(Bu))
-            .ReserveAsync(Bu, bigStock, 1000m, "other-order", orderId: 999);
+        using var history = db.ContextFor(Bu);
+        var historical = await HistoricalReservations.SeedAsync(history, Bu, bigStock, 1000m, "other-order", orderId: 999);
 
         SeedOrder(db, Bu, orderId: 41, productId: productId, quantity: 50m);
         var result = await Service(db).ReserveOrderAsync(Bu, 41, "rep@acme");
 
-        var line = Assert.Single(result.Lines);
-        Assert.Equal(50m, line.Reserved);
-        Assert.Equal("Reserved", line.Outcome);
+        Assert.Empty(result.Lines);
+        await history.Entry(historical).ReloadAsync();
+        Assert.Equal(1000m, historical.Quantity);
+        Assert.Equal(StockReservationStatus.Active, historical.Status);
+        Assert.Single(history.StockReservations);
     }
 
     [Fact]
@@ -183,16 +175,14 @@ public class OrderStockAllocationIntegrityTests
 
         var result = await Service(db).ReserveOrderAsync(Bu, 43, "rep@acme");
 
-        var line = Assert.Single(result.Lines);
-        Assert.Equal("NoInventoryMatch", line.Outcome);
-        Assert.Equal(0m, line.Reserved);
+        Assert.Empty(result.Lines);
         using var verify = db.ContextFor(Bu);
         Assert.Equal(500m, verify.Set<ERP_RFQ_Automation.Models.Inventory>().Single(x => x.Id == 35).QtyOnHand);
         Assert.Empty(verify.StockReservations);
     }
 
     [Fact]
-    public async Task Reallocating_after_a_partial_restock_tops_the_line_up_without_double_holding()
+    public async Task Restocking_does_not_reactivate_order_reservations()
     {
         using var db = new TestDb();
         SeedTenant(db, Bu);
@@ -202,23 +192,21 @@ public class OrderStockAllocationIntegrityTests
         SeedOrder(db, Bu, orderId: 44, productId: productId, quantity: 50m);
 
         var first = await Service(db).ReserveOrderAsync(Bu, 44, "rep@acme");
-        Assert.Equal(30m, first.Lines.Single().Reserved);
-        Assert.Equal(20m, first.Lines.Single().Shortage);
+        Assert.Empty(first.Lines);
 
         // Stock arrives, then the order is re-allocated.
         await new StockLedgerService(db.ContextFor(Bu))
             .AdjustAsync(Bu, productId, warehouse, 20m, "restock:1", "ops@acme");
         var second = await Service(db).ReserveOrderAsync(Bu, 44, "rep@acme");
 
-        Assert.Equal(50m, second.Lines.Single().Reserved);
-        Assert.Equal(0m, second.Lines.Single().Shortage);
+        Assert.Empty(second.Lines);
         var availability = await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, inventoryId);
-        Assert.Equal(50m, availability.Reserved); // not 80 — the first hold was not duplicated
-        Assert.Equal(0m, availability.Available);
+        Assert.Equal(0m, availability.Reserved);
+        Assert.Equal(50m, availability.Available);
     }
 
     [Fact]
-    public async Task Deleting_an_order_leaks_stock_until_the_orphan_sweep_recovers_it()
+    public async Task Orphaned_historical_holds_remain_readable_without_withholding_stock()
     {
         using var db = new TestDb();
         SeedTenant(db, Bu);
@@ -226,7 +214,8 @@ public class OrderStockAllocationIntegrityTests
         var warehouse = SeedWarehouse(db, Bu, 27, "WH-E");
         var inventoryId = SeedStock(db, Bu, 37, productId, warehouse, 100m);
         SeedOrder(db, Bu, orderId: 45, productId: productId, quantity: 40m);
-        await Service(db).ReserveOrderAsync(Bu, 45, "rep@acme");
+        using var history = db.ContextFor(Bu);
+        var historical = await HistoricalReservations.SeedAsync(history, Bu, inventoryId, 40m, "orphan", orderId: 45);
 
         // StockReservation has no FK to Orders, so the row survives the delete with a dangling
         // OrderId and ReleaseForOrderAsync can never be triggered for it again.
@@ -238,17 +227,19 @@ public class OrderStockAllocationIntegrityTests
         }
 
         var leaked = await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, inventoryId);
-        Assert.Equal(60m, leaked.Available); // 40 units stranded
+        Assert.Equal(100m, leaked.Available);
 
         var recovered = await Service(db).ReleaseOrphanedAsync(Bu, "ops@acme");
 
-        Assert.Equal(1, recovered);
+        Assert.Equal(0, recovered);
+        await history.Entry(historical).ReloadAsync();
+        Assert.Equal(StockReservationStatus.Active, historical.Status);
         var restored = await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, inventoryId);
         Assert.Equal(100m, restored.Available);
     }
 
     [Fact]
-    public async Task Stale_holds_are_expired_auditably_and_recent_holds_are_untouched()
+    public async Task Sweeping_preserves_stale_and_recent_historical_holds()
     {
         using var db = new TestDb();
         SeedTenant(db, Bu);
@@ -256,10 +247,11 @@ public class OrderStockAllocationIntegrityTests
         var warehouse = SeedWarehouse(db, Bu, 28, "WH-F");
         var inventoryId = SeedStock(db, Bu, 38, productId, warehouse, 100m);
 
-        var availability = new InventoryAvailabilityService(db.ContextFor(Bu));
-        var abandoned = await availability.ReserveAsync(Bu, inventoryId, 40m, "abandoned", orderId: 46);
-        await new InventoryAvailabilityService(db.ContextFor(Bu))
-            .ReserveAsync(Bu, inventoryId, 10m, "fresh", orderId: 47);
+        using var history = db.ContextFor(Bu);
+        var abandoned = await HistoricalReservations.SeedAsync(history, Bu, inventoryId, 40m, "abandoned", orderId: 46);
+        var recent = await HistoricalReservations.SeedAsync(history, Bu, inventoryId, 10m, "fresh", orderId: 47);
+        recent.CreatedOn = DateTime.UtcNow;
+        await history.SaveChangesAsync();
 
         using (var age = db.ContextFor(Bu))
         {
@@ -271,14 +263,16 @@ public class OrderStockAllocationIntegrityTests
         var expired = await new InventoryAvailabilityService(db.ContextFor(Bu))
             .ExpireStaleAsync(Bu, DateTime.UtcNow.AddHours(-72), "sweeper@acme");
 
-        Assert.Equal(1, expired);
+        Assert.Equal(0, expired);
         var after = await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, inventoryId);
-        Assert.Equal(10m, after.Reserved);  // only the fresh hold survives
-        Assert.Equal(90m, after.Available);
+        Assert.Equal(0m, after.Reserved);
+        Assert.Equal(100m, after.Available);
 
         using var verify = db.ContextFor(Bu);
-        Assert.Single(verify.ProcurementEvents.Where(x =>
+        Assert.Empty(verify.ProcurementEvents.Where(x =>
             x.AggregateType == "StockReservation" && x.EventType == "STOCK_RESERVATION_EXPIRED"));
+        Assert.Equal(2, verify.StockReservations.Count());
+        Assert.All(verify.StockReservations, row => Assert.Equal(StockReservationStatus.Active, row.Status));
     }
 
     [Fact]
@@ -307,12 +301,9 @@ public class OrderStockAllocationIntegrityTests
 
         var result = await Service(db).ReserveOrderAsync(Bu, 48, "rep@acme");
 
-        // A short line is reported, not thrown: procurement needs the shortage, and the fully
-        // allocated line keeps its hold because the whole pass committed as one transaction.
-        Assert.Equal(2, result.Lines.Count);
-        Assert.True(result.HasShortages);
-        Assert.Equal(10m, result.Lines.Single(x => x.OrderItemId == 480).Reserved);
-        Assert.Equal(5m, result.Lines.Single(x => x.OrderItemId == 481).Reserved);
-        Assert.Equal(45m, result.TotalShortage);
+        Assert.Empty(result.Lines);
+        using var verify = db.ContextFor(Bu);
+        Assert.Empty(verify.StockReservations);
+        Assert.Equal(105m, verify.Set<Models.Inventory>().Sum(x => x.QtyOnHand));
     }
 }

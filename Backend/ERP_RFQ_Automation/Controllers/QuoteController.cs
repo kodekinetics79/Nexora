@@ -596,6 +596,117 @@ namespace ERP_RFQ_Automation.Controllers
             catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
         }
 
+        /// <summary>The fields of "Upload a quote". Strings, parsed invariantly, so a browser locale cannot change a date or an amount.</summary>
+        public sealed class UploadQuoteForm
+        {
+            public IFormFile? File { get; set; }
+            public long RfqId { get; set; }
+            public string? QuoteNumber { get; set; }
+            public string? SentOn { get; set; }
+            public string? ValidUntil { get; set; }
+            public long CurrencyId { get; set; }
+            public string? Amount { get; set; }
+        }
+
+        // -------- POST /api/Quote/upload --------
+        // The rep quoted this RFQ outside Nexora (by hand, in Excel, on the customer's portal).
+        // Their file is inspected like every other upload, kept, and the quote is recorded as sent.
+        [HttpPost("upload")]
+        [RequestSizeLimit(26L * 1024 * 1024)]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(ERP_RFQ_Automation.Platform.Hardening.RateLimitingExtensions.UploadPolicy)]
+        [RequireModulePermission("Quotations", PermissionAction.Create)]
+        public async Task<IActionResult> Upload([FromForm] UploadQuoteForm form,
+            [FromServices] ERP_RFQ_Automation.Security.DocumentInspection.IFileInspectionService inspection)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (form.File is null || form.File.Length == 0) return BadRequest(new { message = "Choose the quote file." });
+            if (form.RfqId <= 0) return BadRequest(new { message = "Choose the RFQ this quote answers." });
+            if (!TryParseDay(form.SentOn, out var sentOn)) return BadRequest(new { message = "Enter the date the quote was sent." });
+            DateTime? validUntil = null;
+            if (!string.IsNullOrWhiteSpace(form.ValidUntil))
+            {
+                if (!TryParseDay(form.ValidUntil, out var until)) return BadRequest(new { message = "Valid until is not a date." });
+                validUntil = until;
+            }
+            if (!decimal.TryParse(form.Amount, System.Globalization.NumberStyles.Number,
+                    System.Globalization.CultureInfo.InvariantCulture, out var amount))
+                return BadRequest(new { message = "Enter the amount before VAT." });
+
+            try
+            {
+                if (_commercialAccess == null
+                    || !await _commercialAccess.CanAccessRfqAsync(form.RfqId, HttpContext.RequestAborted))
+                    return NotFound();
+
+                await using var inspected = await ERP_RFQ_Automation.Security.DocumentInspection.UploadInspectionGate
+                    .InspectAsync(inspection, form.File, HttpContext.RequestAborted);
+                if (!inspected.IsCleared)
+                    return ERP_RFQ_Automation.Security.DocumentInspection.UploadInspectionGate
+                        .Refuse(this, inspected.Inspection, "Quote file rejected");
+
+                var result = await _quoteService.RecordUploadedQuoteAsync(new UploadedQuoteCommand(
+                    businessUnitId, form.RfqId, form.QuoteNumber ?? string.Empty, sentOn, validUntil,
+                    form.CurrencyId, amount, form.File.FileName, inspected.Content.ToArray(),
+                    inspected.Inspection.DetectedContentType, ActorEmail(), ActorUserId()),
+                    HttpContext.RequestAborted);
+                return CreatedAtAction(nameof(GetById), new { id = result.QuoteId },
+                    new { quoteId = result.QuoteId, quoteNo = result.QuoteNo, replacedDraftNo = result.ReplacedDraftNo });
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (LifecycleValidationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (LifecycleConflictException ex) { return Conflict(new { message = ex.Message }); }
+            catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "upload"); }
+        }
+
+        // -------- GET /api/Quote/{id}/uploaded-file --------
+        // The file the rep uploaded — the quote the customer actually holds.
+        [HttpGet("{id}/uploaded-file")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<IActionResult> DownloadUploadedQuote(long id,
+            [FromServices] ERP_RFQ_Automation.Infrastructure.Storage.IEvidenceObjectStorage evidence)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+            try
+            {
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
+                var file = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.Id == id && q.BusinessUnitId == businessUnitId)
+                    .Select(q => new { q.UploadedFileName, q.UploadedFileStorageUri, q.UploadedFileSha256, q.UploadedFileContentType })
+                    .SingleOrDefaultAsync(HttpContext.RequestAborted);
+                if (file is null || string.IsNullOrWhiteSpace(file.UploadedFileStorageUri)
+                    || string.IsNullOrWhiteSpace(file.UploadedFileSha256)) return NotFound();
+
+                var stream = await evidence.OpenVerifiedReadAsync(
+                    file.UploadedFileStorageUri, file.UploadedFileSha256, HttpContext.RequestAborted);
+                return File(stream,
+                    string.IsNullOrWhiteSpace(file.UploadedFileContentType) ? "application/octet-stream" : file.UploadedFileContentType,
+                    file.UploadedFileName ?? "quote");
+            }
+            catch (FileNotFoundException) { return NotFound("The quote file was not found in storage."); }
+            catch (UnauthorizedAccessException) { return NotFound(); }
+            catch (InvalidDataException)
+            {
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The stored quote file failed integrity verification.");
+            }
+            catch (Exception ex) { return Unexpected(ex, "uploaded-file"); }
+        }
+
+        private static bool TryParseDay(string? value, out DateTime day)
+        {
+            day = default;
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            if (!DateTime.TryParseExact(value.Trim()[..Math.Min(10, value.Trim().Length)], "yyyy-MM-dd",
+                    System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed))
+                return false;
+            day = parsed.Date;
+            return true;
+        }
+
         // -------- POST /api/Quote/{id}/revise (revisions-lite, WP-B4) --------
         // Clones a non-DRAFT quote (+items) as a new DRAFT revision (RevisionNo+1,
         // linked back). Draft / superseded / outcome-locked chains → 409.
@@ -699,6 +810,8 @@ namespace ERP_RFQ_Automation.Controllers
             public string? ReasonCode { get; set; }
             /// <summary>Optional free-text note (max 500 chars).</summary>
             public string? Note { get; set; }
+            /// <summary>Optional: one of the client's own endings. It must count as <see cref="Outcome"/>.</summary>
+            public long? EndingId { get; set; }
         }
 
         // -------- POST /api/Quote/{id}/outcome (WP-A4) --------
@@ -713,7 +826,8 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
 
                 var result = await _outcomeService.SetOutcomeAsync(
-                    id, businessUnitId, ActorEmail(), request.Outcome, request.ReasonCode, request.Note);
+                    id, businessUnitId, ActorEmail(), request.Outcome, request.ReasonCode, request.Note,
+                    request.EndingId, HttpContext.RequestAborted);
                 return Ok(result);
             }
             catch (KeyNotFoundException)
@@ -757,6 +871,99 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return NotFound();
             }
+        }
+
+        // ================================================================
+        // The client's own quote statuses (owner request 2026-09-28): customer steps while SENT,
+        // endings that count as Won / Lost / Expired, reasons with a "for". Labels on the fixed
+        // lifecycle, never new states. See Sla/QuoteClientStatusService.cs.
+        // ================================================================
+
+        public sealed class QuoteStepRequest
+        {
+            /// <summary>A QuoteStep row, or null to clear the step.</summary>
+            public long? StepId { get; set; }
+        }
+
+        // -------- GET /api/Quote/statuses --------
+        [HttpGet("statuses")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<QuoteStatusCatalogDto>> GetStatusCatalog(
+            [FromServices] IQuoteClientStatusService statuses,
+            [FromQuery] bool includeInactive = false)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            try
+            {
+                return Ok(await statuses.GetCatalogAsync(businessUnitId, includeInactive, HttpContext.RequestAborted));
+            }
+            catch (Exception ex) { return Unexpected(ex, "quote-statuses"); }
+        }
+
+        // -------- POST /api/Quote/statuses --------
+        // Setup, not the rep's desk: limited exactly as Setup > Lists & Picklists edits are
+        // (SetupMasterController Create/Update carry [RequireManagerRole]).
+        [HttpPost("statuses")]
+        [RequireManagerRole]
+        public async Task<IActionResult> AddStatusOption(
+            [FromBody] QuoteStatusOptionCreateRequest request,
+            [FromServices] IQuoteClientStatusService statuses)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (request is null) return BadRequest(new { message = "Say what to add." });
+            try
+            {
+                return Ok(await statuses.AddAsync(businessUnitId, ActorEmail(), request, HttpContext.RequestAborted));
+            }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "quote-status-add"); }
+        }
+
+        // -------- PUT /api/Quote/statuses/{id} --------
+        [HttpPut("statuses/{id:long}")]
+        [RequireManagerRole]
+        public async Task<IActionResult> UpdateStatusOption(long id,
+            [FromBody] QuoteStatusOptionUpdateRequest request,
+            [FromServices] IQuoteClientStatusService statuses)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (request is null) return BadRequest(new { message = "Say what to change." });
+            try
+            {
+                return Ok(await statuses.UpdateAsync(businessUnitId, ActorEmail(), id, request, HttpContext.RequestAborted));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "quote-status-update"); }
+        }
+
+        // -------- PUT /api/Quote/{id}/step --------
+        // SENT and not replaced by a revision. Picking a step also records "customer responded" (OD1).
+        [HttpPut("{id}/step")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<ActionResult<QuoteResponseDTO>> SetStep(long id,
+            [FromBody] QuoteStepRequest request,
+            [FromServices] IQuoteClientStatusService statuses)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
+            try
+            {
+                await statuses.SetStepAsync(id, businessUnitId, ActorEmail(), request?.StepId, HttpContext.RequestAborted);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != businessUnitId) return NotFound();
+                return Ok(await _repository.GetByIdAsync(id, businessUnitId, actor.AccountScope));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "quote-step"); }
         }
 
         // -------- GET /api/Quote/outcome-reasons (WP-A4 governed picklist) --------

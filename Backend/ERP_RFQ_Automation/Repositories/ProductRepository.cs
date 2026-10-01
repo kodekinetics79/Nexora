@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
+using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting;
@@ -117,7 +118,7 @@ namespace ERP_RFQ_Automation.Repositories
             return extensions.Contains(Path.GetExtension(fileName).ToLower());
         }
 
-        public async Task<(IEnumerable<ProductResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null)
+        public async Task<(IEnumerable<ProductResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, ProductListQuery? listQuery = null)
         {
             IQueryable<Product> query = _context.Products
                 .AsNoTracking()
@@ -126,6 +127,8 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(p => p.SubCategory)
                 .Include(p => p.Warehouse)
                 .Include(p => p.PreferredSupplier)
+                .Include(p => p.Uom)
+                .Include(p => p.PriceCurrency)
                 .Include(p => p.Bu);
 
             if (!string.IsNullOrWhiteSpace(search))
@@ -141,14 +144,19 @@ namespace ERP_RFQ_Automation.Repositories
             if (isActive.HasValue)
                 query = query.Where(p => p.IsActive == isActive.Value);
 
-            int totalItems = await query.CountAsync();
+            var options = listQuery ?? new ProductListQuery();
+            var register = ProductRegisterQuery.Build(_context, query, businessUnitId, options);
+            int totalItems = await register.CountAsync();
 
-            var products = await query
+            var products = await ProductRegisterQuery.Order(register, options)
                 .Skip((pageNumber - 1) * pageSize)
                 .Take(pageSize)
+                .Select(row => row.Product)
                 .ToListAsync();
 
             var productIds = products.Select(p => p.Id).ToList();
+
+            var purchaseEvidence = await ProductPurchaseEvidenceReader.ReadLatestAsync(_context, businessUnitId, productIds);
 
             var attachments = await _context.ProductAttachments
                 .Where(a => productIds.Contains(a.InventoryId))
@@ -189,6 +197,11 @@ namespace ERP_RFQ_Automation.Repositories
                     UomName = p.Uom?.UomName,
                     UnitCost = p.UnitCost,
                     SellingPrice = p.SellingPrice,
+                    PriceCurrencyId = p.PriceCurrencyId,
+                    PriceCurrencyCode = p.PriceCurrency?.Code,
+                    LastPurchaseCost = purchaseEvidence.TryGetValue(p.Id, out var purchase) ? purchase.UnitCost : null,
+                    LastPurchaseCurrencyCode = purchase?.CurrencyCode,
+                    LastPurchaseOn = purchase?.PurchasedOn,
                     FinalLandedCost = p.FinalLandedCost,
                     FinalSalesPrice = p.FinalSalesPrice,
 
@@ -197,6 +210,7 @@ namespace ERP_RFQ_Automation.Repositories
                     PreferredSupplierId = p.PreferredSupplierId,
                     PreferredSupplierName = p.PreferredSupplier?.Name,
                     PreferredSupplierEmail = p.PreferredSupplier?.ContactEmail,
+                    PreferredSupplierTier = p.PreferredSupplier?.Tier,
                     BatchTracking = p.BatchTracking,
                     SerialTracking = p.SerialTracking,
                     ExpirationDate = p.ExpirationDate,
@@ -289,6 +303,8 @@ namespace ERP_RFQ_Automation.Repositories
                     throw new ArgumentException($"PreferredSupplier ID {product.PreferredSupplierId} does not exist in this Business Unit.");
             }
 
+            await ValidatePricingAsync(product, product.Buid!.Value);
+
 
             var buExists = await _context.BusinessUnits.AnyAsync(b => b.Id == product.Buid);
             if (!buExists)
@@ -358,7 +374,7 @@ namespace ERP_RFQ_Automation.Repositories
             return "PR" + (highWater + 1).ToString("D8");
         }
 
-        public async Task UpdateAsync(Product product, long businessUnitId, List<IFormFile>? attachments)
+        public async Task UpdateAsync(Product product, long businessUnitId, List<IFormFile>? attachments, bool applyPricing = false)
         {
             var existing = await _context.Products.AsNoTracking().FirstOrDefaultAsync(p => p.Id == product.Id && p.Buid == businessUnitId);
             if (existing == null)
@@ -416,6 +432,10 @@ namespace ERP_RFQ_Automation.Repositories
                     throw new ArgumentException($"PreferredSupplier ID {product.PreferredSupplierId} does not exist in this Business Unit.");
             }
 
+            // Old multipart clients do not send price fields and legacy rows may still carry a
+            // cost without a currency. Only an explicit pricing edit opts into today's rules.
+            if (applyPricing) await ValidatePricingAsync(product, businessUnitId);
+
             product.ModifiedOn = DateTime.UtcNow;
 
             // SEC-H5: inspect before the product update is committed (see AddAsync).
@@ -445,6 +465,37 @@ namespace ERP_RFQ_Automation.Repositories
                 }
                 await _context.SaveChangesAsync();
             }
+        }
+
+        private async Task ValidatePricingAsync(Product product, long businessUnitId)
+        {
+            const decimal maxPrice = 1_000_000_000m;
+            var anyPricing = product.UnitCost is not null
+                || product.SellingPrice is not null
+                || product.PriceCurrencyId is not null;
+            var completePricing = product.UnitCost is not null
+                && product.SellingPrice is not null
+                && product.PriceCurrencyId is not null;
+
+            if (anyPricing && !completePricing)
+                throw new ArgumentException("Landed cost, selling price, and price currency must be provided together, or all left blank.");
+
+            if (product.UnitCost is { } landedCost && (landedCost <= 0m || landedCost > maxPrice))
+                throw new ArgumentException("Landed cost must be above 0 and no more than 1,000,000,000.");
+            if (product.SellingPrice is { } sellingPrice && (sellingPrice <= 0m || sellingPrice > maxPrice))
+                throw new ArgumentException("Selling price must be above 0 and no more than 1,000,000,000.");
+            if ((product.UnitCost is not null || product.SellingPrice is not null) && product.PriceCurrencyId is null)
+                throw new ArgumentException("Choose the currency for the landed cost and selling price.");
+            if (product.PriceCurrencyId is { } currencyId)
+            {
+                var currencyExists = await _context.Currencies.AsNoTracking().AnyAsync(currency =>
+                    currency.Id == currencyId && currency.BusinessUnitId == businessUnitId && currency.IsActive == true);
+                if (!currencyExists)
+                    throw new ArgumentException("Choose one of your company's active currencies.");
+            }
+
+            if (product.UnitCost is not null) product.UnitCost = decimal.Round(product.UnitCost.Value, 2);
+            if (product.SellingPrice is not null) product.SellingPrice = decimal.Round(product.SellingPrice.Value, 2);
         }
 
         public async Task DeleteAsync(long id, long businessUnitId)
@@ -524,9 +575,12 @@ namespace ERP_RFQ_Automation.Repositories
                 .Select(s => new SupplierLookupDTO
                 {
                     Id = s.Id,
-                    Name = s.Name
+                    Name = s.Name,
+                    Tier = s.Tier,
                 })
-                .OrderBy(s => s.Name)
+                .OrderBy(s => s.Tier == SupplierTiers.Tier1Partner ? 0
+                    : s.Tier == SupplierTiers.Tier2Extended ? 1 : 2)
+                .ThenBy(s => s.Name)
                 .ToListAsync();
         }
 

@@ -68,6 +68,9 @@ export interface LotSummaryDTO {
   supplierName?: string | null;
   supplierPurchaseOrderId: number;
   purchaseOrderNumber?: string | null;
+  receiptNumber?: string | null;
+  supplierInvoiceNumber?: string | null;
+  billOfLadingNumber?: string | null;
   receivedOn: string;
   certificateState: CertificateExpiryState;
   certificateCount: number;
@@ -138,6 +141,8 @@ export interface LotWhereFromDTO {
   receivedOn: string;
   goodsReceiptId: number;
   receiptNumber?: string | null;
+  supplierInvoiceNumber?: string | null;
+  billOfLadingNumber?: string | null;
   supplierPurchaseOrderId: number;
   purchaseOrderNumber?: string | null;
   purchaseOrderDemandSource?: string | null;

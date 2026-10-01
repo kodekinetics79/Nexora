@@ -13,8 +13,9 @@ import type { CustomerAwardQuote } from '../Quotes/customer-awards';
  *
  * `CustomerAwardApplicationService.LoadEligibleQuoteAsync` accepts SENT, ACCEPTED or ORDERED, plus
  * the two legacy status ids that predate the setup codes, and refuses anything that has been
- * superseded by a revision. The list endpoint already drops ORDERED and withdrawn quotes, so what
- * is left to mirror here is the status rule.
+ * superseded by a revision. The list endpoint drops withdrawn quotes. It used to drop ORDERED ones
+ * too, so this picker never offered a quote that already became an order; the Quotes list now keeps
+ * ordered quotes (as Won), and the picker goes on leaving them out so this tested step is unchanged.
  *
  * Mirrored rather than invented: a picker that offers a quote the server will refuse teaches people
  * that the error is random, and one that hides a quote the server would accept sends them back to
@@ -26,6 +27,7 @@ const ELIGIBLE_STATUSES = ['SENT', 'ACCEPTED', 'ORDERED'];
 
 const isEligible = (quote: QuoteDTO) => {
   const status = (quote.statusCode || quote.statusValue || '').toUpperCase();
+  if (status === 'ORDERED') return false;
   const statusAllows = ELIGIBLE_STATUSES.includes(status)
     || LEGACY_ELIGIBLE_STATUS_IDS.includes(Number(quote.statusId));
   // The identity triple the create-PO command requires. A quote missing any of it cannot carry a

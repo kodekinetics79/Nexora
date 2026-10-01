@@ -9,6 +9,8 @@ import {
   ALL_SCREENS_ENTRY,
   PRIMARY_NAV,
   PRIMARY_VIEWS,
+  RELEASE_ADVANCED_GROUPS,
+  RELEASE_PRIMARY_NAV,
   navEntryMatches,
   pathnameOf,
 } from './navCatalog';
@@ -98,7 +100,7 @@ const OLD_RAIL_DESTINATIONS: Record<string, string> = {
   'Won / Lost': '/sales/quotes?state=outcomes',
   'Service BOQs': '/services/boq',
   'Client PO Inbox': '/sales/client-pos',
-  'Customer Orders': '/sales/orders',
+  'Client Orders': '/sales/orders',
   'Procurement Handoffs': '/procurement/handoffs',
   'Accounts Receivable': '/sales/finance',
   Shipments: '/sales/shipments',
@@ -129,9 +131,25 @@ const OLD_RAIL_DESTINATIONS: Record<string, string> = {
   Setup: '/setup',
 };
 
+const CONSOLIDATED_INVENTORY_ALIASES = new Set([
+  '/inventory/overview',
+  '/inventory/availability',
+  '/inventory/incoming',
+  '/inventory/levels',
+  '/inventory/reorder-alerts',
+  '/inventory/lots',
+  '/inventory/movements',
+  '/inventory/pricing-sheet',
+]);
+
+const DEFERRED_RELEASE_PATHS = new Set([
+  '/sales/shipments',
+  '/sales/finance',
+]);
+
 /** Every path the new navigation offers, from all four surfaces. */
 const reachablePaths = new Set<string>([
-  ...PRIMARY_NAV.map((item) => item.path),
+  ...RELEASE_PRIMARY_NAV.map((item) => item.path),
   ...PRIMARY_VIEWS.map((view) => view.path),
   ...ADVANCED_ENTRIES.map((entry) => entry.path),
   ...SETUP_ENTRIES.map((entry) => entry.path),
@@ -146,7 +164,7 @@ const reachablePaths = new Set<string>([
  * primary row is manager-only any more, so the two rails are currently identical; the helper stays
  * because the next manager-only row must be a decision somebody makes on purpose.
  */
-const railFor = (isManager: boolean) => PRIMARY_NAV.filter((item) => !item.managerOnly || isManager);
+const railFor = (isManager: boolean) => RELEASE_PRIMARY_NAV.filter((item) => !item.managerOnly || isManager);
 
 
 describe('the rail exposes the complete commercial spine', () => {
@@ -163,21 +181,20 @@ describe('the rail exposes the complete commercial spine', () => {
    * audiences, scoped per reader by the server, so the row is open to everyone who holds the
    * module and both counts move up by one.
    *
-   * The property the old count existed to protect is asserted separately below: the COMMERCIAL
-   * spine is still seven rows and still in journey order, so "a rep's rail does not grow" keeps its
-   * teeth and only the deliberate addition is allowed through.
+   * The release spine is seven rows in journey order. Fulfilment and Receivables keep their routes
+   * for future activation, but they are not offered in this release.
    */
-  it('carries the dashboard and the seven commercial destinations, in journey order, for everyone', () => {
+  it('carries the dashboard and the seven release destinations, in journey order, for everyone', () => {
     expect(railFor(false)).toHaveLength(8);
     expect(railFor(false).map((item) => item.key)).toEqual([
       'executive',
       'inbox',
       'leads',
       'rfqs',
+      'suppliers',
+      'inventory',
       'quotes',
       'orders',
-      'shipments',
-      'accounts-receivable',
     ]);
   });
 
@@ -207,33 +224,28 @@ describe('the rail exposes the complete commercial spine', () => {
 
   it('accounts for all 69 old destinations across four surfaces', () => {
     // These are the numbers the before/after rests on, so they are asserted rather than counted by
-    // hand: 1 dashboard row + 7 commercial rows + 15 tabs + 56 directory cards + 21 Setup entries
-    // + the directory door. The directory lost one card and the rail gained one row when the
-    // Dashboard moved up into the rail: the destination moved, so the accounting still balances.
+    // hand: 1 dashboard row + 7 release rows + 15 tabs + 47 directory cards + 21 Setup entries
+    // + the directory door. Inventory summary lists and the three Products sub-screens resolve inside the Products
+    // workspace and are intentionally not advertised as separate destinations.
     // Setup went from 25 to 20 on 2026-09-16: the five platform studios (AI Trust, Taxonomy &
     // Document Skills, Model & Rule Lifecycle, Quality Analytics, Test & Release) are Platform
     // Admin configuration and are no longer tenant destinations at all — see setupCatalog.tsx.
     // Supplier Email (2026-09-16) took it to 21: the wording of supplier RFQ emails.
-    // The Pricing sheet (2026-09-27) is a new destination, not a moved one: the directory holds 57.
     expect(railFor(false)).toHaveLength(8);
-    expect(PRIMARY_VIEWS).toHaveLength(15);
-    expect(ADVANCED_ENTRIES).toHaveLength(57);
+    // Quotes gained an "All" tab (2026-09-28): the same list with no filter, not a new destination.
+    expect(PRIMARY_VIEWS).toHaveLength(16);
+    expect(ADVANCED_ENTRIES).toHaveLength(47);
     expect(ADVANCED_GROUPS).toHaveLength(10);
-    expect(SETUP_ENTRIES).toHaveLength(21);
+    // Quote statuses (2026-09-29): the client's own quote steps, endings and reasons, beside Quote Format.
+    expect(SETUP_ENTRIES).toHaveLength(22);
   });
 
-  it('keeps every post-quote destination directly visible and governed by its route permission', () => {
-    expect(PRIMARY_NAV.slice(-3).map(({ key, label, path, moduleName }) => ({ key, label, path, moduleName })))
-      .toEqual([
-        { key: 'orders', label: 'Orders', path: '/sales/orders', moduleName: 'Orders' },
-        { key: 'shipments', label: 'Fulfilment', path: '/sales/shipments', moduleName: 'Shipments' },
-        {
-          key: 'accounts-receivable',
-          label: 'Receivables',
-          path: '/sales/finance',
-          moduleName: 'Accounts Receivable',
-        },
-      ]);
+  it('ends the release journey at Client Orders while retaining deferred routes', () => {
+    expect(RELEASE_PRIMARY_NAV.at(-1)).toMatchObject({
+      key: 'orders', label: 'Client Orders', path: '/sales/orders', moduleName: 'Orders',
+    });
+    expect(RELEASE_PRIMARY_NAV.map((item) => item.key)).not.toContain('shipments');
+    expect(RELEASE_PRIMARY_NAV.map((item) => item.key)).not.toContain('accounts-receivable');
 
     expect(appSource).toContain(
       '<Route path="/sales/orders" element={<TenantShell><PermissionGuard moduleName="Orders"><OrderListPage /></PermissionGuard></TenantShell>} />',
@@ -311,13 +323,27 @@ describe('catalog permissions match route authority', () => {
   });
 });
 
-describe('nothing was deleted to get there', () => {
-  it('keeps every one of the 69 destinations the old rail carried', () => {
+describe('legacy destinations remain safe while duplicate inventory lists consolidate', () => {
+  it('keeps every offered old destination discoverable except Products sub-screens and deferred modules', () => {
     const missing = Object.entries(OLD_RAIL_DESTINATIONS)
-      .filter(([, path]) => !reachablePaths.has(path))
+      .filter(([, path]) => !CONSOLIDATED_INVENTORY_ALIASES.has(path)
+        && !DEFERRED_RELEASE_PATHS.has(path)
+        && !reachablePaths.has(path))
       .map(([label, path]) => `${label} (${path})`);
 
     expect(missing).toEqual([]);
+  });
+
+  it('does not advertise consolidated inventory aliases as separate screens', () => {
+    expect(ADVANCED_ENTRIES.filter((entry) => CONSOLIDATED_INVENTORY_ALIASES.has(entry.path))).toEqual([]);
+  });
+
+  it('keeps Suppliers in the primary release journey while deferring Fulfilment and Receivables', () => {
+    expect(RELEASE_ADVANCED_GROUPS.map((group) => group.key)).toContain('sourcing');
+    expect(RELEASE_PRIMARY_NAV.find((entry) => entry.path === '/suppliers')).toBeDefined();
+    expect(ADVANCED_ENTRIES.find((entry) => entry.path === '/suppliers')).toBeUndefined();
+    expect(RELEASE_PRIMARY_NAV.map((item) => item.path)).not.toContain('/sales/shipments');
+    expect(RELEASE_PRIMARY_NAV.map((item) => item.path)).not.toContain('/sales/finance');
   });
 
   it('still serves every one of those destinations from the router', () => {
@@ -423,14 +449,15 @@ describe('every entry is written for a person who does not know our words', () =
     const find = (query: string) =>
       ADVANCED_ENTRIES.filter((entry) => navEntryMatches(entry, query)).map((entry) => entry.key);
 
-    // "old stock" is Stock Ageing; "vendor" is Suppliers; "chase" is Follow-ups.
+    // Primary destinations such as Suppliers are intentionally absent from All screens; these
+    // terms exercise the searchable secondary directory.
     expect(find('old stock')).toContain('inventory-ageing');
-    expect(find('vendor')).toContain('suppliers');
+    expect(find('shortfall')).toContain('sourcing-cases');
     expect(find('chase')).toContain('sales-follow-ups');
   });
 
   it('matches on every term, not on any of them', () => {
     // A one-term-matches search turns "stock ageing" into every stock screen.
-    expect(navEntryMatches(ADVANCED_ENTRIES.find((e) => e.key === 'suppliers')!, 'vendor zzz')).toBe(false);
+    expect(navEntryMatches(ADVANCED_ENTRIES.find((e) => e.key === 'sourcing-cases')!, 'shortfall zzz')).toBe(false);
   });
 });

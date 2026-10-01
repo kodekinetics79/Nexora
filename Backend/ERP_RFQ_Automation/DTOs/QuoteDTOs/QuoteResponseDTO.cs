@@ -68,6 +68,38 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public string? SupersededByQuoteNo { get; set; }
 
         /// <summary>
+        /// A revision of this quote that has not been sent yet. The customer still holds THIS quote,
+        /// but its status can only move on the revision once that is sent, so the list offers to
+        /// finish the revision. Null when there is none or it was sent (then SupersededByQuoteNo).
+        /// </summary>
+        public long? PendingRevisionId { get; set; }
+        public string? PendingRevisionQuoteNo { get; set; }
+
+        /// <summary>The number printed on a quote made outside Nexora — the one the customer knows it by.</summary>
+        public string? ExternalQuoteReference { get; set; }
+
+        /// <summary>
+        /// Set when the rep made this quote outside Nexora and uploaded it: the name of that file.
+        /// The file, not a Nexora PDF, is what the customer holds.
+        /// </summary>
+        public string? UploadedFileName { get; set; }
+
+        /// <summary>
+        /// The client's own status on top of the fixed one (Setup › Quote statuses): a customer
+        /// step while the quote is SENT, or an ending once it closed. Null when none was picked.
+        /// A step left over on a quote that is no longer SENT is never projected.
+        /// </summary>
+        public long? SubStatusId { get; set; }
+        public string? SubStatusName { get; set; }
+        /// <summary>"STEP" or "ENDING"; null with <see cref="SubStatusId"/>.</summary>
+        public string? SubStatusKind { get; set; }
+        /// <summary>When the step or ending was set.</summary>
+        public DateTime? SubStatusOn { get; set; }
+
+        /// <summary>The quote's owner (Quote.OwnerUserId) by first and last name. Null when nobody owns it.</summary>
+        public string? OwnerName { get; set; }
+
+        /// <summary>
         /// R7: when the validity date was last moved by an explicit, reasoned extend command.
         /// Null when the validity is still the one set on the draft. Drives the "validity
         /// extended" chip and tells the SLA sweep this quote is being held open deliberately.

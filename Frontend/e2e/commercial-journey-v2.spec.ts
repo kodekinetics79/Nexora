@@ -648,9 +648,9 @@ test('11 approved Supplier offer prices the actual Customer Quote with cost evid
     rationale: 'Target margin approved for Release 02 acceptance.',
   }, commandHeaders('commercial-v2-customer-pricing-atlas')));
   await page.goto(`/sales/quotes/view/${quoteId()}`);
-  await expect(page.getByText('SELECTED SUPPLIER QUOTE')).toBeVisible();
+  await expect(page.getByText('Supplier quote', { exact: true })).toBeVisible();
   await expect(page.getByText('Atlas Automation Partners', { exact: false })).toBeVisible();
-  await expect(page.getByText('Supplier validity does not support this Customer Quote')).toBeVisible();
+  await expect(page.getByText('Supplier price ends before this quote')).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
   await page.screenshot({ path: path.join(evidenceDir, 'supplier-offer-customer-pricing.png'), fullPage: true });
 });
@@ -779,14 +779,14 @@ test('15 Supplier selection is retained as the governed sourcing award', async (
 test('16 Customer Quote shows the selected Supplier cost source', async ({ page }) => {
   await loginAs(page, 'manager');
   await page.goto(`/sales/quotes/view/${quoteId()}`);
-  await expect(page.getByText('SELECTED SUPPLIER QUOTE')).toBeVisible();
+  await expect(page.getByText('Supplier quote', { exact: true })).toBeVisible();
   await expect(page.getByText('Atlas Automation Partners', { exact: false })).toBeVisible();
 });
 
 test('17 Customer Quote blocks silent use of insufficient Supplier validity', async ({ page }) => {
   await loginAs(page, 'manager');
   await page.goto(`/sales/quotes/view/${quoteId()}`);
-  await expect(page.getByText('Supplier validity does not support this Customer Quote')).toBeVisible();
+  await expect(page.getByText('Supplier price ends before this quote')).toBeVisible();
 });
 
 test('18 quote lifecycle preserves completed follow-up history', async ({ page }) => {
@@ -1004,15 +1004,10 @@ test('34 role Today surfaces expose persisted operational work', async ({ page }
   await page.getByRole('button', { name: 'Open sourcing queue' }).click();
   await expect(page).toHaveURL(/\/procurement\/rfqs\/all\?state=requires-sourcing$/);
 
-  const inventory = await jsonOk<{ metrics: Array<{ label: string; value: number }>; exceptions: Array<{ partNumber: string }> }>(
-    await api(page, token, 'get', '/api/inventory-intelligence/overview'),
-  );
+  // Inventory Today is consolidated into the Products workspace for this release.
   await page.goto('/inventory/today');
-  await expect(page.getByRole('heading', { name: 'Inventory today' })).toBeVisible();
-  if (inventory.metrics.length) await expect(page.getByText(inventory.metrics[0].label, { exact: true })).toBeVisible();
-  if (inventory.exceptions.length) await expect(page.getByText(inventory.exceptions[0].partNumber, { exact: true }).first()).toBeVisible();
-  await page.getByRole('button', { name: 'View demand intelligence' }).click();
-  await expect(page).toHaveURL(/\/inventory\/demand$/);
+  await expect(page).toHaveURL(/\/inventory\/products$/);
+  await expect(page.getByRole('heading', { name: 'Products' })).toBeVisible();
 
   await page.goto('/executive/today');
   // /executive/today and /dashboard are the same screen, and it is no longer the "Executive view":
@@ -1331,12 +1326,6 @@ test('40 accepted shipment closes order to cash with replay safety', async ({ pa
   expect(order.items).toHaveLength(1);
   expect(order.nexoraSerial).toBe(required('E2E_V2_CLIENT_PO_EXACT_NEXORA_SERIAL'));
 
-  const allocation = await jsonOk<{ orderId: number; fullyAllocated: boolean }>(
-    await api(page, token, 'post', `/api/Order/${orderId}/allocate`),
-  );
-  expect(allocation.orderId).toBe(orderId);
-  expect(allocation.fullyAllocated).toBe(true);
-
   const shipments = await jsonOk<Shipment[]>(await api(page, token, 'get', '/api/Shipment'));
   let shipment = shipments.find((item) => item.orderId === orderId);
   const availabilityBeforeShipment = shipment ? null : await jsonOk<InventoryAvailability[]>(
@@ -1361,11 +1350,13 @@ test('40 accepted shipment closes order to cash with replay safety', async ({ pa
   expect(shipment.items).toHaveLength(order.items.length);
   expect(shipment.deliveryStatus).toBe('DISPATCHED');
 
+  // Reservations are outside this release. The shipment is the stock issue and must not create
+  // or consume a hidden hold on the customer's order.
   const consumedReservations = await jsonOk<StockReservation[]>(
     await api(page, token, 'get', '/api/inventory-intelligence/reservations?status=Consumed'),
   );
   expect(consumedReservations.some((item) => item.demandReference === `Order ${orderId}`
-    && item.quantity === order.items[0].quantity)).toBe(true);
+    && item.quantity === order.items[0].quantity)).toBe(false);
   const reconciliation = await jsonOk<{ balanced: boolean; driftCount: number }>(
     await api(page, token, 'get', '/api/inventory-intelligence/stock/reconciliation?driftOnly=true'),
   );
@@ -1380,7 +1371,7 @@ test('40 accepted shipment closes order to cash with replay safety', async ({ pa
       const after = availabilityAfterShipment.find((row) => row.inventoryId === before?.inventoryId);
       expect(before, `Order line ${item.id} must resolve to authoritative stock.`).toBeTruthy();
       expect(after?.onHand).toBe(before!.onHand - item.quantity);
-      expect(after?.reserved).toBe(before!.reserved - item.quantity);
+      expect(after?.reserved).toBe(before!.reserved);
     }
   }
 
@@ -1688,11 +1679,6 @@ test('41 sourced demand crosses supplier PO, inbound receipt, inventory, deliver
   expect(sourcedOrder.nexoraSerial).toBe(required('E2E_CORE_NEXORA_SERIAL'));
   expect(sourcedOrder.items.find((item) => item.id === sourcedOrderLineId)?.productId)
     .toBe(supplierPo!.lines[0].productId);
-  const allocation = await jsonOk<{ fullyAllocated: boolean }>(await api(
-    page, token, 'post', `/api/Order/${sourcedOrder.id}/allocate`,
-  ));
-  expect(allocation.fullyAllocated).toBe(true);
-
   let outbound = (await jsonOk<Shipment[]>(await api(page, token, 'get', '/api/Shipment')))
     .find((item) => item.orderId === sourcedOrder.id);
   const outboundAlreadyExisted = Boolean(outbound);
@@ -1727,7 +1713,7 @@ test('41 sourced demand crosses supplier PO, inbound receipt, inventory, deliver
     page, token, 'get', '/api/inventory-intelligence/reservations?status=Consumed',
   ));
   expect(consumed.some((item) => item.demandReference === `Order ${sourcedOrder.id}`
-    && item.quantity === sourcedOrder.items[0].quantity)).toBe(true);
+    && item.quantity === sourcedOrder.items[0].quantity)).toBe(false);
   expect(await jsonOk(await api(
     page, token, 'get', '/api/inventory-intelligence/stock/reconciliation?driftOnly=true',
   ))).toEqual(expect.objectContaining({ balanced: true, driftCount: 0 }));

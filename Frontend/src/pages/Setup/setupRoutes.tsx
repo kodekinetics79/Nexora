@@ -7,6 +7,7 @@ const WarehousePage = lazyWithRetry(() => import('./Warehouse/WarehousePage'));
 const UomPage = lazyWithRetry(() => import('./UOM/UomPage'));
 const LocationMaster = lazyWithRetry(() => import('./Location/LocationMaster'));
 const QuoteFormatPage = lazyWithRetry(() => import('./QuoteFormat/QuoteFormatPage'));
+const QuoteStatusesPage = lazyWithRetry(() => import('./QuoteStatuses/QuoteStatusesPage'));
 const SupplierEmailPage = lazyWithRetry(() => import('./SupplierEmail/SupplierEmailPage'));
 const BusinessUnitPage = lazyWithRetry(() => import('./BusinessUnit/BusinessUnitPage'));
 const PriceStructurePage = lazyWithRetry(() => import('./PriceStructure/PriceStructurePage'));
@@ -70,6 +71,9 @@ export const SETUP_ROUTES: SetupRoute[] = [
   // onto "Business Units". "Locations" is not a permission module and nothing enforces it.
   { path: 'locations', moduleName: 'Business Units', component: LocationMaster },
   { path: 'quote-format', moduleName: 'Quote Configuration', component: QuoteFormatPage },
+  // The client's own quote steps, endings and reasons. "Quotations", like price-structure: the
+  // words are picked on a quote. The server's writes are manager-only.
+  { path: 'quote-statuses', moduleName: 'Quotations', component: QuoteStatusesPage },
   // The wording around supplier RFQ emails (subject, greeting, opening, message, signature). It is
   // company-facing document wording like the quote format, so it shares that module.
   { path: 'supplier-email', moduleName: 'Quote Configuration', component: SupplierEmailPage },

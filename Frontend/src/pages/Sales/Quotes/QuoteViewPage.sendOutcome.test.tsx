@@ -89,7 +89,8 @@ const quoteFixture = () => ({
   ],
   customerName: 'Naspak',
   customerEmail: 'zahid@naspakinc.com',
-  rfqId: 58,
+  // No RFQ behind it, so Send walks the email chain this file pins (a quote from an RFQ opens the
+  // RFQ send window instead; see QuoteViewPage.send.test).
 });
 
 function renderQuote() {

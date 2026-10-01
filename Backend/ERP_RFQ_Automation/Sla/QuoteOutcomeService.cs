@@ -44,6 +44,20 @@ public interface IQuoteOutcomeService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Manual outcome capture with one of the client's own endings ("Partly won", "Tender
+    /// cancelled"): <paramref name="endingId"/> is a <c>QuoteEnding</c> row that must count as
+    /// <paramref name="outcome"/>. Null records the plain Won / Lost / Expired and clears any step
+    /// left on the quote. Implementations that predate client endings accept only null.
+    /// </summary>
+    Task<QuoteResponseDTO> SetOutcomeAsync(
+        long quoteId, long businessUnitId, string actorEmail,
+        string outcome, string? reasonCode, string? note, long? endingId,
+        CancellationToken ct = default)
+        => endingId is null
+            ? SetOutcomeAsync(quoteId, businessUnitId, actorEmail, outcome, reasonCode, note, ct)
+            : throw new NotSupportedException("Client endings are not supported by this outcome service.");
+
+    /// <summary>
     /// System path (SLA sweep): expires a SENT quote with the given reason
     /// (normally "AUTO_EXPIRED"). No role checks; no RespondedOn stamp.
     /// Returns false when the quote is no longer in SENT (nothing to do).
@@ -112,9 +126,15 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         ["expired"] = "EXPIRED"
     };
 
-    public async Task<QuoteResponseDTO> SetOutcomeAsync(
+    public Task<QuoteResponseDTO> SetOutcomeAsync(
         long quoteId, long businessUnitId, string actorEmail,
         string outcome, string? reasonCode = null, string? note = null,
+        CancellationToken ct = default)
+        => SetOutcomeAsync(quoteId, businessUnitId, actorEmail, outcome, reasonCode, note, null, ct);
+
+    public async Task<QuoteResponseDTO> SetOutcomeAsync(
+        long quoteId, long businessUnitId, string actorEmail,
+        string outcome, string? reasonCode, string? note, long? endingId,
         CancellationToken ct = default)
     {
         if (!OutcomeToStatusCode.TryGetValue(outcome?.Trim() ?? "", out var statusCode))
@@ -131,14 +151,16 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         // Revisions-lite chain lock (WP-B4): a quote that has been superseded by a
         // newer revision can no longer take an outcome — the outcome belongs on the
         // latest revision (and, once recorded there, locks the whole chain).
+        // A withdrawn (removed) revision replaced nothing, so it does not lock this quote.
         var supersededBy = await _context.Quotes.AsNoTracking()
-            .Where(q => q.RevisionOfQuoteId == quote.Id)
-            .Select(q => new { q.QuoteNo, q.RevisionNo })
+            .Where(q => q.RevisionOfQuoteId == quote.Id && q.RemovedOn == null)
+            .Select(q => new { q.QuoteNo, q.RevisionNo, q.SentOn })
             .FirstOrDefaultAsync(ct);
         if (supersededBy != null)
-            throw new InvalidOperationException(
-                $"Quote '{quote.QuoteNo}' has been superseded by revision '{supersededBy.QuoteNo}' " +
-                $"(Rev {supersededBy.RevisionNo}). Record the outcome on the latest revision instead.");
+            throw new InvalidOperationException(supersededBy.SentOn is null
+                ? $"Revision '{supersededBy.QuoteNo}' is waiting to be sent. Send it, then update its status."
+                : $"Quote '{quote.QuoteNo}' has been superseded by revision '{supersededBy.QuoteNo}' " +
+                  $"(Rev {supersededBy.RevisionNo}). Record the outcome on the latest revision instead.");
 
         // Terminal-state immutability: once an outcome is recorded the quote is
         // frozen; only a manager/admin may correct it.
@@ -157,6 +179,30 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         {
             reasonId = await ResolveReasonIdAsync(businessUnitId, reasonCode!, ct)
                 ?? throw new ArgumentException($"Unknown outcome reason '{reasonCode}'.");
+            // A reason the client gave a "for" is offered only for that outcome; one without is
+            // offered for Lost and Expired, and accepted on Won as it always was.
+            var reasonFor = await ParentStatusCodeAsync(reasonId.Value, ct);
+            if (reasonFor is not null && !string.Equals(reasonFor, statusCode, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"The reason '{reasonCode}' is for {OutcomeWord(reasonFor)}, not {OutcomeWord(statusCode)}.");
+        }
+
+        // The client's own ending must count as the outcome being recorded: choosing "Partly won"
+        // IS choosing Won. Nothing about the fixed status moves on the ending's say-so.
+        if (endingId.HasValue)
+        {
+            var ending = await _context.SetupMasters.AsNoTracking()
+                .Where(s => s.SetupId == endingId.Value && s.BusinessUnitId == businessUnitId
+                            && s.SetupType == QuoteClientStatusTypes.Ending)
+                .Select(s => new { s.SetupValue, s.IsActive, s.ParentSetupId })
+                .FirstOrDefaultAsync(ct)
+                ?? throw new ArgumentException("That ending is not on this workspace's list.");
+            if (ending.IsActive == false)
+                throw new ArgumentException($"'{ending.SetupValue}' is switched off. Switch it on in Setup to use it.");
+            var endingCountsAs = ending.ParentSetupId is long parentId ? await ParentCodeAsync(parentId, ct) : null;
+            if (!string.Equals(endingCountsAs, statusCode, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"'{ending.SetupValue}' counts as {OutcomeWord(endingCountsAs)}, not {OutcomeWord(statusCode)}.");
         }
 
         var now = DateTime.UtcNow;
@@ -164,6 +210,9 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         quote.OutcomeOn = now;
         quote.OutcomeReasonId = reasonId;
         quote.OutcomeNote = Truncate(note, 500);
+        // The ending, or nothing: a customer step belongs to SENT and does not outlive it.
+        quote.SubStatusId = endingId;
+        quote.SubStatusOn = endingId.HasValue ? now : null;
         if (recordsCustomerResponse) quote.RespondedOn ??= now;
         quote.ModifiedBy = actorEmail;
         quote.ModifiedDate = now;
@@ -202,9 +251,11 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         dto.OutcomeOn = quote.OutcomeOn;
         dto.OutcomeReasonId = quote.OutcomeReasonId;
         dto.OutcomeNote = quote.OutcomeNote;
+        await QuoteClientStatusReadModel.ApplyAsync(_context, businessUnitId,
+            new[] { new QuoteClientStatusReadModel.Row(dto, quote.SubStatusId, quote.SubStatusOn, quote.OwnerUserId) }, ct);
 
-        _logger.LogInformation("Quote {QuoteId} outcome '{Outcome}' recorded by {Actor} (reason {Reason}).",
-            quoteId, outcome, actorEmail, reasonCode ?? "-");
+        _logger.LogInformation("Quote {QuoteId} outcome '{Outcome}' recorded by {Actor} (reason {Reason}, ending {Ending}).",
+            quoteId, outcome, actorEmail, reasonCode ?? "-", endingId?.ToString() ?? "-");
 
         // WP-B4 passive metric (never throws, never blocks the outcome).
         await RecordOutcomeMetricAsync(quote, outcome!.Trim().ToLowerInvariant(), reasonCode, ct);
@@ -229,7 +280,8 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         // supersedes, so a match from another tenant is never legitimate — it would suppress this
         // tenant's auto-expiry on the strength of a foreign row.
         var superseded = await _context.Quotes.AsNoTracking().IgnoreQueryFilters()
-            .AnyAsync(q => q.RevisionOfQuoteId == quote.Id && q.BusinessUnitId == quote.BusinessUnitId, ct);
+            .AnyAsync(q => q.RevisionOfQuoteId == quote.Id && q.BusinessUnitId == quote.BusinessUnitId
+                           && q.RemovedOn == null, ct);
         if (superseded) return false;
 
         await EnsureExpiredStatusSeededAsync(quote.BusinessUnitId, ct);
@@ -238,6 +290,9 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
 
         quote.OutcomeOn = DateTime.UtcNow;
         quote.OutcomeReasonId = reasonId;
+        // A customer step belongs to SENT; the quote is leaving it.
+        quote.SubStatusId = null;
+        quote.SubStatusOn = null;
         quote.ModifiedBy = "system:sla-sweep";
         quote.ModifiedDate = DateTime.UtcNow;
         // NOTE: RespondedOn deliberately NOT stamped — the customer never responded.
@@ -345,6 +400,7 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
                 revisionNo = quote.RevisionNo,
                 outcome,
                 reasonCode,
+                endingId = quote.SubStatusId,
                 cycle = new
                 {
                     recDate,
@@ -471,23 +527,46 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         // activity service refuses anything but UTC, so a rep recording "won" after "customer
         // responded" got a 500 ("OccurredAtUtc must be UTC.") — the customer said yes and nothing
         // could be recorded (2026-09-15). Stamp the kind here, once, for every timestamp we pass.
-        await _sales.AppendActivityAsync(quote.BusinessUnitId, new AppendCommercialActivityCommand(
+        var command = new AppendCommercialActivityCommand(
             owner, activityType, "Quote", quote.Id,
             attribution?.CustomerId ?? quote.CustomerId, null, WeightedEligibleRepScoringEngine.AsUtc(occurredOn),
             outcomeCode, $"quote:{quote.Id}:{eventCode.ToLowerInvariant()}", actor,
             $"quote:{quote.Id}:commercial-activity",
-            $"quote:{quote.Id}:commercial-activity:{activityIdentity}"), ct);
+            $"quote:{quote.Id}:commercial-activity:{activityIdentity}");
+        if (activityType != CommercialActivityType.CustomerResponded)
+        {
+            await _sales.AppendActivityAsync(quote.BusinessUnitId, command, ct);
+            return;
+        }
+
+        // "The customer responded" is recorded once per quote (one key). It is re-asserted by the
+        // Customer responded button, by picking a customer step and by the outcome — often by a
+        // different person than the one who recorded it first, which the key's replay check reads
+        // as "different content". The fact is already on record, so that is not a failure: before
+        // this, rep A pressing Customer responded and manager B recording Won got a refusal.
+        try
+        {
+            await _sales.AppendActivityAsync(quote.BusinessUnitId, command, ct);
+        }
+        catch (SalesConflictException)
+        {
+            _logger.LogDebug("Quote {QuoteId}: the customer's response was already on record; kept the first entry.", quote.Id);
+        }
     }
 
     public async Task<IReadOnlyList<OutcomeReasonDto>> GetOutcomeReasonsAsync(long businessUnitId, CancellationToken ct = default)
     {
         await EnsureReasonsSeededAsync(businessUnitId, ct);
 
+        // The Lost / Expired reasons (and the ones with no "for"). Won reasons belong to the
+        // client's catalog (GET api/Quote/statuses); a lead rejection never offers "Best price".
         return await _context.SetupMasters.AsNoTracking()
             .Where(s => s.SetupType == "QuoteOutcomeReason"
                         && s.BusinessUnitId == businessUnitId
-                        && (s.IsActive == true || s.IsActive == null))
-            .OrderBy(s => s.SetupId)
+                        && (s.IsActive == true || s.IsActive == null)
+                        && (s.ParentSetupId == null
+                            || !_context.SetupMasters.Any(p => p.SetupId == s.ParentSetupId && p.SetupCode == "ACCEPTED")))
+            .OrderBy(s => s.SortOrder).ThenBy(s => s.SetupId)
             .Select(s => new OutcomeReasonDto
             {
                 Id = s.SetupId,
@@ -579,6 +658,30 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
             .FirstOrDefaultAsync(s => s.SetupType == "QuoteOutcomeReason" && s.SetupCode == code, ct);
         return row?.SetupId;
     }
+
+    /// <summary>The fixed status code a reason or ending row points at through ParentSetupId, or null.</summary>
+    private async Task<string?> ParentStatusCodeAsync(long setupId, CancellationToken ct)
+    {
+        var parentId = await _context.SetupMasters.AsNoTracking()
+            .Where(s => s.SetupId == setupId)
+            .Select(s => s.ParentSetupId)
+            .FirstOrDefaultAsync(ct);
+        return parentId is long id ? await ParentCodeAsync(id, ct) : null;
+    }
+
+    private async Task<string?> ParentCodeAsync(long statusId, CancellationToken ct)
+        => (await _context.SetupMasters.AsNoTracking()
+            .Where(s => s.SetupId == statusId)
+            .Select(s => s.SetupCode)
+            .FirstOrDefaultAsync(ct))?.Trim().ToUpperInvariant();
+
+    private static string OutcomeWord(string? statusCode) => statusCode?.ToUpperInvariant() switch
+    {
+        "ACCEPTED" => "Won",
+        "REJECTED" => "Lost",
+        "EXPIRED" => "Expired",
+        _ => "another status"
+    };
 
     private async Task<bool> IsTerminalStatusAsync(Quote quote, CancellationToken ct)
     {

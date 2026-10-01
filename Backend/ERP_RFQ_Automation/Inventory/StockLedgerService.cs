@@ -735,7 +735,7 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == key, ct)!;
 
     private async Task<decimal> ActiveReservedAsync(long businessUnitId, long inventoryId, CancellationToken ct)
-        => await _db.Set<StockReservation>().AsNoTracking()
+        => !InventoryReleaseScope.ReservationsEnabled ? 0m : await _db.Set<StockReservation>().AsNoTracking()
             .Where(r => r.BusinessUnitId == businessUnitId && r.InventoryId == inventoryId
                         && r.Status == StockReservationStatus.Active)
             .SumAsync(r => (decimal?)r.Quantity, ct) ?? 0m;

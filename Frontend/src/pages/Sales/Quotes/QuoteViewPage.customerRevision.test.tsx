@@ -151,7 +151,8 @@ describe('QuoteViewPage — a customer revision arrived after the draft', () => 
 
     const apply = await screen.findByRole('button', { name: /apply the new quantities/i });
     const keep = screen.getByRole('button', { name: /keep as quoted/i });
-    expect(apply).toHaveClass('MuiButton-contained');
+    // Contained only once the send check has answered: until then nothing is promoted.
+    await waitFor(() => expect(apply).toHaveClass('MuiButton-contained'));
     expect(keep).toHaveClass('MuiButton-outlined');
     // Exactly one contained button on the screen: the rep is not offered two "primary" moves.
     const contained = screen.getAllByRole('button').filter((b) => b.classList.contains('MuiButton-contained'));

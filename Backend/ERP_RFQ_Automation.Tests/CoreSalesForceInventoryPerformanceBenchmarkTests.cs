@@ -136,7 +136,7 @@ public sealed class CoreSalesForceInventoryPerformanceBenchmarkTests(
             Assert.Equal(2, route.Allocations.Count);
         });
         return Measurement.Local("multi_warehouse_atp_3_warehouses", operations, samples,
-            contentCount: snapshots.Length, note: "ATP subtracts reserved, allocated, and safety stock before deterministic warehouse ordering.");
+            contentCount: snapshots.Length, note: "ATP ignores historical reservations and subtracts allocated and safety stock before deterministic warehouse ordering.");
     }
 
     private static async Task<Measurement> BenchmarkReadAggregationAsync()
@@ -182,6 +182,10 @@ public sealed class CoreSalesForceInventoryPerformanceBenchmarkTests(
             {
                 outcomes.Add("insufficient_stock");
             }
+            catch (InvalidOperationException exception) when (exception.Message == InventoryReleaseScope.ReservationsDisabledMessage)
+            {
+                outcomes.Add("disabled");
+            }
             catch (PostgresException exception)
             {
                 outcomes.Add($"contention_error:PostgresException:{exception.SqlState}");
@@ -202,13 +206,13 @@ public sealed class CoreSalesForceInventoryPerformanceBenchmarkTests(
         var availability = await new InventoryAvailabilityService(verify)
             .GetAvailabilityAsync(Tenant, InventoryId);
         var reserved = outcomes.Count(value => value == "reserved");
-        var rejected = outcomes.Count(value => value == "insufficient_stock");
+        var rejected = outcomes.Count(value => value == "disabled");
         var contentionErrors = outcomes.Count(value => value.StartsWith("contention_error", StringComparison.Ordinal));
 
-        Assert.True(reserved > 0, $"No reservation succeeded. Outcomes: {string.Join(", ", outcomes.Order())}");
-        Assert.Equal(10, rejected);
+        Assert.Equal(0, reserved);
+        Assert.Equal(attempts, rejected);
         Assert.Equal(0, contentionErrors);
-        Assert.Equal(0m, availability.Available);
+        Assert.Equal(100m, availability.Available);
         return Measurement.Local("concurrent_postgresql_reservations", attempts, timings.ToArray(),
             queryCount: commandCounter.Commands, contentionCount: rejected + contentionErrors,
             note: $"reserved={reserved}; insufficient_stock={rejected}; unexpected_contention_errors={contentionErrors}; final_ATP={availability.Available}.");

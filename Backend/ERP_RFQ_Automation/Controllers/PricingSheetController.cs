@@ -2,6 +2,7 @@ using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Procurement;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -34,7 +35,8 @@ public sealed class PricingSheetController(ErpRfqAutomationContext db) : Control
     public sealed record PricingRow(
         long ProductId, string PartNo, string? Name, string? Unit,
         long? CurrencyId, string? CurrencyCode, decimal? LandedCost, decimal? SalePrice,
-        decimal? LastPurchasePrice, decimal OnHand, DateTime? ChangedOn, string? ChangedBy);
+        decimal? LastPurchasePrice, decimal OnHand, DateTime? ChangedOn, string? ChangedBy,
+        string? LastPurchaseCurrencyCode, DateTime? LastPurchaseOn);
 
     public sealed record PricingPage(
         IReadOnlyList<PricingRow> Rows, int Total, int Page, int PageSize, int MissingCount,
@@ -74,11 +76,12 @@ public sealed class PricingSheetController(ErpRfqAutomationContext db) : Control
             {
                 p.Id, p.PartNo, Name = p.ProductName ?? p.Description, Unit = p.Uom != null ? p.Uom.UomCode : null,
                 p.PriceCurrencyId, CurrencyCode = p.PriceCurrency != null ? p.PriceCurrency.Code : null,
-                p.UnitCost, p.SellingPrice, p.FinalLandedCost
+                p.UnitCost, p.SellingPrice
             })
             .ToListAsync(ct);
 
         var ids = rows.Select(r => r.Id).ToList();
+        var purchaseEvidence = await ProductPurchaseEvidenceReader.ReadLatestAsync(db, tenant, ids, ct);
         var onHand = (await db.Set<Models.Inventory>().AsNoTracking()
                 .Where(i => i.Buid == tenant && i.ProductId != null && ids.Contains(i.ProductId.Value))
                 .Select(i => new { ProductId = i.ProductId!.Value, i.QtyOnHand })
@@ -96,10 +99,12 @@ public sealed class PricingSheetController(ErpRfqAutomationContext db) : Control
         return Ok(new PricingPage(
             rows.Select(r => new PricingRow(
                 r.Id, r.PartNo, r.Name, r.Unit, r.PriceCurrencyId, r.CurrencyCode,
-                Positive(r.UnitCost), Positive(r.SellingPrice), Positive(r.FinalLandedCost),
+                Positive(r.UnitCost), Positive(r.SellingPrice),
+                purchaseEvidence.TryGetValue(r.Id, out var purchase) ? purchase.UnitCost : null,
                 onHand.GetValueOrDefault(r.Id),
                 changes.TryGetValue(r.Id, out var c) ? c.On : null,
-                changes.TryGetValue(r.Id, out var c2) ? c2.By : null)).ToList(),
+                changes.TryGetValue(r.Id, out var c2) ? c2.By : null,
+                purchase?.CurrencyCode, purchase?.PurchasedOn)).ToList(),
             total, page, pageSize, missingCount, currencies));
     }
 
@@ -135,12 +140,18 @@ public sealed class PricingSheetController(ErpRfqAutomationContext db) : Control
                 continue;
             }
             var label = product.PartNo;
+            var complete = change.LandedCost is not null
+                && change.SalePrice is not null
+                && change.CurrencyId is not null;
+            var empty = change.LandedCost is null
+                && change.SalePrice is null
+                && change.CurrencyId is null;
+            if (!complete && !empty)
+                problems.Add($"{label}: landed cost, sale price and currency must be set together, or all cleared.");
             if (change.LandedCost is { } cost && (cost <= 0m || cost > MaxPrice))
                 problems.Add($"{label}: landed cost must be above 0.");
             if (change.SalePrice is { } sale && (sale <= 0m || sale > MaxPrice))
                 problems.Add($"{label}: sale price must be above 0.");
-            if ((change.LandedCost is not null || change.SalePrice is not null) && change.CurrencyId is null)
-                problems.Add($"{label}: choose the currency these prices are in.");
             if (change.CurrencyId is { } currencyId && !currencies.Contains(currencyId))
                 problems.Add($"{label}: choose one of your company's currencies.");
         }
@@ -153,8 +164,10 @@ public sealed class PricingSheetController(ErpRfqAutomationContext db) : Control
         foreach (var change in changes)
         {
             var product = products[change.ProductId];
-            product.UnitCost = change.LandedCost is { } cost ? Math.Round(cost, 4) : null;
-            product.SellingPrice = change.SalePrice is { } sale ? Math.Round(sale, 4) : null;
+            // Products stores both amounts as decimal(18,2); normalize before persistence so the
+            // API never appears to retain precision the database necessarily discards.
+            product.UnitCost = change.LandedCost is { } cost ? Math.Round(cost, 2) : null;
+            product.SellingPrice = change.SalePrice is { } sale ? Math.Round(sale, 2) : null;
             product.PriceCurrencyId = change.CurrencyId;
             if (db.Entry(product).State == EntityState.Modified)
             {

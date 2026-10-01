@@ -109,6 +109,7 @@ describe('the strip itself', () => {
     );
 
     expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      'All',
       'Drafts',
       'Sent',
       'Follow-up due',

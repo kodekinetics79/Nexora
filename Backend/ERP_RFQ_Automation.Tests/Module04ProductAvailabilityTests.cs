@@ -65,9 +65,9 @@ public sealed class Module04ProductAvailabilityTests
 
         var match = Assert.IsType<ProductMatchSuggestionDTO>(result.ExactMatch);
         Assert.True(result.HasExactMatch);
-        Assert.Equal(10m, match.AvailableToPromise);
+        Assert.Equal(15m, match.AvailableToPromise);
         Assert.Equal(3m, match.IncomingAvailable);
-        Assert.Equal(7m, match.ProjectedShortage);
+        Assert.Equal(2m, match.ProjectedShortage);
         Assert.Equal("KnownShortage", match.AvailabilityStatus);
         Assert.Equal("EUR", match.CostCurrencyCode);
         Assert.Equal(DateOnly.FromDateTime(DateTime.UtcNow).AddDays(14), match.ExpectedAvailableOn);

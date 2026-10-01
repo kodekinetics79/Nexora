@@ -8,6 +8,7 @@ import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import quoteService from '../../../api/services/quoteService';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
+import ValidityDateField from './ValidityDateField';
 
 interface ExtendValidityDialogProps {
   open: boolean;
@@ -111,14 +112,17 @@ const ExtendValidityDialog: React.FC<ExtendValidityDialogProps> = ({
             stay exactly as the customer already has them.
           </Typography>
 
-          <TextField
+          <ValidityDateField
             fullWidth
             size="small"
-            type="date"
             label="New validity date"
             value={validUntil}
-            onChange={(e) => setValidUntil(e.target.value)}
-            slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: minDate } }}
+            onChange={setValidUntil}
+            // "+30 days" holds the price 30 days past the date the customer already has, or past
+            // today when that date has gone.
+            from={currentValidUntil && dayjs(currentValidUntil).isAfter(dayjs()) ? dayjs(currentValidUntil).format('YYYY-MM-DD') : null}
+            presetLabel={(days) => `+${days} days`}
+            min={minDate}
             error={touched && (dateMissing || dateTooEarly)}
             helperText={
               touched && dateMissing

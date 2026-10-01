@@ -19,6 +19,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import customerService from '../../../api/services/customerService';
 import currencyService from '../../../api/services/currencyService';
+import ValidityDateField from './ValidityDateField';
 import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
 import productService from '../../../api/services/productService';
@@ -529,7 +530,7 @@ const EditQuotePage: React.FC = () => {
                 <TextField fullWidth type="date" label="Date" size="small" value={quoteDate} onChange={(e) => setQuoteDate(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
               </Grid>
               <Grid size={{ xs: 12, md: 2 }}>
-                <TextField fullWidth type="date" label="Valid Until" size="small" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
+                <ValidityDateField fullWidth size="small" label="Valid Until" value={validUntil} onChange={setValidUntil} from={quoteDate} min={quoteDate || undefined} />
               </Grid>
               <Grid size={{ xs: 12, md: 8 }}>
                 <TextField fullWidth label="Notes to customer" helperText="Printed on the quote and in the email" size="small" value={headerRemarks} onChange={(e) => setHeaderRemarks(e.target.value)} />

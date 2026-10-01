@@ -261,6 +261,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         long? orderId = null, long? orderItemId = null, string? actor = null,
         long? materialLotId = null, CancellationToken ct = default)
     {
+        InventoryReleaseScope.RequireReservations();
         if (quantity <= 0m)
             throw new ArgumentOutOfRangeException(nameof(quantity), "Reservation quantity must be positive.");
         if (string.IsNullOrWhiteSpace(idempotencyKey))
@@ -366,6 +367,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
     public async Task<int> ReleaseForOrderAsync(long businessUnitId, long orderId, string? actor = null, CancellationToken ct = default)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled) return 0;
         if (_db.Database.CurrentTransaction is not null)
             return await ReleaseWithinTransactionAsync(businessUnitId, orderId, actor, ct);
         var strategy = _db.Database.CreateExecutionStrategy();
@@ -383,6 +385,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
     public async Task ReleaseAsync(long businessUnitId, long reservationId, uint expectedVersion,
         string idempotencyKey, string? actor = null, CancellationToken ct = default)
     {
+        InventoryReleaseScope.RequireReservations();
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
 
@@ -456,6 +459,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         long businessUnitId, long inventoryId, decimal quantityToFree, string? actor = null,
         CancellationToken ct = default)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled) return [];
         if (quantityToFree <= 0m) return [];
 
         async Task<IReadOnlyList<StockReservation>> ReleaseAsync()
@@ -531,7 +535,8 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         // the kind of silent ordering assumption that produces write-offs nobody can explain.
         return lots
             .Select(x => new ReservableLot(x.Id, x.LotNumber,
-                x.QuantityReceived - x.QuantityConsumed, held.GetValueOrDefault(x.Id, 0m),
+                x.QuantityReceived - x.QuantityConsumed,
+                InventoryReleaseScope.ReservationsEnabled ? held.GetValueOrDefault(x.Id, 0m) : 0m,
                 x.ExpiryDate, x.ReceivedOn))
             .Where(x => x.Reservable > 0m)
             .OrderBy(x => x.ExpiryDate.HasValue ? 0 : 1)
@@ -544,6 +549,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
     public async Task<IReadOnlyList<StockReservation>> ReleaseHoldsOnLotAsync(
         long businessUnitId, long materialLotId, string? actor = null, CancellationToken ct = default)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled) return [];
         async Task<IReadOnlyList<StockReservation>> ReleaseAsync()
         {
             var active = await _db.Set<StockReservation>()
@@ -600,6 +606,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
     public async Task ConsumeAsync(long businessUnitId, long reservationId, string? actor = null, CancellationToken ct = default)
     {
+        InventoryReleaseScope.RequireReservations();
         if (_db.Database.CurrentTransaction is not null)
         {
             await ConsumeWithinTransactionAsync(businessUnitId, reservationId, actor, ct);
@@ -619,6 +626,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
     public async Task<StockReservation> SplitAsync(long businessUnitId, long reservationId, decimal quantity,
         string? actor = null, CancellationToken ct = default)
     {
+        InventoryReleaseScope.RequireReservations();
         if (quantity <= 0m)
             throw new ArgumentOutOfRangeException(nameof(quantity), "Split quantity must be positive.");
 
@@ -694,6 +702,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
     public async Task<int> ExpireStaleAsync(long businessUnitId, DateTime createdBefore, string? actor = null,
         CancellationToken ct = default)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled) return 0;
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
@@ -884,6 +893,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
     private async Task<decimal> ActiveReservedAsync(long businessUnitId, long inventoryId, CancellationToken ct)
     {
+        if (!InventoryReleaseScope.ReservationsEnabled) return 0m;
         var sum = await _db.Set<StockReservation>()
             .Where(r => r.BusinessUnitId == businessUnitId && r.InventoryId == inventoryId
                         && r.Status == StockReservationStatus.Active)

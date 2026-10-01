@@ -890,7 +890,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             .ToListAsync(ct);
         var inventoryIds = inventory.Select(x => x.Id).ToArray();
         var reservations = await _db.Set<StockReservation>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
+            .Where(x => InventoryReleaseScope.ReservationsEnabled && x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
                 && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId).Select(x => new { InventoryId = x.Key, Quantity = x.Sum(v => v.Quantity) })
             .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity, ct);
@@ -2459,6 +2459,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     public async Task<GoodsReceiptResult> PostGoodsReceiptAsync(PostGoodsReceiptCommand command, CancellationToken ct = default)
     {
         ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+        command = command with
+        {
+            SupplierInvoiceNumber = NormalizeReceiptDocumentReference(command.SupplierInvoiceNumber, "Supplier invoice number"),
+            BillOfLadingNumber = NormalizeReceiptDocumentReference(command.BillOfLadingNumber, "Bill of lading number")
+        };
         if (command.Lines.Count == 0 || command.Lines.Select(x => x.PurchaseOrderLineId).Distinct().Count() != command.Lines.Count
             || command.Lines.Any(x => x.Quantity <= 0) || string.IsNullOrWhiteSpace(command.ReceiptNumber))
             throw new ProcurementValidationException("A receipt number and distinct positive receipt lines are required.");
@@ -2514,6 +2519,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             {
                 BusinessUnitId = command.BusinessUnitId, SupplierPurchaseOrderId = po.Id, WarehouseId = command.WarehouseId,
                 ReceiptNumber = command.ReceiptNumber.Trim(), ReceivedOn = command.ReceivedOn, IdempotencyKey = command.IdempotencyKey.Trim(),
+                SupplierInvoiceNumber = command.SupplierInvoiceNumber, BillOfLadingNumber = command.BillOfLadingNumber,
                 RequestHash = hash, CreatedOn = now, CreatedBy = command.Actor.Trim()
             };
             _db.GoodsReceipts.Add(receipt);
@@ -2777,7 +2783,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             return new SourcingCandidateView(x.Id, x.SupplierId, supplier.Name, supplier.ContactEmail,
                 x.Rank, x.EvidenceType, x.RecommendationReason, x.EvidenceScore, x.EvidenceFreshOn, x.Selected,
                 supplier.GovernanceStatus, supplier.VerificationStatus, supplier.ComplianceStatus,
-                supplier.RiskStatus, supplier.ReadinessStatus, blockers.Count == 0, blockers);
+                supplier.RiskStatus, supplier.ReadinessStatus, blockers.Count == 0, blockers, supplier.Tier);
         }).ToArray();
     }
 
@@ -3225,7 +3231,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             }).ToListAsync(ct);
         var inventoryIds = inventory.Select(x => x.Id).ToArray();
         var reserved = await _db.Set<StockReservation>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
+            .Where(x => InventoryReleaseScope.ReservationsEnabled && x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
                 && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId).Select(x => new { InventoryId = x.Key, Quantity = x.Sum(v => v.Quantity) })
             .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity, ct);
@@ -3308,8 +3314,17 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         return demand;
     }
 
+    private static string? NormalizeReceiptDocumentReference(string? value, string label)
+    {
+        var normalized = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        if (normalized?.Length > 100)
+            throw new ProcurementValidationException($"{label} must be 100 characters or fewer.");
+        return normalized;
+    }
+
     private static string ReceiptBusinessHash(PostGoodsReceiptCommand command)
-        => Hash(new
+    {
+        var receiptHash = Hash(new
         {
             command.BusinessUnitId,
             command.PurchaseOrderId,
@@ -3338,6 +3353,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     },
                 }).ToArray()
         });
+        // Preserve historical hashes for receipts without document references so old retries
+        // continue to replay. Once supplied, both references are immutable business content.
+        return command.SupplierInvoiceNumber is null && command.BillOfLadingNumber is null
+            ? receiptHash
+            : Hash(new { ReceiptHash = receiptHash, command.SupplierInvoiceNumber, command.BillOfLadingNumber });
+    }
 
     /// <summary>
     /// Landed cost of a workbench-captured supplier quote line. Freight, duty and other captured

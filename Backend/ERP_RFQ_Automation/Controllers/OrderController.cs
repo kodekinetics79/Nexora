@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.DTOs.OrderDTOs;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.Inventory;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System;
@@ -47,6 +48,8 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Orders", PermissionAction.Edit)]
         public async Task<IActionResult> AllocateStock(long id, [FromQuery] long? businessUnitId = null)
         {
+            if (!InventoryReleaseScope.ReservationsEnabled)
+                return Conflict(new { error = InventoryReleaseScope.ReservationsDisabledMessage });
             var buId = ResolveBusinessUnitId(businessUnitId);
             if (buId <= 0) return BadRequest("Business Unit ID is required.");
             if (!await CanAccessOrderAsync(id)) return NotFound();
@@ -60,6 +63,8 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Orders", PermissionAction.Edit)]
         public async Task<IActionResult> ReleaseStock(long id, [FromQuery] long? businessUnitId = null)
         {
+            if (!InventoryReleaseScope.ReservationsEnabled)
+                return Conflict(new { error = InventoryReleaseScope.ReservationsDisabledMessage });
             var buId = ResolveBusinessUnitId(businessUnitId);
             if (buId <= 0) return BadRequest("Business Unit ID is required.");
             if (!await CanAccessOrderAsync(id)) return NotFound();
@@ -73,6 +78,8 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Orders", PermissionAction.Edit)]
         public async Task<IActionResult> ConsumeStock(long id, [FromQuery] long? businessUnitId = null)
         {
+            if (!InventoryReleaseScope.ReservationsEnabled)
+                return Conflict(new { error = InventoryReleaseScope.ReservationsDisabledMessage });
             var buId = ResolveBusinessUnitId(businessUnitId);
             if (buId <= 0) return BadRequest("Business Unit ID is required.");
             if (!await CanAccessOrderAsync(id)) return NotFound();

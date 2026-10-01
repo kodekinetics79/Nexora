@@ -8,6 +8,9 @@ export interface OrderDTO {
   customerName: string;
   quoteId?: number;
   quoteNo?: string;
+  /** The buyer PO and submitted quote that authorize this Client Order. */
+  customerPurchaseOrderId?: number | null;
+  clientPoNumber?: string | null;
   rfqId?: number;
   rfqNo?: string;
   leadId?: number;

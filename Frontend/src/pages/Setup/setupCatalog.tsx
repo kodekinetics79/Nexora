@@ -8,6 +8,7 @@ import {
   Percent as PriceStructureIcon,
   Policy as CommercialPolicyIcon,
   Article as QuoteFormatIcon,
+  Flag as QuoteStatusesIcon,
   ForwardToInbox as SupplierEmailIcon,
   AltRoute as RoutingIcon,
   AlternateEmail as MailboxIcon,
@@ -82,6 +83,13 @@ export const SETUP_ROOT = '/setup';
  */
 export const SETUP_TYPES_OWNED_ELSEWHERE: Record<string, { label: string; path: string }> = {
   price_structure: { label: 'Price Structure', path: '/setup/price-structure' },
+  // The client's own quote words. QuoteStatus is the fixed lifecycle (Draft, Sent, Won…): shown
+  // read-only here and not editable anywhere, because QuoteViewPage compares its labels and a
+  // renamed "Sent" breaks the quote page. Steps, endings and reasons are edited in Quote statuses.
+  quotestatus: { label: 'Quote statuses', path: '/setup/quote-statuses' },
+  quotestep: { label: 'Quote statuses', path: '/setup/quote-statuses' },
+  quoteending: { label: 'Quote statuses', path: '/setup/quote-statuses' },
+  quoteoutcomereason: { label: 'Quote statuses', path: '/setup/quote-statuses' },
 };
 
 /** Normalises a stored setup type the way the backend does before comparing it. */
@@ -186,6 +194,15 @@ export const SETUP_GROUPS: SetupGroup[] = [
         icon: <QuoteFormatIcon />,
         moduleName: 'Quote Configuration',
         keywords: ['quote format', 'template', 'pdf', 'numbering', 'terms', 'layout', 'branding'],
+      },
+      {
+        key: 'quote-statuses',
+        label: 'Quote statuses',
+        description: "The customer's steps while a quote is open, how a quote ended, and the reasons behind it.",
+        path: '/setup/quote-statuses',
+        icon: <QuoteStatusesIcon />,
+        moduleName: 'Quotations',
+        keywords: ['status', 'stage', 'step', 'outcome', 'ending', 'reason', 'won', 'lost'],
       },
       {
         key: 'supplier-email',

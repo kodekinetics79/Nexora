@@ -9,10 +9,10 @@ namespace ERP_RFQ_Automation.Interfaces
 {
     public interface IProductRepository
     {
-        Task<(IEnumerable<ProductResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null);
+        Task<(IEnumerable<ProductResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, ProductListQuery? listQuery = null);
         Task<Product> GetByIdAsync(long id, long businessUnitId);
         Task AddAsync(Product product, List<IFormFile>? attachments);
-        Task UpdateAsync(Product product, long businessUnitId, List<IFormFile>? attachments);
+        Task UpdateAsync(Product product, long businessUnitId, List<IFormFile>? attachments, bool applyPricing = false);
         Task DeleteAsync(long id, long businessUnitId);
         Task<List<BusinessUnitLookupDTO>> GetActiveBusinessUnitsAsync();
         Task<List<ProductCategoryLookupDTO>> GetProductCategoriesAsync(long businessUnitId);

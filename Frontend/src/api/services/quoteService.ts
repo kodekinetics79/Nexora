@@ -1,4 +1,5 @@
 import axiosInstance from '../axiosInstance';
+import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 
 /**
  * What the server did when asked to remove a quotation. `deleted` is false for the normal case —
@@ -136,6 +137,24 @@ export interface QuoteDTO {
   daysSinceSent?: number | null;
   /** Set once a later revision was SENT: the customer holds that one, so this quote no longer counts. */
   supersededByQuoteNo?: string | null;
+  /** A revision of this quote not sent yet: the customer still holds this one; its status moves once the revision goes out. */
+  pendingRevisionId?: number | null;
+  pendingRevisionQuoteNo?: string | null;
+  /** The number printed on a quote made outside Nexora. */
+  externalQuoteReference?: string | null;
+  /** Set when the quote was made outside Nexora and uploaded: the file the customer holds. */
+  uploadedFileName?: string | null;
+  /**
+   * The client's own status on top of the fixed one (Setup > Quote statuses): a customer step
+   * while the quote is SENT ("Technical evaluation"), or an ending once it closed ("Partly won").
+   * Null when none was picked. The fixed status (statusCode) still drives everything else.
+   */
+  subStatusId?: number | null;
+  subStatusName?: string | null;
+  subStatusKind?: 'STEP' | 'ENDING' | null;
+  subStatusOn?: string | null;
+  /** The person who owns the quote (Quote.OwnerUserId), by name. Null when nobody does. */
+  ownerName?: string | null;
   // Reasoned validity extensions (R7)
   /** When the validity date was last moved by an explicit, reasoned extend command. */
   validityExtendedOn?: string | null;
@@ -258,9 +277,13 @@ export interface QuoteSendOutcome {
  * later with nobody watching. A rep who read "emailed" closed the tab; the customer had nothing.
  */
 export const describeQuoteSendOutcome = (
-  result: Pick<QuoteSendOutcome, 'delivered' | 'queuedForDelivery'>,
+  result: Pick<QuoteSendOutcome, 'delivered' | 'queuedForDelivery'> & { replayed?: boolean },
 ): { delivered: boolean; message: string } =>
-  result.delivered
+  // A quote has one delivery. Sending it "again" with the same words replays that delivery: the
+  // customer already has it and nothing new went out, so the rep is told exactly that.
+  result.delivered && result.replayed
+    ? { delivered: true, message: 'Already emailed to the customer. Nothing new was sent.' }
+    : result.delivered
     ? { delivered: true, message: 'Quote emailed to the customer' }
     : {
         delivered: false,
@@ -393,6 +416,31 @@ export interface QuoteValidityExtensionResult {
 
 export type QuoteOutcome = 'won' | 'lost' | 'expired';
 
+/** What a client status counts as on dashboards, reminders and auto-expiry. */
+export type QuoteCountsAs = 'WON' | 'LOST' | 'EXPIRED';
+
+export interface QuoteStatusOption {
+  id: number;
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+  /** Seeded by Nexora and not editable (e.g. "Expired automatically"). */
+  isSystem: boolean;
+}
+export interface QuoteEndingOption extends QuoteStatusOption { countsAs: QuoteCountsAs }
+export interface QuoteReasonOption extends QuoteStatusOption {
+  code: string;
+  /** Which outcome the reason is offered for. Null = Lost and Expired (the reasons that existed before). */
+  for: QuoteCountsAs | null;
+}
+/** The client's own quote statuses (Setup > Quote statuses). Won / Lost / Expired themselves are fixed and not listed. */
+export interface QuoteStatusCatalog {
+  steps: QuoteStatusOption[];
+  endings: QuoteEndingOption[];
+  reasons: QuoteReasonOption[];
+}
+export type QuoteStatusKind = 'step' | 'ending' | 'reason';
+
 export interface PaginatedQuotes {
   items: QuoteDTO[];
   totalItems: number;
@@ -404,6 +452,17 @@ export interface QuoteParams {
   pageSize?: number;
   search?: string;
   state?: string;
+}
+
+export interface UploadQuoteInput {
+  file: File;
+  rfqId: number;
+  quoteNumber: string;
+  sentOn: string;
+  validUntil?: string | null;
+  currencyId: number;
+  /** Before VAT. Nexora adds the VAT at the tenant's rate, as on every quote. */
+  amount: number;
 }
 
 const quoteService = {
@@ -456,6 +515,30 @@ const quoteService = {
    * refusal reason would otherwise be unreadable and every caller would fall back to a generic
    * "download failed". The body is decoded back to JSON here so the rep sees what to do next.
    */
+  /**
+   * A quote made outside Nexora (by hand, in Excel, on the customer's portal): the file is kept and
+   * the quote is recorded on its RFQ as sent on `sentOn`. Dates are `YYYY-MM-DD`. An unsent draft
+   * already on the RFQ is replaced, and `replacedDraftNo` names it.
+   */
+  upload: async (input: UploadQuoteInput): Promise<{ quoteId: number; quoteNo: string; replacedDraftNo?: string | null }> => {
+    const form = new FormData();
+    form.append('file', input.file);
+    form.append('rfqId', String(input.rfqId));
+    form.append('quoteNumber', input.quoteNumber.trim());
+    form.append('sentOn', input.sentOn);
+    if (input.validUntil) form.append('validUntil', input.validUntil);
+    form.append('currencyId', String(input.currencyId));
+    form.append('amount', String(input.amount));
+    const { data } = await axiosInstance.post('/api/Quote/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return data;
+  },
+
+  /** The file of a quote made outside Nexora, saved under its own name. */
+  downloadUploadedFile: (id: number, fileName: string): Promise<void> =>
+    downloadAuthenticatedFile(`/api/Quote/${id}/uploaded-file`, fileName),
+
   downloadPdf: async (id: number): Promise<Blob> => {
     try {
       const { data } = await axiosInstance.get(`/api/Quote/${id}/pdf`, { responseType: 'blob' });
@@ -664,13 +747,43 @@ const quoteService = {
     outcome: QuoteOutcome,
     reasonCode?: string,
     note?: string,
+    /** One of the client's own endings; it must count as `outcome`. */
+    endingId?: number | null,
   ): Promise<QuoteDTO> => {
     const { data } = await axiosInstance.post(`/api/Quote/${id}/outcome`, {
       outcome,
       reasonCode: reasonCode || undefined,
       note: note || undefined,
+      endingId: endingId || undefined,
     });
     return data;
+  },
+
+  /** The client's own statuses. Reps get the active ones; Setup asks for all. */
+  getStatusCatalog: async (includeInactive = false): Promise<QuoteStatusCatalog> => {
+    const { data } = await axiosInstance.get('/api/Quote/statuses', { params: { includeInactive: includeInactive || undefined } });
+    return data;
+  },
+
+  /**
+   * Sets (or clears, with null) the client's customer step on a SENT quote. Picking a step also
+   * records that the customer responded, so the quote stops showing "No reply".
+   */
+  setStep: async (id: number, stepId: number | null): Promise<QuoteDTO> => {
+    const { data } = await axiosInstance.put(`/api/Quote/${id}/step`, { stepId });
+    return data;
+  },
+
+  /** Setup > Quote statuses: add one of the client's own steps, endings or reasons. */
+  addStatusOption: async (kind: QuoteStatusKind, body: { name: string; countsAs?: QuoteCountsAs; for?: QuoteCountsAs | null }) => {
+    const { data } = await axiosInstance.post('/api/Quote/statuses', { kind, ...body });
+    return data as QuoteStatusOption;
+  },
+
+  /** Setup > Quote statuses: rename, move, switch on/off. What an ending counts as never changes. */
+  updateStatusOption: async (id: number, body: { name?: string; sortOrder?: number; isActive?: boolean; for?: QuoteCountsAs | null }) => {
+    const { data } = await axiosInstance.put(`/api/Quote/statuses/${id}`, body);
+    return data as QuoteStatusOption;
   },
 
   markResponded: async (id: number): Promise<void> => {

@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
+  DialogContentText,
   Grid, FormControlLabel, Switch, TextField, CircularProgress,
   Table, TableHead, TableRow, TableCell, TableBody,
   Tooltip, Divider, MenuItem, Select, FormControl, InputLabel, Alert,
@@ -121,6 +122,17 @@ const ContactSubForm: React.FC<{
 /** Said wherever a supplier cannot be created, so the absence is never unexplained. */
 const NO_CREATE_PERMISSION = 'Ask your administrator for permission to add suppliers.';
 
+const supplierDeleteError = (error: any): string => {
+  const detail = error?.response?.data?.detail || error?.response?.data;
+  if (typeof detail === 'string' && detail.toLowerCase().includes('commercial lineage')) {
+    return 'This supplier is already part of commercial history, so it was not deleted. Open the profile and use Supplier Governance to mark it inactive instead.';
+  }
+  if (error?.response?.status === 404) {
+    return 'This supplier profile no longer exists. Refresh the directory to see the latest list.';
+  }
+  return 'The supplier profile could not be deleted. Nothing was changed; retry or open the profile to review it.';
+};
+
 const SuppliersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -133,6 +145,7 @@ const SuppliersPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const canCreateSupplier = hasPermission('Suppliers', 'create');
   const canEditSupplier = hasPermission('Suppliers', 'edit');
+  const canDeleteSupplier = hasPermission('Suppliers', 'delete');
   const canViewContacts = hasPermission('Suppliers');
   const canCreateContact = hasPermission('Suppliers', 'create');
   const canEditContact = hasPermission('Suppliers', 'edit');
@@ -148,6 +161,8 @@ const SuppliersPage: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<SupplierDTO | null>(null);
   const [formData, setFormData] = useState<SupplierFormState>(emptySupplier);
+  const [supplierToDelete, setSupplierToDelete] = useState<SupplierDTO | null>(null);
+  const [deleteSupplierError, setDeleteSupplierError] = useState('');
 
   // Contact state
   const [showContactForm, setShowContactForm] = useState(false);
@@ -231,6 +246,20 @@ const SuppliersPage: React.FC = () => {
     ),
   });
 
+  const deleteSupplierMutation = useMutation({
+    mutationFn: (supplier: SupplierDTO) => supplierService.delete(supplier.id),
+    onSuccess: (_result, supplier) => {
+      queryClient.invalidateQueries({ queryKey: ['suppliers'] });
+      setSupplierToDelete(null);
+      setDeleteSupplierError('');
+      if ((data?.items.length ?? 0) === 1 && paginationModel.page > 0) {
+        setPaginationModel((current) => ({ ...current, page: current.page - 1 }));
+      }
+      enqueueSnackbar(`${supplier.name} was deleted.`, { variant: 'success' });
+    },
+    onError: (error: any) => setDeleteSupplierError(supplierDeleteError(error)),
+  });
+
   // ── Contact mutations ──
   const createContactMutation = useMutation({
     mutationFn: (body: Partial<ContactDTO>) => contactService.create(body),
@@ -289,6 +318,12 @@ const SuppliersPage: React.FC = () => {
     setShowContactForm(false);
     setContactForm(emptyContact);
     setIsModalOpen(true);
+  };
+
+  const requestSupplierDeletion = (supplier: SupplierDTO) => {
+    if (!canDeleteSupplier) return;
+    setDeleteSupplierError('');
+    setSupplierToDelete(supplier);
   };
 
   // Arriving from a sourcing case: open the add form with the part already in Tags, once. The flag is
@@ -390,6 +425,27 @@ const SuppliersPage: React.FC = () => {
   const columns: GridColDef[] = [
     { field: 'docId', headerName: 'Doc ID', width: 110, renderCell: (p) => <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{p.value ?? '—'}</Typography> },
     { field: 'name', headerName: t('supplier_name'), flex: 1.5, minWidth: 160 },
+    {
+      field: 'actions',
+      headerName: t('actions'),
+      width: 136,
+      sortable: false,
+      renderCell: (p) => (
+        <Stack direction="row" spacing={0.5}>
+          <Tooltip title="View Details">
+            <IconButton aria-label={`View ${p.row.name}`} size="small" color="primary" onClick={() => navigate(`/suppliers/${p.row.id}`)}><ViewIcon fontSize="small" /></IconButton>
+          </Tooltip>
+          {canEditSupplier && <Tooltip title="Edit">
+            <IconButton aria-label={`Edit ${p.row.name}`} size="small" color="info" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>
+          </Tooltip>}
+          {canDeleteSupplier && <Tooltip title="Delete unused profile">
+            <IconButton aria-label={`Delete ${p.row.name}`} size="small" color="error" onClick={() => requestSupplierDeletion(p.row)}>
+              <DeleteIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>}
+        </Stack>
+      ),
+    },
     { field: 'contactEmail', headerName: t('email'), flex: 1.2, minWidth: 180 },
     { field: 'countryName', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
     { field: 'currencyName', headerName: t('currency'), width: 100, renderCell: (p) => p.value ?? '—' },
@@ -400,22 +456,6 @@ const SuppliersPage: React.FC = () => {
     { field: 'governanceStatus', headerName: 'Approval', width: 145, renderCell: (p) => <Chip label={statusLabel(p.value, 'Unverified')} size="small" variant="outlined" /> },
     { field: 'readinessStatus', headerName: 'RFQ readiness', width: 145, renderCell: (p) => <Chip label={statusLabel(p.value, 'Review required')} size="small" variant="outlined" /> },
     { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
-    { 
-      field: 'actions', 
-      headerName: t('actions'), 
-      width: 120, 
-      sortable: false, 
-      renderCell: (p) => (
-        <Stack direction="row" spacing={0.5}>
-          <Tooltip title="View Details">
-            <IconButton size="small" color="primary" onClick={() => navigate(`/suppliers/${p.row.id}`)}><ViewIcon fontSize="small" /></IconButton>
-          </Tooltip>
-          {canEditSupplier && <Tooltip title="Edit">
-            <IconButton size="small" color="info" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>
-          </Tooltip>}
-        </Stack>
-      )
-    },
   ];
 
   return (
@@ -423,13 +463,13 @@ const SuppliersPage: React.FC = () => {
       {/* Header */}
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('supplier_management')}</Typography>
-          <Typography variant="body2" color="text.secondary">{t('manage_supplier_network')}</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Supplier directory</Typography>
+          <Typography variant="body2" color="text.secondary">Manage In Network and Extended Network supplier profiles in one place.</Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
           <UploadExportToolbar canUpload={canCreateSupplier} onDownloadTemplate={supplierService.downloadTemplate} onUpload={supplierService.uploadTemplate} onExport={supplierService.export} templateFileName="SupplierTemplate.xlsx" exportFileName="Suppliers.xlsx" />
           {canCreateSupplier
-            ? <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>
+            ? <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>Add supplier profile</Button>
             : (
               /* A missing button is a support ticket unless it says why it is missing. */
               <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 300, textAlign: 'right' }}>
@@ -689,6 +729,65 @@ const SuppliersPage: React.FC = () => {
           <Button onClick={() => setIsModalOpen(false)} color="inherit">Cancel</Button>
           <Button variant="contained" onClick={handleSaveSupplier} disabled={isBusy}>
             {isBusy ? <CircularProgress size={22} /> : t('save_supplier')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={supplierToDelete !== null}
+        onClose={() => {
+          if (deleteSupplierMutation.isPending) return;
+          setSupplierToDelete(null);
+          setDeleteSupplierError('');
+        }}
+        fullWidth
+        maxWidth="xs"
+        aria-labelledby="delete-supplier-title"
+        aria-describedby="delete-supplier-description"
+      >
+        <DialogTitle id="delete-supplier-title" sx={{ fontWeight: 800 }}>Delete unused supplier profile?</DialogTitle>
+        <DialogContent>
+          <DialogContentText id="delete-supplier-description">
+            {supplierToDelete
+              ? `${supplierToDelete.name} will be permanently removed, including contacts that belong only to this profile. This cannot be undone.`
+              : ''}
+          </DialogContentText>
+          <Alert severity="info" sx={{ mt: 2 }}>
+            Suppliers already used in an RFQ, quote, purchase order, product link or traceability record are protected. If this profile has history, Nexora will keep it and ask you to mark it inactive through Supplier Governance.
+          </Alert>
+          {deleteSupplierError && <Alert severity="error" sx={{ mt: 2 }}>{deleteSupplierError}</Alert>}
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            color="inherit"
+            disabled={deleteSupplierMutation.isPending}
+            onClick={() => {
+              setSupplierToDelete(null);
+              setDeleteSupplierError('');
+            }}
+          >
+            Cancel
+          </Button>
+          {deleteSupplierError && supplierToDelete && (
+            <Button
+              variant="outlined"
+              onClick={() => {
+                navigate(`/suppliers/${supplierToDelete.id}`);
+                setSupplierToDelete(null);
+                setDeleteSupplierError('');
+              }}
+            >
+              Open profile
+            </Button>
+          )}
+          <Button
+            variant="contained"
+            color="error"
+            disabled={!supplierToDelete || deleteSupplierMutation.isPending}
+            startIcon={deleteSupplierMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DeleteIcon />}
+            onClick={() => supplierToDelete && deleteSupplierMutation.mutate(supplierToDelete)}
+          >
+            {deleteSupplierMutation.isPending ? 'Deleting…' : 'Delete profile'}
           </Button>
         </DialogActions>
       </Dialog>

@@ -68,6 +68,13 @@ namespace ERP_RFQ_Automation.DTOs
         public string CustomerName { get; set; } = null!;
         public long? QuoteId { get; set; }
         public string? QuoteNo { get; set; }
+        /// <summary>
+        /// The buyer document that authorized this order. Null on legacy/manual records only.
+        /// Kept beside the submitted quote so the Orders list exposes the traceability already
+        /// enforced by the customer-award creation path instead of making users reconstruct it.
+        /// </summary>
+        public long? CustomerPurchaseOrderId { get; set; }
+        public string? ClientPoNumber { get; set; }
         public long? RfqId { get; set; }
         public string? RfqNo { get; set; }
         public long? LeadId { get; set; }

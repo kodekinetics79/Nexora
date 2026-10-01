@@ -395,6 +395,8 @@ export interface SourcingCaseCandidate {
   readinessStatus?: string | null;
   eligibleForSupplierRfq: boolean;
   blockingReasons?: string[];
+  /** Commercial relationship: Tier 1 = In Network, Tier 2 = Extended Network. Never an eligibility gate. */
+  supplierTier?: string | null;
 }
 
 export interface SourcingCase {
@@ -1018,6 +1020,8 @@ const procurementService = {
       warehouseId: number;
       receivedOn: string;
       receiptNumber: string;
+      supplierInvoiceNumber?: string | null;
+      billOfLadingNumber?: string | null;
       expectedPurchaseOrderVersion: number;
       idempotencyKey: string;
       lines: Array<{

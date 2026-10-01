@@ -35,6 +35,7 @@ import { useAuth } from "../../../context/AuthContext";
 import { formatMoney } from "../../../utils/currency";
 import { deliveryText } from "../../../utils/delivery";
 import KeepAsQuotedDialog from "../../Sales/Quotes/KeepAsQuotedDialog";
+import ValidityDateField from "../../Sales/Quotes/ValidityDateField";
 
 const EMAIL = /^[^\s@;,]+@[^\s@;,]+\.[^\s@;,]+$/;
 const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -584,21 +585,9 @@ export default function SendQuoteDialog({ open, rfqId, onClose, onSent, deadline
                     {currencies.map((c) => <MenuItem key={c.id} value={c.id}>{c.code}</MenuItem>)}
                   </TextField>
                 )}
-                <Box>
-                  <TextField type="date" label="Prices valid until" value={validUntil} error={validUntil !== "" && !validOk}
-                    onChange={(event) => setValidUntil(event.target.value)} slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: isoDay(new Date()) } }} />
-                  <Stack direction="row" spacing={0.5} sx={{ mt: 0.75 }}>
-                    {requiredValidUntil && (
-                      <Chip size="small" label={`Buyer: ${shortDay(requiredValidUntil)}`}
-                        variant={validUntil === requiredValidUntil ? "filled" : "outlined"}
-                        color={validUntil === requiredValidUntil ? "primary" : "default"} onClick={() => setValidUntil(requiredValidUntil)} />
-                    )}
-                    {[15, 30, 60].map((days) => (
-                      <Chip key={days} size="small" label={`${days} days`} variant={validUntil === daysFromToday(days) ? "filled" : "outlined"}
-                        color={validUntil === daysFromToday(days) ? "primary" : "default"} onClick={() => setValidUntil(daysFromToday(days))} />
-                    ))}
-                  </Stack>
-                </Box>
+                <ValidityDateField label="Prices valid until" value={validUntil} error={validUntil !== "" && !validOk}
+                  onChange={setValidUntil} min={isoDay(new Date())}
+                  extraChips={requiredValidUntil ? [{ label: `Buyer: ${shortDay(requiredValidUntil)}`, value: requiredValidUntil }] : []} />
               </Stack>
 
               <Box sx={{ mt: 3 }}>

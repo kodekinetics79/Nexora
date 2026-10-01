@@ -1,8 +1,12 @@
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.DTOs.BusinessUnit;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
 using ERP_RFQ_Automation.DTOs.SupplierDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.SupplierQuotes;
+using ERP_RFQ_Automation.Traceability;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Repositories
@@ -303,11 +307,43 @@ namespace ERP_RFQ_Automation.Repositories
             });
         }
 
-        public async Task DeleteAsync(long id, long businessUnitId)
+        public Task DeleteAsync(long id, long businessUnitId) =>
+            ExecuteInTransactionAsync(() => DeleteCoreAsync(id, businessUnitId));
+
+        private async Task DeleteCoreAsync(long id, long businessUnitId)
         {
-            _ = await GetByIdAsync(id, businessUnitId);
-            throw new InvalidOperationException(
-                "Supplier records preserve commercial lineage and cannot be deleted. Use the governed inactive decision instead.");
+            var supplier = await _context.Suppliers
+                .SingleOrDefaultAsync(value => value.Id == id && value.Buid == businessUnitId)
+                ?? throw new KeyNotFoundException($"Supplier with ID {id} not found in Business Unit {businessUnitId}.");
+
+            // A supplier is removable only while it is still a profile, not once it has become part
+            // of commercial evidence. This lets an administrator clean up a mistaken/duplicate
+            // entry without ever cutting a hole through an RFQ, quote, purchase order, preferred
+            // product, receipt or traceability chain. Contacts are profile-owned children and are
+            // removed in the same transaction; commercial records are never cascaded.
+            var hasCommercialLineage =
+                await _context.Products.AnyAsync(value => value.PreferredSupplierId == id && value.Buid == businessUnitId)
+                || await _context.Rfqitems.AnyAsync(value => value.SupplierId == id)
+                || await _context.SupplierPurchaseHistories.AnyAsync(value => value.SupplierId == id)
+                || await _context.SupplierQuotedItems.AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                || await _context.Set<SupplierSolicitation>().AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                || await _context.Set<SourcingAward>().AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                || await _context.SourcingCaseCandidates.AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                || await _context.SupplierPurchaseOrders.AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                || await _context.ProcurementHandoffs.AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                || await _context.SupplierQuotes.AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                || await _context.MaterialLots.AnyAsync(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId);
+
+            if (hasCommercialLineage)
+                throw new InvalidOperationException(
+                    "Supplier records with commercial lineage cannot be deleted. Use Supplier Governance to mark this supplier inactive instead.");
+
+            var contacts = await _context.Contacts
+                .Where(value => value.SupplierId == id && value.BusinessUnitId == businessUnitId)
+                .ToListAsync();
+            _context.Contacts.RemoveRange(contacts);
+            _context.Suppliers.Remove(supplier);
+            await _context.SaveChangesAsync();
         }
 
         /// <summary>

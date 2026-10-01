@@ -206,8 +206,9 @@ test('39 Mobile Sales Rep and Inventory journeys work', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Sales today' })).toBeVisible();
   await expect(page.locator('body')).not.toHaveCSS('overflow-x', 'scroll');
   await page.goto('/inventory/availability');
-  await expect(page.getByRole('heading', { name: 'Availability' })).toBeVisible();
-  await expect(page.getByLabel('Search part or product')).toBeVisible();
+  await expect(page).toHaveURL(/\/inventory\/products$/);
+  await expect(page.getByRole('heading', { name: 'Products' })).toBeVisible();
+  await expect(page.getByPlaceholder('Search product or part number…')).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
   await page.screenshot({ path: path.join(evidenceDir, '39-mobile-sales-inventory.png'), fullPage: true });
 });

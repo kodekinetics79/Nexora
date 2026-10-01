@@ -285,6 +285,23 @@ namespace ERP_RFQ_Automation.Controllers
                 if (parentId.HasValue && parentId.Value == existing.SetupId)
                     return BadRequest("ParentSetupId cannot be same as the entity SetupId.");
 
+                // The client's quote statuses keep their own rules (Setup › Quote statuses,
+                // QuoteClientStatusService): what an ending counts as never changes, and the
+                // system reason is Nexora's. This generic editor must not be the way round them.
+                if (existing.SetupType is ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.Step
+                    or ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.Ending
+                    or ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.Reason)
+                {
+                    if (!string.Equals(request.SetupType, existing.SetupType, StringComparison.Ordinal))
+                        return Conflict("A quote status cannot be turned into another kind of setup row.");
+                    if (existing.SetupType == ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.Ending
+                        && parentId != existing.ParentSetupId)
+                        return Conflict("What a quote ending counts as never changes. Switch it off and add a new ending.");
+                    if (string.Equals(existing.SetupCode, ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.SystemReasonCode,
+                            StringComparison.OrdinalIgnoreCase))
+                        return Conflict("This reason is set by Nexora when a quote expires on its own. It cannot be changed.");
+                }
+
                 var beforeRole = new { existing.SetupCode, existing.SetupValue, existing.IsActive, existing.RoleRank };
                 var rankChanged = wasRole && existing.RoleRank != requestedRank;
 

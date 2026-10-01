@@ -114,7 +114,7 @@ export default function StockAgeingPage() {
               <TableRow>
                 <TableCell>Part</TableCell>
                 <TableCell>Warehouse</TableCell>
-                <TableCell align="right">On hand (units)</TableCell>
+                <TableCell align="right">In stock (units)</TableCell>
                 <TableCell align="right">Unit cost</TableCell>
                 <TableCell align="right">Carrying value</TableCell>
                 <TableCell>Last issued</TableCell>

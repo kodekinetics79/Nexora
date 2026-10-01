@@ -213,7 +213,7 @@ export default function ReorderAlertsPage() {
           <Paper variant="outlined" sx={{ p: 2 }}>
             <Typography variant="body2" color="text.secondary">
               Alerts are raised against available-to-promise plus stock already on order, not against
-              on-hand: a warehouse whose entire stock is reserved can supply nobody, and a row whose
+              physical stock: quality holds and safety stock reduce availability, and a row whose
               gap is already covered by a purchase order needs no chasing. Only the worst condition a
               row qualifies for is raised.
             </Typography>

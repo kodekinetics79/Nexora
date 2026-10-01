@@ -8,8 +8,7 @@ import {
 import { CloudUpload, FindInPage, Refresh, Search } from '@mui/icons-material';
 import customerAwardService from '../../../api/services/customerAwardService';
 import { useAuth } from '../../../context/AuthContext';
-import { CustomerAwardDialog, type CustomerAwardQuote } from '../Quotes/customer-awards';
-import ChooseQuoteForClientPoDialog from './ChooseQuoteForClientPoDialog';
+import ClientPoUploadFlow from './ClientPoUploadFlow';
 import { statusLabel } from '../../../utils/statusLabels';
 
 
@@ -18,14 +17,7 @@ export default function ClientPurchaseOrderInboxPage() {
   const queryClient = useQueryClient();
   const { hasPermission } = useAuth();
   const [search, setSearch] = useState('');
-  /**
-   * The upload journey, in the two states it can be in: choosing which quotation the buyer's
-   * document answers, then capturing it against that quotation. They are separate states rather
-   * than one wizard because the second is the existing `CustomerAwardDialog` — the same component
-   * the quote view page opens — and it must not be forked.
-   */
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [uploadAgainst, setUploadAgainst] = useState<CustomerAwardQuote | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
   const query = useQuery({
     queryKey: ['client-purchase-orders', search],
     queryFn: () => customerAwardService.searchPurchaseOrders(search),
@@ -42,7 +34,7 @@ export default function ClientPurchaseOrderInboxPage() {
         {hasPermission('Customer Awards', 'create') && <Button
           variant="contained"
           startIcon={<CloudUpload />}
-          onClick={() => setPickerOpen(true)}
+          onClick={() => setUploadOpen(true)}
         >
           Upload Client PO
         </Button>}
@@ -96,18 +88,10 @@ export default function ClientPurchaseOrderInboxPage() {
       </Table>
     </TableContainer>}
 
-    <ChooseQuoteForClientPoDialog
-      open={pickerOpen}
-      onClose={() => setPickerOpen(false)}
-      onChosen={(quote) => { setPickerOpen(false); setUploadAgainst(quote); }}
-    />
-
-    <CustomerAwardDialog
-      open={uploadAgainst !== null}
-      quote={uploadAgainst}
-      onClose={() => setUploadAgainst(null)}
+    <ClientPoUploadFlow
+      open={uploadOpen}
+      onClose={() => setUploadOpen(false)}
       onCompleted={(result) => {
-        setUploadAgainst(null);
         // Back to the inbox the user started on, showing the purchase order they just uploaded,
         // rather than to the sales order the quote view page navigates to — the sales order is
         // reachable from the row, and this screen is where the next PO gets uploaded from.

@@ -1,5 +1,5 @@
 import { Suspense } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Box, CircularProgress } from '@mui/material';
 import TenantShell from './components/layout/TenantShell';
 import lazyWithRetry from './utils/lazyWithRetry';
@@ -26,19 +26,14 @@ const InboxPage = lazyWithRetry(() => import('./pages/Inbox/InboxPage'));
 const AllScreensPage = lazyWithRetry(() => import('./pages/Advanced/AllScreensPage'));
 const ProductsPage = lazyWithRetry(() => import('./pages/Inventory/ProductsPage'));
 const ProductDetailPage = lazyWithRetry(() => import('./pages/Inventory/ProductDetailPage'));
-const PricingSheetPage = lazyWithRetry(() => import('./pages/Inventory/PricingSheetPage'));
 const ProductCategoryPage = lazyWithRetry(() => import('./pages/Inventory/ProductCategoryPage'));
 const ProductSubCategoryPage = lazyWithRetry(() => import('./pages/Inventory/ProductSubCategoryPage'));
-const InventoryOverviewPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/InventoryOverviewPage'));
-const AvailabilityPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/AvailabilityPage'));
 const WarehousesPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/WarehousesPage'));
 const ReservationsPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/ReservationsPage'));
 const IncomingPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/IncomingPage'));
 const MovementsPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/MovementsPage'));
 const DemandPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/DemandPage'));
 const RelatedResourcesPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/RelatedResourcesPage'));
-const StockLevelsPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/StockLevelsPage'));
-const ReorderAlertsPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/ReorderAlertsPage'));
 const CountVariancePage = lazyWithRetry(() => import('./pages/Inventory/Commercial/CountVariancePage'));
 const StockAgeingPage = lazyWithRetry(() => import('./pages/Inventory/Commercial/StockAgeingPage'));
 // Gate 5 / FR-MTR-01..05 — material lots, certificates, quarantine and where-used trace.
@@ -156,6 +151,12 @@ const RootRedirect = () => {
   return <Navigate to={token ? '/dashboard' : '/login'} replace />;
 };
 
+/** Old product views are bookmarks into the same protected Products list now. */
+const ProductsRedirect = () => {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: '/inventory/products', search, hash }} replace />;
+};
+
 function App() {
   return (
     <>
@@ -200,7 +201,7 @@ function App() {
       {/* Sales Routes */}
       <Route path="/sales/today" element={<TenantShell><PermissionGuard moduleName="Leads"><SalesTodayPage /></PermissionGuard></TenantShell>} />
       <Route path="/sourcing/today" element={<TenantShell><PermissionGuard moduleName="Supplier History"><SourcingTodayPage /></PermissionGuard></TenantShell>} />
-      <Route path="/inventory/today" element={<TenantShell><PermissionGuard moduleName="Products"><InventoryOverviewPage /></PermissionGuard></TenantShell>} />
+      <Route path="/inventory/today" element={<Navigate to="/inventory/products" replace />} />
       <Route path="/executive/today" element={<TenantShell><PermissionGuard moduleName="Dashboard"><DashboardPage /></PermissionGuard></TenantShell>} />
       <Route path="/admin/operations" element={<TenantShell><PermissionGuard moduleName="Users"><TenantAdminOperationsPage /></PermissionGuard></TenantShell>} />
       <Route path="/sales/actions" element={<TenantShell><PermissionGuard moduleName="Leads"><HumanActionCenterPage /></PermissionGuard></TenantShell>} />
@@ -295,8 +296,8 @@ function App() {
       </Route>
 
       {/* Inventory Routes */}
-      <Route path="/inventory/overview" element={<TenantShell><PermissionGuard moduleName="Products"><InventoryOverviewPage /></PermissionGuard></TenantShell>} />
-      <Route path="/inventory/availability" element={<TenantShell><PermissionGuard moduleName="Products"><AvailabilityPage /></PermissionGuard></TenantShell>} />
+      <Route path="/inventory/overview" element={<Navigate to="/inventory/products" replace />} />
+      <Route path="/inventory/availability" element={<ProductsRedirect />} />
       <Route path="/inventory/warehouses" element={<TenantShell><PermissionGuard moduleName="Products"><WarehousesPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/reservations" element={<TenantShell><PermissionGuard moduleName="Products"><ReservationsPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/incoming" element={<TenantShell><PermissionGuard moduleName="Products"><IncomingPage /></PermissionGuard></TenantShell>} />
@@ -305,8 +306,8 @@ function App() {
       <Route path="/inventory/resources" element={<TenantShell><PermissionGuard moduleName="Products"><RelatedResourcesPage /></PermissionGuard></TenantShell>} />
       {/* FR-INV-04/05/06. Four screens that had no interface at all: minimum/maximum levels and the
           reorder alert ledger, and the two reports whose endpoints were complete and unreachable. */}
-      <Route path="/inventory/levels" element={<TenantShell><PermissionGuard moduleName="Products"><StockLevelsPage /></PermissionGuard></TenantShell>} />
-      <Route path="/inventory/reorder-alerts" element={<TenantShell><PermissionGuard moduleName="Products"><ReorderAlertsPage /></PermissionGuard></TenantShell>} />
+      <Route path="/inventory/levels" element={<Navigate to="/inventory/products" replace />} />
+      <Route path="/inventory/reorder-alerts" element={<Navigate to="/inventory/products" replace />} />
       <Route path="/inventory/count-variance" element={<TenantShell><PermissionGuard moduleName="Products"><CountVariancePage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/ageing" element={<TenantShell><PermissionGuard moduleName="Products"><StockAgeingPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/lots" element={<TenantShell><PermissionGuard moduleName="Products"><LotsPage /></PermissionGuard></TenantShell>} />
@@ -315,7 +316,7 @@ function App() {
       <Route path="/inventory/order-trace/:orderId" element={<TenantShell><PermissionGuard moduleName="Products"><PermissionGuard moduleName="Orders"><OrderTracePage /></PermissionGuard></PermissionGuard></TenantShell>} />
       <Route path="/inventory/products" element={<TenantShell><PermissionGuard moduleName="Products"><ProductsPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/products/:id" element={<TenantShell><PermissionGuard moduleName="Products"><ProductDetailPage /></PermissionGuard></TenantShell>} />
-      <Route path="/inventory/pricing-sheet" element={<TenantShell><PermissionGuard moduleName="Products"><PricingSheetPage /></PermissionGuard></TenantShell>} />
+      <Route path="/inventory/pricing-sheet" element={<ProductsRedirect />} />
       <Route path="/inventory/categories" element={<TenantShell><PermissionGuard moduleName="Product Categories"><ProductCategoryPage /></PermissionGuard></TenantShell>} />
       <Route path="/inventory/sub-categories" element={<TenantShell><PermissionGuard moduleName="Product Categories"><ProductSubCategoryPage /></PermissionGuard></TenantShell>} />
       

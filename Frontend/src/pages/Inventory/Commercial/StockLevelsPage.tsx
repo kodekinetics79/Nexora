@@ -159,7 +159,7 @@ export default function StockLevelsPage() {
               <TableRow>
                 <TableCell>Part</TableCell>
                 <TableCell>Warehouse</TableCell>
-                <TableCell align="right">On hand</TableCell>
+                <TableCell align="right">In stock</TableCell>
                 <TableCell align="right">Available</TableCell>
                 <TableCell align="right">On order</TableCell>
                 <TableCell align="right">Projected</TableCell>

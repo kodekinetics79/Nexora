@@ -22,9 +22,9 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { confirmLeavingUnsavedWork } from '../../hooks/unsavedWorkRegistry';
 import {
-  ADVANCED_GROUPS,
+  RELEASE_ADVANCED_GROUPS,
   ALL_SCREENS_ENTRY,
-  PRIMARY_NAV,
+  RELEASE_PRIMARY_NAV,
   navEntryLabel,
   type NavEntry,
   type PrimaryNavItem,
@@ -46,9 +46,9 @@ interface SidebarProps {
  *
  * The commercial spine stays first, read from `navCatalog.tsx` and nothing else:
  *
- *     Inbox · Leads · RFQs · Quotes · Setup
+ *     Inbox · Leads · RFQs · Suppliers · Products · Quotes · Orders
  *
- * Those are the five nouns a rep uses to describe the main commercial journey. Secondary business
+ * Those are the seven nouns a rep uses to describe the release journey. Secondary business
  * domains are permission-filtered expandable workspaces beneath them; the searchable directory is
  * a fallback, not the place ordinary operations are hidden.
  */
@@ -56,6 +56,9 @@ interface SidebarProps {
 interface RailGroup {
   key: string;
   title: string;
+  /** All permitted destinations, including specialist tools hidden from the compact child list. */
+  activeEntries: NavEntry[];
+  /** The small set of doors an operator should choose from in routine work. */
   entries: NavEntry[];
 }
 
@@ -134,7 +137,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
   };
 
   const primaryRows = useMemo(
-    () => PRIMARY_NAV.filter(
+    () => RELEASE_PRIMARY_NAV.filter(
       (item) => (!item.managerOnly || isManager) && (!item.moduleName || hasPermission(item.moduleName)),
     ),
     [hasPermission, isManager],
@@ -145,18 +148,22 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
 
   /** Operational workspaces belong in the navigation; permissions still decide what users see. */
   const advancedRows: RailGroup[] = useMemo(() => {
-    return ADVANCED_GROUPS
+    return RELEASE_ADVANCED_GROUPS
       // A group the tenant has not been granted is not a group with zero permitted entries: it is
       // absent, whatever the reader's role says.
       .filter((group) => !group.entitlement || hasEntitlement(group.entitlement))
-      .map((group) => ({
-        key: group.key,
-        title: group.title,
-        entries: group.entries.filter(
+      .map((group) => {
+        const activeEntries = group.entries.filter(
           (entry) =>
             (!entry.managerOnly || isManager) && (!entry.moduleName || hasPermission(entry.moduleName)),
-        ),
-      })).filter((group) => group.entries.length > 0);
+        );
+        return {
+          key: group.key,
+          title: group.title,
+          activeEntries,
+          entries: activeEntries.filter((entry) => !entry.hideFromSidebar),
+        };
+      }).filter((group) => group.entries.length > 0);
   }, [hasPermission, hasEntitlement, isManager]);
 
   const rowSx = (isSelected: boolean) => ({
@@ -242,7 +249,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpan
   );
 
   const renderAdvancedGroup = (group: RailGroup) => {
-    const isSelected = !activePrimary && group.entries.some((entry) => isPathMatched(entry.path, location));
+    const isSelected = !activePrimary && group.activeEntries.some((entry) => isPathMatched(entry.path, location));
     // Reveal the current screen's home on first arrival. An explicit user collapse remains closed.
     const isOpen = openGroups[group.key] ?? isSelected;
     // The child list only exists in the DOM while expanded (unmountOnExit) and is never rendered

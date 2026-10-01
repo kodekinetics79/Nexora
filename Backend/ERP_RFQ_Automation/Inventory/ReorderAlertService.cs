@@ -130,7 +130,7 @@ public sealed class ReorderAlertService(ErpRfqAutomationContext db) : IReorderAl
 
         var inventoryIds = stock.Select(x => x.InventoryId).ToArray();
         var reserved = await _db.Set<StockReservation>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
+            .Where(x => InventoryReleaseScope.ReservationsEnabled && x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
                         && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId)
             .Select(g => new { InventoryId = g.Key, Quantity = g.Sum(x => x.Quantity) })

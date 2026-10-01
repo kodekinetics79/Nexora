@@ -303,8 +303,8 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await expect(page).toHaveURL(/\/sales\/quotes\/view\/\d+$/);
     partialQuoteId = Number(page.url().split('/').at(-1));
     expect(partialQuoteId).toBeGreaterThan(0);
-    await expect(page.getByRole('button', { name: 'Open Source RFQ' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open Canonical Lead' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^RFQ / }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open lead' }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export PDF' })).toBeDisabled();
 
     // The operator returns to the RFQ. The header no longer offers to prepare a draft a second
@@ -373,7 +373,7 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     // or keep the draft as quoted (which records the review).
     await expect(page.getByText('Customer revision received', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Keep as quoted' })).toBeVisible();
-    await page.getByRole('button', { name: 'Open Canonical Lead' }).click();
+    await page.getByRole('button', { name: 'Open lead' }).first().click();
     await expect(page).toHaveURL(new RegExp(`/procurement/leads/view/${env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID}$`));
     await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
   });

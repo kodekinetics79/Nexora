@@ -631,6 +631,8 @@ public sealed class GoodsReceipt
     public long SupplierPurchaseOrderId { get; set; }
     public long WarehouseId { get; set; }
     public string ReceiptNumber { get; set; } = null!;
+    public string? SupplierInvoiceNumber { get; set; }
+    public string? BillOfLadingNumber { get; set; }
     public string Status { get; set; } = GoodsReceiptStatuses.Posted;
     public DateTime ReceivedOn { get; set; }
     public string IdempotencyKey { get; set; } = null!;

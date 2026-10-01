@@ -15,13 +15,14 @@ test('15 exact Product match displays ATP', async ({ page }) => {
   await expect(page.getByText(/Known, in stock/)).toBeVisible();
 });
 
-test('16 reserved stock is excluded from ATP', async ({ page }) => {
+test('16 historical reservations do not withhold ATP in this release', async ({ page }) => {
   const token = await loginAs(page, 'manager');
-  const rows = await jsonOk<Availability[]>(await api(page, token, 'get', `/api/inventory-intelligence/availability?search=${encodeURIComponent(required('E2E_CORE_RESERVED_PART'))}`));
-  const row = rows.find((value) => value.reserved > 0);
+  const part = required('E2E_CORE_RESERVED_PART');
+  const rows = await jsonOk<Availability[]>(await api(page, token, 'get', `/api/inventory-intelligence/availability?search=${encodeURIComponent(part)}`));
+  const row = rows.find((value) => value.partNumber === part);
   expect(row).toBeTruthy();
-  expect(row!.available).toBeLessThan(row!.onHand);
-  expect(row!.onHand - row!.reserved).toBeGreaterThanOrEqual(row!.available);
+  expect(row!.reserved).toBe(0);
+  expect(row!.available).toBeLessThanOrEqual(row!.onHand);
 });
 
 test('17 partial availability displays correctly', async ({ page }) => {
@@ -49,7 +50,9 @@ test('19 incoming stock shows quantity and expected date', async ({ page }) => {
   expect(row).toBeTruthy();
   expect(row!.expectedAt).toBeTruthy();
   await page.goto('/inventory/incoming');
-  const expectedDate = await page.evaluate((value) => new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }), row!.expectedAt!);
+  const expectedDate = await page.evaluate((value) => new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC',
+  }).format(new Date(value)), row!.expectedAt!);
   await expect(page.getByRole('row').filter({ hasText: part })).toContainText(expectedDate);
 });
 
@@ -115,7 +118,7 @@ test('24 multi-warehouse fulfilment is shown', async ({ page }) => {
   expect(JSON.stringify(resolution.fulfilment).toLowerCase()).toMatch(/warehouse|allocation/);
 });
 
-test('25 inventory reservation prevents double allocation', async ({ page }) => {
+test('25 inventory allocation endpoint stays disabled and creates no holds', async ({ page }) => {
   const token = await loginAs(page, 'manager');
   const orderId = requiredNumber('E2E_CORE_DOUBLE_ALLOCATION_ORDER_ID');
   const headers = { 'Idempotency-Key': `core-double-allocation-${orderId}` };
@@ -126,17 +129,21 @@ test('25 inventory reservation prevents double allocation', async ({ page }) => 
     api(page, token, 'post', `/api/Order/${orderId}/allocate`, undefined, headers),
     api(page, token, 'post', `/api/Order/${orderId}/allocate`, undefined, headers),
   ]);
-  expect(first.ok()).toBeTruthy();
-  expect(second.ok()).toBeTruthy();
+  expect(first.status()).toBe(409);
+  expect(second.status()).toBe(409);
+  expect(await first.json()).toEqual(expect.objectContaining({
+    error: 'Inventory reservations are disabled for this release.',
+  }));
+  expect(await second.json()).toEqual(expect.objectContaining({
+    error: 'Inventory reservations are disabled for this release.',
+  }));
   const after = await jsonOk<Array<{ demandReference: string }>>(
     await api(page, token, 'get', '/api/inventory-intelligence/reservations'),
   );
   const orderReference = `Order ${orderId}`;
   const beforeCount = before.filter((row) => row.demandReference === orderReference).length;
   const afterCount = after.filter((row) => row.demandReference === orderReference).length;
-  expect(afterCount).toBe(1);
-  expect(afterCount - beforeCount).toBeGreaterThanOrEqual(0);
-  expect(afterCount - beforeCount).toBeLessThanOrEqual(1);
+  expect(afterCount).toBe(beforeCount);
 });
 
 test('26 inventory change marks downstream state stale', async ({ page }) => {

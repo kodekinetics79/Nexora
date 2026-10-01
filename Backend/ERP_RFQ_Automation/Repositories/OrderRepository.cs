@@ -33,6 +33,12 @@ namespace ERP_RFQ_Automation.Repositories
                 // Included it; without it here, OrderDto.CurrencyCode would be null on the
                 // Orders grid and every amount would again render without its currency.
                 .Include(o => o.Currency)
+                // Client Orders must show the two documents that authorize them: the buyer's PO
+                // and the submitted quote. Both links already exist; omitting the navigations from
+                // this list read made its Client PO and Quote columns appear unlinked.
+                .Include(o => o.Quote)
+                .Include(o => o.CustomerAward)
+                    .ThenInclude(a => a!.PurchaseOrder)
                 .Include(o => o.OrderItems)
                 .Include(o => o.Shipments)
                 .OrderByDescending(o => o.CreatedOn)
@@ -48,6 +54,8 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(o => o.PaymentMethod)
                 .Include(o => o.Currency)
                 .Include(o => o.Quote)
+                .Include(o => o.CustomerAward)
+                    .ThenInclude(a => a!.PurchaseOrder)
                 .Include(o => o.Rfq)
                 .Include(o => o.Lead)
                 .Include(o => o.OrderItems)
@@ -136,6 +144,8 @@ namespace ERP_RFQ_Automation.Repositories
                  query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
              return await query
                 .Include(o => o.Status)
+                .Include(o => o.CustomerAward)
+                    .ThenInclude(a => a!.PurchaseOrder)
                 .ToListAsync();
         }
 

@@ -159,6 +159,23 @@ namespace ERP_RFQ_Automation.Repositories
                         "users and clear the role's permissions first.");
             }
 
+            // The client's quote steps, endings and reasons: once a quote carries one, deleting it
+            // would silently blank that quote's status or reason (the step/ending key sets NULL,
+            // the reason key is loose). Switching it off keeps the history.
+            if (setupMaster.SetupType is ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.Step
+                or ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.Ending
+                or ERP_RFQ_Automation.Sla.QuoteClientStatusTypes.Reason)
+            {
+                var inUse = await _context.Quotes.IgnoreQueryFilters()
+                    .AnyAsync(q => q.BusinessUnitId == setupMaster.BusinessUnitId
+                                   && (q.SubStatusId == id || q.OutcomeReasonId == id))
+                    || await _context.Leads.IgnoreQueryFilters()
+                        .AnyAsync(l => l.BusinessUnitId == setupMaster.BusinessUnitId && l.OutcomeReasonId == id);
+                if (inUse)
+                    throw new InvalidOperationException(
+                        $"'{setupMaster.Description ?? setupMaster.SetupValue}' is already used on quotes or leads. Switch it off instead of deleting it.");
+            }
+
             _context.SetupMasters.Remove(setupMaster);
             await _context.SaveChangesAsync();
         }

@@ -908,7 +908,6 @@ function SourcingWorkbenchPage() {
               <TableCell>Part / description</TableCell>
               <TableCell align="right">Requested</TableCell>
               <TableCell align="right">Available</TableCell>
-              <TableCell align="right">Reserved</TableCell>
               <TableCell align="right">Shortfall</TableCell>
               <TableCell align="right">Still to source</TableCell>
               <TableCell>Resolution</TableCell>
@@ -929,7 +928,6 @@ function SourcingWorkbenchPage() {
                 </TableCell>
                 <TableCell align="right">{line.requestedQuantity}</TableCell>
                 <TableCell align="right">{line.availableQuantity}</TableCell>
-                <TableCell align="right">{line.reservedQuantity}</TableCell>
                 <TableCell align="right">
                   <Typography
                     color={
@@ -3291,6 +3289,8 @@ function ReceiptDialog({
     order.lines[0]?.warehouseId ?? 0,
   );
   const [receiptNumber, setReceiptNumber] = useState("");
+  const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState("");
+  const [billOfLadingNumber, setBillOfLadingNumber] = useState("");
   const [receivedOn, setReceivedOn] = useState(
     localCalendarDate(new Date()),
   );
@@ -3328,6 +3328,8 @@ function ReceiptDialog({
       procurementService.postReceipt(order.id, {
         warehouseId,
         receiptNumber,
+        supplierInvoiceNumber: supplierInvoiceNumber.trim() || null,
+        billOfLadingNumber: billOfLadingNumber.trim() || null,
         receivedOn: receiptTimestamp(receivedOn),
         expectedPurchaseOrderVersion: order.version,
         idempotencyKey,
@@ -3403,6 +3405,24 @@ function ReceiptDialog({
               value={receivedOn}
               onChange={(e) => setReceivedOn(e.target.value)}
               slotProps={{ inputLabel: { shrink: true } }}
+            />
+          </Stack>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <TextField
+              fullWidth
+              label="Supplier invoice #"
+              value={supplierInvoiceNumber}
+              onChange={(event) => setSupplierInvoiceNumber(event.target.value)}
+              helperText="Optional supplier invoice reference for this receipt."
+              slotProps={{ htmlInput: { maxLength: 100 } }}
+            />
+            <TextField
+              fullWidth
+              label="Bill of lading #"
+              value={billOfLadingNumber}
+              onChange={(event) => setBillOfLadingNumber(event.target.value)}
+              helperText="Optional shipping document reference for this receipt."
+              slotProps={{ htmlInput: { maxLength: 100 } }}
             />
           </Stack>
           <Divider />

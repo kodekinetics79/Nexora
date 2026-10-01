@@ -89,6 +89,7 @@ export default function OpeningStockDialog({ open, onClose }: {
       setResult(value);
       // The new Inventory row now exists, so every grid that INNER JOINs it must be refetched.
       void client.invalidateQueries({ queryKey: ['inventory-intelligence'] });
+      void client.invalidateQueries({ queryKey: ['products'] });
       enqueueSnackbar(
         `Opening stock recorded: ${value.countedQuantity ?? counted} unit(s) of ${productLabel(product!)}.`,
         { variant: 'success' });
@@ -127,7 +128,7 @@ export default function OpeningStockDialog({ open, onClose }: {
           {failure && <Alert severity="error">{failure}</Alert>}
           {result && (
             <Alert severity="success">
-              Recorded {result.countedQuantity ?? 0} unit(s). On hand is now {result.onHand}. Pick
+              Recorded {result.countedQuantity ?? 0} unit(s). In stock is now {result.onHand}. Pick
               another product to continue, or close.
             </Alert>
           )}
@@ -184,7 +185,7 @@ export default function OpeningStockDialog({ open, onClose }: {
           </TextField>
 
           <TextField
-            label="Quantity on hand (units)"
+            label="Quantity in stock (units)"
             type="number"
             size="small"
             value={counted}

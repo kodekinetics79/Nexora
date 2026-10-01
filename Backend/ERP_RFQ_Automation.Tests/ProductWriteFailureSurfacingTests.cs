@@ -274,7 +274,7 @@ public sealed class ProductWriteFailureSurfacingTests
     {
         public Task AddAsync(Product product, List<IFormFile>? attachments) => Task.FromException(failure);
 
-        public Task UpdateAsync(Product product, long businessUnitId, List<IFormFile>? attachments)
+        public Task UpdateAsync(Product product, long businessUnitId, List<IFormFile>? attachments, bool applyPricing = false)
             => Task.FromException(failure);
 
         public Task<Product> GetByIdAsync(long id, long businessUnitId)
@@ -282,7 +282,7 @@ public sealed class ProductWriteFailureSurfacingTests
                 ? Task.FromException<Product>(new InvalidOperationException("GetByIdAsync was not expected here."))
                 : Task.FromResult(existing);
 
-        public Task<(IEnumerable<ProductResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null) => throw new NotSupportedException();
+        public Task<(IEnumerable<ProductResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, ProductListQuery? listQuery = null) => throw new NotSupportedException();
         public Task DeleteAsync(long id, long businessUnitId) => throw new NotSupportedException();
         public Task<List<BusinessUnitLookupDTO>> GetActiveBusinessUnitsAsync() => throw new NotSupportedException();
         public Task<List<ProductCategoryLookupDTO>> GetProductCategoriesAsync(long businessUnitId) => throw new NotSupportedException();
