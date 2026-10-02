@@ -1,6 +1,11 @@
 import React from 'react';
-import { Box, Typography, Button, Paper, CircularProgress } from '@mui/material';
-import { ReportProblemOutlined as ErrorIcon, Refresh as RefreshIcon } from '@mui/icons-material';
+import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import Paper from '@mui/material/Paper';
+import Typography from '@mui/material/Typography';
+import ErrorIcon from '@mui/icons-material/ReportProblemOutlined';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { isStaleDeploymentChunkError } from '../../utils/chunkRecovery';
 import {
   markDeploymentUpdated,

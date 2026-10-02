@@ -1,29 +1,25 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import {
-  Alert,
-  AlertTitle,
-  Box,
-  Button,
-  CircularProgress,
-  IconButton,
-  InputAdornment,
-  LinearProgress,
-  Paper,
-  Stack,
-  TextField,
-  Typography,
-} from '@mui/material';
-import {
-  CheckCircleOutlined as MetIcon,
-  DarkMode as MoonIcon,
-  LightMode as SunIcon,
-  LockOutlined as LockIcon,
-  RadioButtonUnchecked as UnmetIcon,
-  Visibility,
-  VisibilityOff,
-} from '@mui/icons-material';
+import Alert from '@mui/material/Alert';
+import AlertTitle from '@mui/material/AlertTitle';
+import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import IconButton from '@mui/material/IconButton';
+import InputAdornment from '@mui/material/InputAdornment';
+import LinearProgress from '@mui/material/LinearProgress';
+import Paper from '@mui/material/Paper';
+import Stack from '@mui/material/Stack';
+import TextField from '@mui/material/TextField';
+import Typography from '@mui/material/Typography';
+import MetIcon from '@mui/icons-material/CheckCircleOutlined';
+import MoonIcon from '@mui/icons-material/DarkMode';
+import SunIcon from '@mui/icons-material/LightMode';
+import LockIcon from '@mui/icons-material/LockOutlined';
+import UnmetIcon from '@mui/icons-material/RadioButtonUnchecked';
+import Visibility from '@mui/icons-material/Visibility';
+import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import { useAppTheme } from '../../context/ThemeContext';
 import useDocumentTitle from '../../hooks/useDocumentTitle';
 import { presentableErrorMessage } from '../../utils/apiErrors';

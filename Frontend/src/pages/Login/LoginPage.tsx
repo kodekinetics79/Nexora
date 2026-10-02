@@ -1,29 +1,25 @@
 import React, { useEffect, useState } from 'react';
-import {
-  Box,
-  Typography,
-  TextField,
-  Button,
-  IconButton,
-  InputAdornment,
-  Alert,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
-  CircularProgress,
-} from '@mui/material';
-import {
-  MailOutlined as MailIcon,
-  LockOutlined as LockIcon,
-  LightMode as SunIcon,
-  DarkMode as MoonIcon,
-  Visibility,
-  VisibilityOff,
-  VerifiedUserOutlined as IntegrityIcon,
-  SettingsOutlined as SettingsIcon,
-  ArrowForwardRounded as ArrowIcon,
-} from '@mui/icons-material';
+import Alert from '@mui/material/Alert';
+import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import FormControl from '@mui/material/FormControl';
+import IconButton from '@mui/material/IconButton';
+import InputAdornment from '@mui/material/InputAdornment';
+import InputLabel from '@mui/material/InputLabel';
+import MenuItem from '@mui/material/MenuItem';
+import Select from '@mui/material/Select';
+import TextField from '@mui/material/TextField';
+import Typography from '@mui/material/Typography';
+import ArrowIcon from '@mui/icons-material/ArrowForwardRounded';
+import MoonIcon from '@mui/icons-material/DarkMode';
+import SunIcon from '@mui/icons-material/LightMode';
+import LockIcon from '@mui/icons-material/LockOutlined';
+import MailIcon from '@mui/icons-material/MailOutlined';
+import SettingsIcon from '@mui/icons-material/SettingsOutlined';
+import IntegrityIcon from '@mui/icons-material/VerifiedUserOutlined';
+import Visibility from '@mui/icons-material/Visibility';
+import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import styled from '@emotion/styled';
 import { useAuth } from '../../context/AuthContext';
 import { useAppTheme } from '../../context/ThemeContext';
@@ -33,7 +29,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import userService, { type MePermissionsResponse } from '../../api/services/userService';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
-import { INBOX_ROOT } from '../../components/layout/navCatalog';
+import { INBOX_ROOT } from '../../routePaths';
 import { loginErrorMessage } from './loginError';
 import { BrandHero, EvidenceSpine } from './EvidenceSpine';
 
