@@ -34,6 +34,12 @@ public sealed class ExtractionWorkerOptions
     /// <summary>Process-wide ceiling on in-flight LLM calls, independent of WorkerCount. Start 8.</summary>
     public int MaxConcurrentLlmCalls { get; set; } = 8;
 
+    /// <summary>
+    /// Maximum independent chunks from one document that may call the model together. Keeping
+    /// this below the process-wide cap prevents one large document from monopolising the provider.
+    /// </summary>
+    public int MaxConcurrentChunksPerDocument { get; set; } = 3;
+
     /// <summary>Max simultaneously-processing jobs per tenant (fairness / anti-monopoly).</summary>
     public int PerTenantConcurrencyCap { get; set; } = 4;
 
@@ -52,6 +58,7 @@ public sealed class ExtractionWorkerOptions
     public int RequestedWorkerCount { get; set; }
     public int RequestedMaxConcurrentLlmCalls { get; set; }
     public int RequestedPerTenantConcurrencyCap { get; set; }
+    public int RequestedMaxConcurrentChunksPerDocument { get; set; }
 }
 
 /// <summary>
@@ -88,20 +95,26 @@ public static class ExtractionWorkerCapacityPolicy
             tenantCap = Math.Min(tenantCap, 2);
         }
 
+        var chunksPerDocument = Math.Min(
+            Math.Max(1, requested.MaxConcurrentChunksPerDocument), llmCap);
+
         return new ExtractionWorkerOptions
         {
             WorkerCount = workerCount,
             MaxConcurrentLlmCalls = llmCap,
+            MaxConcurrentChunksPerDocument = chunksPerDocument,
             PerTenantConcurrencyCap = tenantCap,
             LeaseDuration = requested.LeaseDuration,
             IdlePollDelay = requested.IdlePollDelay,
             DetectedMemoryLimitBytes = Math.Max(0, totalAvailableMemoryBytes),
             CapacityWasClamped = workerCount != requested.WorkerCount
                 || llmCap != requested.MaxConcurrentLlmCalls
-                || tenantCap != requested.PerTenantConcurrencyCap,
+                || tenantCap != requested.PerTenantConcurrencyCap
+                || chunksPerDocument != requested.MaxConcurrentChunksPerDocument,
             RequestedWorkerCount = requested.WorkerCount,
             RequestedMaxConcurrentLlmCalls = requested.MaxConcurrentLlmCalls,
-            RequestedPerTenantConcurrencyCap = requested.PerTenantConcurrencyCap
+            RequestedPerTenantConcurrencyCap = requested.PerTenantConcurrencyCap,
+            RequestedMaxConcurrentChunksPerDocument = requested.MaxConcurrentChunksPerDocument
         };
     }
 }
@@ -179,7 +192,7 @@ public sealed class ExtractionWorker : BackgroundService
     private readonly ExtractionWorkerOptions _options;
     private readonly ILogger<ExtractionWorker> _log;
     private readonly ITenantScopeAccessor _tenantScope;
-    private readonly SemaphoreSlim _llmGate; // process-wide LLM concurrency cap
+    private readonly IExtractionLlmCallGate _llmCallGate;
     private readonly IExtractionWorkerHeartbeat? _workerHeartbeat;
     private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
 
@@ -189,7 +202,8 @@ public sealed class ExtractionWorker : BackgroundService
         ILogger<ExtractionWorker> log,
         ITenantScopeAccessor tenantScope,
         IExtractionWorkerHeartbeat? workerHeartbeat = null,
-        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null,
+        IExtractionLlmCallGate? llmCallGate = null)
     {
         _scopeFactory = scopeFactory;
         _options = options;
@@ -197,7 +211,8 @@ public sealed class ExtractionWorker : BackgroundService
         _tenantScope = tenantScope;
         _workerHeartbeat = workerHeartbeat;
         _metrics = metrics;
-        _llmGate = new SemaphoreSlim(Math.Max(1, options.MaxConcurrentLlmCalls));
+        _llmCallGate = llmCallGate
+            ?? new ExtractionLlmCallGate(Math.Max(1, options.MaxConcurrentLlmCalls));
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
@@ -205,15 +220,18 @@ public sealed class ExtractionWorker : BackgroundService
         var count = Math.Max(1, _options.WorkerCount);
         _log.LogInformation(
             "ExtractionWorker starting {Count} loop(s); LLM cap {Llm}, per-tenant cap {Cap}; "
-            + "memory ceiling {MemoryMiB} MiB; capacity clamped {Clamped}; requested {RequestedWorkers}/{RequestedLlm}/{RequestedTenant}.",
+            + "per-document chunk cap {Chunks}; memory ceiling {MemoryMiB} MiB; capacity clamped {Clamped}; "
+            + "requested {RequestedWorkers}/{RequestedLlm}/{RequestedTenant}/{RequestedChunks}.",
             count,
             _options.MaxConcurrentLlmCalls,
             _options.PerTenantConcurrencyCap,
+            _options.MaxConcurrentChunksPerDocument,
             _options.DetectedMemoryLimitBytes / (1024 * 1024),
             _options.CapacityWasClamped,
             _options.RequestedWorkerCount,
             _options.RequestedMaxConcurrentLlmCalls,
-            _options.RequestedPerTenantConcurrencyCap);
+            _options.RequestedPerTenantConcurrencyCap,
+            _options.RequestedMaxConcurrentChunksPerDocument);
         _workerHeartbeat?.Beat();
 
         var loops = new Task[count];
@@ -373,15 +391,11 @@ public sealed class ExtractionWorker : BackgroundService
                 && scope.ServiceProvider.GetService<HeaderCompletion.IHeaderCompletionService>() is { } headerCompletion
                 && headerCompletion.HasGap(input))
             {
-                await _llmGate.WaitAsync(workToken);
-                try
+                await _llmCallGate.RunAsync(async token =>
                 {
-                    await headerCompletion.CompleteAsync(input, workToken);
-                }
-                finally
-                {
-                    _llmGate.Release();
-                }
+                    await headerCompletion.CompleteAsync(input, token);
+                    return true;
+                }, workToken);
             }
             // Only the non-structured path can be a conversational body, so the provenance
             // lookup is paid only where it can change the routing.
@@ -403,29 +417,17 @@ public sealed class ExtractionWorker : BackgroundService
                 // describe free prose (see ConversationalPrompt), so the body takes its own
                 // extractor — under the SAME process-wide LLM concurrency gate. The document
                 // path (ChunkedExtractionService) is untouched.
-                await _llmGate.WaitAsync(workToken);
-                try
-                {
-                    outcome = await conversational.ExtractAsync(
-                        input, jobMetadata?.ThreadContinuation == true, workToken);
-                }
-                finally
-                {
-                    _llmGate.Release();
-                }
+                outcome = await _llmCallGate.RunAsync(
+                    token => conversational.ExtractAsync(
+                        input, jobMetadata?.ThreadContinuation == true, token),
+                    workToken);
             }
             else
             {
-                // Bound total in-flight LLM calls across the whole process.
-                await _llmGate.WaitAsync(workToken);
-                try
-                {
-                    outcome = await extractor.ExtractUnstructuredAsync(input, workToken);
-                }
-                finally
-                {
-                    _llmGate.Release();
-                }
+                // ChunkedExtractionService takes the shared permit around each provider call.
+                // Keeping a permit around the whole document would deadlock at cap=1 and would
+                // make independent chunks serial at every larger cap.
+                outcome = await extractor.ExtractUnstructuredAsync(input, workToken);
             }
 
             if (outcome.Status == ExtractionOutcomeStatus.Failed || outcome.Result is null)

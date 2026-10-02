@@ -1105,4 +1105,75 @@ public class ChunkedExtractionServiceTests
             Assert.Contains("RFQ 9500202307", prompt);
         });
     }
+
+    [Fact]
+    public async Task Later_chunks_run_in_parallel_but_the_header_chunk_finishes_first()
+    {
+        var llm = new ConcurrencyProbeLlm();
+        using var processGate = new ExtractionLlmCallGate(8);
+        var service = new ChunkedExtractionService(
+            llm,
+            new CanonicalRfqNormalizer(),
+            new NoopLogger<ChunkedExtractionService>(),
+            llmCallGate: processGate,
+            workerOptions: new ExtractionWorkerOptions
+            {
+                MaxConcurrentLlmCalls = 8,
+                MaxConcurrentChunksPerDocument = 2
+            });
+
+        await service.ExtractUnstructuredAsync(Doc(Rows(3)));
+
+        Assert.Equal(3, llm.CallCount);
+        Assert.Equal(2, llm.MaxObservedConcurrency);
+        Assert.Equal(AiPromptVersions.StructuredRfqExtraction, llm.PromptVersions[0]);
+        Assert.All(llm.PromptVersions.Skip(1), version =>
+            Assert.Equal(AiPromptVersions.StructuredRfqItemsOnly, version));
+    }
+
+    private sealed class ConcurrencyProbeLlm : ILLMService
+    {
+        private int _active;
+        private int _calls;
+        private int _maxObserved;
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _versions = new();
+
+        public AiProviderClass ProviderClass => AiProviderClass.Local;
+        public int MaxOutputTokens => 2048; // one row per chunk
+        public int CallCount => Volatile.Read(ref _calls);
+        public int MaxObservedConcurrency => Volatile.Read(ref _maxObserved);
+        public IReadOnlyList<string> PromptVersions => _versions.ToArray();
+
+        public async Task<LlmExtractionOutcome> ExtractLeadDataDetailedAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _calls);
+            _versions.Enqueue(context.PromptVersion);
+            var active = Interlocked.Increment(ref _active);
+            while (true)
+            {
+                var observed = Volatile.Read(ref _maxObserved);
+                if (active <= observed
+                    || Interlocked.CompareExchange(ref _maxObserved, active, observed) == observed)
+                    break;
+            }
+            try
+            {
+                await Task.Delay(50, cancellationToken);
+                return new LlmExtractionOutcome(Ext.Result(Ext.Items(1, 0.9), 0.9), null);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _active);
+            }
+        }
+
+        public async Task<LeadExtractionResult?> ExtractLeadDataAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+            => (await ExtractLeadDataDetailedAsync(fullText, context, cancellationToken)).Result;
+
+        public Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<BoqDraftResult?>(null);
+    }
 }

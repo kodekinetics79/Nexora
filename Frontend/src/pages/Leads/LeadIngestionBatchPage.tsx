@@ -51,6 +51,9 @@ import {
 import { BatchMetricFilterCard } from './BatchMetricFilterCard';
 import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
 import { formatDateTime } from '../../utils/dates';
+import { pollIntervalFor } from './ingestionPolling';
+
+export { pollIntervalFor } from './ingestionPolling';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
@@ -91,14 +94,6 @@ const withheldReasons = (reasons: string[]): string[] => reasons
   .filter((reason) => reason.length > 0)
   .filter((reason) => !/^Intake (?:stopped|status):/i.test(reason))
   .filter((reason) => presentableServerText(reason) === null);
-
-/**
- * Poll backoff. The old loop stopped the moment nothing was Pending or Awaiting, so a scanner that
- * recovered minutes later was never noticed. We keep watching while infrastructure holds remain,
- * and widen the interval so a long outage is not a tight loop against the API.
- */
-export const pollIntervalFor = (completedFetches: number): number =>
-  Math.min(2000 * 2 ** Math.floor(Math.max(completedFetches, 0) / 3), 30000);
 
 const classificationMeta = (classification: string): { label: string; color: ChipColor } => {
   const normalized = classification.replaceAll('_', '').toLowerCase();
