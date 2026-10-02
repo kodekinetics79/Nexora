@@ -13,12 +13,14 @@ public sealed class ExtractionWorkerCapacityPolicyTests
 
         Assert.Equal(1, result.WorkerCount);
         Assert.Equal(1, result.MaxConcurrentLlmCalls);
+        Assert.Equal(1, result.MaxConcurrentChunksPerDocument);
         Assert.Equal(1, result.PerTenantConcurrencyCap);
         Assert.True(result.CapacityWasClamped);
         Assert.Equal(512 * MiB, result.DetectedMemoryLimitBytes);
         Assert.Equal(4, result.RequestedWorkerCount);
         Assert.Equal(8, result.RequestedMaxConcurrentLlmCalls);
         Assert.Equal(4, result.RequestedPerTenantConcurrencyCap);
+        Assert.Equal(3, result.RequestedMaxConcurrentChunksPerDocument);
     }
 
     [Fact]
@@ -28,6 +30,7 @@ public sealed class ExtractionWorkerCapacityPolicyTests
 
         Assert.Equal(2, result.WorkerCount);
         Assert.Equal(2, result.MaxConcurrentLlmCalls);
+        Assert.Equal(2, result.MaxConcurrentChunksPerDocument);
         Assert.Equal(2, result.PerTenantConcurrencyCap);
         Assert.True(result.CapacityWasClamped);
     }
@@ -39,6 +42,7 @@ public sealed class ExtractionWorkerCapacityPolicyTests
 
         Assert.Equal(4, result.WorkerCount);
         Assert.Equal(8, result.MaxConcurrentLlmCalls);
+        Assert.Equal(3, result.MaxConcurrentChunksPerDocument);
         Assert.Equal(4, result.PerTenantConcurrencyCap);
         Assert.False(result.CapacityWasClamped);
     }
@@ -61,6 +65,7 @@ public sealed class ExtractionWorkerCapacityPolicyTests
         {
             WorkerCount = 1,
             MaxConcurrentLlmCalls = 1,
+            MaxConcurrentChunksPerDocument = 1,
             PerTenantConcurrencyCap = 1,
             LeaseDuration = TimeSpan.FromMinutes(9),
             IdlePollDelay = TimeSpan.FromSeconds(7)

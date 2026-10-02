@@ -782,6 +782,8 @@ var requestedExtractionWorkerOptions = new ExtractionWorkerOptions
 {
     WorkerCount = Math.Max(1, builder.Configuration.GetValue("Extraction:WorkerCount", 4)),
     MaxConcurrentLlmCalls = Math.Max(1, builder.Configuration.GetValue("Extraction:MaxConcurrentLlmCalls", 8)),
+    MaxConcurrentChunksPerDocument = Math.Max(1,
+        builder.Configuration.GetValue("Extraction:MaxConcurrentChunksPerDocument", 3)),
     PerTenantConcurrencyCap = Math.Max(1, builder.Configuration.GetValue("Extraction:PerTenantConcurrencyCap", 4)),
     LeaseDuration = TimeSpan.FromMinutes(5),
     IdlePollDelay = TimeSpan.FromSeconds(2)
@@ -789,6 +791,9 @@ var requestedExtractionWorkerOptions = new ExtractionWorkerOptions
 builder.Services.AddSingleton(ExtractionWorkerCapacityPolicy.Apply(
     requestedExtractionWorkerOptions,
     GC.GetGCMemoryInfo().TotalAvailableMemoryBytes));
+builder.Services.AddSingleton<IExtractionLlmCallGate>(services =>
+    new ExtractionLlmCallGate(
+        services.GetRequiredService<ExtractionWorkerOptions>().MaxConcurrentLlmCalls));
 builder.Services.AddSingleton<IExtractionHeavyWorkAdmission>(
     new ExtractionHeavyWorkAdmission(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes));
 builder.Services.AddScoped<IExtractionQueue, ExtractionQueue>();

@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.ProductIntelligence.ManufacturerKnowledge;
 using ERP_RFQ_Automation.Extraction.Anchoring;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -345,6 +346,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     private readonly IAiExternalProviderTrust? _externalProviderTrust;
     private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
     private readonly IManufacturerKnowledge? _manufacturerKnowledge;
+    private readonly IExtractionLlmCallGate _llmCallGate;
+    private readonly IServiceScopeFactory? _scopeFactory;
+    private readonly int _maxConcurrentChunks;
 
     // Chunk bounds. A chunk must satisfy ALL THREE constraints:
     //   1. OUTPUT-token budget (ExtractionOutputBudget) — the binding one in practice, and
@@ -406,7 +410,10 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         ILogger<ChunkedExtractionService> log,
         IAiExternalProviderTrust? externalProviderTrust = null,
         ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null,
-        IManufacturerKnowledge? manufacturerKnowledge = null)
+        IManufacturerKnowledge? manufacturerKnowledge = null,
+        IExtractionLlmCallGate? llmCallGate = null,
+        IServiceScopeFactory? scopeFactory = null,
+        ExtractionWorkerOptions? workerOptions = null)
     {
         _llm = llm;
         _normalizer = normalizer;
@@ -414,6 +421,12 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         _externalProviderTrust = externalProviderTrust;
         _metrics = metrics;
         _manufacturerKnowledge = manufacturerKnowledge;
+        _llmCallGate = llmCallGate ?? UnrestrictedExtractionLlmCallGate.Instance;
+        _scopeFactory = scopeFactory;
+        _maxConcurrentChunks = Math.Clamp(
+            workerOptions?.MaxConcurrentChunksPerDocument ?? 1,
+            1,
+            Math.Max(1, workerOptions?.MaxConcurrentLlmCalls ?? 1));
     }
 
     // ---- manufacturer inference ------------------------------------------
@@ -862,143 +875,89 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         LeadExtractionResult? headerSource = null;
         var failedChunks = 0;
 
-        // MAP: extract each chunk independently. A failed chunk is recorded (its items are
-        // "missing" from the union) rather than silently dropped — the count assert catches it.
-        //
-        // `pending` starts as the planned chunks and may GROW: when the provider reports it
-        // ran out of output budget (AiErrorCodes.OutputTruncated) the chunk is replaced
-        // in-place by its two halves and reprocessed, preserving document order. The planned
-        // size is derived from an ESTIMATE, so an unusually verbose document can still
-        // overflow it; this is the honest correction, and it re-issues a SMALLER request
-        // rather than replaying the identical failing one.
-        var pending = new List<ChunkSpan>(chunks);
-        var attemptedCalls = 0;
+        // MAP: the first successful chunk is deliberately ordered because it owns the document
+        // header. Once that header exists, later spans are independent and can use the configured
+        // per-document parallelism. Every actual provider call still passes through the shared
+        // process-wide gate, so four workers cannot multiply the configured provider pressure.
         var callBudget = TruncationCallBudget(expected, chunks.Count);
+        var callCounter = new ChunkCallCounter(callBudget);
         var governanceRefusalCodes = new List<string>();
 
-        for (var i = 0; i < pending.Count; i++)
+        var attempts = new List<ChunkAttempt>();
+        var nextPlannedChunk = 0;
+        while (headerSource is null && nextPlannedChunk < chunks.Count)
         {
-            ct.ThrowIfCancellationRequested();
-            var span = pending[i];
-            var chunk = input.LineItemRegions.Skip(span.Start).Take(span.Count).ToList();
-            // The header is asked for until one call has returned it, then never again: each
-            // later copy cost ~650 output tokens and was thrown away.
-            var headerRequested = headerSource is null;
-            var contextSent = headerRequested ? headerContext : laterHeaderContext;
-            var prompt = BuildChunkText(contextSent, chunk);
-            LlmExtractionOutcome outcome;
-            var chunkStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
-            try
-            {
-                attemptedCalls++;
-                // The key is scoped to the LEASE ATTEMPT (a{n}) so that a retried job is a
-                // NEW governed request instead of a replay the ledger refuses as a
-                // duplicate; within one attempt the (position, size) pair never repeats
-                // (every re-split shrinks the chunk at its position), so a replay of the
-                // same attempt still deduplicates exactly as it should.
-                outcome = await _llm.ExtractLeadDataDetailedAsync(prompt,
-                    new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
-                        $"extraction:{input.SourceId}:a{input.AttemptNumber}:chunk:{i + 1}:{chunk.Count}",
-                        headerRequested ? AiPromptVersions.StructuredRfqExtraction : AiPromptVersions.StructuredRfqItemsOnly,
-                        ExtractionJobId: input.ExtractionJobId,
-                        SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId,
-                        ItemsInPayload: chunk.Count), ct);
-                RecordLlmCall(input.BusinessUnitId, chunkStartedAt,
-                    outcome.Result is not null ? "ok"
-                        : outcome.OutputTruncated ? "output_truncated" : "no_result");
-            }
-            catch (OperationCanceledException)
-            {
-                throw; // lease loss / shutdown is not a chunk failure — never record it as one
-            }
-            catch (AiPolicyDeniedException ex)
-            {
-                RecordLlmCall(input.BusinessUnitId, chunkStartedAt, "policy_denied");
-                // The governance ledger refused this request BEFORE any model call
-                // (duplicate key, policy denial, budget ceiling). That is a different fact
-                // from a model failure and it must stay legible all the way to the
-                // dead-letter row — this exact refusal used to be flattened into
-                // attempts_exhausted and then into "All chunks failed", which is how a job
-                // whose 12 calls all succeeded dead-lettered as a model problem.
-                failedChunks++;
-                printedInUnreadParts += AiItemAnchoring.EstimateLines(AnchorText.Build(chunk));
-                governanceRefusalCodes.Add(ex.Code);
-                diagnostics.Add(
-                    $"Chunk {i + 1}/{pending.Count} refused by AI governance before any model call "
-                    + $"({ex.Code}); {chunk.Count} item(s) not extracted.");
-                _log.LogWarning(ex,
-                    "Chunk {Index}/{Total} for {Document} was refused by AI governance ({Code}).",
-                    i + 1, pending.Count, input.SourceDocumentName, ex.Code);
-                continue;
-            }
-            catch (Exception ex)
-            {
-                RecordLlmCall(input.BusinessUnitId, chunkStartedAt, "error");
-                _log.LogWarning(ex, "Chunk {Index}/{Total} extraction threw.", i + 1, pending.Count);
-                outcome = new LlmExtractionOutcome(null, AiErrorCodes.AttemptsExhausted);
-            }
+            var ordered = await ExtractSpanWithSplitsAsync(
+                input, chunks[nextPlannedChunk], requestHeader: true,
+                headerContext, laterHeaderContext, callCounter, ct);
+            attempts.AddRange(ordered);
+            headerSource = ordered.FirstOrDefault(x => x.HeaderRequested && x.Outcome?.Result is not null)
+                ?.Outcome?.Result;
+            nextPlannedChunk++;
+        }
 
-            if (outcome.Result is null && outcome.OutputTruncated)
+        if (headerSource is not null && nextPlannedChunk < chunks.Count)
+        {
+            using var documentGate = new SemaphoreSlim(_maxConcurrentChunks, _maxConcurrentChunks);
+            var remaining = chunks.Skip(nextPlannedChunk).Select(async span =>
             {
-                // A single line item is indivisible. If even that overflows the ceiling,
-                // fail THAT item honestly — never loop, never silently drop it.
-                if (chunk.Count <= 1)
+                await documentGate.WaitAsync(ct);
+                try
                 {
-                    failedChunks++;
-                    printedInUnreadParts += Math.Max(1, AiItemAnchoring.EstimateLines(AnchorText.Build(chunk)));
-                    var reason =
-                        $"Chunk {i + 1}/{pending.Count} failed: one line item alone exceeds the model's "
-                        + $"{_llm.MaxOutputTokens}-token output budget (1 item not extracted).";
-                    diagnostics.Add(reason);
-                    _log.LogWarning(
-                        "Single line item exceeded the output budget for {Document}; failing the item rather "
-                        + "than retrying. Code={Code}.", input.SourceDocumentName,
-                        AiErrorCodes.SingleItemExceedsOutputBudget);
-                    continue;
+                    return await ExtractSpanWithSplitsAsync(
+                        input, span, requestHeader: false,
+                        headerContext, laterHeaderContext, callCounter, ct);
                 }
-
-                if (attemptedCalls >= callBudget)
+                finally
                 {
-                    failedChunks++;
-                    printedInUnreadParts += AiItemAnchoring.EstimateLines(AnchorText.Build(chunk));
-                    diagnostics.Add(
-                        $"Chunk {i + 1}/{pending.Count} failed: output truncated and the re-split budget "
-                        + $"is exhausted ({chunk.Count} item(s) not extracted).");
-                    continue;
+                    documentGate.Release();
                 }
+            }).ToArray();
+            foreach (var result in await Task.WhenAll(remaining))
+                attempts.AddRange(result);
+        }
 
-                var half = chunk.Count / 2;
-                pending[i] = new ChunkSpan(span.Start + half, span.Count - half);
-                pending.Insert(i, new ChunkSpan(span.Start, half));
-                diagnostics.Add(
-                    $"Chunk {i + 1} output was truncated at {chunk.Count} item(s); retrying as "
-                    + $"{half} + {chunk.Count - half} item(s).");
-                _log.LogWarning(
-                    "Output truncated for {Document} chunk {Index} at {Items} item(s); halving and retrying "
-                    + "({First} + {Second}).", input.SourceDocumentName, i + 1, chunk.Count,
-                    half, chunk.Count - half);
-                i--; // reprocess this position, which now holds the first half
-                continue;
-            }
+        diagnostics.Add(
+            $"Model calls: {callCounter.Count}; later chunks ran with up to {_maxConcurrentChunks} in flight.");
 
-            if (outcome.Result is null)
+        for (var i = 0; i < attempts.Count; i++)
+        {
+            var attempt = attempts[i];
+            var chunk = attempt.Chunk;
+            var span = attempt.Span;
+            var outcome = attempt.Outcome;
+
+            foreach (var note in attempt.Diagnostics) diagnostics.Add(note);
+
+            if (attempt.GovernanceCode is { } refusal)
             {
                 failedChunks++;
                 printedInUnreadParts += AiItemAnchoring.EstimateLines(AnchorText.Build(chunk));
+                governanceRefusalCodes.Add(refusal);
                 diagnostics.Add(
-                    $"Chunk {i + 1}/{pending.Count} failed ({chunk.Count} item(s) not extracted)."
-                    + (outcome.ErrorCode is null ? "" : $" [{outcome.ErrorCode}]"));
+                    $"Chunk {i + 1}/{attempts.Count} refused by AI governance before any model call "
+                    + $"({refusal}); {chunk.Count} item(s) not extracted.");
+                continue;
+            }
+
+            if (outcome?.Result is null)
+            {
+                failedChunks++;
+                printedInUnreadParts += Math.Max(1, AiItemAnchoring.EstimateLines(AnchorText.Build(chunk)));
+                diagnostics.Add(
+                    $"Chunk {i + 1}/{attempts.Count} failed ({chunk.Count} item(s) not extracted)."
+                    + (outcome?.ErrorCode is null ? "" : $" [{outcome.ErrorCode}]"));
                 continue;
             }
 
             // Header fields come from the call that was asked for them: the first successful one.
-            if (headerRequested) headerSource = outcome.Result;
+            if (attempt.HeaderRequested && headerSource is null) headerSource = outcome.Result;
 
             // CHECK every value against this call's own pages, and cite what is found. A model's
             // provenance fields are never trusted; the check writes them.
             var ownText = AnchorText.Build(chunk, positions[span.Start].Page, positions[span.Start].Line);
             var modelItems = (outcome.Result.Items ?? new List<LeadItemData>()).Select(WithoutServerOwnedEvidence).ToList();
-            var anchored = AiItemAnchoring.AnchorChunk(modelItems, ownText, contextSent);
+            var anchored = AiItemAnchoring.AnchorChunk(modelItems, ownText, attempt.ContextSent);
             var returnedHere = anchored.Count(x => x.Disposition != AnchorDisposition.HeaderEcho);
             printedButNotReturned += Math.Max(0, AiItemAnchoring.EstimateLines(ownText) - returnedHere);
 
@@ -1029,7 +988,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     _log.LogWarning(
                         "Chunk {Index}/{Total} for {Document} repeated {Dropped} item(s) an earlier chunk "
                         + "already returned or found only in the header context; kept {Kept}.",
-                        i + 1, pending.Count, input.SourceDocumentName, anchored.Count - added, added);
+                        i + 1, attempts.Count, input.SourceDocumentName, anchored.Count - added, added);
             }
         }
         if (echoesDropped > 0)
@@ -1130,6 +1089,154 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             PageCountAuthoritative = input.PageCountAuthoritative,
             OcrTruncated = input.OcrTruncated
         };
+    }
+
+    private async Task<List<ChunkAttempt>> ExtractSpanWithSplitsAsync(
+        DocumentExtractionInput input,
+        ChunkSpan span,
+        bool requestHeader,
+        string headerContext,
+        string laterHeaderContext,
+        ChunkCallCounter callCounter,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var chunk = input.LineItemRegions.Skip(span.Start).Take(span.Count).ToList();
+        var contextSent = requestHeader ? headerContext : laterHeaderContext;
+
+        if (!callCounter.TryStart())
+        {
+            return
+            [
+                new ChunkAttempt(
+                    span, chunk, requestHeader, contextSent, null, null,
+                    [$"Chunk beginning at region {span.Start + 1} was not sent because the "
+                     + $"{callCounter.Limit}-call document budget was exhausted."])
+            ];
+        }
+
+        var prompt = BuildChunkText(contextSent, chunk);
+        var chunkStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        LlmExtractionOutcome outcome;
+        IServiceScope? callScope = null;
+        try
+        {
+            // A parallel call gets its own scoped governance/trust services and therefore its
+            // own DbContext. Sharing the worker scope here would make EF Core concurrent-use
+            // unsafe even though HttpClient itself is safe.
+            var llm = _llm;
+            if (_scopeFactory is not null)
+            {
+                callScope = _scopeFactory.CreateScope();
+                llm = callScope.ServiceProvider.GetRequiredService<ILLMService>();
+            }
+
+            outcome = await _llmCallGate.RunAsync(
+                token => llm.ExtractLeadDataDetailedAsync(prompt,
+                    new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
+                        $"extraction:{input.SourceId}:a{input.AttemptNumber}:chunk:{span.Start + 1}:{span.Count}",
+                        requestHeader
+                            ? AiPromptVersions.StructuredRfqExtraction
+                            : AiPromptVersions.StructuredRfqItemsOnly,
+                        ExtractionJobId: input.ExtractionJobId,
+                        SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId,
+                        ItemsInPayload: chunk.Count), token),
+                ct);
+            RecordLlmCall(input.BusinessUnitId, chunkStartedAt,
+                outcome.Result is not null ? "ok"
+                    : outcome.OutputTruncated ? "output_truncated" : "no_result");
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // lease loss / shutdown is not a chunk failure
+        }
+        catch (AiPolicyDeniedException ex)
+        {
+            RecordLlmCall(input.BusinessUnitId, chunkStartedAt, "policy_denied");
+            _log.LogWarning(ex,
+                "Chunk at region {Region} for {Document} was refused by AI governance ({Code}).",
+                span.Start + 1, input.SourceDocumentName, ex.Code);
+            return [new ChunkAttempt(span, chunk, requestHeader, contextSent, null, ex.Code, [])];
+        }
+        catch (Exception ex)
+        {
+            RecordLlmCall(input.BusinessUnitId, chunkStartedAt, "error");
+            _log.LogWarning(ex,
+                "Chunk at region {Region} for {Document} threw during extraction.",
+                span.Start + 1, input.SourceDocumentName);
+            outcome = new LlmExtractionOutcome(null, AiErrorCodes.AttemptsExhausted);
+        }
+        finally
+        {
+            callScope?.Dispose();
+        }
+
+        if (outcome.Result is not null || !outcome.OutputTruncated)
+            return [new ChunkAttempt(span, chunk, requestHeader, contextSent, outcome, null, [])];
+
+        if (span.Count <= 1)
+        {
+            _log.LogWarning(
+                "Single line item exceeded the output budget for {Document}; failing the item rather "
+                + "than retrying. Code={Code}.", input.SourceDocumentName,
+                AiErrorCodes.SingleItemExceedsOutputBudget);
+            return
+            [
+                new ChunkAttempt(span, chunk, requestHeader, contextSent, outcome, null,
+                    [$"Chunk beginning at region {span.Start + 1} failed: one line item alone "
+                     + $"exceeds the model's {_llm.MaxOutputTokens}-token output budget."])
+            ];
+        }
+
+        var half = span.Count / 2;
+        var leftSpan = new ChunkSpan(span.Start, half);
+        var rightSpan = new ChunkSpan(span.Start + half, span.Count - half);
+        _log.LogWarning(
+            "Output truncated for {Document} at region {Region} with {Items} item(s); halving and retrying "
+            + "({First} + {Second}).", input.SourceDocumentName, span.Start + 1, span.Count,
+            half, span.Count - half);
+
+        var left = await ExtractSpanWithSplitsAsync(
+            input, leftSpan, requestHeader, headerContext, laterHeaderContext, callCounter, ct);
+        var leftFoundHeader = requestHeader
+            && left.Any(x => x.HeaderRequested && x.Outcome?.Result is not null);
+        var right = await ExtractSpanWithSplitsAsync(
+            input, rightSpan, requestHeader && !leftFoundHeader,
+            headerContext, laterHeaderContext, callCounter, ct);
+        var splitNote =
+            $"Chunk beginning at region {span.Start + 1} was truncated at {span.Count} item(s); "
+            + $"retrying as {half} + {span.Count - half} item(s).";
+        if (left.Count > 0) left[0].Diagnostics.Insert(0, splitNote);
+        else if (right.Count > 0) right[0].Diagnostics.Insert(0, splitNote);
+        left.AddRange(right);
+        return left;
+    }
+
+    private sealed record ChunkAttempt(
+        ChunkSpan Span,
+        List<string> Chunk,
+        bool HeaderRequested,
+        string ContextSent,
+        LlmExtractionOutcome? Outcome,
+        string? GovernanceCode,
+        List<string> Diagnostics);
+
+    private sealed class ChunkCallCounter(int limit)
+    {
+        private int _count;
+        public int Limit { get; } = Math.Max(1, limit);
+        public int Count => Volatile.Read(ref _count);
+
+        public bool TryStart()
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _count);
+                if (current >= Limit) return false;
+                if (Interlocked.CompareExchange(ref _count, current + 1, current) == current)
+                    return true;
+            }
+        }
     }
 
     public async Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
