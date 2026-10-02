@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const PUBLIC_ICON_PATTERN = /node_modules\/@mui\/icons-material\/(?:esm\/)?(?:ArrowForwardRounded|CheckRounded|CheckCircleOutlined|DarkMode|LightMode|LockOutlined|MailOutlined|MarkEmailReadOutlined|RadioButtonUnchecked|ReportProblemOutlined|Refresh|SettingsOutlined|VerifiedUserOutlined|Visibility|VisibilityOff)\.m?js$/
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
@@ -29,15 +31,14 @@ export default defineConfig({
           ) {
             return 'react-vendor';
           }
-          // The data grid and its internals are left to ordinary route splitting. Grouped with @mui/
-          // they were part of mui-vendor, which every screen preloads, so the login page downloaded
-          // the whole grid. Naming them a group of their own does not help: the bundler then pulls
-          // the Material modules the grid imports into that group and preloads it anyway.
-          if (id.includes('node_modules/@mui/x-')) {
-            return undefined;
+          // Icon modules are tiny but numerous. Keep the handful used by public auth separate so
+          // `/login` never inherits the tenant catalog, then combine workspace icons into one
+          // cached request instead of making the browser negotiate dozens of sub-kilobyte files.
+          if (PUBLIC_ICON_PATTERN.test(id)) {
+            return 'mui-public-icons';
           }
-          if (id.includes('node_modules/@mui/') || id.includes('node_modules/@emotion/')) {
-            return 'mui-vendor';
+          if (id.includes('node_modules/@mui/icons-material/')) {
+            return 'mui-workspace-icons';
           }
         },
       },

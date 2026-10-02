@@ -23,3 +23,23 @@ body {
   min-height: 100vh;
   min-height: 100dvh;
 }
+
+.route-loading-indicator {
+  width: 28px;
+  height: 28px;
+  box-sizing: border-box;
+  border: 3px solid rgb(201 147 26 / 30%);
+  border-top-color: #c9931a;
+  border-radius: 50%;
+  animation: route-loader-spin 700ms linear infinite;
+}
+
+@keyframes route-loader-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-loading-indicator {
+    animation: none;
+  }
+}

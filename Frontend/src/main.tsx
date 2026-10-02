@@ -5,7 +5,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import CssBaseline from '@mui/material/CssBaseline';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeContextProvider } from './context/ThemeContext';
-import App from './App';
+import RootApp from './RootApp';
 import { queryClient } from './api/queryClient';
 import ErrorBoundary from './components/common/ErrorBoundary';
 import DeploymentUpdateNotice from './components/common/DeploymentUpdateNotice';
@@ -58,7 +58,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <BrowserRouter>
             <SnackbarProvider maxSnack={3} anchorOrigin={{ vertical: 'top', horizontal: 'right' }}>
               <RoutedErrorBoundary>
-                <App />
+                <RootApp />
                 {/* Inside the boundary, not beside it: a render throw originating in a toast used
                     to be uncaught and unmounted the entire application root. */}
                 <Toaster position="top-right" />

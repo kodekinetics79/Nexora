@@ -1,8 +1,9 @@
 import React, { useEffect, useRef } from 'react';
-import { Box, Typography } from '@mui/material';
+import Box from '@mui/material/Box';
+import Typography from '@mui/material/Typography';
 import { keyframes } from '@emotion/react';
 import styled from '@emotion/styled';
-import { CheckRounded as CheckIcon } from '@mui/icons-material';
+import CheckIcon from '@mui/icons-material/CheckRounded';
 import BrandMark from '../../components/common/BrandMark';
 
 /**

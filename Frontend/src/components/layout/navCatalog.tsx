@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { RELEASE_SCOPE } from '../../config/releaseScope';
+import { INBOX_ROOT } from '../../routePaths';
 import {
   Inbox as InboxIcon,
   TrendingUp as LeadIcon,
@@ -151,7 +152,7 @@ export interface PrimaryNavItem {
   releaseVisible?: boolean;
 }
 
-export const INBOX_ROOT = '/inbox';
+export { INBOX_ROOT };
 export const ADVANCED_ROOT = '/advanced';
 
 /**

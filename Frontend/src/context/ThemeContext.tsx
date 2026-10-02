@@ -1,8 +1,6 @@
 import React, { createContext, useContext, useState, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import { ThemeProvider, createTheme } from '@mui/material';
-import type { PaletteMode } from '@mui/material';
-import { alpha } from '@mui/material/styles';
+import { ThemeProvider, createTheme, alpha, type PaletteMode } from '@mui/material/styles';
 import {
   AA_NON_TEXT_CONTRAST,
   AA_TEXT_CONTRAST,

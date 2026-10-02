@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EXECUTIVE_LANDING_ROUTE, landingRouteFor } from './LoginPage';
-import { INBOX_ROOT } from '../../components/layout/navCatalog';
+import { INBOX_ROOT } from '../../routePaths';
 
 /**
  * Where a user lands after signing in.

@@ -1,25 +1,21 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import {
-  Alert,
-  AlertTitle,
-  Box,
-  Button,
-  CircularProgress,
-  IconButton,
-  InputAdornment,
-  Paper,
-  Stack,
-  TextField,
-  Typography,
-} from '@mui/material';
-import {
-  DarkMode as MoonIcon,
-  LightMode as SunIcon,
-  MailOutlined as MailIcon,
-  MarkEmailReadOutlined as SentIcon,
-} from '@mui/icons-material';
+import Alert from '@mui/material/Alert';
+import AlertTitle from '@mui/material/AlertTitle';
+import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import IconButton from '@mui/material/IconButton';
+import InputAdornment from '@mui/material/InputAdornment';
+import Paper from '@mui/material/Paper';
+import Stack from '@mui/material/Stack';
+import TextField from '@mui/material/TextField';
+import Typography from '@mui/material/Typography';
+import MoonIcon from '@mui/icons-material/DarkMode';
+import SunIcon from '@mui/icons-material/LightMode';
+import MailIcon from '@mui/icons-material/MailOutlined';
+import SentIcon from '@mui/icons-material/MarkEmailReadOutlined';
 import { useAppTheme } from '../../context/ThemeContext';
 import useDocumentTitle from '../../hooks/useDocumentTitle';
 import { presentableErrorMessage } from '../../utils/apiErrors';

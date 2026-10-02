@@ -13,7 +13,10 @@ const sizes = await Promise.all(initialAssets.map(async asset => ({
 })));
 const initialBytes = sizes.reduce((total, item) => total + item.bytes, 0);
 const baselineBytes = 1_683_028;
-const optimizedBytes = 1_315_324;
+// Public authentication and authenticated workspaces are separate route graphs. This is the
+// measured public-entry payload after that split; keep enough headroom for normal bundler/runtime
+// variance without allowing the workspace router or all of Material UI back into `/login`.
+const optimizedBytes = 596_416;
 // Rolldown output can vary by a few bytes between the Node/runtime patch levels used by local CI
 // and Vercel. The previous limit left only 39 bytes of local headroom and rejected the identical
 // source on Vercel by 17 bytes. Keep the measured 10% regression ceiling, with a tightly bounded
@@ -37,7 +40,7 @@ for (const asset of productionJavaScript) {
   }
 }
 
-console.log(`Initial JavaScript: ${initialBytes.toLocaleString()} bytes (optimized budget ${maximumBytes.toLocaleString()}, Gate 5 reduction ${reductionPercent.toFixed(2)}%).`);
+console.log(`Initial JavaScript: ${initialBytes.toLocaleString()} bytes (optimized budget ${maximumBytes.toLocaleString()}, legacy reduction ${reductionPercent.toFixed(2)}%).`);
 if (forbidden.length > 0) {
   throw new Error(`Route-only vendors were eagerly loaded: ${forbidden.join(', ')}`);
 }
