@@ -88,4 +88,18 @@ describe('the live theme', () => {
     expect(getContrastRatio(probe.dataset.warning!, paper)).toBeGreaterThanOrEqual(4.5);
     expect(getContrastRatio(probe.dataset.info!, paper)).toBeGreaterThanOrEqual(4.5);
   });
+
+  it('injects restrained route and record motion with a reduced-motion escape hatch', () => {
+    render(
+      <ThemeContextProvider>
+        <CssBaseline />
+      </ThemeContextProvider>,
+    );
+
+    const css = injectedCss();
+    expect(css).toContain('nx-route-enter');
+    expect(css).toMatch(/cubic-bezier\(0\.16,\s*1,\s*0\.3,\s*1\)/);
+    expect(css).toContain('.MuiDataGrid-row:hover');
+    expect(css).toMatch(/prefers-reduced-motion:\s*reduce/);
+  });
 });

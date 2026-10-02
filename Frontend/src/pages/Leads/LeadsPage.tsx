@@ -23,6 +23,7 @@ import {
   AssignmentInd as AssignIcon,
   Person as UserIcon,
   Tune as TuneIcon,
+  UploadFileOutlined as UploadIcon,
 } from '@mui/icons-material';
 import useColumnPreferences from '../../hooks/useColumnPreferences';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
@@ -1725,7 +1726,42 @@ const LeadsPage: React.FC = () => {
           />
         </Box>
         <Box sx={{ flexGrow: 1 }} />
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', sm: 'flex-end' } }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{
+            alignItems: 'center',
+            justifyContent: { xs: 'flex-start', sm: 'flex-end' },
+            flexWrap: 'wrap',
+          }}
+        >
+          {canUploadDocuments && (
+            <Button
+              variant="contained"
+              startIcon={<UploadIcon />}
+              onClick={() => navigate('/procurement/leads/manual-upload')}
+              sx={{
+                fontWeight: 800,
+                whiteSpace: 'nowrap',
+                '& .MuiButton-startIcon': {
+                  transition: 'transform 180ms cubic-bezier(0.16, 1, 0.3, 1)',
+                },
+                '&:hover .MuiButton-startIcon': {
+                  transform: 'translateY(-2px) rotate(-4deg)',
+                },
+                '&:active .MuiButton-startIcon': {
+                  transform: 'translateY(1px)',
+                },
+                '@media (prefers-reduced-motion: reduce)': {
+                  '& .MuiButton-startIcon': { transition: 'none' },
+                  '&:hover .MuiButton-startIcon, &:active .MuiButton-startIcon': { transform: 'none' },
+                },
+              }}
+            >
+              Upload documents
+            </Button>
+          )}
           <Tooltip title={canCheckMailboxes
             ? 'Fetches new emails from your connected inboxes now'
             : 'Requires Can Create on Leads. Ask an administrator to update your role under Roles & Permissions.'}>

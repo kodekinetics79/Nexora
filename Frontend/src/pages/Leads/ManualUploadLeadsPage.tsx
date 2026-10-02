@@ -7,6 +7,7 @@ import {
   ListItem, ListItemIcon, ListItemText,
 } from '@mui/material';
 import {
+  ArrowBack as BackIcon,
   CloudOff as OfflineIcon,
   Delete as DeleteIcon,
   Description as DocIcon,
@@ -18,7 +19,6 @@ import leadService, {
   type GovernedUploadJobDTO,
 } from '../../api/services/leadService';
 import { useAuth } from '../../context/AuthContext';
-import InboxFrame, { INBOX_CARD_SX } from '../Inbox/InboxFrame';
 import { useSnackbar } from 'notistack';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import {
@@ -189,8 +189,25 @@ const ManualUploadLeadsPage: React.FC = () => {
   };
 
   return (
-    <InboxFrame summary="PDF, Word, Excel, CSV, email (.msg, .eml), web pages or images · up to 25 MB each">
-      <Paper variant="outlined" sx={INBOX_CARD_SX}>
+    <Box sx={{ p: { xs: 1, sm: 2 }, maxWidth: 1440, mx: 'auto' }}>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', gap: 1.5, mb: 2 }}
+      >
+        <Box>
+          <Typography variant="h4" component="h1" sx={{ fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
+            Upload documents
+          </Typography>
+          <Typography color="text.secondary" sx={{ mt: 0.75 }}>
+            Add customer RFQs to Leads · PDF, Word, Excel, CSV, email, web pages or images · up to 25 MB each
+          </Typography>
+        </Box>
+        <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+          Back to Leads
+        </Button>
+      </Stack>
+
+      <Paper variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
         <Box sx={{ p: { xs: 2, sm: 3 } }}>
           {/* Upload Area */}
           <Paper
@@ -414,7 +431,7 @@ const ManualUploadLeadsPage: React.FC = () => {
           </Stack>
         </Box>
       </Paper>
-    </InboxFrame>
+    </Box>
   );
 };
 
